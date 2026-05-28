@@ -11,13 +11,17 @@ import (
 
 	"github.com/iodesystems/tslsmcp/internal/config"
 	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
+	"github.com/iodesystems/tslsmcp/internal/symbols"
 )
 
-// Server implements the LSP base protocol over an io.Reader/io.Writer pair.
-// It is intentionally minimal: it owns the JSON-RPC loop and dispatches to
-// handler methods. Capabilities are deliberately empty until the multiplex
-// (internal/multiplex) and tree-sitter (internal/treesitter) layers come
-// online — see plan/plan.md.
+// Server implements the LSP base protocol over an io.Reader/io.Writer
+// pair. It owns the JSON-RPC loop, dispatches to typed handlers in
+// lsp.go, and holds the cross-language symbol index.
+//
+// Capabilities currently advertised: workspace/symbol,
+// textDocument/references, textDocument/didSave. The multiplex layer
+// (internal/multiplex) will fan in child-LSP capabilities on top once
+// that lands.
 type Server struct {
 	registry *config.Registry
 
@@ -27,6 +31,9 @@ type Server struct {
 	stateMu     sync.Mutex
 	initialized bool
 	shutdown    bool
+
+	indexMu sync.RWMutex
+	index   *symbols.Index
 }
 
 func New(reg *config.Registry) *Server {
@@ -59,7 +66,6 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 	case "initialize":
 		s.handleInitialize(req)
 	case "initialized":
-		// Notification: no response.
 		s.stateMu.Lock()
 		s.initialized = true
 		s.stateMu.Unlock()
@@ -70,7 +76,13 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 		s.stateMu.Unlock()
 		s.reply(req, json.RawMessage("null"))
 	case "exit":
-		// Handled by Serve loop.
+		// Loop in Serve closes us out.
+	case "workspace/symbol":
+		s.handleWorkspaceSymbol(req)
+	case "textDocument/references":
+		s.handleReferences(req)
+	case "textDocument/didSave":
+		s.handleDidSave(req)
 	default:
 		if req.IsNotification() {
 			return
@@ -79,17 +91,16 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 	}
 }
 
-func (s *Server) handleInitialize(req *jsonrpc.Message) {
-	// Empty capabilities for now. Multiplex layer will populate this from
-	// the union of child-LSP capabilities.
-	result := map[string]any{
-		"capabilities": map[string]any{},
-		"serverInfo": map[string]any{
-			"name":    "tslsmcp",
-			"version": "0.0.0",
-		},
-	}
-	s.reply(req, result)
+func (s *Server) setIndex(idx *symbols.Index) {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	s.index = idx
+}
+
+func (s *Server) getIndex() *symbols.Index {
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
+	return s.index
 }
 
 func (s *Server) reply(req *jsonrpc.Message, result any) {

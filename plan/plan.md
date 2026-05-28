@@ -98,12 +98,18 @@ Cheap, noisy, immediate value for "find everywhere this name appears."
         appears in go + ts + python + markdown + yaml; `GreetUser` crosses
         go + yaml + markdown.
 - [ ] Swap each language's extractor to a tree-sitter `(identifier)` query.
-- [ ] Watcher: rebuild a file's slice of the index on `didSave`. Depends on
-      multiplex `textDocument/didSave` wiring.
-- [ ] `workspace/symbol`: return Index matches.
-- [ ] `textDocument/references`: merge LSP result + Index lexical matches.
-      Lexical matches default to **shown but unselected** in the response so
-      tools can preview.
+- [x] Watcher: rebuild a file's slice of the index on `didSave`. Wired via
+      `textDocument/didSave` notification handler in `internal/server`.
+- [x] `workspace/symbol`: return Index matches. Substring match on Name,
+      case-insensitive, every Site emitted as a `SymbolInformation`.
+- [x] `textDocument/references` **(lexical-only)**: extracts the word at
+      the cursor, returns every Site for that name. LSP-result merge is
+      blocked on multiplex; when that lands, lexical matches will be
+      tagged as preview-only per the original plan.
+- [x] End-to-end test in `internal/server/server_test.go` drives the
+      full handshake over in-process `io.Pipe` pairs (no subprocess).
+      Verified live against polyglot fixture: 14 `UserID` hits across
+      README.md / client.ts / config.yaml / main.go / worker.py.
 
 ### Tier 2 — declared bindings (v0.2.1)
 

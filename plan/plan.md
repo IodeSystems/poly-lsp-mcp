@@ -36,9 +36,11 @@ branch indexes by content hash, so switching `feature/c → feature/b` is cheap.
 Goal: editor connects, opens any file, gets either real LSP semantics or
 tree-sitter–derived hover/refs/edits. **No cross-language stitching yet.**
 
-- [ ] `internal/config`: language registry. `ext → {lsp_cmd, treesitter_lang}`.
+- [x] `internal/config`: language registry. `ext → {lsp_cmd, treesitter_lang}`.
       Source from a single config file (default `tslsmcp.yaml` at repo root)
-      and bake a sensible default for go/ts/py.
+      and bake a sensible default for go/ts/py. (yaml.v3; defaults cover
+      go/ts/py + treesitter-only md/yaml/json; wired into main with --config
+      flag and startup log.)
 - [ ] `internal/multiplex`:
   - [ ] Child LSP process supervisor (spawn, restart-on-crash, drain, kill).
   - [ ] Per-child JSON-RPC client reusing `internal/server` framing.

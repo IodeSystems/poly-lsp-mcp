@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"sync"
+
+	"github.com/iodesystems/tslsmcp/internal/config"
 )
 
 // Server implements the LSP base protocol over an io.Reader/io.Writer pair.
@@ -16,6 +18,8 @@ import (
 // (internal/multiplex) and tree-sitter (internal/treesitter) layers come
 // online — see plan/plan.md.
 type Server struct {
+	registry *config.Registry
+
 	writeMu sync.Mutex
 	out     io.Writer
 
@@ -24,8 +28,8 @@ type Server struct {
 	shutdown    bool
 }
 
-func New() *Server {
-	return &Server{}
+func New(reg *config.Registry) *Server {
+	return &Server{registry: reg}
 }
 
 func (s *Server) Serve(in io.Reader, out io.Writer) error {

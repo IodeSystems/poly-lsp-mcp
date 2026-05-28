@@ -154,6 +154,27 @@ func TestRefreshReplacesFile(t *testing.T) {
 	}
 }
 
+func TestIndexLanguagesReportsDistinct(t *testing.T) {
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := Build(fixturePath(t, "testdata", "fixtures", "polyglot"), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := idx.Languages()
+	want := map[string]bool{"go": true, "typescript": true, "python": true, "markdown": true, "yaml": true, "json": true}
+	if len(got) != len(want) {
+		t.Errorf("Languages = %v, want %d distinct entries", got, len(want))
+	}
+	for _, lang := range got {
+		if !want[lang] {
+			t.Errorf("unexpected language %q", lang)
+		}
+	}
+}
+
 func TestSkipDirsObeyed(t *testing.T) {
 	// Sanity: building the repo root must not descend into .git.
 	reg, err := config.Default().Build()

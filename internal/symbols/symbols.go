@@ -72,6 +72,26 @@ func (i *Index) Lookup(name string) []Site {
 	return out
 }
 
+// Languages returns the distinct language names with at least one site
+// in the index, sorted. Used by the multiplex layer to decide which
+// child LSPs are worth spawning for this workspace.
+func (i *Index) Languages() []string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	set := map[string]struct{}{}
+	for _, sites := range i.sites {
+		for _, s := range sites {
+			set[s.Language] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Names returns every indexed name, sorted. Useful for diagnostics.
 func (i *Index) Names() []string {
 	i.mu.RLock()

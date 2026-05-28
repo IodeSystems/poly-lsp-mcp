@@ -56,10 +56,17 @@ cross-language stitching yet (that's Phase 2).**
         so the next slice can union without losing fields.
   - [x] Test by spawning the tslsmcp binary as a child (TestMain builds it),
         verifying real `workspace/symbol` round-trip through the supervisor.
-- [ ] `internal/multiplex` manager:
-  - [ ] Map of language → Child with lazy or eager spawn.
-  - [ ] `RouteByURI(uri)` for textDocument/* dispatch.
-  - [ ] Restart-on-crash with backoff.
+- [x] `internal/multiplex` manager:
+  - [x] Map of language → Child with eager spawn during Start.
+  - [x] `RouteByURI(uri)` returning the Child for a file's extension, or
+        nil if the child has exited (callers fall back to symbol index).
+  - [x] Capabilities() returns each child's raw ServerCapabilities for
+        the server's initialize union (next slice).
+  - [x] Shutdown sends shutdown+exit to every child, falls back to Kill.
+  - [x] `(*symbols.Index).Languages()` helper so the server can decide
+        which children are worth spawning from the workspace it just
+        indexed.
+  - [ ] Restart-on-crash with backoff *(deferred — needs policy choice)*.
 - [ ] Server integration:
   - [ ] Forward `textDocument/*` to the manager's per-URI child.
   - [ ] Capabilities merge in `initialize`: union child caps with our

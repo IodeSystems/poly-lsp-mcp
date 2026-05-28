@@ -199,6 +199,71 @@ func TestPolyglotSQLContributesUserID(t *testing.T) {
 	}
 }
 
+func TestTreeSitterPythonCapturesIdentifiers(t *testing.T) {
+	ex := DefaultExtractor("python")
+	src := []byte(`"""Module docstring with UserID inside."""
+
+from typing import Optional
+
+UserID = int
+
+class UserService:
+    """Class docstring with UserID."""
+
+    def fetch(self, user_id: UserID) -> Optional[str]:
+        msg = f"loaded {user_id}"
+        # comment mentioning UserID should not be indexed
+        return msg
+`)
+	got := map[string]int{}
+	for _, h := range ex.Extract(src) {
+		got[h.Name]++
+	}
+	for _, want := range []string{
+		"typing", "Optional",
+		"UserID",      // variable + annotation + class generic
+		"UserService", // class name
+		"fetch",       // method name
+		"self",        // implicit param
+		"user_id",     // parameter, used in f-string
+		"msg",         // local, returned
+	} {
+		if got[want] == 0 {
+			t.Errorf("missing %q from python extract: %+v", want, got)
+		}
+	}
+	// Builtins surfaced as identifier nodes — filtered.
+	for _, drop := range []string{"int", "str", "print"} {
+		if got[drop] != 0 {
+			t.Errorf("builtin %q leaked: %d", drop, got[drop])
+		}
+	}
+}
+
+func TestTreeSitterPythonSkipsStringsAndComments(t *testing.T) {
+	ex := DefaultExtractor("python")
+	// UserID appears inside docstring, regular string, and comment —
+	// none must reach the index. The f-string's `x` IS an identifier.
+	src := []byte(`"""UserID mentioned here."""
+x = 1
+y = "UserID is just text"
+# UserID inside a comment
+z = f"value={x}"
+`)
+	for _, h := range ex.Extract(src) {
+		if h.Name == "UserID" {
+			t.Errorf("UserID leaked from string/comment at %d:%d", h.Line, h.Col)
+		}
+	}
+	got := map[string]bool{}
+	for _, h := range ex.Extract(src) {
+		got[h.Name] = true
+	}
+	if !got["x"] || !got["y"] || !got["z"] {
+		t.Errorf("expected x/y/z identifiers, got %+v", got)
+	}
+}
+
 func TestPolyglotGoUserIDCountDroppedAfterTreeSitter(t *testing.T) {
 	reg, err := config.Default().Build()
 	if err != nil {

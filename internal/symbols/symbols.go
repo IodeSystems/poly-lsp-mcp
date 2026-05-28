@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/sql"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
 
@@ -58,6 +59,14 @@ const tsxIdentifierQuery = `[
 // names. Data types (BIGINT, TEXT, …) and DDL keywords (CREATE, TABLE,
 // NOT, NULL, PRIMARY, KEY) are non-identifier nodes — they don't match.
 const sqlIdentifierQuery = `(identifier) @name`
+
+// pythonIdentifierQuery — Python's grammar uses one identifier node for
+// all the cases that matter to us (functions, classes, variables,
+// parameters, type annotations, attribute accesses, decorator names,
+// and f-string interpolations). Keywords (def/class/if/for/…) are
+// non-identifier nodes; the keyword filter is for the builtins
+// (int/str/print/…) that the grammar reports as identifier nodes.
+const pythonIdentifierQuery = `(identifier) @name`
 
 // Confidence ranks how trustworthy a Site is for a given Name.
 type Confidence int
@@ -257,15 +266,15 @@ var defaultExtractors = map[string]Extractor{
 		"object", "void", "undefined", "null",
 	)),
 	"sql": mustTreeSitterExtractor(sql.GetLanguage(), sqlIdentifierQuery, nil),
-	"python": &LexicalExtractor{Keywords: keywordSet(
-		"False", "None", "True", "and", "as", "assert", "async", "await",
-		"break", "class", "continue", "def", "del", "elif", "else", "except",
-		"finally", "for", "from", "global", "if", "import", "in", "is",
-		"lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
-		"while", "with", "yield",
+	// Python via tree-sitter. Keywords filter is trimmed to the builtins
+	// the grammar surfaces as identifier nodes — proper Python keywords
+	// (def/class/import/…) are non-identifier nodes and would never match
+	// the query.
+	"python": mustTreeSitterExtractor(python.GetLanguage(), pythonIdentifierQuery, keywordSet(
 		"int", "float", "str", "bool", "bytes", "list", "dict", "tuple",
-		"set", "frozenset", "type", "object", "print",
-	)},
+		"set", "frozenset", "type", "object", "print", "len", "range",
+		"True", "False", "None",
+	)),
 	"yaml":     &LexicalExtractor{},
 	"json":     &LexicalExtractor{},
 	"markdown": &LexicalExtractor{},

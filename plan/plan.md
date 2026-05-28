@@ -147,7 +147,14 @@ Cheap, noisy, immediate value for "find everywhere this name appears."
         default LSP. Polyglot fixture extended with
         `migrations/001_users.sql` so cross-language UserID now
         crosses go / ts / py / md / yaml / sql.
-  - [ ] Python.
+  - [x] Python: `(identifier)` via smacker/go-tree-sitter/python.
+        Captures functions/classes/parameters/annotations/f-string
+        interpolations. Keyword filter trimmed to just the builtins
+        (`int`, `str`, `print`, `True`/`False`/`None`, etc.) the grammar
+        surfaces as identifier nodes; proper Python keywords
+        (`def`/`class`/`import`/…) are non-identifier nodes and don't
+        need filtering. Docstrings, regular strings, and comments are
+        excluded.
 - [x] Watcher: rebuild a file's slice of the index on `didSave`. Wired via
       `textDocument/didSave` notification handler in `internal/server`.
 - [x] `workspace/symbol`: return Index matches. Substring match on Name,

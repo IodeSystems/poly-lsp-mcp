@@ -15,7 +15,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/iodesystems/tslsmcp/internal/config"
 	"github.com/iodesystems/tslsmcp/internal/symbols"
@@ -86,12 +88,58 @@ func (r *Resolver) applySite(idx *symbols.Index, bindingName string, site config
 		return inserted, nil
 	}
 	if site.JSONPath != "" {
-		return 0, fmt.Errorf("site form 'jsonpath' not yet implemented")
+		return r.applyJSONPathSite(idx, bindingName, site)
 	}
 	if site.Regex != "" {
 		return 0, fmt.Errorf("site form 'regex' not yet implemented")
 	}
 	return 0, fmt.Errorf("site for %s has no symbol / jsonpath / regex set", site.File)
+}
+
+// applyJSONPathSite reads the file, evaluates the jsonpath, and registers
+// every matched node as a declared site under bindingName. Only YAML and
+// JSON files are supported — the language tag on inserted sites comes
+// from the file extension. Files of other types yield an error (we're
+// not going to fish identifier-like strings out of arbitrary content).
+func (r *Resolver) applyJSONPathSite(idx *symbols.Index, bindingName string, site config.BindingSite) (int, error) {
+	abs := r.absFile(site.File)
+	lang := jsonpathLanguage(abs)
+	if lang == "" {
+		return 0, fmt.Errorf("jsonpath only supports .yaml/.yml/.json files; got %s", site.File)
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", abs, err)
+	}
+	path, err := parsePath(site.JSONPath)
+	if err != nil {
+		return 0, fmt.Errorf("parse jsonpath %q: %w", site.JSONPath, err)
+	}
+	positions, err := evalYAMLJSON(content, path)
+	if err != nil {
+		return 0, fmt.Errorf("eval jsonpath in %s: %w", site.File, err)
+	}
+	if len(positions) == 0 {
+		return 0, fmt.Errorf("jsonpath %q matched nothing in %s", site.JSONPath, site.File)
+	}
+	for _, p := range positions {
+		idx.InsertDeclared(bindingName, abs, lang, p.Line, p.Col)
+	}
+	return len(positions), nil
+}
+
+// jsonpathLanguage returns "yaml" or "json" for files we can evaluate
+// jsonpath against, or "" for everything else. Hard-coded extension
+// list rather than going through the config.Registry to keep this
+// package decoupled.
+func jsonpathLanguage(path string) string {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
+	case "yaml", "yml":
+		return "yaml"
+	case "json":
+		return "json"
+	}
+	return ""
 }
 
 // absFile resolves a binding's relative File against the workspace root.

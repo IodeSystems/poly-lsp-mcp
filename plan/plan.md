@@ -198,10 +198,15 @@ sites (the unique value-add vs single-language LSPs).
 - [x] `internal/server` wires bindings through `New(reg, mgr, bindings)`
       and applies them after `Build`. End-to-end test confirms
       `workspace/symbol UserType` returns UserID's sites in main.go.
-- [ ] Site forms: `jsonpath` (YAML/JSON value) — the real
-      value-add for string-literal cross-language rename. Reserved as
-      a config field; resolver currently warns + skips.
-- [ ] Site forms: `regex` (last resort). Same status as jsonpath.
+- [x] Site forms: `jsonpath` (YAML/JSON value). Supported subset:
+      `$.foo`, `$.foo.bar`, `$.foo[N]`, `$.foo[*]`. Wildcards work over
+      arrays and map values; recursive descent / filters / slices /
+      quoted keys are rejected with named errors. Evaluator uses
+      `gopkg.in/yaml.v3` so the same code path handles both YAML and
+      JSON (JSON is a strict subset of YAML). Position info comes from
+      `yaml.Node.Line` / `Column`.
+- [ ] Site forms: `regex` (last resort). Resolver still skips with a
+      warning; comes next.
 - [ ] `textDocument/rename`: use declared sites by default. Lexical
       requires `--rename-confidence=lexical`.
 - [ ] `workspace/applyEdit` synthesizes the combined edit atomically.

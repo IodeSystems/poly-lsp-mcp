@@ -564,6 +564,46 @@ func TestBindingsSurfaceAsSynonymInWorkspaceSymbol(t *testing.T) {
 	}
 }
 
+func TestBindingsJSONPathSurfacesYAMLValueAsSynonym(t *testing.T) {
+	// The polyglot fixture's config.yaml has `user_id_type: UserID` —
+	// declare a binding that pins the UserID value at that jsonpath
+	// as "user identifier". workspace/symbol "user identifier" must
+	// then return the YAML value's position.
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := []config.Binding{{
+		Name: "user identifier",
+		Sites: []config.BindingSite{
+			{File: "config.yaml", JSONPath: "$.user_id_type"},
+		},
+	}}
+
+	s := startSessionFull(t, reg, nil, declared)
+	defer s.close()
+
+	s.request("initialize", map[string]any{"rootUri": fixtureURI(t, "polyglot")})
+	s.notify("initialized", map[string]any{})
+
+	resp := s.request("workspace/symbol", map[string]any{"query": "user identifier"})
+	var syms []symbolInformation
+	if err := json.Unmarshal(resp.Result, &syms); err != nil {
+		t.Fatal(err)
+	}
+	if len(syms) == 0 {
+		t.Fatal("workspace/symbol 'user identifier' returned nothing — jsonpath binding not surfacing")
+	}
+	for _, sym := range syms {
+		if sym.Name != "user identifier" {
+			t.Errorf("name = %q, want 'user identifier'", sym.Name)
+		}
+		if !strings.HasSuffix(sym.Location.URI, "config.yaml") {
+			t.Errorf("URI %q should end with config.yaml", sym.Location.URI)
+		}
+	}
+}
+
 func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	s := startSession(t)
 	defer s.close()

@@ -1,6 +1,7 @@
 package bindings
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -141,27 +142,93 @@ func TestResolverEmptySitesListRejected(t *testing.T) {
 	}
 }
 
-func TestResolverUnimplementedSiteFormsWarnedNotFatal(t *testing.T) {
+func TestResolverPartialFailureStillPersistsGoodSites(t *testing.T) {
 	root := "/ws"
 	idx := buildIndex(root)
 	r := NewResolver(root)
 
-	// jsonpath / regex aren't implemented yet — the resolver should log
-	// the case and continue with whatever it CAN apply.
+	// regex is still unimplemented; the resolver should log it and
+	// continue applying the symbol site so the binding is partially live.
 	n, err := r.Apply(idx, []config.Binding{
 		{
-			Name: "FutureForm",
+			Name: "PartiallyApplied",
 			Sites: []config.BindingSite{
-				{File: "config.yaml", JSONPath: "$.user_id_type"},
-				{File: "main.go", Symbol: "UserID"},
+				{File: "main.go", Regex: "User.*"},  // unimplemented
+				{File: "main.go", Symbol: "UserID"}, // works → 2 sites
 			},
 		},
 	})
 	if err != nil {
-		t.Errorf("Apply errored on unimplemented forms: %v", err)
+		t.Errorf("Apply errored: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("inserted = %d, want 2 (symbol form succeeds for both UserID sites)", n)
+	}
+}
+
+func TestResolverJSONPathFormResolvesYAMLValue(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "config.yaml")
+	yaml := `service: polyglot
+user_id_type: UserID
+endpoints:
+  - path: /users/:id
+    handler: GreetUser
+`
+	if err := os.WriteFile(yamlPath, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	idx := symbols.NewIndex()
+	r := NewResolver(dir)
+	n, err := r.Apply(idx, []config.Binding{
+		{
+			Name: "UserIdentifier",
+			Sites: []config.BindingSite{
+				{File: "config.yaml", JSONPath: "$.user_id_type"},
+				{File: "config.yaml", JSONPath: "$.endpoints[0].handler"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("inserted = %d, want 2", n)
+	}
+	sites := idx.Lookup("UserIdentifier")
+	if len(sites) != 2 {
+		t.Fatalf("Lookup = %d sites, want 2: %+v", len(sites), sites)
+	}
+	for _, s := range sites {
+		if s.Confidence != symbols.ConfidenceDeclared {
+			t.Errorf("confidence = %d, want Declared", s.Confidence)
+		}
+		if s.Language != "yaml" {
+			t.Errorf("language = %q, want yaml", s.Language)
+		}
+	}
+}
+
+func TestResolverJSONPathFormRejectsNonYAMLJSONFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx := symbols.NewIndex()
+	r := NewResolver(dir)
+	n, err := r.Apply(idx, []config.Binding{
+		{
+			Name:  "Bad",
+			Sites: []config.BindingSite{{File: "main.go", JSONPath: "$.foo"}},
+		},
+	})
+	if err != nil {
+		t.Errorf("unexpected resolver-level error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("inserted = %d, want 0 (Go file should not be evaluated as jsonpath)", n)
 	}
 }
 

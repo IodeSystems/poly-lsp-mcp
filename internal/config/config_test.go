@@ -94,6 +94,46 @@ languages:
 	}
 }
 
+func TestLoadYAMLWithBindings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tslsmcp.yaml")
+	yaml := `
+languages:
+  - name: go
+    extensions: [go]
+    treesitter: go
+
+bindings:
+  - name: UserType
+    sites:
+      - {file: main.go, symbol: UserID}
+      - {file: client.ts, symbol: UserID}
+  - name: Endpoint
+    sites:
+      - file: config.yaml
+        jsonpath: $.endpoints[0].path
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Bindings) != 2 {
+		t.Fatalf("got %d bindings, want 2", len(cfg.Bindings))
+	}
+	if cfg.Bindings[0].Name != "UserType" {
+		t.Errorf("binding[0].Name = %q, want UserType", cfg.Bindings[0].Name)
+	}
+	if len(cfg.Bindings[0].Sites) != 2 {
+		t.Errorf("UserType sites = %d, want 2", len(cfg.Bindings[0].Sites))
+	}
+	if cfg.Bindings[1].Sites[0].JSONPath != "$.endpoints[0].path" {
+		t.Errorf("Endpoint jsonpath = %q", cfg.Bindings[1].Sites[0].JSONPath)
+	}
+}
+
 func TestLoadOrDefaultMissingFile(t *testing.T) {
 	cfg, used, err := LoadOrDefault(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {

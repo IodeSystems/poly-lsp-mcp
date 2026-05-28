@@ -180,19 +180,28 @@ Cheap, noisy, immediate value for "find everywhere this name appears."
 Precise. Required for safe cross-language rename, including string-literal
 sites (the unique value-add vs single-language LSPs).
 
-- [ ] Extend `tslsmcp.yaml` with a `bindings` block. Same file by user
-      decision (2026-05-28); revisit if it grows past ~1k lines.
+- [x] Extend `tslsmcp.yaml` with a `bindings` block.
       ```yaml
       bindings:
-        - name: UserID
+        - name: UserType
           sites:
             - {file: main.go, symbol: UserID}
             - {file: client.ts, symbol: UserID}
             - {file: worker.py, symbol: UserID}
-            - {file: config.yaml, jsonpath: $.user_id_type}
       ```
-- [ ] Site forms: `symbol` (identifier in any language), `jsonpath`
-      (YAML/JSON value), `regex` (last resort).
+- [x] `internal/symbols`: declared sites live in their own backing
+      store; `Lookup` dedups against lexical sites at the same
+      (file, line, col), declared wins.
+- [x] `internal/bindings`: Resolver maps `symbol` site form. Missing
+      symbols logged but not fatal. Empty name / empty sites list is
+      validation-rejected.
+- [x] `internal/server` wires bindings through `New(reg, mgr, bindings)`
+      and applies them after `Build`. End-to-end test confirms
+      `workspace/symbol UserType` returns UserID's sites in main.go.
+- [ ] Site forms: `jsonpath` (YAML/JSON value) — the real
+      value-add for string-literal cross-language rename. Reserved as
+      a config field; resolver currently warns + skips.
+- [ ] Site forms: `regex` (last resort). Same status as jsonpath.
 - [ ] `textDocument/rename`: use declared sites by default. Lexical
       requires `--rename-confidence=lexical`.
 - [ ] `workspace/applyEdit` synthesizes the combined edit atomically.

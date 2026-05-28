@@ -1,0 +1,187 @@
+package bindings
+
+import (
+	"path/filepath"
+	"testing"
+
+	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/tslsmcp/internal/symbols"
+)
+
+// buildIndex constructs an Index pre-populated with lexical sites for a
+// few test names so the resolver has something to match against.
+func buildIndex(root string) *symbols.Index {
+	idx := symbols.NewIndex()
+	idx.Refresh(filepath.Join(root, "main.go"), "go", []symbols.Hit{
+		{Name: "UserID", Line: 5, Col: 6},
+		{Name: "UserID", Line: 8, Col: 19},
+		{Name: "GreetUser", Line: 8, Col: 6},
+	})
+	idx.Refresh(filepath.Join(root, "client.ts"), "typescript", []symbols.Hit{
+		{Name: "UserID", Line: 1, Col: 13},
+		{Name: "UserID", Line: 3, Col: 37},
+	})
+	return idx
+}
+
+func TestResolverSymbolFormAliasesAcrossFiles(t *testing.T) {
+	root := "/ws"
+	idx := buildIndex(root)
+	r := NewResolver(root)
+
+	n, err := r.Apply(idx, []config.Binding{
+		{
+			Name: "UserType",
+			Sites: []config.BindingSite{
+				{File: "main.go", Symbol: "UserID"},
+				{File: "client.ts", Symbol: "UserID"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("inserted = %d, want 4 (2 sites in main.go + 2 in client.ts)", n)
+	}
+
+	// Now Lookup("UserType") should return UserID's positions tagged as
+	// declared.
+	got := idx.Lookup("UserType")
+	if len(got) != 4 {
+		t.Fatalf("Lookup(UserType) = %d sites, want 4: %+v", len(got), got)
+	}
+	for _, s := range got {
+		if s.Confidence != symbols.ConfidenceDeclared {
+			t.Errorf("UserType site %+v has confidence %d, want Declared", s, s.Confidence)
+		}
+	}
+}
+
+func TestResolverSymbolFormStaysSameNameOverridesLexical(t *testing.T) {
+	root := "/ws"
+	idx := buildIndex(root)
+	r := NewResolver(root)
+
+	// Declare a binding whose own Name is the same as the symbol it
+	// points at — i.e., mark the existing UserID sites in main.go as
+	// also declared. Lookup should NOT return duplicates; declared wins
+	// at the same (file, line, col).
+	_, err := r.Apply(idx, []config.Binding{
+		{
+			Name:  "UserID",
+			Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got := idx.Lookup("UserID")
+	// main.go has 2 UserID sites; client.ts has 2 more. Total 4 — no
+	// duplicates from the declared overlay.
+	if len(got) != 4 {
+		t.Errorf("Lookup(UserID) = %d, want 4 (declared in main.go overrides lexical, plus 2 from client.ts)", len(got))
+	}
+	// The two sites in main.go must be Declared, the two in client.ts
+	// must remain Lexical.
+	for _, s := range got {
+		want := symbols.ConfidenceLexical
+		if filepath.Base(s.File) == "main.go" {
+			want = symbols.ConfidenceDeclared
+		}
+		if s.Confidence != want {
+			t.Errorf("site %s:%d:%d confidence = %d, want %d", s.File, s.Line, s.Col, s.Confidence, want)
+		}
+	}
+}
+
+func TestResolverMissingSymbolLogsButDoesNotAbort(t *testing.T) {
+	root := "/ws"
+	idx := buildIndex(root)
+	r := NewResolver(root)
+
+	n, err := r.Apply(idx, []config.Binding{
+		{
+			Name: "Mixed",
+			Sites: []config.BindingSite{
+				{File: "main.go", Symbol: "DoesNotExist"}, // should warn
+				{File: "main.go", Symbol: "GreetUser"},    // should succeed
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply unexpectedly returned an error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("inserted = %d, want 1 (only GreetUser hit)", n)
+	}
+}
+
+func TestResolverEmptyNameRejected(t *testing.T) {
+	root := "/ws"
+	idx := buildIndex(root)
+	r := NewResolver(root)
+
+	_, err := r.Apply(idx, []config.Binding{
+		{Name: "", Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}}},
+	})
+	if err == nil {
+		t.Error("expected error for empty binding name")
+	}
+}
+
+func TestResolverEmptySitesListRejected(t *testing.T) {
+	root := "/ws"
+	idx := buildIndex(root)
+	r := NewResolver(root)
+
+	_, err := r.Apply(idx, []config.Binding{{Name: "Foo"}})
+	if err == nil {
+		t.Error("expected error for binding with no sites")
+	}
+}
+
+func TestResolverUnimplementedSiteFormsWarnedNotFatal(t *testing.T) {
+	root := "/ws"
+	idx := buildIndex(root)
+	r := NewResolver(root)
+
+	// jsonpath / regex aren't implemented yet — the resolver should log
+	// the case and continue with whatever it CAN apply.
+	n, err := r.Apply(idx, []config.Binding{
+		{
+			Name: "FutureForm",
+			Sites: []config.BindingSite{
+				{File: "config.yaml", JSONPath: "$.user_id_type"},
+				{File: "main.go", Symbol: "UserID"},
+			},
+		},
+	})
+	if err != nil {
+		t.Errorf("Apply errored on unimplemented forms: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("inserted = %d, want 2 (symbol form succeeds for both UserID sites)", n)
+	}
+}
+
+func TestResolverAbsolutePathBypassesRoot(t *testing.T) {
+	root := "/ws"
+	idx := symbols.NewIndex()
+	idx.Refresh("/elsewhere/gen.go", "go", []symbols.Hit{
+		{Name: "Token", Line: 3, Col: 6},
+	})
+	r := NewResolver(root)
+	n, err := r.Apply(idx, []config.Binding{
+		{
+			Name:  "Token",
+			Sites: []config.BindingSite{{File: "/elsewhere/gen.go", Symbol: "Token"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("inserted = %d, want 1", n)
+	}
+}

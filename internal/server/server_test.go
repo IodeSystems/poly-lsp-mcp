@@ -61,8 +61,12 @@ func startSession(t *testing.T) *lspSession {
 }
 
 func startSessionWith(t *testing.T, reg *config.Registry, mgr *multiplex.Manager) *lspSession {
+	return startSessionFull(t, reg, mgr, nil)
+}
+
+func startSessionFull(t *testing.T, reg *config.Registry, mgr *multiplex.Manager, declared []config.Binding) *lspSession {
 	t.Helper()
-	srv := New(reg, mgr)
+	srv := New(reg, mgr, declared)
 
 	sIn, cOut := io.Pipe()
 	cIn, sOut := io.Pipe()
@@ -509,6 +513,54 @@ func TestForwardsTextDocumentWithNilManagerReplyNull(t *testing.T) {
 	}
 	if string(resp.Result) != "null" {
 		t.Errorf("expected null, got %s", resp.Result)
+	}
+}
+
+func TestBindingsSurfaceAsSynonymInWorkspaceSymbol(t *testing.T) {
+	// Build a tiny workspace with two .go files containing "UserID",
+	// then declare a binding that aliases "UserType" to UserID's sites.
+	// workspace/symbol "UserType" should return those sites — the
+	// synonym semantics promised by Tier 2.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\n\ntype UserID int\n\nfunc f(id UserID) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := []config.Binding{{
+		Name:  "UserType",
+		Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}},
+	}}
+
+	s := startSessionFull(t, reg, nil, declared)
+	defer s.close()
+
+	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
+	s.notify("initialized", map[string]any{})
+
+	resp := s.request("workspace/symbol", map[string]any{"query": "UserType"})
+	var syms []symbolInformation
+	if err := json.Unmarshal(resp.Result, &syms); err != nil {
+		t.Fatal(err)
+	}
+	if len(syms) == 0 {
+		t.Fatal("workspace/symbol UserType returned no results — declared binding not surfacing")
+	}
+	for _, sym := range syms {
+		if sym.Name != "UserType" {
+			t.Errorf("symbol name = %q, want UserType (binding name should win)", sym.Name)
+		}
+		if filepath.Base(strings.TrimPrefix(sym.Location.URI, "file://")) != "main.go" {
+			t.Errorf("URI = %q, want main.go", sym.Location.URI)
+		}
 	}
 }
 

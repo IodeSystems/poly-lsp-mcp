@@ -88,39 +88,92 @@ type Site struct {
 	Confidence Confidence
 }
 
-// Index maps name → []Site. Safe for concurrent reads; Replace serializes
-// writes so per-file incremental updates can run from a single watcher.
+// Index maps name → []Site. Safe for concurrent reads; writes serialize
+// so per-file incremental updates can run from a single watcher.
+//
+// Two backing stores share the same name space: `sites` holds lexical
+// hits from extractors and is rebuilt on every Refresh, while
+// `declaredSites` holds Tier-2 declared bindings and is rebuilt only on
+// config reloads. Lookup merges both, with declared sites overriding
+// lexical at the same (file, line, col).
 type Index struct {
-	mu    sync.RWMutex
-	sites map[string][]Site
+	mu sync.RWMutex
+
+	sites         map[string][]Site
+	declaredSites map[string][]Site
 }
 
 func NewIndex() *Index {
-	return &Index{sites: map[string][]Site{}}
+	return &Index{
+		sites:         map[string][]Site{},
+		declaredSites: map[string][]Site{},
+	}
 }
 
-// Lookup returns every site for name, or nil if unknown. The returned
-// slice is a copy; callers may mutate it freely.
+// Lookup returns every site for name, declared first then lexical, with
+// duplicates at the same (file, line, col) dropped (declared wins). The
+// returned slice is a copy; callers may mutate it freely.
 func (i *Index) Lookup(name string) []Site {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	src := i.sites[name]
-	if src == nil {
-		return nil
+	type key struct {
+		file string
+		line int
+		col  int
 	}
-	out := make([]Site, len(src))
-	copy(out, src)
+	seen := map[key]bool{}
+	var out []Site
+	for _, s := range i.declaredSites[name] {
+		seen[key{s.File, s.Line, s.Col}] = true
+		out = append(out, s)
+	}
+	for _, s := range i.sites[name] {
+		if seen[key{s.File, s.Line, s.Col}] {
+			continue
+		}
+		out = append(out, s)
+	}
 	return out
 }
 
+// InsertDeclared registers a declared binding site. The caller has
+// already resolved the position from a config.Binding; this method just
+// stores it. Confidence on the stored Site is forced to
+// ConfidenceDeclared regardless of what the caller passes — declared
+// status is the whole point of using this entry point.
+func (i *Index) InsertDeclared(name, file, language string, line, col int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.declaredSites[name] = append(i.declaredSites[name], Site{
+		File:       file,
+		Line:       line,
+		Col:        col,
+		Language:   language,
+		Confidence: ConfidenceDeclared,
+	})
+}
+
+// ClearDeclared removes every declared binding. Called on config reload
+// before re-applying the new bindings from disk.
+func (i *Index) ClearDeclared() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.declaredSites = map[string][]Site{}
+}
+
 // Languages returns the distinct language names with at least one site
-// in the index, sorted. Used by the multiplex layer to decide which
-// child LSPs are worth spawning for this workspace.
+// in the index, sorted. Considers both lexical and declared sites; used
+// by the multiplex layer to decide which child LSPs are worth spawning.
 func (i *Index) Languages() []string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	set := map[string]struct{}{}
 	for _, sites := range i.sites {
+		for _, s := range sites {
+			set[s.Language] = struct{}{}
+		}
+	}
+	for _, sites := range i.declaredSites {
 		for _, s := range sites {
 			set[s.Language] = struct{}{}
 		}
@@ -133,12 +186,19 @@ func (i *Index) Languages() []string {
 	return out
 }
 
-// Names returns every indexed name, sorted. Useful for diagnostics.
+// Names returns every indexed name (lexical or declared), sorted.
 func (i *Index) Names() []string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	out := make([]string, 0, len(i.sites))
+	set := map[string]struct{}{}
 	for k := range i.sites {
+		set[k] = struct{}{}
+	}
+	for k := range i.declaredSites {
+		set[k] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
 		out = append(out, k)
 	}
 	sort.Strings(out)

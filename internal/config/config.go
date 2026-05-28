@@ -30,9 +30,33 @@ type Language struct {
 	TreeSitter string   `yaml:"treesitter,omitempty"`
 }
 
+// Binding declares that several physical sites (in files of any language)
+// are part of the same cross-language entity. The Name is the canonical
+// label workspace/symbol and references queries can use to find the
+// whole set. Bindings are intentionally a separate concept from the
+// lexical index: they encode *intent* the lexical extractor cannot
+// recover (e.g., that a TS export and a Python class are the same
+// concept, or that a YAML string value is "the same" as a Go type).
+type Binding struct {
+	Name  string        `yaml:"name"`
+	Sites []BindingSite `yaml:"sites"`
+}
+
+// BindingSite addresses a position inside a file. Exactly one of Symbol /
+// JSONPath / Regex must be set; the resolver dispatches on which is
+// populated. v0.2.1 implements Symbol only; the other forms are reserved
+// fields so the on-disk shape doesn't churn when they land.
+type BindingSite struct {
+	File     string `yaml:"file"`
+	Symbol   string `yaml:"symbol,omitempty"`
+	JSONPath string `yaml:"jsonpath,omitempty"`
+	Regex    string `yaml:"regex,omitempty"`
+}
+
 // Config is the on-disk shape.
 type Config struct {
 	Languages []Language `yaml:"languages"`
+	Bindings  []Binding  `yaml:"bindings,omitempty"`
 }
 
 // Registry is the in-memory lookup view: extension → language. Built from a

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iodesystems/tslsmcp/internal/bindings"
 	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
 	"github.com/iodesystems/tslsmcp/internal/symbols"
 )
@@ -97,6 +98,17 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		} else {
 			s.setIndex(idx)
 			log.Printf("initialize: indexed %d names from %s", len(idx.Names()), root)
+			// Apply declared bindings (Tier 2). Failures in any single
+			// binding are logged but don't abort initialization — the
+			// lexical index is still useful on its own.
+			if len(s.bindings) > 0 {
+				resolver := bindings.NewResolver(root)
+				n, err := resolver.Apply(idx, s.bindings)
+				if err != nil {
+					log.Printf("initialize: some bindings failed validation: %v", err)
+				}
+				log.Printf("initialize: applied %d declared binding site(s)", n)
+			}
 		}
 	} else {
 		log.Print("initialize: no workspace root; symbol index disabled")

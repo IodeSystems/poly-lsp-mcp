@@ -45,6 +45,7 @@ var ErrExitWithoutShutdown = errors.New("server: exit notification received befo
 type Server struct {
 	registry *config.Registry
 	manager  *multiplex.Manager
+	bindings []config.Binding
 
 	writeMu sync.Mutex
 	out     io.Writer
@@ -58,8 +59,12 @@ type Server struct {
 	index   *symbols.Index
 }
 
-func New(reg *config.Registry, manager *multiplex.Manager) *Server {
-	return &Server{registry: reg, manager: manager}
+// New constructs a Server. manager may be nil to skip child-LSP
+// spawning (useful for tests that don't want gopls/tsserver startup
+// latency); bindings may be nil for workspaces without declared
+// cross-language bindings.
+func New(reg *config.Registry, manager *multiplex.Manager, declared []config.Binding) *Server {
+	return &Server{registry: reg, manager: manager, bindings: declared}
 }
 
 func (s *Server) Serve(in io.Reader, out io.Writer) error {

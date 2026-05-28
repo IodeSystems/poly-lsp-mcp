@@ -84,7 +84,7 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	var p initializeParams
 	if len(req.Params) > 0 {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
-			s.replyError(req, -32602, fmt.Sprintf("bad initialize params: %v", err))
+			s.replyError(req, errInvalidParams, fmt.Sprintf("bad initialize params: %v", err))
 			return
 		}
 	}
@@ -211,7 +211,7 @@ func (s *Server) handleWorkspaceSymbol(req *jsonrpc.Message) {
 	var p workspaceSymbolParams
 	if len(req.Params) > 0 {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
-			s.replyError(req, -32602, fmt.Sprintf("bad workspace/symbol params: %v", err))
+			s.replyError(req, errInvalidParams, fmt.Sprintf("bad workspace/symbol params: %v", err))
 			return
 		}
 	}
@@ -245,7 +245,7 @@ func (s *Server) handleWorkspaceSymbol(req *jsonrpc.Message) {
 func (s *Server) handleReferences(req *jsonrpc.Message) {
 	var p referenceParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		s.replyError(req, -32602, fmt.Sprintf("bad references params: %v", err))
+		s.replyError(req, errInvalidParams, fmt.Sprintf("bad references params: %v", err))
 		return
 	}
 
@@ -316,7 +316,7 @@ func (s *Server) handleDocumentSymbol(req *jsonrpc.Message) {
 		TextDocument textDocumentIdentifier `json:"textDocument"`
 	}
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		s.replyError(req, -32602, fmt.Sprintf("bad documentSymbol params: %v", err))
+		s.replyError(req, errInvalidParams, fmt.Sprintf("bad documentSymbol params: %v", err))
 		return
 	}
 
@@ -409,7 +409,7 @@ func (s *Server) forwardTextDocument(req *jsonrpc.Message) {
 	defer cancel()
 	result, err := child.Call(ctx, req.Method, passParams)
 	if err != nil {
-		s.replyError(req, -32603, err.Error())
+		s.replyError(req, errInternal, err.Error())
 		return
 	}
 	s.send(&jsonrpc.Message{JSONRPC: "2.0", ID: req.ID, Result: result})

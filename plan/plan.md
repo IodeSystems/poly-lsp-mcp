@@ -91,8 +91,15 @@ cross-language stitching yet (that's Phase 2).**
 - [ ] Fallback path: when the child LSP returns no result for `definition`,
       `references`, `documentSymbol`, or returns an empty edit for `rename`,
       synthesize a result from the tree-sitter index.
-- [ ] LSP conformance smoke test: open vs-code or `nvim-lspconfig`, see that
-      definition/references work across go + ts in one session.
+- [x] LSP conformance pack (`internal/server/conformance_test.go`):
+      pre-init/post-shutdown gating with the right error codes (-32002,
+      -32600), double-initialize rejection, exit-without-shutdown surfaces
+      `ErrExitWithoutShutdown` so main.go log.Fatals with exit code 1,
+      `jsonrpc:"2.0"` validation, framing edge cases. 18 tests. Covers
+      the contract independently of any language-specific handler.
+- [ ] LSP conformance smoke against a real editor (vs-code or
+      `nvim-lspconfig`) — proves we satisfy editor-side expectations
+      that automated tests miss (e.g., capability shape quirks).
 
 **Open decisions (resolve in Phase 1):**
 - LSP framework: stdlib (current) vs `tliron/glsp` vs `go.lsp.dev/protocol`.

@@ -1,0 +1,6 @@
+/tslsmcp
+/dist/
+*.test
+*.out
+.idea/
+.vscode/

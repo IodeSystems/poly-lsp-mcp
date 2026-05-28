@@ -1,17 +1,24 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
 	"github.com/iodesystems/tslsmcp/internal/symbols"
 )
+
+// forwardTimeout caps how long the server will wait on a child LSP
+// before giving up on a forwarded request. Notifications don't use it.
+const forwardTimeout = 30 * time.Second
 
 // Minimal LSP type subset. We only declare the fields we actually read or
 // write — the LSP spec is large, and tight types make it easier to know
@@ -95,24 +102,74 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		log.Print("initialize: no workspace root; symbol index disabled")
 	}
 
-	result := map[string]any{
-		"capabilities": map[string]any{
-			"workspaceSymbolProvider": true,
-			"referencesProvider":      true,
-			// Sync=None means we don't ask for didChange streams; the
-			// index is rebuilt from disk on didSave only.
-			"textDocumentSync": map[string]any{
-				"openClose": false,
-				"change":    0,
-				"save":      true,
-			},
+	// Spawn child LSPs for every language we observed in the workspace.
+	// Languages with no LSP binary in the registry, and binaries that
+	// fail to start, are skipped — fallback path serves them.
+	if s.manager != nil && root != "" {
+		idx := s.getIndex()
+		var langs []string
+		if idx != nil {
+			langs = idx.Languages()
+		}
+		if len(langs) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			rootURI := pathToURI(root)
+			if err := s.manager.Start(ctx, root, rootURI, langs); err != nil {
+				log.Printf("initialize: manager.Start: %v", err)
+			}
+		}
+	}
+
+	// Our own capabilities. These win over any child entry of the same
+	// name — we're the entity actually answering for the client on the
+	// methods we name here.
+	ourCaps := map[string]any{
+		"workspaceSymbolProvider": true,
+		"referencesProvider":      true,
+		"documentSymbolProvider":  true,
+		"textDocumentSync": map[string]any{
+			"openClose": false,
+			"change":    0,
+			"save":      true,
 		},
+	}
+
+	caps := mergeCapabilities(s.childCaps(), ourCaps)
+	result := map[string]any{
+		"capabilities": caps,
 		"serverInfo": map[string]any{
 			"name":    "tslsmcp",
 			"version": "0.0.0",
 		},
 	}
 	s.reply(req, result)
+}
+
+// childCaps returns every running child's reported ServerCapabilities,
+// or nil when no manager is configured.
+func (s *Server) childCaps() map[string]json.RawMessage {
+	if s.manager == nil {
+		return nil
+	}
+	return s.manager.Capabilities()
+}
+
+// mergeCapabilities unions every child's capability map and overlays
+// our own (last write wins for ours). Children that disagree on a key
+// settle in iteration order; that's deterministic enough for v0.1 since
+// every child the manager spawned is unique per language.
+func mergeCapabilities(childCaps map[string]json.RawMessage, ourCaps map[string]any) map[string]any {
+	merged := map[string]any{}
+	for _, raw := range childCaps {
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			continue
+		}
+		maps.Copy(merged, m)
+	}
+	maps.Copy(merged, ourCaps)
+	return merged
 }
 
 // pickRoot prefers workspaceFolders[0], falls back to rootUri, then to
@@ -220,37 +277,156 @@ func (s *Server) handleReferences(req *jsonrpc.Message) {
 }
 
 // handleDidSave is a notification — no response. Re-extracts the file and
-// refreshes its slice of the index. Files outside the registry, or saves
-// while we have no index, are silently ignored.
+// refreshes its slice of the index, then forwards the notification to
+// the routed child (if any) so its in-memory view stays consistent.
+// Files outside the registry, or saves while we have no index, are
+// silently ignored (we still forward — the child decides).
 func (s *Server) handleDidSave(req *jsonrpc.Message) {
 	var p didSaveTextDocumentParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
 		log.Printf("didSave: bad params: %v", err)
 		return
 	}
+	if idx := s.getIndex(); idx != nil {
+		path := uriToPath(p.TextDocument.URI)
+		if path != "" {
+			ext := strings.TrimPrefix(filepath.Ext(path), ".")
+			if lang := s.registry.LookupByExt(ext); lang != nil {
+				if ex := symbols.DefaultExtractor(lang.Name); ex != nil {
+					data, err := os.ReadFile(path)
+					if err != nil {
+						log.Printf("didSave: read %s: %v", path, err)
+					} else {
+						idx.Refresh(path, lang.Name, ex.Extract(data))
+					}
+				}
+			}
+		}
+	}
+	s.forwardTextDocument(req)
+}
+
+// handleDocumentSymbol forwards to the child for the URI's language if
+// one exists; otherwise falls back to our own per-file slice of the
+// symbol index. The forward path is preferred because the child has
+// semantic precision; the fallback ensures the method always works for
+// any URI inside the workspace.
+func (s *Server) handleDocumentSymbol(req *jsonrpc.Message) {
+	var p struct {
+		TextDocument textDocumentIdentifier `json:"textDocument"`
+	}
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		s.replyError(req, -32602, fmt.Sprintf("bad documentSymbol params: %v", err))
+		return
+	}
+
+	if s.manager != nil {
+		if child := s.manager.RouteByURI(p.TextDocument.URI); child != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
+			defer cancel()
+			var passParams any
+			if len(req.Params) > 0 {
+				passParams = json.RawMessage(req.Params)
+			}
+			result, err := child.Call(ctx, req.Method, passParams)
+			if err == nil {
+				s.send(&jsonrpc.Message{JSONRPC: "2.0", ID: req.ID, Result: result})
+				return
+			}
+			log.Printf("documentSymbol forward: %v; falling back to index", err)
+		}
+	}
+
 	idx := s.getIndex()
 	if idx == nil {
+		s.reply(req, []symbolInformation{})
 		return
 	}
 	path := uriToPath(p.TextDocument.URI)
 	if path == "" {
+		s.reply(req, []symbolInformation{})
 		return
 	}
-	ext := strings.TrimPrefix(filepath.Ext(path), ".")
-	lang := s.registry.LookupByExt(ext)
-	if lang == nil {
+	out := []symbolInformation{}
+	for _, name := range idx.Names() {
+		for _, site := range idx.Lookup(name) {
+			if site.File != path {
+				continue
+			}
+			out = append(out, symbolInformation{
+				Name: name,
+				Kind: symbolKindVariable,
+				Location: location{
+					URI:   pathToURI(site.File),
+					Range: rangeForToken(site.Line, site.Col, name),
+				},
+			})
+		}
+	}
+	s.reply(req, out)
+}
+
+// forwardTextDocument is the generic forwarder for textDocument/* methods
+// the server doesn't intercept. Requests get the child's response (or an
+// error if the child fails / no child matches); notifications are
+// fire-and-forget. URIs that don't resolve to a child are answered with
+// null (requests) or dropped (notifications).
+func (s *Server) forwardTextDocument(req *jsonrpc.Message) {
+	if s.manager == nil {
+		if !req.IsNotification() {
+			s.reply(req, nil)
+		}
 		return
 	}
-	ex := symbols.DefaultExtractor(lang.Name)
-	if ex == nil {
+	uri := extractURI(req.Params)
+	if uri == "" {
+		if !req.IsNotification() {
+			s.reply(req, nil)
+		}
 		return
 	}
-	data, err := os.ReadFile(path)
+	child := s.manager.RouteByURI(uri)
+	if child == nil {
+		if !req.IsNotification() {
+			s.reply(req, nil)
+		}
+		return
+	}
+
+	var passParams any
+	if len(req.Params) > 0 {
+		passParams = json.RawMessage(req.Params)
+	}
+
+	if req.IsNotification() {
+		if err := child.Notify(req.Method, passParams); err != nil {
+			log.Printf("forward %s: %v", req.Method, err)
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), forwardTimeout)
+	defer cancel()
+	result, err := child.Call(ctx, req.Method, passParams)
 	if err != nil {
-		log.Printf("didSave: read %s: %v", path, err)
+		s.replyError(req, -32603, err.Error())
 		return
 	}
-	idx.Refresh(path, lang.Name, ex.Extract(data))
+	s.send(&jsonrpc.Message{JSONRPC: "2.0", ID: req.ID, Result: result})
+}
+
+// extractURI pulls textDocument.uri out of an LSP params object. Returns
+// "" if the field is missing or the JSON doesn't decode.
+func extractURI(raw json.RawMessage) string {
+	var p struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return ""
+	}
+	return p.TextDocument.URI
 }
 
 // rangeForToken converts our 1-based (line, col) plus a token name into

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/tslsmcp/internal/multiplex"
 	"github.com/iodesystems/tslsmcp/internal/server"
 )
 
@@ -38,7 +39,8 @@ func main() {
 		log.Printf("  %-12s exts=%v backend=%s", lang.Name, lang.Extensions, backend)
 	}
 
-	srv := server.New(reg)
+	mgr := multiplex.NewManager(reg)
+	srv := server.New(reg, mgr)
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}

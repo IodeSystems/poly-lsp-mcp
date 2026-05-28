@@ -67,13 +67,22 @@ cross-language stitching yet (that's Phase 2).**
         which children are worth spawning from the workspace it just
         indexed.
   - [ ] Restart-on-crash with backoff *(deferred — needs policy choice)*.
-- [ ] Server integration:
-  - [ ] Forward `textDocument/*` to the manager's per-URI child.
-  - [ ] Capabilities merge in `initialize`: union child caps with our
-        own (workspaceSymbolProvider, referencesProvider) and mask
-        anything we intend to override (rename, when cross-language
-        rename lands).
-  - [ ] Workspace folder broadcast + `didChangeConfiguration` fanout.
+- [x] Server integration:
+  - [x] Generic `textDocument/*` forward through `Manager.RouteByURI`;
+        notifications fire-and-forget, requests honor a 30s timeout
+        before erroring. URIs with no child get a null reply.
+  - [x] `textDocument/documentSymbol`: forward-first with parent-index
+        fallback so the method always answers across the whole workspace.
+  - [x] `textDocument/didSave` re-indexes parent AND forwards to the
+        child so its in-memory view stays consistent.
+  - [x] `mergeCapabilities` in `initialize` unions every child's caps
+        and overlays the server's own (workspaceSymbolProvider,
+        referencesProvider, documentSymbolProvider, textDocumentSync).
+  - [x] `Server.New(reg, manager)` — manager may be nil so tests can
+        skip child-spawn latency.
+  - [x] `shutdown` drains the manager (5s timeout) before exit.
+  - [ ] Workspace folder broadcast + `didChangeConfiguration` fanout
+        *(not yet — needs per-child params shaping per LSP spec)*.
 - [ ] `internal/treesitter`:
   - [ ] Parser registry (smacker/go-tree-sitter or
         tree-sitter/go-tree-sitter — decide when this PR lands).

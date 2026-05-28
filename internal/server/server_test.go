@@ -3,8 +3,10 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -14,7 +16,29 @@ import (
 
 	"github.com/iodesystems/tslsmcp/internal/config"
 	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
+	"github.com/iodesystems/tslsmcp/internal/multiplex"
 )
+
+// tslsmcpBinary is the path of the tslsmcp binary built during TestMain.
+// Used by tests that need a real child LSP — the binary speaks the
+// protocol so we can exercise the server's forwarding paths against
+// itself without depending on gopls/tsserver/pylsp being installed.
+var tslsmcpBinary string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "tslsmcp-srv-test-*")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir)
+
+	tslsmcpBinary = filepath.Join(dir, "tslsmcp")
+	out, err := exec.Command("go", "build", "-o", tslsmcpBinary, "github.com/iodesystems/tslsmcp").CombinedOutput()
+	if err != nil {
+		panic(fmt.Sprintf("build tslsmcp for tests: %v\n%s", err, out))
+	}
+	os.Exit(m.Run())
+}
 
 // lspSession drives a live Server through in-process io.Pipe pairs. It
 // gives tests the same shape as a real client without spawning a binary.
@@ -33,7 +57,12 @@ func startSession(t *testing.T) *lspSession {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(reg)
+	return startSessionWith(t, reg, nil)
+}
+
+func startSessionWith(t *testing.T, reg *config.Registry, mgr *multiplex.Manager) *lspSession {
+	t.Helper()
+	srv := New(reg, mgr)
 
 	sIn, cOut := io.Pipe()
 	cIn, sOut := io.Pipe()
@@ -43,7 +72,7 @@ func startSession(t *testing.T) *lspSession {
 
 	return &lspSession{
 		t:       t,
-		srvIn:   cOut, // closing this signals EOF to the server
+		srvIn:   cOut,
 		clientR: bufio.NewReader(cIn),
 		clientW: cOut,
 		done:    done,
@@ -301,6 +330,185 @@ func TestDidSaveRefreshesIndex(t *testing.T) {
 	json.Unmarshal(resp.Result, &syms)
 	if len(syms) == 0 {
 		t.Error("after didSave: Beta not picked up")
+	}
+}
+
+func TestMergeCapabilitiesUnionsAndOverrides(t *testing.T) {
+	childA := json.RawMessage(`{"hoverProvider":true,"definitionProvider":true}`)
+	childB := json.RawMessage(`{"hoverProvider":false,"completionProvider":{"triggerCharacters":["."]}}`)
+	own := map[string]any{
+		"workspaceSymbolProvider": true,
+		"hoverProvider":           "override-wins",
+	}
+	merged := mergeCapabilities(map[string]json.RawMessage{"a": childA, "b": childB}, own)
+
+	if merged["workspaceSymbolProvider"] != true {
+		t.Errorf("own cap missing: %+v", merged)
+	}
+	if merged["hoverProvider"] != "override-wins" {
+		t.Errorf("our hoverProvider should override child; got %v", merged["hoverProvider"])
+	}
+	if merged["definitionProvider"] != true {
+		t.Errorf("childA definitionProvider missing: %v", merged["definitionProvider"])
+	}
+	if _, ok := merged["completionProvider"]; !ok {
+		t.Errorf("childB completionProvider missing: %+v", merged)
+	}
+}
+
+func TestMergeCapabilitiesHandlesNilAndBadInputs(t *testing.T) {
+	merged := mergeCapabilities(nil, map[string]any{"workspaceSymbolProvider": true})
+	if merged["workspaceSymbolProvider"] != true {
+		t.Errorf("own cap missing with nil child caps: %+v", merged)
+	}
+
+	bad := map[string]json.RawMessage{"junk": json.RawMessage(`{not json`)}
+	merged = mergeCapabilities(bad, map[string]any{"x": 1})
+	if merged["x"] != 1 {
+		t.Errorf("malformed child JSON should be skipped: %+v", merged)
+	}
+}
+
+// makeGoOverrideRegistry returns a registry where "go" points at the
+// tslsmcp test binary so tests can spin up a child LSP without a real
+// language server installed.
+func makeGoOverrideRegistry(t *testing.T) *config.Registry {
+	t.Helper()
+	cfg := &config.Config{Languages: []config.Language{
+		{Name: "go", Extensions: []string{"go", "mod"}, LSP: &config.LSP{Cmd: tslsmcpBinary}, TreeSitter: "go"},
+	}}
+	reg, err := cfg.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
+
+// makeGoWorkspace materializes a temp dir with a single main.go containing
+// the identifier wantSymbol so tests can verify documentSymbol routing.
+func makeGoWorkspace(t *testing.T, wantSymbol string) string {
+	t.Helper()
+	dir := t.TempDir()
+	mainGo := fmt.Sprintf("package main\n\nfunc %s() {}\n", wantSymbol)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainGo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestDocumentSymbolWithManagerReturnsContent(t *testing.T) {
+	reg := makeGoOverrideRegistry(t)
+	mgr := multiplex.NewManager(reg)
+	dir := makeGoWorkspace(t, "MarkerFunc")
+
+	s := startSessionWith(t, reg, mgr)
+	defer s.close()
+
+	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
+	s.notify("initialized", map[string]any{})
+
+	resp := s.request("textDocument/documentSymbol", map[string]any{
+		"textDocument": map[string]any{"uri": "file://" + filepath.Join(dir, "main.go")},
+	})
+	var syms []symbolInformation
+	if err := json.Unmarshal(resp.Result, &syms); err != nil {
+		t.Fatal(err)
+	}
+	if len(syms) == 0 {
+		t.Fatal("documentSymbol returned empty")
+	}
+	found := false
+	for _, sym := range syms {
+		if sym.Name == "MarkerFunc" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("MarkerFunc missing from documentSymbol: %+v", syms)
+	}
+}
+
+func TestForwardsUnknownTextDocumentMethodToChild(t *testing.T) {
+	reg := makeGoOverrideRegistry(t)
+	mgr := multiplex.NewManager(reg)
+	dir := makeGoWorkspace(t, "Foo")
+
+	s := startSessionWith(t, reg, mgr)
+	defer s.close()
+
+	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
+	s.notify("initialized", map[string]any{})
+
+	// textDocument/hover is implemented by neither side. If we forward to
+	// the child, the child returns -32601 method-not-found and our
+	// forward wrapper sends it back as a -32603 internal error whose
+	// message names the method. If we had NOT forwarded (e.g., no manager
+	// or no child for this URI) the parent would have returned a null
+	// result, not an error — so an error here proves the request reached
+	// the child.
+	id := atomic.AddInt64(&s.nextID, 1)
+	rawID, _ := json.Marshal(id)
+	params, _ := json.Marshal(map[string]any{
+		"textDocument": map[string]any{"uri": "file://" + filepath.Join(dir, "main.go")},
+		"position":     map[string]any{"line": 1, "character": 5},
+	})
+	if err := jsonrpc.Write(s.clientW, &jsonrpc.Message{
+		JSONRPC: "2.0",
+		ID:      rawID,
+		Method:  "textDocument/hover",
+		Params:  params,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := jsonrpc.Read(s.clientR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected forwarded error from hover, got result=%s", resp.Result)
+	}
+	if resp.Error.Code != -32603 {
+		t.Errorf("error code = %d, want -32603 (forward wrapper)", resp.Error.Code)
+	}
+	if !strings.Contains(resp.Error.Message, "textDocument/hover") {
+		t.Errorf("error message %q should name the forwarded method", resp.Error.Message)
+	}
+}
+
+func TestForwardsTextDocumentWithNilManagerReplyNull(t *testing.T) {
+	// No manager -> forward path returns null result for any
+	// textDocument/* method we don't intercept. Sanity check that the
+	// fallback exists and doesn't error.
+	s := startSession(t)
+	defer s.close()
+
+	s.request("initialize", map[string]any{})
+	s.notify("initialized", map[string]any{})
+
+	id := atomic.AddInt64(&s.nextID, 1)
+	rawID, _ := json.Marshal(id)
+	params, _ := json.Marshal(map[string]any{
+		"textDocument": map[string]any{"uri": "file:///tmp/whatever.go"},
+		"position":     map[string]any{"line": 0, "character": 0},
+	})
+	if err := jsonrpc.Write(s.clientW, &jsonrpc.Message{
+		JSONRPC: "2.0", ID: rawID, Method: "textDocument/hover", Params: params,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := jsonrpc.Read(s.clientR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != nil {
+		t.Errorf("expected null result, got error %+v", resp.Error)
+	}
+	if string(resp.Result) != "null" {
+		t.Errorf("expected null, got %s", resp.Result)
 	}
 }
 

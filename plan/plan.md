@@ -47,13 +47,25 @@ cross-language stitching yet (that's Phase 2).**
 - [x] `internal/config`: language registry (`ext → {lsp_cmd, treesitter_lang}`,
       yaml.v3, defaults for go/ts/py + treesitter-only md/yaml/json, wired
       into main with --config flag).
-- [ ] `internal/multiplex` *(deferred during Phase 2 design pivot)*:
-  - [ ] Child LSP process supervisor (spawn, restart-on-crash, drain, kill).
-  - [ ] Per-child JSON-RPC client over `internal/jsonrpc`.
-  - [ ] Forward `textDocument/*` to the child owning that URI.
-  - [ ] Capabilities merge: union child `ServerCapabilities`, then mask with
-        anything we override (e.g. we own `textDocument/rename` once
-        cross-language rename lands).
+- [x] `internal/multiplex` supervisor (per-child):
+  - [x] Spawn / Kill / Wait / Done / Err lifecycle on `exec.Cmd`.
+  - [x] JSON-RPC client over `internal/jsonrpc` with request/response
+        correlation by id, Notify, server→client notification callback,
+        server→client request method-not-found stub.
+  - [x] LSP Initialize handshake; capabilities returned as `json.RawMessage`
+        so the next slice can union without losing fields.
+  - [x] Test by spawning the tslsmcp binary as a child (TestMain builds it),
+        verifying real `workspace/symbol` round-trip through the supervisor.
+- [ ] `internal/multiplex` manager:
+  - [ ] Map of language → Child with lazy or eager spawn.
+  - [ ] `RouteByURI(uri)` for textDocument/* dispatch.
+  - [ ] Restart-on-crash with backoff.
+- [ ] Server integration:
+  - [ ] Forward `textDocument/*` to the manager's per-URI child.
+  - [ ] Capabilities merge in `initialize`: union child caps with our
+        own (workspaceSymbolProvider, referencesProvider) and mask
+        anything we intend to override (rename, when cross-language
+        rename lands).
   - [ ] Workspace folder broadcast + `didChangeConfiguration` fanout.
 - [ ] `internal/treesitter`:
   - [ ] Parser registry (smacker/go-tree-sitter or

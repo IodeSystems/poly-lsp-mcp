@@ -136,7 +136,17 @@ Cheap, noisy, immediate value for "find everywhere this name appears."
         excluded. Builtins (`int64`, `string`, etc.) still filtered
         via the keyword set because grammar emits them as
         `type_identifier`.
-  - [ ] TypeScript.
+  - [x] TypeScript / TSX: union of `(identifier)`,
+        `(type_identifier)`, `(property_identifier)`, and
+        `(shorthand_property_identifier)` via
+        smacker/go-tree-sitter/typescript/tsx (the tsx grammar is a
+        superset of pure .ts so one extractor covers both extensions).
+  - [x] SQL / PostgreSQL: `(identifier)` via
+        smacker/go-tree-sitter/sql. New language entry registered in
+        `config.Default()` with extensions `.sql` / `.psql`, no
+        default LSP. Polyglot fixture extended with
+        `migrations/001_users.sql` so cross-language UserID now
+        crosses go / ts / py / md / yaml / sql.
   - [ ] Python.
 - [x] Watcher: rebuild a file's slice of the index on `didSave`. Wired via
       `textDocument/didSave` notification handler in `internal/server`.

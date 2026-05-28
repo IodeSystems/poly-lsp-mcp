@@ -186,8 +186,8 @@ func TestWorkspaceSymbolFindsUserIDAcrossLanguages(t *testing.T) {
 	}
 	files := map[string]bool{}
 	for _, sym := range syms {
-		if sym.Name != "UserID" {
-			t.Errorf("query=UserID returned name %q (substring is allowed but exact preferred here)", sym.Name)
+		if !strings.Contains(strings.ToLower(sym.Name), "userid") {
+			t.Errorf("substring match: %q does not contain UserID", sym.Name)
 		}
 		files[filepath.Base(strings.TrimPrefix(sym.Location.URI, "file://"))] = true
 	}

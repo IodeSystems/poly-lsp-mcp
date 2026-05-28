@@ -82,6 +82,16 @@ func Default() *Config {
 				Extensions: []string{"json"},
 				TreeSitter: "json",
 			},
+			{
+				// PostgreSQL: parsed by tree-sitter-sql (covers standard
+				// SQL well enough for identifier extraction; pg-specific
+				// constructs degrade gracefully). No default LSP — user
+				// can wire postgrestools / sqls / sql-language-server via
+				// tslsmcp.yaml if they want one.
+				Name:       "sql",
+				Extensions: []string{"sql", "psql"},
+				TreeSitter: "sql",
+			},
 		},
 	}
 }

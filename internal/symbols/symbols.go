@@ -25,6 +25,8 @@ import (
 	"sync"
 
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/sql"
+	"github.com/smacker/go-tree-sitter/typescript/tsx"
 
 	"github.com/iodesystems/tslsmcp/internal/config"
 )
@@ -38,6 +40,24 @@ const goIdentifierQuery = `[
   (type_identifier)
   (package_identifier)
 ] @name`
+
+// tsxIdentifierQuery covers TypeScript (and TSX/JSX) names: variables,
+// type names, object properties, and JSX attribute keys. The tsx
+// grammar is a superset of typescript so it parses both .ts and .tsx.
+// shorthand_property_identifier is included so `{userId}` in object
+// literals lands in the index.
+const tsxIdentifierQuery = `[
+  (identifier)
+  (type_identifier)
+  (property_identifier)
+  (shorthand_property_identifier)
+] @name`
+
+// sqlIdentifierQuery — the SQL grammar doesn't distinguish identifier
+// kinds, so one capture covers table names, column names, and index
+// names. Data types (BIGINT, TEXT, …) and DDL keywords (CREATE, TABLE,
+// NOT, NULL, PRIMARY, KEY) are non-identifier nodes — they don't match.
+const sqlIdentifierQuery = `(identifier) @name`
 
 // Confidence ranks how trustworthy a Site is for a given Name.
 type Confidence int
@@ -227,17 +247,16 @@ var defaultExtractors = map[string]Extractor{
 		"float32", "float64", "bool", "any", "error",
 		"true", "false", "nil", "iota",
 	)),
-	"typescript": &LexicalExtractor{Keywords: keywordSet(
-		"break", "case", "catch", "class", "const", "continue", "debugger",
-		"default", "delete", "do", "else", "enum", "export", "extends",
-		"false", "finally", "for", "function", "if", "import", "in",
-		"instanceof", "new", "null", "return", "super", "switch", "this",
-		"throw", "true", "try", "typeof", "var", "void", "while", "with",
-		"yield", "let", "async", "await", "of", "as", "from", "interface",
-		"type", "implements", "readonly", "public", "private", "protected",
-		"static", "abstract", "declare",
-		"string", "number", "boolean", "any", "unknown", "never", "object",
-	)},
+	// TypeScript (and .tsx) via tsx grammar. The keyword filter is
+	// shorter than the lexical set because tree-sitter already drops
+	// `function`/`return`/`export`/etc. as non-identifier nodes — we
+	// only need to subtract the type-name builtins the grammar surfaces
+	// as type_identifier.
+	"typescript": mustTreeSitterExtractor(tsx.GetLanguage(), tsxIdentifierQuery, keywordSet(
+		"string", "number", "boolean", "any", "unknown", "never",
+		"object", "void", "undefined", "null",
+	)),
+	"sql": mustTreeSitterExtractor(sql.GetLanguage(), sqlIdentifierQuery, nil),
 	"python": &LexicalExtractor{Keywords: keywordSet(
 		"False", "None", "True", "and", "as", "assert", "async", "await",
 		"break", "class", "continue", "def", "del", "elif", "else", "except",

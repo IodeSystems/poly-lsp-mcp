@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,9 +113,13 @@ func TestCallRoutesThroughChildLSP(t *testing.T) {
 	if len(syms) < 6 {
 		t.Errorf("got %d UserID syms via multiplex, want >= 6", len(syms))
 	}
+	// workspace/symbol does case-insensitive substring match, so names
+	// like "users_UserID_idx" are valid hits. Just require the query
+	// substring to appear in each.
 	for _, s := range syms {
-		if s["name"] != "UserID" {
-			t.Errorf("unexpected symbol name %v", s["name"])
+		name, _ := s["name"].(string)
+		if !strings.Contains(strings.ToLower(name), "userid") {
+			t.Errorf("symbol %q does not contain query UserID", name)
 		}
 	}
 

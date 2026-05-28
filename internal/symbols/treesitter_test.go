@@ -105,6 +105,100 @@ func TestTreeSitterGoLineColumnTracking(t *testing.T) {
 	}
 }
 
+func TestTreeSitterTSXCapturesAllIdentifierKinds(t *testing.T) {
+	ex := DefaultExtractor("typescript")
+	src := []byte(`import { foo } from "./bar";
+
+export type UserID = number;
+
+export async function fetchUser(id: UserID): Promise<string> {
+  const obj = {userId: id, shorthand};
+  const c = <UserCard userId={id} />;
+  return obj.shorthand;
+}
+`)
+	got := map[string]int{}
+	for _, h := range ex.Extract(src) {
+		got[h.Name]++
+	}
+	for _, want := range []string{
+		"foo",       // imported binding
+		"UserID",    // type_identifier (declared + used)
+		"fetchUser", // function name
+		"id",        // parameter
+		"Promise",   // type_identifier in return type
+		"obj",       // const binding
+		"userId",    // property_identifier
+		"UserCard",  // JSX component (identifier)
+		"shorthand", // shorthand_property_identifier
+	} {
+		if got[want] == 0 {
+			t.Errorf("missing %q from tsx extract: %+v", want, got)
+		}
+	}
+	// "string" and "number" are builtins — filtered.
+	for _, drop := range []string{"string", "number"} {
+		if got[drop] != 0 {
+			t.Errorf("builtin %q leaked: %d", drop, got[drop])
+		}
+	}
+}
+
+func TestTreeSitterTSXSkipsStringContents(t *testing.T) {
+	ex := DefaultExtractor("typescript")
+	// "UserID" inside a string literal and inside a template literal must
+	// NOT be indexed. The interpolated `id` IS an identifier, so it stays.
+	src := []byte("const a: string = \"UserID\";\nconst b = `/api/${id}/UserID`;\n")
+	for _, h := range ex.Extract(src) {
+		if h.Name == "UserID" {
+			t.Errorf("UserID leaked from string at line %d col %d", h.Line, h.Col)
+		}
+	}
+}
+
+func TestTreeSitterSQLCapturesIdentifiers(t *testing.T) {
+	ex := DefaultExtractor("sql")
+	src := []byte(`CREATE TABLE users (
+  UserID BIGINT PRIMARY KEY,
+  email TEXT NOT NULL
+);
+
+CREATE INDEX users_idx ON users (email);
+`)
+	got := map[string]int{}
+	for _, h := range ex.Extract(src) {
+		got[h.Name]++
+	}
+	for _, want := range []string{"users", "UserID", "email", "users_idx"} {
+		if got[want] == 0 {
+			t.Errorf("missing %q from sql extract: %+v", want, got)
+		}
+	}
+	for _, drop := range []string{"CREATE", "TABLE", "BIGINT", "PRIMARY", "KEY", "TEXT", "NOT", "NULL", "INDEX", "ON"} {
+		if got[drop] != 0 {
+			t.Errorf("DDL keyword %q surfaced as identifier: %d", drop, got[drop])
+		}
+	}
+}
+
+func TestPolyglotSQLContributesUserID(t *testing.T) {
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := Build(fixturePath(t, "testdata", "fixtures", "polyglot"), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	langs := map[string]bool{}
+	for _, s := range idx.Lookup("UserID") {
+		langs[s.Language] = true
+	}
+	if !langs["sql"] {
+		t.Errorf("UserID not surfaced from sql files; languages seen: %+v", langs)
+	}
+}
+
 func TestPolyglotGoUserIDCountDroppedAfterTreeSitter(t *testing.T) {
 	reg, err := config.Default().Build()
 	if err != nil {

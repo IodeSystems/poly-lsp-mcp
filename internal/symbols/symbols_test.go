@@ -164,7 +164,7 @@ func TestIndexLanguagesReportsDistinct(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := idx.Languages()
-	want := map[string]bool{"go": true, "typescript": true, "python": true, "markdown": true, "yaml": true, "json": true}
+	want := map[string]bool{"go": true, "typescript": true, "python": true, "markdown": true, "yaml": true, "json": true, "sql": true}
 	if len(got) != len(want) {
 		t.Errorf("Languages = %v, want %d distinct entries", got, len(want))
 	}

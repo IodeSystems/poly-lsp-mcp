@@ -1,0 +1,7 @@
+{
+  "queues": [
+    {"name": "release-checklist", "size": 12},
+    {"name": "ingest", "size": 0}
+  ],
+  "version": 3
+}

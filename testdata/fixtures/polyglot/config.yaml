@@ -1,0 +1,5 @@
+service: polyglot
+user_id_type: UserID
+endpoints:
+  - path: /users/:id
+    handler: GreetUser

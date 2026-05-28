@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
 )
 
 // Server implements the LSP base protocol over an io.Reader/io.Writer pair.
@@ -36,7 +37,7 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	s.out = out
 	r := bufio.NewReader(in)
 	for {
-		msg, err := readMessage(r)
+		msg, err := jsonrpc.Read(r)
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
@@ -53,7 +54,7 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	}
 }
 
-func (s *Server) dispatch(req *Message) {
+func (s *Server) dispatch(req *jsonrpc.Message) {
 	switch req.Method {
 	case "initialize":
 		s.handleInitialize(req)
@@ -78,7 +79,7 @@ func (s *Server) dispatch(req *Message) {
 	}
 }
 
-func (s *Server) handleInitialize(req *Message) {
+func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	// Empty capabilities for now. Multiplex layer will populate this from
 	// the union of child-LSP capabilities.
 	result := map[string]any{
@@ -91,23 +92,23 @@ func (s *Server) handleInitialize(req *Message) {
 	s.reply(req, result)
 }
 
-func (s *Server) reply(req *Message, result any) {
+func (s *Server) reply(req *jsonrpc.Message, result any) {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		s.replyError(req, -32603, err.Error())
 		return
 	}
-	s.send(&Message{JSONRPC: "2.0", ID: req.ID, Result: raw})
+	s.send(&jsonrpc.Message{JSONRPC: "2.0", ID: req.ID, Result: raw})
 }
 
-func (s *Server) replyError(req *Message, code int, msg string) {
-	s.send(&Message{JSONRPC: "2.0", ID: req.ID, Error: &Error{Code: code, Message: msg}})
+func (s *Server) replyError(req *jsonrpc.Message, code int, msg string) {
+	s.send(&jsonrpc.Message{JSONRPC: "2.0", ID: req.ID, Error: &jsonrpc.Error{Code: code, Message: msg}})
 }
 
-func (s *Server) send(m *Message) {
+func (s *Server) send(m *jsonrpc.Message) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if err := writeMessage(s.out, m); err != nil {
+	if err := jsonrpc.Write(s.out, m); err != nil {
 		log.Printf("write: %v", err)
 	}
 }

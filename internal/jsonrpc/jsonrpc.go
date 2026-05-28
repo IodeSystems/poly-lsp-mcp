@@ -1,4 +1,9 @@
-package server
+// Package jsonrpc implements the LSP base-protocol framing
+// (Content-Length headers wrapping JSON-RPC 2.0 bodies).
+//
+// Both the server loop (internal/server) and the child-LSP supervisor
+// (internal/multiplex) read and write messages through this package.
+package jsonrpc
 
 import (
 	"bufio"
@@ -9,8 +14,10 @@ import (
 	"strings"
 )
 
-// LSP base-protocol framing: Content-Length headers + JSON-RPC 2.0 body.
-
+// Message is a JSON-RPC 2.0 message. The same struct serves requests
+// (Method + ID), notifications (Method, no ID), and responses (ID +
+// Result/Error). Fields are RawMessage to defer decoding to handlers
+// that know the method-specific shape.
 type Message struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -31,7 +38,13 @@ func (m *Message) IsNotification() bool {
 	return len(m.ID) == 0 || string(m.ID) == "null"
 }
 
-func readMessage(r *bufio.Reader) (*Message, error) {
+// IsResponse reports whether the message carries a Result or Error.
+func (m *Message) IsResponse() bool {
+	return m.Result != nil || m.Error != nil
+}
+
+// Read parses one Content-Length framed message from r.
+func Read(r *bufio.Reader) (*Message, error) {
 	var contentLength int
 	for {
 		line, err := r.ReadString('\n')
@@ -68,7 +81,8 @@ func readMessage(r *bufio.Reader) (*Message, error) {
 	return &m, nil
 }
 
-func writeMessage(w io.Writer, m *Message) error {
+// Write encodes m and writes it with a Content-Length header.
+func Write(w io.Writer, m *Message) error {
 	body, err := json.Marshal(m)
 	if err != nil {
 		return err

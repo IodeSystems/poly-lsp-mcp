@@ -125,7 +125,19 @@ Cheap, noisy, immediate value for "find everywhere this name appears."
   - [x] Verified end-to-end against `testdata/fixtures/polyglot`: `UserID`
         appears in go + ts + python + markdown + yaml; `GreetUser` crosses
         go + yaml + markdown.
-- [ ] Swap each language's extractor to a tree-sitter `(identifier)` query.
+- [ ] Swap each code language's extractor to a tree-sitter identifier
+      query. Data formats (yaml/json/markdown) deliberately stay on
+      `LexicalExtractor` — their string-literal contents are exactly
+      the cross-language references we want indexed, and tree-sitter's
+      `(string_scalar)` nodes would force us to scan inside them anyway.
+  - [x] Go: union of `(identifier)`, `(field_identifier)`,
+        `(type_identifier)`, `(package_identifier)` via
+        smacker/go-tree-sitter. Comments and string contents now
+        excluded. Builtins (`int64`, `string`, etc.) still filtered
+        via the keyword set because grammar emits them as
+        `type_identifier`.
+  - [ ] TypeScript.
+  - [ ] Python.
 - [x] Watcher: rebuild a file's slice of the index on `didSave`. Wired via
       `textDocument/didSave` notification handler in `internal/server`.
 - [x] `workspace/symbol`: return Index matches. Substring match on Name,

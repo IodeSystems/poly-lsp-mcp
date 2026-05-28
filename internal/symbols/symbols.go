@@ -24,8 +24,20 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/smacker/go-tree-sitter/golang"
+
 	"github.com/iodesystems/tslsmcp/internal/config"
 )
+
+// goIdentifierQuery captures every node Go's grammar uses to name a
+// program entity. Comments, string literals, and keywords are not
+// matched — that's the precision win over LexicalExtractor.
+const goIdentifierQuery = `[
+  (identifier)
+  (field_identifier)
+  (type_identifier)
+  (package_identifier)
+] @name`
 
 // Confidence ranks how trustworthy a Site is for a given Name.
 type Confidence int
@@ -205,16 +217,16 @@ func keywordSet(words ...string) map[string]struct{} {
 // For data formats (yaml/json/markdown) we keep every word — that's the
 // whole point of the cross-language index for string-literal sites.
 var defaultExtractors = map[string]Extractor{
-	"go": &LexicalExtractor{Keywords: keywordSet(
-		"break", "case", "chan", "const", "continue", "default", "defer",
-		"else", "fallthrough", "for", "func", "go", "goto", "if", "import",
-		"interface", "map", "package", "range", "return", "select", "struct",
-		"switch", "type", "var",
-		"true", "false", "nil", "iota",
+	// Go uses tree-sitter so identifier-shaped tokens inside string
+	// literals and comments stop polluting the index. Keywords are
+	// kept for builtin types (int64, string, etc.) which the grammar
+	// reports as type_identifier nodes.
+	"go": mustTreeSitterExtractor(golang.GetLanguage(), goIdentifierQuery, keywordSet(
 		"string", "int", "int8", "int16", "int32", "int64",
 		"uint", "uint8", "uint16", "uint32", "uint64", "byte", "rune",
 		"float32", "float64", "bool", "any", "error",
-	)},
+		"true", "false", "nil", "iota",
+	)),
 	"typescript": &LexicalExtractor{Keywords: keywordSet(
 		"break", "case", "catch", "class", "const", "continue", "debugger",
 		"default", "delete", "do", "else", "enum", "export", "extends",

@@ -294,16 +294,38 @@ Goal: switching branches in a stack doesn't re-parse the world.
 
 ## Phase 4 — MCP
 
-Two options:
+We shipped **Option A**: same binary, new subcommand. `tslsmcp mcp
+--root <dir> [--config <file>]` boots a Model Context Protocol server
+over newline-delimited JSON-RPC 2.0 on stdio. The MCP layer reuses the
+symbol index, bindings resolver, and schema dialects so LLM agents get
+the full cross-language stack the LSP layer already serves to editors.
 
-- **Option A:** ship `cmd/tslsmcp-mcp` that speaks MCP and adapts to our
-  LSP — same binary, two subcommands.
-- **Option B:** point users at `isaacphi/mcp-language-server` configured
-  to spawn `tslsmcp` as the LSP. Zero work for us, but no tslsmcp-specific
-  MCP tools (e.g. `tslsmcp.cross_lang_refs`).
-
-Probable answer: B for v0.1 ship, A once Phase 2 has bindings worth their
-own MCP tool surface.
+- [x] `internal/mcp` package: lifecycle (initialize / shutdown /
+      pre-init guards / double-init rejection / EOF-without-shutdown
+      sentinel), tool registry, `tools/list`, `tools/call`. Reuses
+      `jsonrpc.Message` for the shapes and swaps the LSP Content-Length
+      framing for newline-delimited JSON via `encoding/json`'s streaming
+      Decoder/Encoder.
+- [x] Tools (v0.1):
+  - `find_symbol(query)` — case-insensitive substring search across the
+    cross-language index.
+  - `find_references(name)` — every workspace position for an exact
+    name, declared + lexical + schema-anchored.
+  - `rename(name, newName)` — returns a list of file edits
+    `{file, line, col, oldText, newText}` with the same confidence
+    policy and aliasing-safety check as the LSP rename handler.
+- [x] Workspace-relative file paths in tool output for stable
+      cross-machine references.
+- [x] Live polyglot smoke through all three tools: `find_symbol(UserID)`
+      returns 24 hits across 9 languages; `rename(UserID, PersonID)`
+      produces 20 atomic edits across proto + openapi + jsonschema + go
+      + ts + py + yaml + sql + md.
+- [ ] More tools as use cases surface: `list_bindings`,
+      `document_symbols`, `did_save_refresh`, etc.
+- [ ] Live editing tool: instead of returning edits for the agent to
+      apply, atomically apply them ourselves on `apply_rename`.
+- [ ] `resources/list` and `resources/read` for treating workspace
+      files (or bindings catalog) as MCP resources.
 
 ## Non-goals (for now)
 

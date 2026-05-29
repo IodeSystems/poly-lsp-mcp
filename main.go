@@ -4,8 +4,10 @@ import (
 	"flag"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/tslsmcp/internal/mcp"
 	"github.com/iodesystems/tslsmcp/internal/multiplex"
 	"github.com/iodesystems/tslsmcp/internal/server"
 )
@@ -15,22 +17,21 @@ func main() {
 	log.SetPrefix("tslsmcp ")
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
+	// Subcommand dispatch. Default (no subcommand) runs the LSP server.
+	// `tslsmcp mcp [flags]` runs the MCP server.
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+		runMCP()
+		return
+	}
+	runLSP()
+}
+
+func runLSP() {
 	configPath := flag.String("config", "tslsmcp.yaml", "language registry config file")
 	flag.Parse()
 
-	cfg, used, err := config.LoadOrDefault(*configPath)
-	if err != nil {
-		log.Fatalf("config: %v", err)
-	}
-	reg, err := cfg.Build()
-	if err != nil {
-		log.Fatalf("config: %v", err)
-	}
-	if used {
-		log.Printf("config: loaded %s", *configPath)
-	} else {
-		log.Printf("config: using defaults (no %s)", *configPath)
-	}
+	cfg, reg := loadConfigOrDie(*configPath)
 	for _, lang := range reg.Languages() {
 		backend := "treesitter-only"
 		if lang.LSP != nil {
@@ -44,4 +45,41 @@ func main() {
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func runMCP() {
+	configPath := flag.String("config", "tslsmcp.yaml", "language registry config file")
+	rootPath := flag.String("root", ".", "workspace root directory the symbol index covers")
+	flag.Parse()
+
+	cfg, reg := loadConfigOrDie(*configPath)
+	root, err := filepath.Abs(*rootPath)
+	if err != nil {
+		log.Fatalf("root: %v", err)
+	}
+	log.Printf("mcp: workspace root %s", root)
+
+	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// loadConfigOrDie loads the config file (falling back to defaults) and
+// builds the registry; both subcommands need it identically.
+func loadConfigOrDie(path string) (*config.Config, *config.Registry) {
+	cfg, used, err := config.LoadOrDefault(path)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	reg, err := cfg.Build()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	if used {
+		log.Printf("config: loaded %s", path)
+	} else {
+		log.Printf("config: using defaults (no %s)", path)
+	}
+	return cfg, reg
 }

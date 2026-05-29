@@ -234,9 +234,36 @@ sites (the unique value-add vs single-language LSPs).
       instead of returning them in the rename response. Clients
       currently do the applying.
 
-### Tier 3 — schema-anchored (deferred)
+### Tier 3 — schema-anchored
 
-- [ ] Read `.proto`, OpenAPI, JSONSchema; derive bindings automatically.
+A single entry under `schemas:` in tslsmcp.yaml is enough to bind every
+workspace position for the schema's named entities.
+
+```yaml
+schemas:
+  - file: api.proto
+    dialect: proto
+```
+
+- [x] Proto dialect: regex-based parser extracts `message`, `enum`,
+      `service`, and `rpc` declarations. Patterns are anchored to skip
+      comments / strings / field types.
+- [x] `Resolver.ApplySchemas` reads each schema, snapshots the workspace
+      lookup BEFORE mutating the index (avoids feedback loops), then
+      registers the schema declaration plus every existing index hit
+      for the name as declared sites.
+- [x] `Index.InsertDeclared` is now idempotent at (file, line, col), so
+      user bindings + schema bindings that overlap don't produce
+      duplicate edits at rename time.
+- [x] Live demo against polyglot fixture: declaring `api.proto`
+      produces a single rename that touches 7 files in 6 formats —
+      proto + go + ts + py + yaml + sql + md — with 15 atomic edits.
+- [ ] OpenAPI dialect (reserved). Likely parses paths and components
+      to extract operationIds + schema names.
+- [ ] JSONSchema dialect (reserved). Likely walks `$defs` /
+      `definitions` keys.
+- [ ] Tree-sitter-protobuf upgrade (replace regex parser) once we
+      hit a real codebase whose proto style breaks the regex MVP.
 
 ## Phase 3 — stacked-branch index
 

@@ -113,16 +113,23 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		} else {
 			s.setIndex(idx)
 			log.Printf("initialize: indexed %d names from %s", len(idx.Names()), root)
-			// Apply declared bindings (Tier 2). Failures in any single
-			// binding are logged but don't abort initialization — the
-			// lexical index is still useful on its own.
-			if len(s.bindings) > 0 {
+			// Apply declared bindings (Tier 2) then schema-anchored
+			// bindings (Tier 3). Failures in any single binding/schema
+			// are logged but don't abort initialization — the lexical
+			// index is still useful on its own.
+			if len(s.bindings) > 0 || len(s.schemas) > 0 {
 				resolver := bindings.NewResolver(root)
-				n, err := resolver.Apply(idx, s.bindings)
-				if err != nil {
-					log.Printf("initialize: some bindings failed validation: %v", err)
+				if len(s.bindings) > 0 {
+					n, err := resolver.Apply(idx, s.bindings)
+					if err != nil {
+						log.Printf("initialize: some bindings failed validation: %v", err)
+					}
+					log.Printf("initialize: applied %d declared binding site(s)", n)
 				}
-				log.Printf("initialize: applied %d declared binding site(s)", n)
+				if len(s.schemas) > 0 {
+					n := resolver.ApplySchemas(idx, s.schemas)
+					log.Printf("initialize: applied %d schema-anchored site(s)", n)
+				}
 			}
 		}
 	} else {

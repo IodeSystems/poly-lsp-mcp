@@ -40,7 +40,7 @@ func main() {
 	}
 
 	mgr := multiplex.NewManager(reg)
-	srv := server.New(reg, mgr, cfg.Bindings)
+	srv := server.New(reg, mgr, cfg.Bindings, cfg.Schemas)
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}

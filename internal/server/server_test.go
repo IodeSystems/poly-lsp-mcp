@@ -61,12 +61,12 @@ func startSession(t *testing.T) *lspSession {
 }
 
 func startSessionWith(t *testing.T, reg *config.Registry, mgr *multiplex.Manager) *lspSession {
-	return startSessionFull(t, reg, mgr, nil)
+	return startSessionFull(t, reg, mgr, nil, nil)
 }
 
-func startSessionFull(t *testing.T, reg *config.Registry, mgr *multiplex.Manager, declared []config.Binding) *lspSession {
+func startSessionFull(t *testing.T, reg *config.Registry, mgr *multiplex.Manager, declared []config.Binding, schemas []config.Schema) *lspSession {
 	t.Helper()
-	srv := New(reg, mgr, declared)
+	srv := New(reg, mgr, declared, schemas)
 
 	sIn, cOut := io.Pipe()
 	cIn, sOut := io.Pipe()
@@ -540,7 +540,7 @@ func TestBindingsSurfaceAsSynonymInWorkspaceSymbol(t *testing.T) {
 		Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}},
 	}}
 
-	s := startSessionFull(t, reg, nil, declared)
+	s := startSessionFull(t, reg, nil, declared, nil)
 	defer s.close()
 
 	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
@@ -580,7 +580,7 @@ func TestBindingsJSONPathSurfacesYAMLValueAsSynonym(t *testing.T) {
 		},
 	}}
 
-	s := startSessionFull(t, reg, nil, declared)
+	s := startSessionFull(t, reg, nil, declared, nil)
 	defer s.close()
 
 	s.request("initialize", map[string]any{"rootUri": fixtureURI(t, "polyglot")})
@@ -697,7 +697,7 @@ func TestRenameWithDeclaredBindingRestrictsToDeclared(t *testing.T) {
 		Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}},
 	}}
 
-	s := startSessionFull(t, reg, nil, declared)
+	s := startSessionFull(t, reg, nil, declared, nil)
 	defer s.close()
 	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
 	s.notify("initialized", map[string]any{})
@@ -741,7 +741,7 @@ func TestRenameSkipsAliasingBindingSites(t *testing.T) {
 		Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}}, // aliasing
 	}}
 
-	s := startSessionFull(t, reg, nil, declared)
+	s := startSessionFull(t, reg, nil, declared, nil)
 	defer s.close()
 	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
 	s.notify("initialized", map[string]any{})
@@ -810,6 +810,58 @@ func TestRenameRejectsEmptyNewName(t *testing.T) {
 	}
 	if resp.Error.Code != errInvalidParams {
 		t.Errorf("error code = %d, want %d", resp.Error.Code, errInvalidParams)
+	}
+}
+
+func TestSchemaAnchoredBindingsPromoteWorkspaceHits(t *testing.T) {
+	// Tier 3: declaring api.proto (which already exists in the polyglot
+	// fixture and contains `message UserID`) must auto-bind every
+	// workspace position for UserID across go/ts/py/yaml/md as
+	// declared. Rename through any of those positions should then
+	// touch every member including the proto declaration.
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := []config.Schema{{File: "api.proto", Dialect: "proto"}}
+
+	s := startSessionFull(t, reg, nil, nil, schemas)
+	defer s.close()
+
+	s.request("initialize", map[string]any{"rootUri": fixtureURI(t, "polyglot")})
+	s.notify("initialized", map[string]any{})
+
+	// Rename UserID from the Go declaration. The proto file must be
+	// part of the resulting WorkspaceEdit because Tier 3 auto-bound it.
+	resp := s.request("textDocument/rename", map[string]any{
+		"textDocument": map[string]any{
+			"uri": fixtureURI(t, "polyglot") + "/main.go",
+		},
+		"position": map[string]any{"line": 5, "character": 6},
+		"newName":  "PersonID",
+	})
+	var edit workspaceEdit
+	if err := json.Unmarshal(resp.Result, &edit); err != nil {
+		t.Fatal(err)
+	}
+
+	files := map[string]int{}
+	for uri, edits := range edit.Changes {
+		base := filepath.Base(strings.TrimPrefix(uri, "file://"))
+		files[base] += len(edits)
+	}
+
+	// api.proto must be in the edit set — that's the whole point of
+	// schema-anchored bindings.
+	if files["api.proto"] == 0 {
+		t.Errorf("api.proto missing from rename edit (Tier 3 not pulling its weight): %+v", files)
+	}
+	// And it should still cross go/ts/py via the lexical→declared
+	// promotion path.
+	for _, want := range []string{"main.go", "client.ts", "worker.py"} {
+		if files[want] == 0 {
+			t.Errorf("%s missing from rename edit: %+v", want, files)
+		}
 	}
 }
 

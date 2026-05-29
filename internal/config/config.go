@@ -57,10 +57,21 @@ type BindingSite struct {
 	Regex    []string `yaml:"regex,omitempty"`
 }
 
+// Schema declares a schema file the user wants tslsmcp to read for
+// Tier-3 auto-bindings. Each named entity in the schema (proto message,
+// openapi schema, jsonschema definition) becomes a declared binding
+// whose sites cover (a) the declaration in the schema file and (b)
+// every workspace occurrence of that name in any language.
+type Schema struct {
+	File    string `yaml:"file"`
+	Dialect string `yaml:"dialect"` // proto | openapi | jsonschema
+}
+
 // Config is the on-disk shape.
 type Config struct {
 	Languages []Language `yaml:"languages"`
 	Bindings  []Binding  `yaml:"bindings,omitempty"`
+	Schemas   []Schema   `yaml:"schemas,omitempty"`
 }
 
 // Registry is the in-memory lookup view: extension → language. Built from a

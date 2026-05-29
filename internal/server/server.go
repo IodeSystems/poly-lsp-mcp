@@ -46,6 +46,7 @@ type Server struct {
 	registry *config.Registry
 	manager  *multiplex.Manager
 	bindings []config.Binding
+	schemas  []config.Schema
 
 	writeMu sync.Mutex
 	out     io.Writer
@@ -61,10 +62,11 @@ type Server struct {
 
 // New constructs a Server. manager may be nil to skip child-LSP
 // spawning (useful for tests that don't want gopls/tsserver startup
-// latency); bindings may be nil for workspaces without declared
-// cross-language bindings.
-func New(reg *config.Registry, manager *multiplex.Manager, declared []config.Binding) *Server {
-	return &Server{registry: reg, manager: manager, bindings: declared}
+// latency); declared may be nil for workspaces without explicit
+// cross-language bindings; schemas may be nil for workspaces with no
+// Tier-3 schema-anchored bindings.
+func New(reg *config.Registry, manager *multiplex.Manager, declared []config.Binding, schemas []config.Schema) *Server {
+	return &Server{registry: reg, manager: manager, bindings: declared, schemas: schemas}
 }
 
 func (s *Server) Serve(in io.Reader, out io.Writer) error {

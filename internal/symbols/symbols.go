@@ -136,14 +136,18 @@ func (i *Index) Lookup(name string) []Site {
 	return out
 }
 
-// InsertDeclared registers a declared binding site. The caller has
-// already resolved the position from a config.Binding; this method just
-// stores it. Confidence on the stored Site is forced to
-// ConfidenceDeclared regardless of what the caller passes — declared
-// status is the whole point of using this entry point.
+// InsertDeclared registers a declared binding site. Idempotent: a
+// second call with the same (name, file, line, col) is a no-op so
+// callers that union multiple sources (user bindings + schemas) don't
+// produce duplicate edits at rename time.
 func (i *Index) InsertDeclared(name, file, language string, line, col int) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	for _, s := range i.declaredSites[name] {
+		if s.File == file && s.Line == line && s.Col == col {
+			return
+		}
+	}
 	i.declaredSites[name] = append(i.declaredSites[name], Site{
 		File:       file,
 		Line:       line,

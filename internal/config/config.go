@@ -44,13 +44,17 @@ type Binding struct {
 
 // BindingSite addresses a position inside a file. Exactly one of Symbol /
 // JSONPath / Regex must be set; the resolver dispatches on which is
-// populated. v0.2.1 implements Symbol only; the other forms are reserved
-// fields so the on-disk shape doesn't churn when they land.
+// populated.
+//
+// Regex is a list — a single site may carry multiple patterns and the
+// resolver applies each independently, unioning matches. This keeps the
+// binding declaration compact when one concept spells itself several
+// ways in the same file (e.g., backtick prose plus a code example).
 type BindingSite struct {
-	File     string `yaml:"file"`
-	Symbol   string `yaml:"symbol,omitempty"`
-	JSONPath string `yaml:"jsonpath,omitempty"`
-	Regex    string `yaml:"regex,omitempty"`
+	File     string   `yaml:"file"`
+	Symbol   string   `yaml:"symbol,omitempty"`
+	JSONPath string   `yaml:"jsonpath,omitempty"`
+	Regex    []string `yaml:"regex,omitempty"`
 }
 
 // Config is the on-disk shape.

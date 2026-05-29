@@ -205,8 +205,16 @@ sites (the unique value-add vs single-language LSPs).
       `gopkg.in/yaml.v3` so the same code path handles both YAML and
       JSON (JSON is a strict subset of YAML). Position info comes from
       `yaml.Node.Line` / `Column`.
-- [ ] Site forms: `regex` (last resort). Resolver still skips with a
-      warning; comes next.
+- [x] Site forms: `regex` (last resort). `BindingSite.Regex` is now
+      `[]string` — a single site may carry multiple patterns and the
+      resolver unions their matches. Each pattern allows 0 or 1
+      capture group (whole match vs captured slice as the token);
+      2+ groups rejected. Stdlib `regexp` (RE2), 1 MiB per-file cap,
+      no implicit multiline anchoring. v0.2.x aliasing-safety: a match
+      whose captured text doesn't equal the binding name is logged
+      and skipped — this keeps `textDocument/rename` correct without
+      `Site.Length` plumbing. Aliasing-via-regex is the future-work
+      item that unlocks that.
 - [x] `textDocument/rename` synthesizes a `WorkspaceEdit` from the
       symbol index. Confidence policy: if declared sites exist for the
       name at the cursor, rename only those; otherwise fall back to

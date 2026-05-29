@@ -147,14 +147,15 @@ func TestResolverPartialFailureStillPersistsGoodSites(t *testing.T) {
 	idx := buildIndex(root)
 	r := NewResolver(root)
 
-	// regex is still unimplemented; the resolver should log it and
-	// continue applying the symbol site so the binding is partially live.
+	// One bad site (file does not exist on disk so regex can't read it)
+	// plus one good symbol site. Resolver should log the bad and still
+	// apply the good — bindings degrade gracefully.
 	n, err := r.Apply(idx, []config.Binding{
 		{
 			Name: "PartiallyApplied",
 			Sites: []config.BindingSite{
-				{File: "main.go", Regex: "User.*"},  // unimplemented
-				{File: "main.go", Symbol: "UserID"}, // works → 2 sites
+				{File: "does_not_exist.go", Regex: []string{"User.*"}}, // read fails
+				{File: "main.go", Symbol: "UserID"},                    // 2 sites
 			},
 		},
 	})

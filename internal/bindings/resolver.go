@@ -90,8 +90,8 @@ func (r *Resolver) applySite(idx *symbols.Index, bindingName string, site config
 	if site.JSONPath != "" {
 		return r.applyJSONPathSite(idx, bindingName, site)
 	}
-	if site.Regex != "" {
-		return 0, fmt.Errorf("site form 'regex' not yet implemented")
+	if len(site.Regex) > 0 {
+		return r.applyRegexSite(idx, bindingName, site)
 	}
 	return 0, fmt.Errorf("site for %s has no symbol / jsonpath / regex set", site.File)
 }
@@ -126,6 +126,78 @@ func (r *Resolver) applyJSONPathSite(idx *symbols.Index, bindingName string, sit
 		idx.InsertDeclared(bindingName, abs, lang, p.Line, p.Col)
 	}
 	return len(positions), nil
+}
+
+// applyRegexSite reads the file, evaluates every pattern in the site,
+// and registers each match whose captured text equals bindingName.
+// Matches whose text differs are logged and skipped — that's the
+// aliasing-safety contract for the regex form in v0.2.x.
+//
+// Files larger than maxFileSize are skipped with an error so a stray
+// regex against a generated bundle doesn't tie up the loop.
+func (r *Resolver) applyRegexSite(idx *symbols.Index, bindingName string, site config.BindingSite) (int, error) {
+	abs := r.absFile(site.File)
+	info, err := os.Stat(abs)
+	if err != nil {
+		return 0, fmt.Errorf("stat %s: %w", abs, err)
+	}
+	if info.Size() > maxRegexFileSize {
+		return 0, fmt.Errorf("%s exceeds regex size cap (%d bytes)", abs, maxRegexFileSize)
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", abs, err)
+	}
+	hits, err := evalRegex(content, site.Regex)
+	if err != nil {
+		return 0, fmt.Errorf("regex in %s: %w", site.File, err)
+	}
+	if len(hits) == 0 {
+		return 0, fmt.Errorf("regex patterns matched nothing in %s", site.File)
+	}
+	lang := regexLanguage(abs)
+	inserted := 0
+	for _, h := range hits {
+		if h.Text != bindingName {
+			log.Printf("bindings: regex match %q != binding %q at %s:%d:%d (aliasing not supported in v0.2.x; skipping)",
+				h.Text, bindingName, site.File, h.Line, h.Col)
+			continue
+		}
+		idx.InsertDeclared(bindingName, abs, lang, h.Line, h.Col)
+		inserted++
+	}
+	if inserted == 0 {
+		return 0, fmt.Errorf("no regex match in %s matched binding name %q", site.File, bindingName)
+	}
+	return inserted, nil
+}
+
+// maxRegexFileSize mirrors symbols.Build's per-file cap so the regex
+// form doesn't blow up on the same files the lexical pass skips.
+const maxRegexFileSize = 1 << 20
+
+// regexLanguage tags the inserted sites with the file's language so
+// downstream consumers (workspace/symbol formatting, rename grouping)
+// still get a useful label. Unknown extensions fall back to "" — the
+// site still indexes; just doesn't carry a language hint.
+func regexLanguage(path string) string {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
+	case "go":
+		return "go"
+	case "ts", "tsx", "js", "jsx", "mjs", "cjs":
+		return "typescript"
+	case "py", "pyi":
+		return "python"
+	case "yaml", "yml":
+		return "yaml"
+	case "json":
+		return "json"
+	case "md", "markdown":
+		return "markdown"
+	case "sql", "psql":
+		return "sql"
+	}
+	return ""
 }
 
 // jsonpathLanguage returns "yaml" or "json" for files we can evaluate

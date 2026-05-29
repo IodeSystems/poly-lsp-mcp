@@ -90,18 +90,57 @@ func TestApplySchemasUnknownDialectLoggedNotFatal(t *testing.T) {
 	}
 }
 
-func TestApplySchemasOpenAPIAndJSONSchemaReserved(t *testing.T) {
+func TestApplySchemasJSONSchemaReserved(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "api.yaml"), []byte("openapi: 3.0\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "api.schema.json"), []byte("{}"), 0o644)
 	idx := symbols.NewIndex()
 	r := NewResolver(dir)
-	// Should log warnings but not panic; returns 0 inserted.
+	// jsonschema dialect still not implemented; ApplySchemas logs the
+	// failure and continues, returning zero inserted.
 	n := r.ApplySchemas(idx, []config.Schema{
-		{File: "api.yaml", Dialect: "openapi"},
 		{File: "api.schema.json", Dialect: "jsonschema"},
 	})
 	if n != 0 {
-		t.Errorf("inserted = %d, want 0 for not-yet-implemented dialects", n)
+		t.Errorf("inserted = %d, want 0 (jsonschema not yet implemented)", n)
+	}
+}
+
+func TestApplySchemasOpenAPIPromotesWorkspaceHits(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "api.yaml"), []byte(`openapi: 3.0.3
+paths:
+  /users/{id}:
+    get:
+      operationId: GetUser
+components:
+  schemas:
+    UserID:
+      type: integer
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Workspace has Go uses of UserID and GetUser already lexically.
+	idx := symbols.NewIndex()
+	idx.Refresh(filepath.Join(dir, "main.go"), "go", []symbols.Hit{
+		{Name: "UserID", Line: 5, Col: 6},
+		{Name: "GetUser", Line: 10, Col: 6},
+	})
+	r := NewResolver(dir)
+	n := r.ApplySchemas(idx, []config.Schema{{File: "api.yaml", Dialect: "openapi"}})
+	if n < 4 {
+		t.Errorf("inserted = %d, want >= 4 (2 openapi declarations + 2 Go promotions)", n)
+	}
+	for _, name := range []string{"UserID", "GetUser"} {
+		sites := idx.Lookup(name)
+		langs := map[string]bool{}
+		for _, s := range sites {
+			langs[s.Language] = true
+			if s.Confidence != symbols.ConfidenceDeclared {
+				t.Errorf("%s site not declared after ApplySchemas: %+v", name, s)
+			}
+		}
+		if !langs["go"] || !langs["openapi"] {
+			t.Errorf("%s missing go or openapi language: %+v", name, langs)
+		}
 	}
 }

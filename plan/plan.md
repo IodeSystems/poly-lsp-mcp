@@ -258,8 +258,15 @@ schemas:
 - [x] Live demo against polyglot fixture: declaring `api.proto`
       produces a single rename that touches 7 files in 6 formats —
       proto + go + ts + py + yaml + sql + md — with 15 atomic edits.
-- [ ] OpenAPI dialect (reserved). Likely parses paths and components
-      to extract operationIds + schema names.
+- [x] OpenAPI dialect. Walks `gopkg.in/yaml.v3` *Node tree to extract:
+      (a) every key under `components.schemas.<Name>` (OpenAPI 3.x),
+      (b) every key under `definitions.<Name>` (Swagger 2.0 fallback),
+      (c) every `operationId` scalar value inside path operations. JSON
+      OpenAPI documents work the same way because JSON is a strict
+      subset of YAML.
+      Live polyglot smoke with both proto + openapi schemas declared:
+      a single UserID rename now produces 18 atomic edits across 8 files
+      in 7 formats (proto + openapi + go + ts + py + yaml + sql + md).
 - [ ] JSONSchema dialect (reserved). Likely walks `$defs` /
       `definitions` keys.
 - [ ] Tree-sitter-protobuf upgrade (replace regex parser) once we

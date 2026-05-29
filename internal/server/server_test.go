@@ -865,6 +865,45 @@ func TestSchemaAnchoredBindingsPromoteWorkspaceHits(t *testing.T) {
 	}
 }
 
+func TestSchemaAnchoredOpenAPIPromotesUserIDAcrossWorkspace(t *testing.T) {
+	// polyglot fixture has openapi.yaml declaring `UserID` under
+	// components.schemas and `GetUser` under paths.../operationId.
+	// Declaring it as a schema must surface both names with declared
+	// confidence and pull openapi.yaml into a UserID rename.
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := []config.Schema{{File: "openapi.yaml", Dialect: "openapi"}}
+
+	s := startSessionFull(t, reg, nil, nil, schemas)
+	defer s.close()
+
+	s.request("initialize", map[string]any{"rootUri": fixtureURI(t, "polyglot")})
+	s.notify("initialized", map[string]any{})
+
+	resp := s.request("textDocument/rename", map[string]any{
+		"textDocument": map[string]any{
+			"uri": fixtureURI(t, "polyglot") + "/main.go",
+		},
+		"position": map[string]any{"line": 5, "character": 6},
+		"newName":  "PersonID",
+	})
+	var edit workspaceEdit
+	if err := json.Unmarshal(resp.Result, &edit); err != nil {
+		t.Fatal(err)
+	}
+	hit := false
+	for uri := range edit.Changes {
+		if strings.HasSuffix(uri, "openapi.yaml") {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Errorf("openapi.yaml missing from rename edit; Tier 3 openapi not pulling its weight: %+v", edit.Changes)
+	}
+}
+
 func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	s := startSession(t)
 	defer s.close()

@@ -1,0 +1,36 @@
+openapi: 3.0.3
+
+info:
+  title: Polyglot API
+  version: 0.0.0
+
+paths:
+  /users/{userId}:
+    get:
+      operationId: GetUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/UserID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+components:
+  schemas:
+    UserID:
+      type: integer
+      format: int64
+    User:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/UserID'
+        email:
+          type: string

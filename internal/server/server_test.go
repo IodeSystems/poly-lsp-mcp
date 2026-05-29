@@ -604,6 +604,215 @@ func TestBindingsJSONPathSurfacesYAMLValueAsSynonym(t *testing.T) {
 	}
 }
 
+func TestRenameAdvertisesProviderCapability(t *testing.T) {
+	s := startSession(t)
+	defer s.close()
+
+	resp := s.request("initialize", map[string]any{
+		"rootUri": fixtureURI(t, "polyglot"),
+	})
+	var got struct {
+		Capabilities map[string]any `json:"capabilities"`
+	}
+	json.Unmarshal(resp.Result, &got)
+	if got.Capabilities["renameProvider"] != true {
+		t.Errorf("renameProvider not advertised: %+v", got.Capabilities)
+	}
+	s.notify("initialized", map[string]any{})
+}
+
+func TestRenameLexicalFallbackBuildsWorkspaceEdit(t *testing.T) {
+	// No declared bindings → rename uses lexical hits. Two Go files
+	// share UserID; renaming at one position should produce edits in
+	// both.
+	dir := t.TempDir()
+	file1 := filepath.Join(dir, "main.go")
+	file2 := filepath.Join(dir, "helper.go")
+	if err := os.WriteFile(file1,
+		[]byte("package main\n\ntype UserID int\n\nfunc f(id UserID) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file2,
+		[]byte("package main\n\nfunc g(x UserID) UserID { return x }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSession(t)
+	defer s.close()
+	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
+	s.notify("initialized", map[string]any{})
+
+	// Cursor on UserID in main.go line 2 col 6 (0-based: line=2, char=5).
+	resp := s.request("textDocument/rename", map[string]any{
+		"textDocument": map[string]any{"uri": "file://" + file1},
+		"position":     map[string]any{"line": 2, "character": 5},
+		"newName":      "UserIdentifier",
+	})
+	var edit workspaceEdit
+	if err := json.Unmarshal(resp.Result, &edit); err != nil {
+		t.Fatalf("decode rename result: %v (raw=%s)", err, resp.Result)
+	}
+	if len(edit.Changes) != 2 {
+		t.Errorf("expected edits in 2 files, got %d: %+v", len(edit.Changes), edit.Changes)
+	}
+	totalEdits := 0
+	for uri, edits := range edit.Changes {
+		for _, e := range edits {
+			if e.NewText != "UserIdentifier" {
+				t.Errorf("newText = %q in %s, want UserIdentifier", e.NewText, uri)
+			}
+			// Range width must equal len("UserID") = 6.
+			if e.Range.End.Character-e.Range.Start.Character != 6 {
+				t.Errorf("range width = %d, want 6: %+v in %s",
+					e.Range.End.Character-e.Range.Start.Character, e.Range, uri)
+			}
+		}
+		totalEdits += len(edits)
+	}
+	if totalEdits < 3 {
+		t.Errorf("expected >= 3 edits (1 decl + 1 use in main, 2 uses in helper), got %d", totalEdits)
+	}
+}
+
+func TestRenameWithDeclaredBindingRestrictsToDeclared(t *testing.T) {
+	// Two Go files have UserID. A binding declares UserID in main.go
+	// only. Rename of UserID should ONLY touch main.go — declared sites
+	// are preferred when present (the user opted into precision).
+	dir := t.TempDir()
+	mainGo := filepath.Join(dir, "main.go")
+	helperGo := filepath.Join(dir, "helper.go")
+	os.WriteFile(mainGo,
+		[]byte("package main\n\ntype UserID int\n\nfunc f(id UserID) {}\n"), 0o644)
+	os.WriteFile(helperGo,
+		[]byte("package main\n\nfunc g(x UserID) UserID { return x }\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\ngo 1.26\n"), 0o644)
+
+	reg, _ := config.Default().Build()
+	declared := []config.Binding{{
+		Name:  "UserID",
+		Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}},
+	}}
+
+	s := startSessionFull(t, reg, nil, declared)
+	defer s.close()
+	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
+	s.notify("initialized", map[string]any{})
+
+	resp := s.request("textDocument/rename", map[string]any{
+		"textDocument": map[string]any{"uri": "file://" + mainGo},
+		"position":     map[string]any{"line": 2, "character": 5},
+		"newName":      "UserIdentifier",
+	})
+	var edit workspaceEdit
+	if err := json.Unmarshal(resp.Result, &edit); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := edit.Changes["file://"+helperGo]; ok {
+		t.Errorf("helper.go received edits even though declared binding scoped to main.go: %+v", edit.Changes)
+	}
+	if _, ok := edit.Changes["file://"+mainGo]; !ok {
+		t.Errorf("main.go did not receive edits: %+v", edit.Changes)
+	}
+}
+
+func TestRenameSkipsAliasingBindingSites(t *testing.T) {
+	// Aliasing binding: name=UserType, sites=[symbol: UserID]. The
+	// resolver registers declared sites under name "UserType" pointing
+	// at UserID positions. If a user happens to rename "UserType" at
+	// some cursor position, the declared sites' on-disk text is
+	// "UserID", not "UserType" — those edits would mangle the file.
+	// The aliasing-protection check must skip them.
+	dir := t.TempDir()
+	mainGo := filepath.Join(dir, "main.go")
+	useTypeGo := filepath.Join(dir, "use_type.go")
+	os.WriteFile(mainGo,
+		[]byte("package main\n\ntype UserID int\n"), 0o644)
+	os.WriteFile(useTypeGo,
+		[]byte("package main\n\nvar UserType int\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\ngo 1.26\n"), 0o644)
+
+	reg, _ := config.Default().Build()
+	declared := []config.Binding{{
+		Name:  "UserType",
+		Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}}, // aliasing
+	}}
+
+	s := startSessionFull(t, reg, nil, declared)
+	defer s.close()
+	s.request("initialize", map[string]any{"rootUri": "file://" + dir})
+	s.notify("initialized", map[string]any{})
+
+	// Cursor on UserType in use_type.go line 2 col 5 (0-based: 2, 4).
+	resp := s.request("textDocument/rename", map[string]any{
+		"textDocument": map[string]any{"uri": "file://" + useTypeGo},
+		"position":     map[string]any{"line": 2, "character": 4},
+		"newName":      "Renamed",
+	})
+	if string(resp.Result) == "null" {
+		// If null, the declared sites all got filtered out by the
+		// aliasing-protection check, which is the right outcome here.
+		return
+	}
+	var edit workspaceEdit
+	if err := json.Unmarshal(resp.Result, &edit); err != nil {
+		t.Fatal(err)
+	}
+	// main.go must NOT appear — its declared-binding text is "UserID",
+	// not "UserType", so the aliasing check should have rejected it.
+	if _, ok := edit.Changes["file://"+mainGo]; ok {
+		t.Errorf("main.go received edits despite aliasing-mismatch: %+v", edit.Changes)
+	}
+}
+
+func TestRenameNullForUnknownPosition(t *testing.T) {
+	s := startSession(t)
+	defer s.close()
+	s.request("initialize", map[string]any{"rootUri": fixtureURI(t, "polyglot")})
+	s.notify("initialized", map[string]any{})
+
+	// Blank line in main.go: no word at cursor.
+	resp := s.request("textDocument/rename", map[string]any{
+		"textDocument": map[string]any{"uri": fixtureURI(t, "polyglot") + "/main.go"},
+		"position":     map[string]any{"line": 1, "character": 0},
+		"newName":      "Whatever",
+	})
+	if string(resp.Result) != "null" {
+		t.Errorf("expected null result for rename on blank line, got %s", resp.Result)
+	}
+}
+
+func TestRenameRejectsEmptyNewName(t *testing.T) {
+	s := startSession(t)
+	defer s.close()
+	s.request("initialize", map[string]any{"rootUri": fixtureURI(t, "polyglot")})
+	s.notify("initialized", map[string]any{})
+
+	// request() t.Fatals on error, so use raw send + recv.
+	rawID := s.nextRawID()
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      json.RawMessage(rawID),
+		"method":  "textDocument/rename",
+		"params": map[string]any{
+			"textDocument": map[string]any{"uri": fixtureURI(t, "polyglot") + "/main.go"},
+			"position":     map[string]any{"line": 5, "character": 6},
+			"newName":      "",
+		},
+	})
+	s.sendRaw(body)
+	resp := s.recvMessage()
+	if resp.Error == nil {
+		t.Fatalf("empty newName accepted: %s", resp.Result)
+	}
+	if resp.Error.Code != errInvalidParams {
+		t.Errorf("error code = %d, want %d", resp.Error.Code, errInvalidParams)
+	}
+}
+
 func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	s := startSession(t)
 	defer s.close()

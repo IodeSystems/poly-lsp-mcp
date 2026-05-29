@@ -159,6 +159,8 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 		s.handleReferences(req)
 	case "textDocument/documentSymbol":
 		s.handleDocumentSymbol(req)
+	case "textDocument/rename":
+		s.handleRename(req)
 	case "textDocument/didSave":
 		s.handleDidSave(req)
 	default:

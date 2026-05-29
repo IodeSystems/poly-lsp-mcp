@@ -74,6 +74,21 @@ type didSaveTextDocumentParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
 }
 
+type renameParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     position               `json:"position"`
+	NewName      string                 `json:"newName"`
+}
+
+type textEdit struct {
+	Range   lspRange `json:"range"`
+	NewText string   `json:"newText"`
+}
+
+type workspaceEdit struct {
+	Changes map[string][]textEdit `json:"changes"`
+}
+
 // LSP SymbolKind enum, only the ones we use. The protocol requires *some*
 // kind, and lexical hits don't have a meaningful one — Variable is the
 // least misleading catch-all until tree-sitter gives us better signal.
@@ -135,11 +150,14 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 
 	// Our own capabilities. These win over any child entry of the same
 	// name — we're the entity actually answering for the client on the
-	// methods we name here.
+	// methods we name here. We OWN rename because it crosses languages
+	// via declared bindings; per-language child results would miss the
+	// other languages.
 	ourCaps := map[string]any{
 		"workspaceSymbolProvider": true,
 		"referencesProvider":      true,
 		"documentSymbolProvider":  true,
+		"renameProvider":          true,
 		"textDocumentSync": map[string]any{
 			"openClose": false,
 			"change":    0,
@@ -286,6 +304,141 @@ func (s *Server) handleReferences(req *jsonrpc.Message) {
 		})
 	}
 	s.reply(req, out)
+}
+
+// handleRename synthesizes a cross-language WorkspaceEdit from the
+// symbol index. Confidence policy: if any declared sites exist for the
+// name at the cursor, rename only those (safe by user declaration).
+// Otherwise fall back to every lexical hit (best effort).
+//
+// Aliasing protection: for each candidate site we read the file and
+// confirm the text at (line, col) for len(name) bytes equals the name
+// being renamed. Sites whose text doesn't match (e.g., a declared
+// binding that aliases UserType to UserID's positions) are skipped so
+// rename never substitutes the wrong text into a file.
+func (s *Server) handleRename(req *jsonrpc.Message) {
+	var p renameParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		s.replyError(req, errInvalidParams, fmt.Sprintf("bad rename params: %v", err))
+		return
+	}
+	if p.NewName == "" {
+		s.replyError(req, errInvalidParams, "newName is required")
+		return
+	}
+
+	idx := s.getIndex()
+	if idx == nil {
+		s.reply(req, nil)
+		return
+	}
+
+	path := uriToPath(p.TextDocument.URI)
+	if path == "" {
+		s.reply(req, nil)
+		return
+	}
+	name := wordAtPosition(path, p.Position.Line, p.Position.Character)
+	if name == "" {
+		s.reply(req, nil)
+		return
+	}
+
+	sites := chooseRenameSites(idx.Lookup(name))
+	if len(sites) == 0 {
+		s.reply(req, nil)
+		return
+	}
+
+	edit := workspaceEdit{Changes: map[string][]textEdit{}}
+	fileCache := map[string][]byte{}
+	for _, site := range sites {
+		if !siteTextMatches(site, name, fileCache) {
+			log.Printf("rename: skip %s:%d:%d (text != %q)",
+				site.File, site.Line, site.Col, name)
+			continue
+		}
+		uri := pathToURI(site.File)
+		edit.Changes[uri] = append(edit.Changes[uri], textEdit{
+			Range:   rangeForToken(site.Line, site.Col, name),
+			NewText: p.NewName,
+		})
+	}
+
+	if len(edit.Changes) == 0 {
+		s.reply(req, nil)
+		return
+	}
+	s.reply(req, edit)
+}
+
+// chooseRenameSites implements the confidence policy: prefer declared
+// sites when any are present (the user opted into precision); fall back
+// to lexical only when no declarations cover this name.
+func chooseRenameSites(all []symbols.Site) []symbols.Site {
+	var declared, lexical []symbols.Site
+	for _, s := range all {
+		if s.Confidence >= symbols.ConfidenceDeclared {
+			declared = append(declared, s)
+		} else {
+			lexical = append(lexical, s)
+		}
+	}
+	if len(declared) > 0 {
+		return declared
+	}
+	return lexical
+}
+
+// siteTextMatches reads the file (cached across the request) and checks
+// that the bytes at (Line, Col) length len(name) equal name. Returns
+// false on read errors or out-of-range coordinates — both treated as
+// "don't include in the edit" rather than as errors to surface.
+func siteTextMatches(site symbols.Site, name string, cache map[string][]byte) bool {
+	data, ok := cache[site.File]
+	if !ok {
+		var err error
+		data, err = os.ReadFile(site.File)
+		if err != nil {
+			return false
+		}
+		cache[site.File] = data
+	}
+	// Find the line we want.
+	lineStart := 0
+	currentLine := 1
+	for currentLine < site.Line && lineStart < len(data) {
+		nl := indexNewline(data[lineStart:])
+		if nl < 0 {
+			return false
+		}
+		lineStart += nl + 1
+		currentLine++
+	}
+	if currentLine != site.Line {
+		return false
+	}
+	nl := indexNewline(data[lineStart:])
+	lineEnd := len(data)
+	if nl >= 0 {
+		lineEnd = lineStart + nl
+	}
+	line := data[lineStart:lineEnd]
+	start := site.Col - 1
+	end := start + len(name)
+	if start < 0 || end > len(line) {
+		return false
+	}
+	return string(line[start:end]) == name
+}
+
+func indexNewline(b []byte) int {
+	for i, c := range b {
+		if c == '\n' {
+			return i
+		}
+	}
+	return -1
 }
 
 // handleDidSave is a notification — no response. Re-extracts the file and

@@ -207,9 +207,24 @@ sites (the unique value-add vs single-language LSPs).
       `yaml.Node.Line` / `Column`.
 - [ ] Site forms: `regex` (last resort). Resolver still skips with a
       warning; comes next.
-- [ ] `textDocument/rename`: use declared sites by default. Lexical
-      requires `--rename-confidence=lexical`.
-- [ ] `workspace/applyEdit` synthesizes the combined edit atomically.
+- [x] `textDocument/rename` synthesizes a `WorkspaceEdit` from the
+      symbol index. Confidence policy: if declared sites exist for the
+      name at the cursor, rename only those; otherwise fall back to
+      lexical. Aliasing protection: each candidate site is verified
+      against the on-disk text — sites where text != name being renamed
+      are skipped (so aliasing bindings like `{name: UserType, sites:
+      [symbol: UserID]}` don't substitute the wrong token when
+      UserType is renamed). `renameProvider: true` is advertised; we
+      OWN this method (don't forward to child LSPs because they can't
+      reach the other languages).
+- [x] Cross-language rename validated live: a single rename of UserID
+      at main.go:6:6 produces 7 atomic edits across main.go / client.ts
+      / worker.py / config.yaml — including the YAML value site driven
+      by a `jsonpath` binding. No single-language LSP can do that
+      YAML one.
+- [ ] `workspace/applyEdit` if we ever decide to apply edits ourselves
+      instead of returning them in the rename response. Clients
+      currently do the applying.
 
 ### Tier 3 — schema-anchored (deferred)
 

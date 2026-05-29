@@ -231,7 +231,7 @@ func TestToolsListReturnsRegisteredTools(t *testing.T) {
 			t.Errorf("tool %q has empty inputSchema", tool.Name)
 		}
 	}
-	for _, want := range []string{"find_symbol", "find_references", "rename"} {
+	for _, want := range []string{"find_symbol", "find_references", "rename", "list_bindings", "document_symbols"} {
 		if !names[want] {
 			t.Errorf("tool %q missing from list", want)
 		}
@@ -430,6 +430,202 @@ func TestRenameToolMissingArgumentsIsToolError(t *testing.T) {
 	json.Unmarshal(resp.Result, &r)
 	if !r.IsError {
 		t.Errorf("expected isError=true for missing newName, got %+v", r)
+	}
+}
+
+func TestListBindingsToolWithNoBindingsReturnsEmpty(t *testing.T) {
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "list_bindings",
+		"arguments": map[string]any{},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("list_bindings errored: %+v", r.Content)
+	}
+	var got []bindingSummary
+	json.Unmarshal([]byte(r.Content[0].Text), &got)
+	if len(got) != 0 {
+		t.Errorf("no Tier-2 or Tier-3 bindings declared, got %d catalog entries: %+v", len(got), got)
+	}
+}
+
+func TestListBindingsToolReturnsCatalogWithLanguagesAndSites(t *testing.T) {
+	root := polyglotFixture(t)
+	schemas := []config.Schema{
+		{File: "api.proto", Dialect: "proto"},
+	}
+	s := startSessionFull(t, root, nil, schemas)
+	defer s.close()
+
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "list_bindings",
+		"arguments": map[string]any{},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("list_bindings errored: %+v", r.Content)
+	}
+	var got []bindingSummary
+	if err := json.Unmarshal([]byte(r.Content[0].Text), &got); err != nil {
+		t.Fatalf("payload not catalog-shaped: %v\n%s", err, r.Content[0].Text)
+	}
+	if len(got) == 0 {
+		t.Fatal("schema declared but no bindings surfaced")
+	}
+	// UserID from api.proto should be in the catalog.
+	var userIDEntry *bindingSummary
+	for i, e := range got {
+		if e.Name == "UserID" {
+			userIDEntry = &got[i]
+			break
+		}
+	}
+	if userIDEntry == nil {
+		t.Fatalf("UserID not in binding catalog: %+v", got)
+	}
+	if userIDEntry.SiteCount == 0 {
+		t.Errorf("UserID has zero sites: %+v", userIDEntry)
+	}
+	langSet := map[string]bool{}
+	for _, l := range userIDEntry.Languages {
+		langSet[l] = true
+	}
+	if !langSet["proto"] {
+		t.Errorf("UserID missing proto language tag: %+v", userIDEntry.Languages)
+	}
+	for _, want := range []string{"go", "typescript", "python"} {
+		if !langSet[want] {
+			t.Errorf("UserID missing %s language tag (schema should promote workspace hits): %+v",
+				want, userIDEntry.Languages)
+		}
+	}
+	for _, site := range userIDEntry.Sites {
+		if site.Confidence != "declared" {
+			t.Errorf("catalog returned non-declared site: %+v", site)
+		}
+	}
+}
+
+func TestDocumentSymbolsToolReturnsFileSortedHits(t *testing.T) {
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "document_symbols",
+		"arguments": map[string]any{"file": "main.go"}, // workspace-relative
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("document_symbols errored: %+v", r.Content)
+	}
+	var hits []siteJSON
+	if err := json.Unmarshal([]byte(r.Content[0].Text), &hits); err != nil {
+		t.Fatalf("payload not sites-shaped: %v\n%s", err, r.Content[0].Text)
+	}
+	if len(hits) == 0 {
+		t.Fatal("document_symbols(main.go) returned nothing")
+	}
+	for _, h := range hits {
+		if h.File != "main.go" {
+			t.Errorf("hit file = %q, want main.go", h.File)
+		}
+	}
+	// Sorted by (line, col)?
+	for i := 1; i < len(hits); i++ {
+		prev, cur := hits[i-1], hits[i]
+		if prev.Line > cur.Line || (prev.Line == cur.Line && prev.Col > cur.Col) {
+			t.Errorf("hits not sorted at index %d: %+v then %+v", i, prev, cur)
+		}
+	}
+	// Names should include the Go identifiers we expect.
+	names := map[string]bool{}
+	for _, h := range hits {
+		names[h.Name] = true
+	}
+	for _, want := range []string{"UserID", "GreetUser", "main"} {
+		if !names[want] {
+			t.Errorf("expected %q in main.go symbols, got: %+v", want, names)
+		}
+	}
+}
+
+func TestDocumentSymbolsToolAcceptsAbsolutePath(t *testing.T) {
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "document_symbols",
+		"arguments": map[string]any{"file": filepath.Join(root, "client.ts")},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var hits []siteJSON
+	json.Unmarshal([]byte(r.Content[0].Text), &hits)
+	if len(hits) == 0 {
+		t.Fatal("document_symbols on absolute client.ts returned nothing")
+	}
+	for _, h := range hits {
+		// Output should still be workspace-relative regardless of input.
+		if filepath.IsAbs(h.File) {
+			t.Errorf("expected workspace-relative output, got %q", h.File)
+		}
+	}
+}
+
+func TestDocumentSymbolsToolMissingFileArgIsError(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "document_symbols",
+		"arguments": map[string]any{},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if !r.IsError {
+		t.Errorf("expected isError=true for missing file arg, got %+v", r)
 	}
 }
 

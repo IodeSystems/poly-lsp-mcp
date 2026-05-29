@@ -314,6 +314,13 @@ the full cross-language stack the LSP layer already serves to editors.
   - `rename(name, newName)` — returns a list of file edits
     `{file, line, col, oldText, newText}` with the same confidence
     policy and aliasing-safety check as the LSP rename handler.
+  - `list_bindings()` — catalog of declared bindings the index knows
+    about (Tier 2 + Tier 3). Per name: site count, languages covered,
+    every (file, line, col) position. Lets agents survey the
+    cross-language model without running rename queries.
+  - `document_symbols(file)` — every symbol in a single file, sorted
+    by (line, col), with confidence tags. Accepts workspace-relative
+    or absolute paths; output is always workspace-relative.
 - [x] Workspace-relative file paths in tool output for stable
       cross-machine references.
 - [x] Live polyglot smoke through all three tools: `find_symbol(UserID)`

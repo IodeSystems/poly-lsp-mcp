@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/iodesystems/tslsmcp/internal/symbols"
@@ -61,6 +62,30 @@ func registerTools() map[string]Tool {
   "required": ["name"]
 }`),
 			Handler: handleFindReferences,
+		},
+		"list_bindings": {
+			Name: "list_bindings",
+			Description: "List every cross-language binding the index knows about — the ones declared by the user in tslsmcp.yaml (Tier 2: symbol / jsonpath / regex sites) and the ones auto-derived from schema files (Tier 3: proto / openapi / jsonschema). " +
+				"For each binding the response carries the name, total site count, the set of languages those sites live in, and every (file, line, col) position. Use this to explore what the workspace's cross-language model looks like without running rename queries.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {},
+  "required": []
+}`),
+			Handler: handleListBindings,
+		},
+		"document_symbols": {
+			Name: "document_symbols",
+			Description: "Return every symbol in one file — declarations, uses, and binding members — sorted by position. " +
+				"Pass `file` workspace-relative (preferred) or absolute. Output entries carry the confidence tag so you can distinguish declared bindings from lexical hits.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "file": {"type": "string", "description": "Workspace-relative or absolute path"}
+  },
+  "required": ["file"]
+}`),
+			Handler: handleDocumentSymbols,
 		},
 		"rename": {
 			Name: "rename",
@@ -271,6 +296,100 @@ func bytesIndexNewline(b []byte) int {
 		}
 	}
 	return -1
+}
+
+// bindingSummary is the wire shape `list_bindings` emits per name.
+type bindingSummary struct {
+	Name      string     `json:"name"`
+	SiteCount int        `json:"siteCount"`
+	Languages []string   `json:"languages"`
+	Sites     []siteJSON `json:"sites"`
+}
+
+func handleListBindings(s *Server, _ json.RawMessage) ([]Content, bool, error) {
+	idx := s.getIndex()
+	if idx == nil {
+		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
+	}
+	names := idx.DeclaredNames()
+	out := make([]bindingSummary, 0, len(names))
+	for _, name := range names {
+		var sites []siteJSON
+		langSet := map[string]struct{}{}
+		for _, site := range idx.Lookup(name) {
+			if site.Confidence < symbols.ConfidenceDeclared {
+				continue
+			}
+			sites = append(sites, siteJSON{
+				Name:       name,
+				File:       relPath(site.File, s.root),
+				Line:       site.Line,
+				Col:        site.Col,
+				Language:   site.Language,
+				Confidence: confidenceLabel(site.Confidence),
+			})
+			if site.Language != "" {
+				langSet[site.Language] = struct{}{}
+			}
+		}
+		langs := make([]string, 0, len(langSet))
+		for l := range langSet {
+			langs = append(langs, l)
+		}
+		sort.Strings(langs)
+		out = append(out, bindingSummary{
+			Name:      name,
+			SiteCount: len(sites),
+			Languages: langs,
+			Sites:     sites,
+		})
+	}
+	return jsonContent(out), false, nil
+}
+
+func handleDocumentSymbols(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var p struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if p.File == "" {
+		return nil, true, fmt.Errorf("file is required")
+	}
+	idx := s.getIndex()
+	if idx == nil {
+		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
+	}
+
+	abs := p.File
+	if !filepath.IsAbs(abs) && s.root != "" {
+		abs = filepath.Join(s.root, abs)
+	}
+
+	var hits []siteJSON
+	for _, name := range idx.Names() {
+		for _, site := range idx.Lookup(name) {
+			if site.File != abs {
+				continue
+			}
+			hits = append(hits, siteJSON{
+				Name:       name,
+				File:       relPath(site.File, s.root),
+				Line:       site.Line,
+				Col:        site.Col,
+				Language:   site.Language,
+				Confidence: confidenceLabel(site.Confidence),
+			})
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Line != hits[j].Line {
+			return hits[i].Line < hits[j].Line
+		}
+		return hits[i].Col < hits[j].Col
+	})
+	return jsonContent(hits), false, nil
 }
 
 // jsonContent marshals value into a single text content block — the

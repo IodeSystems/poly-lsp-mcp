@@ -175,6 +175,23 @@ func TestIndexLanguagesReportsDistinct(t *testing.T) {
 	}
 }
 
+func TestDeclaredNamesReturnsOnlyDeclaredBindings(t *testing.T) {
+	idx := NewIndex()
+	idx.addHits("/a.go", "go", []Hit{{Name: "Lexical", Line: 1, Col: 1}})
+	idx.InsertDeclared("Bound", "/a.go", "go", 2, 1)
+	idx.InsertDeclared("AlsoBound", "/b.go", "go", 5, 3)
+
+	got := idx.DeclaredNames()
+	if len(got) != 2 || got[0] != "AlsoBound" || got[1] != "Bound" {
+		t.Errorf("DeclaredNames = %+v, want sorted [AlsoBound, Bound]", got)
+	}
+	for _, name := range got {
+		if name == "Lexical" {
+			t.Errorf("Lexical-only name leaked into DeclaredNames: %+v", got)
+		}
+	}
+}
+
 func TestSkipDirsObeyed(t *testing.T) {
 	// Sanity: building the repo root must not descend into .git.
 	reg, err := config.Default().Build()

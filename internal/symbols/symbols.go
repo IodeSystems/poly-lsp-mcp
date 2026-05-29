@@ -190,6 +190,22 @@ func (i *Index) Languages() []string {
 	return out
 }
 
+// DeclaredNames returns every name with at least one declared site,
+// sorted. Lexical-only names are excluded — this is the binding
+// catalog Tier 2 + Tier 3 produced for the workspace.
+func (i *Index) DeclaredNames() []string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	out := make([]string, 0, len(i.declaredSites))
+	for name, sites := range i.declaredSites {
+		if len(sites) > 0 {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Names returns every indexed name (lexical or declared), sorted.
 func (i *Index) Names() []string {
 	i.mu.RLock()

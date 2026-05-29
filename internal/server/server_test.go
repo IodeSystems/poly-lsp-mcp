@@ -904,6 +904,44 @@ func TestSchemaAnchoredOpenAPIPromotesUserIDAcrossWorkspace(t *testing.T) {
 	}
 }
 
+func TestSchemaAnchoredJSONSchemaPullsSchemaFileIntoRename(t *testing.T) {
+	// polyglot fixture has user.schema.json with $defs.UserID and
+	// title=User. Declaring it as a jsonschema must surface those
+	// declarations and pull the file into a UserID rename.
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := []config.Schema{{File: "user.schema.json", Dialect: "jsonschema"}}
+
+	s := startSessionFull(t, reg, nil, nil, schemas)
+	defer s.close()
+
+	s.request("initialize", map[string]any{"rootUri": fixtureURI(t, "polyglot")})
+	s.notify("initialized", map[string]any{})
+
+	resp := s.request("textDocument/rename", map[string]any{
+		"textDocument": map[string]any{
+			"uri": fixtureURI(t, "polyglot") + "/main.go",
+		},
+		"position": map[string]any{"line": 5, "character": 6},
+		"newName":  "PersonID",
+	})
+	var edit workspaceEdit
+	if err := json.Unmarshal(resp.Result, &edit); err != nil {
+		t.Fatal(err)
+	}
+	hit := false
+	for uri := range edit.Changes {
+		if strings.HasSuffix(uri, "user.schema.json") {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Errorf("user.schema.json missing from rename edit; Tier 3 jsonschema not pulling its weight: %+v", edit.Changes)
+	}
+}
+
 func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	s := startSession(t)
 	defer s.close()

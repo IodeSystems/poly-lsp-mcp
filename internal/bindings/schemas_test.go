@@ -90,18 +90,40 @@ func TestApplySchemasUnknownDialectLoggedNotFatal(t *testing.T) {
 	}
 }
 
-func TestApplySchemasJSONSchemaReserved(t *testing.T) {
+func TestApplySchemasJSONSchemaPromotesWorkspaceHits(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "api.schema.json"), []byte("{}"), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "user.schema.json"), []byte(`{
+  "title": "User",
+  "$defs": {
+    "UserID": {"type": "integer"}
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	idx := symbols.NewIndex()
-	r := NewResolver(dir)
-	// jsonschema dialect still not implemented; ApplySchemas logs the
-	// failure and continues, returning zero inserted.
-	n := r.ApplySchemas(idx, []config.Schema{
-		{File: "api.schema.json", Dialect: "jsonschema"},
+	idx.Refresh(filepath.Join(dir, "main.go"), "go", []symbols.Hit{
+		{Name: "UserID", Line: 5, Col: 6},
+		{Name: "User", Line: 12, Col: 6},
 	})
-	if n != 0 {
-		t.Errorf("inserted = %d, want 0 (jsonschema not yet implemented)", n)
+	r := NewResolver(dir)
+	n := r.ApplySchemas(idx, []config.Schema{
+		{File: "user.schema.json", Dialect: "jsonschema"},
+	})
+	if n < 4 {
+		t.Errorf("inserted = %d, want >= 4 (2 schema declarations + 2 Go promotions)", n)
+	}
+	for _, name := range []string{"UserID", "User"} {
+		sites := idx.Lookup(name)
+		langs := map[string]bool{}
+		for _, s := range sites {
+			langs[s.Language] = true
+			if s.Confidence != symbols.ConfidenceDeclared {
+				t.Errorf("%s site not declared after ApplySchemas: %+v", name, s)
+			}
+		}
+		if !langs["go"] || !langs["jsonschema"] {
+			t.Errorf("%s missing go or jsonschema language: %+v", name, langs)
+		}
 	}
 }
 

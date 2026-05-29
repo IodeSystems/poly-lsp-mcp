@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polyglot.example/user.schema.json",
+  "title": "User",
+  "type": "object",
+  "$defs": {
+    "UserID": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1
+    },
+    "Email": {
+      "type": "string",
+      "format": "email"
+    }
+  },
+  "properties": {
+    "id": { "$ref": "#/$defs/UserID" },
+    "email": { "$ref": "#/$defs/Email" }
+  },
+  "required": ["id", "email"]
+}

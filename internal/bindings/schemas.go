@@ -68,9 +68,13 @@ func (r *Resolver) applySchema(idx *symbols.Index, sch config.Schema) (int, erro
 			return 0, err
 		}
 	case "jsonschema":
-		return 0, fmt.Errorf("jsonschema dialect not yet implemented")
+		var err error
+		entities, err = parseJSONSchema(content)
+		if err != nil {
+			return 0, err
+		}
 	default:
-		return 0, fmt.Errorf("unknown dialect %q (supported: proto, openapi)", sch.Dialect)
+		return 0, fmt.Errorf("unknown dialect %q (supported: proto, openapi, jsonschema)", sch.Dialect)
 	}
 
 	if len(entities) == 0 {

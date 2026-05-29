@@ -267,8 +267,15 @@ schemas:
       Live polyglot smoke with both proto + openapi schemas declared:
       a single UserID rename now produces 18 atomic edits across 8 files
       in 7 formats (proto + openapi + go + ts + py + yaml + sql + md).
-- [ ] JSONSchema dialect (reserved). Likely walks `$defs` /
-      `definitions` keys.
+- [x] JSONSchema dialect. Walks the *yaml.Node tree like openapi —
+      extracts (a) `$defs.<Name>` keys (Draft 2019-09+), (b)
+      `definitions.<Name>` keys (Draft 4–7 fallback), (c) top-level
+      `title` when scalar string. JSON and YAML JSONSchema documents
+      handled by the same code path. `mappingKeys` helper is shared
+      between openapi.go and jsonschema.go.
+      Live polyglot smoke with all three dialects declared (proto +
+      openapi + jsonschema): a single UserID rename now produces 20
+      atomic edits across 9 files in 8 formats.
 - [ ] Tree-sitter-protobuf upgrade (replace regex parser) once we
       hit a real codebase whose proto style breaks the regex MVP.
 

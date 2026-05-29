@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -231,7 +232,7 @@ func TestToolsListReturnsRegisteredTools(t *testing.T) {
 			t.Errorf("tool %q has empty inputSchema", tool.Name)
 		}
 	}
-	for _, want := range []string{"find_symbol", "find_references", "rename", "list_bindings", "document_symbols"} {
+	for _, want := range []string{"find_symbol", "find_references", "rename", "list_bindings", "document_symbols", "refresh"} {
 		if !names[want] {
 			t.Errorf("tool %q missing from list", want)
 		}
@@ -626,6 +627,248 @@ func TestDocumentSymbolsToolMissingFileArgIsError(t *testing.T) {
 	json.Unmarshal(resp.Result, &r)
 	if !r.IsError {
 		t.Errorf("expected isError=true for missing file arg, got %+v", r)
+	}
+}
+
+type refreshStatus struct {
+	Root          string `json:"root"`
+	Names         int    `json:"names"`
+	DeclaredSites int    `json:"declaredSites"`
+	SchemaSites   int    `json:"schemaSites"`
+}
+
+func TestRefreshToolPicksUpNewFiles(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath,
+		[]byte("package main\n\nfunc OriginalName() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// Sanity: OriginalName is found.
+	resp := s.request("tools/call", map[string]any{
+		"name":      "find_references",
+		"arguments": map[string]any{"name": "OriginalName"},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	var hits []siteJSON
+	json.Unmarshal([]byte(r.Content[0].Text), &hits)
+	if len(hits) == 0 {
+		t.Fatal("pre-refresh: OriginalName missing")
+	}
+
+	// Edit on disk: replace OriginalName with NewName.
+	if err := os.WriteFile(mainPath,
+		[]byte("package main\n\nfunc NewName() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before refresh, NewName isn't indexed.
+	resp = s.request("tools/call", map[string]any{
+		"name":      "find_references",
+		"arguments": map[string]any{"name": "NewName"},
+	})
+	json.Unmarshal(resp.Result, &r)
+	json.Unmarshal([]byte(r.Content[0].Text), &hits)
+	if len(hits) != 0 {
+		t.Errorf("expected NewName to be invisible before refresh, got %d hits", len(hits))
+	}
+
+	// Refresh and re-query.
+	resp = s.request("tools/call", map[string]any{
+		"name":      "refresh",
+		"arguments": map[string]any{},
+	})
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("refresh errored: %+v", r.Content)
+	}
+	var status refreshStatus
+	json.Unmarshal([]byte(r.Content[0].Text), &status)
+	if status.Root != dir {
+		t.Errorf("status.root = %q, want %q", status.Root, dir)
+	}
+	if status.Names == 0 {
+		t.Errorf("status.names = 0 after refresh; expected something")
+	}
+
+	resp = s.request("tools/call", map[string]any{
+		"name":      "find_references",
+		"arguments": map[string]any{"name": "NewName"},
+	})
+	json.Unmarshal(resp.Result, &r)
+	json.Unmarshal([]byte(r.Content[0].Text), &hits)
+	if len(hits) == 0 {
+		t.Error("post-refresh: NewName still not visible")
+	}
+
+	resp = s.request("tools/call", map[string]any{
+		"name":      "find_references",
+		"arguments": map[string]any{"name": "OriginalName"},
+	})
+	json.Unmarshal(resp.Result, &r)
+	json.Unmarshal([]byte(r.Content[0].Text), &hits)
+	if len(hits) != 0 {
+		t.Errorf("post-refresh: OriginalName should be gone, got %d hits", len(hits))
+	}
+}
+
+func TestRefreshToolSwitchesWorkspaceRoot(t *testing.T) {
+	// Two temp workspaces with different names; refresh with workspace_root
+	// to swap, then verify queries land on the second one.
+	dirA := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"),
+		[]byte("package x\n\nfunc OnlyInA() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirA, "go.mod"),
+		[]byte("module a\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"),
+		[]byte("package x\n\nfunc OnlyInB() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "go.mod"),
+		[]byte("module b\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dirA, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// Refresh against the second workspace.
+	resp := s.request("tools/call", map[string]any{
+		"name":      "refresh",
+		"arguments": map[string]any{"workspace_root": dirB},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("refresh errored: %+v", r.Content)
+	}
+	var status refreshStatus
+	json.Unmarshal([]byte(r.Content[0].Text), &status)
+	if status.Root != dirB {
+		t.Errorf("status.root = %q, want %q", status.Root, dirB)
+	}
+
+	// OnlyInB is reachable.
+	resp = s.request("tools/call", map[string]any{
+		"name":      "find_references",
+		"arguments": map[string]any{"name": "OnlyInB"},
+	})
+	json.Unmarshal(resp.Result, &r)
+	var hits []siteJSON
+	json.Unmarshal([]byte(r.Content[0].Text), &hits)
+	if len(hits) == 0 {
+		t.Error("OnlyInB not visible after refresh to dirB")
+	}
+	for _, h := range hits {
+		if h.File != "b.go" {
+			t.Errorf("file = %q, want b.go (path should be relative to NEW root)", h.File)
+		}
+	}
+
+	// OnlyInA is no longer reachable (we're pointing at dirB).
+	resp = s.request("tools/call", map[string]any{
+		"name":      "find_references",
+		"arguments": map[string]any{"name": "OnlyInA"},
+	})
+	json.Unmarshal(resp.Result, &r)
+	json.Unmarshal([]byte(r.Content[0].Text), &hits)
+	if len(hits) != 0 {
+		t.Errorf("OnlyInA should be invisible after switching root, got %+v", hits)
+	}
+}
+
+func TestRefreshToolRejectsRelativePath(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "refresh",
+		"arguments": map[string]any{"workspace_root": "relative/path"},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if !r.IsError {
+		t.Errorf("expected isError=true for relative path, got %+v", r)
+	}
+}
+
+func TestRefreshToolReappliesSchemas(t *testing.T) {
+	// Configure a schema; after refresh, schema-anchored bindings must
+	// still be in effect.
+	root := polyglotFixture(t)
+	schemas := []config.Schema{{File: "api.proto", Dialect: "proto"}}
+	s := startSessionFull(t, root, nil, schemas)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "refresh",
+		"arguments": map[string]any{},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("refresh errored: %+v", r.Content)
+	}
+	var status refreshStatus
+	json.Unmarshal([]byte(r.Content[0].Text), &status)
+	if status.SchemaSites == 0 {
+		t.Errorf("expected schema sites > 0 after refresh, got %d", status.SchemaSites)
+	}
+
+	// list_bindings should still show UserID with proto in its languages.
+	resp = s.request("tools/call", map[string]any{
+		"name":      "list_bindings",
+		"arguments": map[string]any{},
+	})
+	json.Unmarshal(resp.Result, &r)
+	var cat []bindingSummary
+	json.Unmarshal([]byte(r.Content[0].Text), &cat)
+	found := false
+	for _, b := range cat {
+		if b.Name == "UserID" {
+			for _, l := range b.Languages {
+				if l == "proto" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("UserID/proto binding missing after refresh: %+v", cat)
 	}
 }
 

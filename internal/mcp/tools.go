@@ -3,11 +3,13 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/iodesystems/tslsmcp/internal/bindings"
 	"github.com/iodesystems/tslsmcp/internal/symbols"
 )
 
@@ -87,6 +89,19 @@ func registerTools() map[string]Tool {
 }`),
 			Handler: handleDocumentSymbols,
 		},
+		"refresh": {
+			Name: "refresh",
+			Description: "Rebuild the workspace symbol index from disk. Use after files have changed (an agent applied edits, a worktree was checked out, etc.). " +
+				"With no arguments, rebuilds against the current workspace root. With `workspace_root`, points the index at a different absolute directory — useful when one tslsmcp instance serves multiple worktrees of the same project, since the bindings and schemas configured at startup are re-applied at the new root.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "workspace_root": {"type": "string", "description": "Optional absolute path. If omitted, rebuild the current root."}
+  },
+  "required": []
+}`),
+			Handler: handleRefresh,
+		},
 		"rename": {
 			Name: "rename",
 			Description: "Cross-language rename. Returns a list of file edits {file, line, col, oldText, newText} you can apply atomically. " +
@@ -138,7 +153,7 @@ func handleFindSymbol(s *Server, args json.RawMessage) ([]Content, bool, error) 
 		for _, site := range idx.Lookup(name) {
 			hits = append(hits, siteJSON{
 				Name:       name,
-				File:       relPath(site.File, s.root),
+				File:       relPath(site.File, s.getRoot()),
 				Line:       site.Line,
 				Col:        site.Col,
 				Language:   site.Language,
@@ -167,7 +182,7 @@ func handleFindReferences(s *Server, args json.RawMessage) ([]Content, bool, err
 	for _, site := range idx.Lookup(p.Name) {
 		hits = append(hits, siteJSON{
 			Name:       p.Name,
-			File:       relPath(site.File, s.root),
+			File:       relPath(site.File, s.getRoot()),
 			Line:       site.Line,
 			Col:        site.Col,
 			Language:   site.Language,
@@ -215,7 +230,7 @@ func handleRename(s *Server, args json.RawMessage) ([]Content, bool, error) {
 			continue
 		}
 		edits = append(edits, renameEdit{
-			File:    relPath(site.File, s.root),
+			File:    relPath(site.File, s.getRoot()),
 			Line:    site.Line,
 			Col:     site.Col,
 			OldText: p.Name,
@@ -298,6 +313,64 @@ func bytesIndexNewline(b []byte) int {
 	return -1
 }
 
+// handleRefresh rebuilds the symbol index from disk, optionally at a
+// new workspace root, then re-applies the bindings and schemas that
+// were configured at startup. The new index swaps in atomically — on
+// build failure the old index keeps serving.
+func handleRefresh(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var p struct {
+		WorkspaceRoot string `json:"workspace_root"`
+	}
+	if len(args) > 0 && string(args) != "null" {
+		if err := json.Unmarshal(args, &p); err != nil {
+			return nil, true, fmt.Errorf("bad arguments: %w", err)
+		}
+	}
+
+	newRoot := s.getRoot()
+	if p.WorkspaceRoot != "" {
+		if !filepath.IsAbs(p.WorkspaceRoot) {
+			return nil, true, fmt.Errorf("workspace_root must be an absolute path; got %q", p.WorkspaceRoot)
+		}
+		newRoot = p.WorkspaceRoot
+	}
+	if newRoot == "" {
+		return nil, true, fmt.Errorf("no workspace root configured and none provided")
+	}
+
+	idx, err := symbols.Build(newRoot, s.registry)
+	if err != nil {
+		return nil, true, fmt.Errorf("build index at %s: %w", newRoot, err)
+	}
+
+	// Re-apply Tier 2 + Tier 3 bindings at the new root. Per-binding
+	// failures are logged inside the resolver; we surface the resulting
+	// counts so the caller can sanity-check.
+	resolver := bindings.NewResolver(newRoot)
+	declaredCount := 0
+	if len(s.bindings) > 0 {
+		n, err := resolver.Apply(idx, s.bindings)
+		if err != nil {
+			log.Printf("refresh: some bindings failed validation: %v", err)
+		}
+		declaredCount = n
+	}
+	schemaCount := 0
+	if len(s.schemas) > 0 {
+		schemaCount = resolver.ApplySchemas(idx, s.schemas)
+	}
+
+	s.setRoot(newRoot)
+	s.setIndex(idx)
+
+	return jsonContent(map[string]any{
+		"root":          newRoot,
+		"names":         len(idx.Names()),
+		"declaredSites": declaredCount,
+		"schemaSites":   schemaCount,
+	}), false, nil
+}
+
 // bindingSummary is the wire shape `list_bindings` emits per name.
 type bindingSummary struct {
 	Name      string     `json:"name"`
@@ -322,7 +395,7 @@ func handleListBindings(s *Server, _ json.RawMessage) ([]Content, bool, error) {
 			}
 			sites = append(sites, siteJSON{
 				Name:       name,
-				File:       relPath(site.File, s.root),
+				File:       relPath(site.File, s.getRoot()),
 				Line:       site.Line,
 				Col:        site.Col,
 				Language:   site.Language,
@@ -363,8 +436,8 @@ func handleDocumentSymbols(s *Server, args json.RawMessage) ([]Content, bool, er
 	}
 
 	abs := p.File
-	if !filepath.IsAbs(abs) && s.root != "" {
-		abs = filepath.Join(s.root, abs)
+	if !filepath.IsAbs(abs) && s.getRoot() != "" {
+		abs = filepath.Join(s.getRoot(), abs)
 	}
 
 	var hits []siteJSON
@@ -375,7 +448,7 @@ func handleDocumentSymbols(s *Server, args json.RawMessage) ([]Content, bool, er
 			}
 			hits = append(hits, siteJSON{
 				Name:       name,
-				File:       relPath(site.File, s.root),
+				File:       relPath(site.File, s.getRoot()),
 				Line:       site.Line,
 				Col:        site.Col,
 				Language:   site.Language,

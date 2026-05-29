@@ -44,9 +44,11 @@ var ErrExitWithoutShutdown = errors.New("mcp: stream closed before shutdown")
 // from, lifecycle flags, and the tool table populated by registerTools.
 type Server struct {
 	registry *config.Registry
-	root     string
 	bindings []config.Binding
 	schemas  []config.Schema
+
+	rootMu sync.RWMutex
+	root   string
 
 	writeMu sync.Mutex
 	enc     *json.Encoder
@@ -160,18 +162,18 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 	}
 }
 
-// handleInitialize builds the symbol index for s.root, applies any
+// handleInitialize builds the symbol index for s.getRoot(), applies any
 // Tier-2 and Tier-3 bindings, and advertises tool capability.
 func (s *Server) handleInitialize(req *jsonrpc.Message) {
-	if s.root != "" {
-		idx, err := symbols.Build(s.root, s.registry)
+	if s.getRoot() != "" {
+		idx, err := symbols.Build(s.getRoot(), s.registry)
 		if err != nil {
-			log.Printf("mcp initialize: index build failed for %s: %v", s.root, err)
+			log.Printf("mcp initialize: index build failed for %s: %v", s.getRoot(), err)
 		} else {
 			s.setIndex(idx)
-			log.Printf("mcp initialize: indexed %d names from %s", len(idx.Names()), s.root)
+			log.Printf("mcp initialize: indexed %d names from %s", len(idx.Names()), s.getRoot())
 			if len(s.bindings) > 0 || len(s.schemas) > 0 {
-				resolver := bindings.NewResolver(s.root)
+				resolver := bindings.NewResolver(s.getRoot())
 				if len(s.bindings) > 0 {
 					n, err := resolver.Apply(idx, s.bindings)
 					if err != nil {
@@ -265,6 +267,22 @@ func (s *Server) getIndex() *symbols.Index {
 	s.indexMu.RLock()
 	defer s.indexMu.RUnlock()
 	return s.index
+}
+
+// setRoot updates the workspace root. Called from handleRefresh when
+// the caller asks to point the index at a different directory; future
+// tool output uses the new root for path relativization.
+func (s *Server) setRoot(root string) {
+	s.rootMu.Lock()
+	defer s.rootMu.Unlock()
+	s.root = root
+}
+
+// getRoot returns the current workspace root.
+func (s *Server) getRoot() string {
+	s.rootMu.RLock()
+	defer s.rootMu.RUnlock()
+	return s.root
 }
 
 func (s *Server) reply(req *jsonrpc.Message, result any) {

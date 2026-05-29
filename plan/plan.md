@@ -321,6 +321,12 @@ the full cross-language stack the LSP layer already serves to editors.
   - `document_symbols(file)` — every symbol in a single file, sorted
     by (line, col), with confidence tags. Accepts workspace-relative
     or absolute paths; output is always workspace-relative.
+  - `refresh(workspace_root?)` — rebuild the index from disk. With no
+    args, rebuilds the current root (after an agent finishes writing
+    edits). With `workspace_root`, points the same MCP instance at a
+    different absolute path (use case: one tslsmcp serves multiple
+    git worktrees of the same project). Bindings and schemas
+    configured at startup re-apply at the new root.
 - [x] Workspace-relative file paths in tool output for stable
       cross-machine references.
 - [x] Live polyglot smoke through all three tools: `find_symbol(UserID)`

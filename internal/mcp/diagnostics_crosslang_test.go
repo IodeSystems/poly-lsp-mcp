@@ -272,6 +272,156 @@ func Run() {
 	}
 }
 
+// TestSiblingDiagnosticsRollup proves the gopls-publishes-cascade
+// path: edit types.go to drop the Greeting field, and main.go's
+// `resp.Greeting` reference is flagged. With the default sibling
+// rollup ON, the response contains the main.go diagnostic. With
+// siblingDiagnostics=false, the response stays scoped to the edited
+// URI and the cascade is invisible.
+func TestSiblingDiagnosticsRollup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipped under -short")
+	}
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not on PATH")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not on PATH")
+	}
+
+	fixtureDir := crossLangFixtureRoot(t)
+	for _, p := range []string{"server/types.go", "server/main.go"} {
+		if _, err := os.Stat(filepath.Join(fixtureDir, p)); err != nil {
+			t.Skipf("fixture missing %s: %v", p, err)
+		}
+	}
+
+	// Two passes, each against a fresh tempdir: default sibling
+	// rollup, then explicit opt-out.
+	t.Run("default-includes-siblings", func(t *testing.T) {
+		runSiblingCase(t, fixtureDir, nil, true)
+	})
+	t.Run("opt-out-scopes-to-edited-uri", func(t *testing.T) {
+		f := false
+		runSiblingCase(t, fixtureDir, &f, false)
+	})
+}
+
+func runSiblingCase(t *testing.T, fixtureDir string, sibling *bool, wantSiblingDiag bool) {
+	t.Helper()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for src, dst := range map[string]string{
+		"server/types.go": "types.go",
+		"server/main.go":  "main.go",
+	} {
+		data, err := os.ReadFile(filepath.Join(fixtureDir, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, dst), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(reg, dir, nil, nil)
+	srv.SetManager(multiplex.NewManager(reg))
+	srv.SetDiagnosticWait(12 * time.Second)
+
+	sIn, cOut := io.Pipe()
+	cIn, sOut := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(sIn, sOut) }()
+	sess := &mcpSession{
+		t: t, srv: srv,
+		srvIn: cOut, clientR: json.NewDecoder(cIn),
+		clientW: cOut, done: done,
+	}
+	defer sess.close()
+
+	sess.request("initialize", map[string]any{})
+	sess.notify("notifications/initialized", map[string]any{})
+
+	// Rewrite types.go to drop HelloResponse.Greeting. main.go uses
+	// resp.Greeting, so gopls flags main.go on the next package
+	// recheck.
+	broken := `package server
+
+type Mood int32
+
+const (
+	MoodUnspecified Mood = 0
+	MoodHappy       Mood = 1
+	MoodGrumpy      Mood = 2
+)
+
+type HelloRequest struct {
+	Name string
+	Mood Mood
+}
+
+type HelloResponse struct {
+}
+
+func Hello(req HelloRequest) HelloResponse {
+	return HelloResponse{}
+}
+`
+	original, err := os.ReadFile(filepath.Join(dir, "types.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	endLine, endCol := contentEndPositionForTest(original)
+
+	args := map[string]any{
+		"file":      "types.go",
+		"startLine": 1, "startCol": 1,
+		"endLine": endLine, "endCol": endCol,
+		"newText": broken,
+	}
+	if sibling != nil {
+		args["siblingDiagnostics"] = *sibling
+	}
+	r := sess.callTool("node_edit", args)
+	if r.IsError {
+		t.Fatalf("node_edit errored: %+v", r.Content)
+	}
+
+	var payload struct {
+		DiagnosticsAvailable bool `json:"diagnosticsAvailable"`
+		Diagnostics          []struct {
+			File     string `json:"file"`
+			Severity string `json:"severity"`
+			Message  string `json:"message"`
+		} `json:"diagnostics"`
+	}
+	if err := json.Unmarshal([]byte(r.Content[0].Text), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var sawMainGo bool
+	for _, d := range payload.Diagnostics {
+		if filepath.Base(d.File) == "main.go" && d.Severity == "error" {
+			sawMainGo = true
+			break
+		}
+	}
+	if wantSiblingDiag && !sawMainGo {
+		t.Errorf("expected main.go sibling diagnostic; got %+v", payload.Diagnostics)
+	}
+	if !wantSiblingDiag && sawMainGo {
+		t.Errorf("opt-out should scope to edited URI; got main.go diagnostic in %+v", payload.Diagnostics)
+	}
+}
+
 // contentEndPositionForTest is a local copy of contentEndPosition (in
 // tools.go) so this test file doesn't depend on internals.
 func contentEndPositionForTest(content []byte) (int, int) {

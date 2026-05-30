@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -99,6 +100,18 @@ type diagnosticOptions struct {
 	DiagnosticLimit int `json:"diagnosticLimit"`
 	ReferenceLimit  int `json:"referenceLimit"`
 	ContextLines    int `json:"contextLines"`
+
+	// SiblingDiagnostics controls whether the response includes
+	// diagnostics for files OTHER than the one(s) the tool edited.
+	// gopls (and most LSPs) publish at the package level — a single
+	// file edit can produce new errors on sibling files. Default ON;
+	// set false to scope the response to edited URIs only (less
+	// noise, but compile cascades stay invisible).
+	//
+	// Pointer so we can distinguish unset (default) from explicit
+	// false: zero value of bool would force the caller to write
+	// `siblingDiagnostics: true` for current behavior.
+	SiblingDiagnostics *bool `json:"siblingDiagnostics,omitempty"`
 }
 
 const (
@@ -127,6 +140,13 @@ func (o diagnosticOptions) contextLines() int {
 		return o.ContextLines
 	}
 	return defaultContextLines
+}
+
+func (o diagnosticOptions) siblingDiagnostics() bool {
+	if o.SiblingDiagnostics == nil {
+		return true
+	}
+	return *o.SiblingDiagnostics
 }
 
 // startManagerIfPresent spawns child LSPs for the languages observed
@@ -171,12 +191,19 @@ func (s *Server) stopManagerIfPresent() {
 // the workspace. Per-call caps live on `opts`; zeros fall back to
 // package defaults.
 //
+// Sibling rollup: gopls (and most LSPs) publish at the package level
+// — one file edit can produce new diagnostics on sibling files. After
+// the direct waits return, we snapshot the store and include any URI
+// whose generation advanced past the pre-edit baseline. Disable via
+// opts.SiblingDiagnostics=false.
+//
 // Returns:
 //   - available=false when manager is nil OR none of the URIs has a
 //     child LSP. Empty Items.
 //   - available=true with the per-URI diagnostic snapshot otherwise.
-//     TimedOut indicates at least one URI hit the deadline without a
-//     fresh publish (the snapshot may still be a prior state).
+//     TimedOut indicates at least one edited URI hit the deadline
+//     without a fresh publish (the snapshot may still be a prior
+//     state).
 func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, opts diagnosticOptions) editDiagnostics {
 	if s.manager == nil || len(uris) == 0 {
 		return editDiagnostics{Available: false, Items: []diagnosticJSON{}}
@@ -189,7 +216,14 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 		since uint64
 	}
 
+	// Pre-edit snapshot of every URI's gen counter. Anything that
+	// advances past this during the wait window was a consequence
+	// of THIS edit (modulo other clients editing concurrently —
+	// not a concern in single-client MCP).
+	preEditGens := storeGenSnapshot(store)
+
 	tracked := make([]captured, 0, len(uris))
+	editedURIs := make(map[string]struct{}, len(uris))
 	for _, uri := range uris {
 		child := s.manager.RouteByURI(uri)
 		if child == nil {
@@ -200,6 +234,7 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 		since := store.Gen(uri)
 		s.notifyChildOfEdit(child, uri, contents[uri])
 		tracked = append(tracked, captured{uri: uri, child: child, since: since})
+		editedURIs[uri] = struct{}{}
 	}
 
 	if len(tracked) == 0 {
@@ -212,19 +247,72 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 
 	out := editDiagnostics{Available: true, Items: []diagnosticJSON{}}
 	limit := opts.diagnosticLimit()
+
+	// Phase 1: wait for each edited URI's gen to advance. Diagnostics
+	// for the edited URIs are added first so they show up at the top
+	// of the response — the cap-overflow ordering then favors the
+	// agent's direct edit over sibling fallout.
+	editedDiags := make(map[string][]multiplex.Diagnostic, len(tracked))
 	for _, c := range tracked {
 		diags := store.WaitAfter(ctx, c.uri, c.since)
 		if ctx.Err() != nil {
 			out.TimedOut = true
 		}
+		editedDiags[c.uri] = diags
+	}
+
+	// Build the response in two passes — edited URIs first (favored
+	// by the cap), then siblings.
+	addDiagnostics := func(uri string, diags []multiplex.Diagnostic) {
 		for _, d := range diags {
 			if len(out.Items) >= limit {
 				out.DroppedDiagnostics++
 				continue
 			}
-			item := s.enrichDiagnostic(c.uri, d, contents[c.uri], opts)
-			out.Items = append(out.Items, item)
+			out.Items = append(out.Items, s.enrichDiagnostic(uri, d, contents[uri], opts))
 		}
+	}
+
+	// Sort edited URIs for stable output.
+	editedSorted := make([]string, 0, len(tracked))
+	for _, c := range tracked {
+		editedSorted = append(editedSorted, c.uri)
+	}
+	sort.Strings(editedSorted)
+	for _, uri := range editedSorted {
+		addDiagnostics(uri, editedDiags[uri])
+	}
+
+	// Phase 2: sibling rollup. Snapshot the store and add any URI
+	// whose gen advanced past pre-edit baseline AND wasn't part of
+	// the edited set. New URIs (never seen before) count as advanced
+	// from 0 → ≥1.
+	if opts.siblingDiagnostics() {
+		snapshot := store.Snapshot()
+		siblingURIs := make([]string, 0, len(snapshot))
+		for uri := range snapshot {
+			if _, edited := editedURIs[uri]; edited {
+				continue
+			}
+			if store.Gen(uri) > preEditGens[uri] {
+				siblingURIs = append(siblingURIs, uri)
+			}
+		}
+		sort.Strings(siblingURIs)
+		for _, uri := range siblingURIs {
+			addDiagnostics(uri, snapshot[uri])
+		}
+	}
+	return out
+}
+
+// storeGenSnapshot captures the current gen for every URI present in
+// the store. Used as the pre-edit baseline for sibling rollup.
+func storeGenSnapshot(store *multiplex.DiagnosticStore) map[string]uint64 {
+	current := store.Snapshot()
+	out := make(map[string]uint64, len(current))
+	for uri := range current {
+		out[uri] = store.Gen(uri)
 	}
 	return out
 }

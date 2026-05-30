@@ -365,11 +365,34 @@ Goal: switching branches in a stack doesn't re-parse the world.
       Load, version mismatch handling, malformed input, nil-cache
       safety, merge-into-existing, end-to-end persistence across
       sessions, and missing-file first-run behavior.
-- [ ] `internal/git` for explicit stack detection + eager prewarm.
-      The on-demand cache covers the common "switched back to a
-      branch you were just on" case for free. The remaining win
-      (pre-parsing ancestor branches you haven't visited yet) needs
-      `git read-tree` plumbing and a policy choice; defer.
+- [x] `internal/git` package: `Repo` wrapper around the `git`
+      binary (rev-parse, ls-tree, show). `FromCWD` discovers the
+      repo root; returns `ErrNotInRepo` / `ErrGitMissing` so
+      callers can branch. `CurrentBranch`, `UpstreamBranch`
+      (strips `origin/` prefix when a local branch by the same
+      name exists), `AncestorChain(branch, maxDepth)` (follows
+      upstream pointers, cycle-guarded), `ListFiles(branch)`,
+      `FileAt(branch, path)`. Tests build real git fixtures with
+      multi-branch stacks.
+- [x] `symbols.PrewarmFromBranch(repo, branch, reg, cache)`: walks
+      every file in a branch, runs the matching extractor if the
+      content-addressed cache hasn't seen `(language, sha256)`
+      yet, returns the count of fresh parses. Skipped: unknown
+      extensions, oversized files (>1 MiB cap, same as Build),
+      unreadable refs (submodule pointers). Idempotent across
+      branches sharing identical content — that's the central
+      stacked-branch payoff. Tests cover seed-then-rerun (all
+      hits second pass) and ancestor reuse (shared.go parsed
+      once across branches).
+- [x] MCP-side wiring: `Server.kickGitPrewarm` walks the current
+      branch's upstream chain (capped at 16 ancestors) and runs
+      `PrewarmFromBranch` per branch in a goroutine after
+      `handleInitialize` returns. Default on; `SetGitPrewarm(false)`
+      to disable. `WaitForGitPrewarm(ctx)` for tests. Silent
+      no-op when not in a git repo or git missing.
+      `TestGitPrewarmFillsCacheForAncestorOnlyFiles` proves the
+      Phase-3 win: ancestor-only files get parsed at startup, so
+      a later branch-switch reuses them for free.
 
 ## Phase 4 — MCP
 

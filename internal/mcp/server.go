@@ -110,6 +110,18 @@ type Server struct {
 	proactiveOpenDoneMu sync.Mutex
 	proactiveOpenDone   chan struct{}
 
+	// gitPrewarm controls whether handleInitialize walks ancestor
+	// branches in git and seeds the parse cache from their contents.
+	// Lets later branch-switches re-use parses for unchanged files
+	// without having to visit those branches first. Default true;
+	// no-op when not in a git repo or git binary missing.
+	gitPrewarm bool
+
+	// gitPrewarmDoneMu guards gitPrewarmDone — same dance as
+	// proactiveOpenDone.
+	gitPrewarmDoneMu sync.Mutex
+	gitPrewarmDone   chan struct{}
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }
@@ -127,6 +139,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		schemas:       schemas,
 		openDocs:      map[string]int32{},
 		proactiveOpen: true,
+		gitPrewarm:    true,
 	}
 	s.tools = registerTools()
 	s.resources = registerResources()
@@ -152,6 +165,34 @@ func (s *Server) WaitForProactiveOpen(ctx context.Context) error {
 	s.proactiveOpenDoneMu.Lock()
 	ch := s.proactiveOpenDone
 	s.proactiveOpenDoneMu.Unlock()
+	if ch == nil {
+		return nil
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// SetGitPrewarm toggles the post-initialize ancestor-branch walk
+// that seeds the parse cache from each ancestor's contents. Default
+// true. Disable when working outside a git repo (the walk no-ops
+// anyway), in CI workloads that don't benefit from branch reuse, or
+// in monstrously huge stacks where the up-front cost outweighs the
+// later switch-time saving.
+func (s *Server) SetGitPrewarm(enabled bool) {
+	s.gitPrewarm = enabled
+}
+
+// WaitForGitPrewarm blocks until the most recent ancestor-branch
+// prewarm finishes, or ctx is done. Returns nil if no walk was
+// kicked (git unavailable, prewarm disabled, etc.). Used by tests.
+func (s *Server) WaitForGitPrewarm(ctx context.Context) error {
+	s.gitPrewarmDoneMu.Lock()
+	ch := s.gitPrewarmDone
+	s.gitPrewarmDoneMu.Unlock()
 	if ch == nil {
 		return nil
 	}
@@ -311,6 +352,7 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 				}
 			}
 			s.startManagerIfPresent(idx)
+			s.kickGitPrewarm()
 		}
 	} else {
 		log.Print("mcp initialize: no workspace root configured; tools will return errors")

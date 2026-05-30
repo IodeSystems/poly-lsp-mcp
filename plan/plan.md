@@ -123,9 +123,18 @@ cross-language stitching yet (that's Phase 2).**
       `ErrExitWithoutShutdown` so main.go log.Fatals with exit code 1,
       `jsonrpc:"2.0"` validation, framing edge cases. 18 tests. Covers
       the contract independently of any language-specific handler.
-- [ ] LSP conformance smoke against a real editor (vs-code or
-      `nvim-lspconfig`) — proves we satisfy editor-side expectations
-      that automated tests miss (e.g., capability shape quirks).
+- [x] LSP conformance smoke against a real-editor-shaped client.
+      `scripts/smoke/editor_smoke.py` drives the binary as a real
+      subprocess with the kitchen-sink ClientCapabilities a typical
+      LSP client sends (nvim-lspconfig / vs-code / helix shape) and
+      asserts every response against the LSP spec's required-field
+      contracts: SymbolKind in 1..26, Range.end >= start, Location.uri
+      is a file:// URI, WorkspaceEdit.changes keyed by URI with
+      non-empty edits, textDocument/hover returns null (not -32601)
+      so editor popups don't break. 7/7 checks pass against the
+      polyglot fixture. Worth re-running before any release tagged
+      with editor-facing changes; doubles as a precise complement to
+      a true nvim/vs-code smoke when one is available.
 
 **Phase 1 open decisions, now resolved:**
 - LSP framework: stdlib won. `internal/jsonrpc` framing + the small

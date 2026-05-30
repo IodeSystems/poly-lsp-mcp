@@ -57,7 +57,7 @@ func TestApplySchemasProtoPromotesWorkspaceHitsToDeclared(t *testing.T) {
 func TestApplySchemasIdempotentOnRepeat(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "api.proto"),
-		[]byte("message Foo {\n}\n"), 0o644)
+		[]byte("syntax = \"proto3\";\n\nmessage Foo {\n}\n"), 0o644)
 	idx := symbols.NewIndex()
 
 	r := NewResolver(dir)
@@ -77,7 +77,7 @@ func TestApplySchemasUnknownDialectLoggedNotFatal(t *testing.T) {
 	r := NewResolver(dir)
 	// Mixed: one bad dialect + one good. Good one should still apply.
 	os.WriteFile(filepath.Join(dir, "good.proto"),
-		[]byte("message Good {\n}\n"), 0o644)
+		[]byte("syntax = \"proto3\";\n\nmessage Good {\n}\n"), 0o644)
 	inserted := r.ApplySchemas(idx, []config.Schema{
 		{File: "api.weird", Dialect: "weird"},
 		{File: "good.proto", Dialect: "proto"},

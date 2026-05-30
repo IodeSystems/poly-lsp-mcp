@@ -70,6 +70,37 @@ message Real {
 	}
 }
 
+func TestParseProtoExtractsNestedMessages(t *testing.T) {
+	// The regex MVP missed nested declarations whose opening brace
+	// shared a line with the parent. Tree-sitter handles arbitrary
+	// nesting because the grammar surfaces every (message …) node
+	// recursively.
+	content := []byte(`syntax = "proto3";
+
+message Outer {
+  string s = 1;
+
+  message Inner {
+    int64 n = 1;
+
+    enum InnerStatus {
+      OK = 0;
+    }
+  }
+}
+`)
+	entities := parseProto(content)
+	names := map[string]bool{}
+	for _, e := range entities {
+		names[e.Name] = true
+	}
+	for _, want := range []string{"Outer", "Inner", "InnerStatus"} {
+		if !names[want] {
+			t.Errorf("missing nested declaration %q: %+v", want, names)
+		}
+	}
+}
+
 func TestParseProtoTracksLineColumnOfName(t *testing.T) {
 	content := []byte("syntax = \"proto3\";\n\nmessage Foo {\n}\n")
 	entities := parseProto(content)

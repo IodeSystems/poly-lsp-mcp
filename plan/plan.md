@@ -288,8 +288,16 @@ schemas:
       Live polyglot smoke with all three dialects declared (proto +
       openapi + jsonschema): a single UserID rename now produces 20
       atomic edits across 9 files in 8 formats.
-- [ ] Tree-sitter-protobuf upgrade (replace regex parser) once we
-      hit a real codebase whose proto style breaks the regex MVP.
+- [x] Tree-sitter-protobuf via smacker/go-tree-sitter/protobuf
+      replaces the regex parser. Query unions
+      `(message (message_name (identifier)))`,
+      `(enum (enum_name …))`, `(service (service_name …))`,
+      `(rpc (rpc_name …))` so nested declarations work the same as
+      top-level ones (the regex MVP missed those). Parsers pool;
+      query compiles once via sync.Once. Stricter than the regex —
+      requires a `syntax = "..."` directive at the top of the file
+      to parse cleanly, which matches what real proto files
+      actually look like.
 
 ## Phase 3 — stacked-branch index
 

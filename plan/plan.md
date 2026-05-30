@@ -83,14 +83,22 @@ cross-language stitching yet (that's Phase 2).**
   - [x] `shutdown` drains the manager (5s timeout) before exit.
   - [ ] Workspace folder broadcast + `didChangeConfiguration` fanout
         *(not yet — needs per-child params shaping per LSP spec)*.
-- [ ] `internal/treesitter`:
-  - [ ] Parser registry (smacker/go-tree-sitter or
-        tree-sitter/go-tree-sitter — decide when this PR lands).
-  - [ ] Per-document parse cache keyed by content hash.
-  - [ ] Identifier-extraction queries per language (`.scm` files).
-- [ ] Fallback path: when the child LSP returns no result for `definition`,
-      `references`, `documentSymbol`, or returns an empty edit for `rename`,
-      synthesize a result from the tree-sitter index.
+- [x] Tree-sitter integration (rolled into `internal/symbols` rather
+      than a separate `internal/treesitter` package):
+  - Binding: smacker/go-tree-sitter (decision locked in the Go slice).
+  - Extractors implemented for go / typescript+tsx / python / sql via
+    inline query constants (no .scm sidecar files; queries are
+    compile-time constants per language). Tree replaces lexical for
+    code languages; data formats stay on the regex `LexicalExtractor`
+    on purpose.
+- [x] Fallback path for the methods we already serve:
+  `textDocument/documentSymbol` forwards to child LSP first and falls
+  back to the symbol-index slice for the file; `references` and
+  `workspace/symbol` are served from the index unconditionally; rename
+  is owned by us (synthesizes a `WorkspaceEdit` from the unioned
+  index). Per-method merging that combines child LSP results WITH the
+  index for `definition` and `hover` is still a follow-up — needs
+  per-method result-shape adapters.
 - [x] LSP conformance pack (`internal/server/conformance_test.go`):
       pre-init/post-shutdown gating with the right error codes (-32002,
       -32600), double-initialize rejection, exit-without-shutdown surfaces
@@ -101,10 +109,14 @@ cross-language stitching yet (that's Phase 2).**
       `nvim-lspconfig`) — proves we satisfy editor-side expectations
       that automated tests miss (e.g., capability shape quirks).
 
-**Open decisions (resolve in Phase 1):**
-- LSP framework: stdlib (current) vs `tliron/glsp` vs `go.lsp.dev/protocol`.
-- Tree-sitter binding: `smacker/go-tree-sitter` (mature, CGO) vs
-  `tree-sitter/go-tree-sitter` (official, newer). Both CGO.
+**Phase 1 open decisions, now resolved:**
+- LSP framework: stdlib won. `internal/jsonrpc` framing + the small
+  typed structs in `internal/server/lsp.go` are enough; pulling in
+  tliron/glsp or go.lsp.dev/protocol would add a dep without changing
+  what we actually serve.
+- Tree-sitter binding: smacker/go-tree-sitter won by virtue of
+  bundling go/ts/tsx/python/sql grammars in one module. Worth
+  revisiting if we ever need a grammar smacker doesn't ship.
 
 ## Phase 2 — cross-language symbol index (v0.2)
 
@@ -132,7 +144,7 @@ Cheap, noisy, immediate value for "find everywhere this name appears."
   - [x] Verified end-to-end against `testdata/fixtures/polyglot`: `UserID`
         appears in go + ts + python + markdown + yaml; `GreetUser` crosses
         go + yaml + markdown.
-- [ ] Swap each code language's extractor to a tree-sitter identifier
+- [x] Swap each code language's extractor to a tree-sitter identifier
       query. Data formats (yaml/json/markdown) deliberately stay on
       `LexicalExtractor` — their string-literal contents are exactly
       the cross-language references we want indexed, and tree-sitter's

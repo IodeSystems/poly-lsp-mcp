@@ -234,7 +234,7 @@ func TestToolsListReturnsRegisteredTools(t *testing.T) {
 			t.Errorf("tool %q has empty inputSchema", tool.Name)
 		}
 	}
-	for _, want := range []string{"find_symbol", "find_references", "rename", "list_bindings", "document_symbols", "refresh", "apply_rename"} {
+	for _, want := range []string{"find_symbol", "find_references", "rename", "list_bindings", "document_symbols", "refresh", "apply_rename", "document_structure", "read_range", "replace_range"} {
 		if !names[want] {
 			t.Errorf("tool %q missing from list", want)
 		}
@@ -1352,6 +1352,328 @@ func TestParseCacheAddsEntriesOnContentChange(t *testing.T) {
 	after := s.srv.parseCache.Len()
 	if after != before+1 {
 		t.Errorf("parseCache size after content change: %d -> %d, want +1", before, after)
+	}
+}
+
+// ---- document_structure / read_range / replace_range ----
+
+type structureNode struct {
+	Type      string `json:"type"`
+	Name      string `json:"name"`
+	StartLine int    `json:"startLine"`
+	StartCol  int    `json:"startCol"`
+	EndLine   int    `json:"endLine"`
+	EndCol    int    `json:"endCol"`
+}
+
+func TestDocumentStructureReturnsGoOutline(t *testing.T) {
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "document_structure",
+		"arguments": map[string]any{"file": "main.go"},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("document_structure errored: %+v", r.Content)
+	}
+	var nodes []structureNode
+	if err := json.Unmarshal([]byte(r.Content[0].Text), &nodes); err != nil {
+		t.Fatalf("not JSON-shaped: %v\n%s", err, r.Content[0].Text)
+	}
+	if len(nodes) == 0 {
+		t.Fatal("empty structure for main.go")
+	}
+	types := map[string]bool{}
+	names := map[string]bool{}
+	for _, n := range nodes {
+		types[n.Type] = true
+		if n.Name != "" {
+			names[n.Name] = true
+		}
+		if n.StartLine < 1 || n.EndLine < n.StartLine {
+			t.Errorf("malformed range on %+v", n)
+		}
+	}
+	for _, want := range []string{"package_clause", "function_declaration"} {
+		if !types[want] {
+			t.Errorf("type %q missing from structure: %+v", want, types)
+		}
+	}
+	if !names["UserID"] || !names["GreetUser"] {
+		t.Errorf("expected names UserID and GreetUser in structure: %+v", names)
+	}
+}
+
+func TestDocumentStructureUnsupportedLanguage(t *testing.T) {
+	// markdown/yaml/json don't have tree-sitter grammars wired for
+	// structure extraction.
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "document_structure",
+		"arguments": map[string]any{"file": "README.md"},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if !r.IsError {
+		t.Errorf("expected isError=true for markdown, got %+v", r)
+	}
+}
+
+func TestReadRangeReturnsExactText(t *testing.T) {
+	dir := t.TempDir()
+	body := "package main\n\nfunc Foo() {\n\treturn\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// "func Foo() {\n\treturn\n}" lives at line 3:1..5:2 (end-exclusive
+	// at column 2 of line 5).
+	resp := s.request("tools/call", map[string]any{
+		"name": "read_range",
+		"arguments": map[string]any{
+			"file":      "main.go",
+			"startLine": 3, "startCol": 1,
+			"endLine": 5, "endCol": 2,
+		},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("read_range errored: %+v", r.Content)
+	}
+	var payload struct {
+		Text string `json:"text"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	want := "func Foo() {\n\treturn\n}"
+	if payload.Text != want {
+		t.Errorf("text = %q, want %q", payload.Text, want)
+	}
+}
+
+func TestReadRangeRejectsOutOfRangePositions(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("hi\n"), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name": "read_range",
+		"arguments": map[string]any{
+			"file":      "main.go",
+			"startLine": 99, "startCol": 1,
+			"endLine": 100, "endCol": 1,
+		},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if !r.IsError {
+		t.Errorf("expected isError on out-of-range read, got %+v", r)
+	}
+}
+
+func TestReplaceRangeRewritesFileAtomically(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	orig := "package main\n\nfunc Foo() {\n\treturn\n}\n"
+	if err := os.WriteFile(mainPath, []byte(orig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// Replace the entire function body line by line: "func Foo() {\n\treturn\n}"
+	// with a one-liner.
+	resp := s.request("tools/call", map[string]any{
+		"name": "replace_range",
+		"arguments": map[string]any{
+			"file":      "main.go",
+			"startLine": 3, "startCol": 1,
+			"endLine": 5, "endCol": 2,
+			"newText": "func Foo() { return }",
+		},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("replace_range errored: %+v", r.Content)
+	}
+
+	got, err := os.ReadFile(mainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package main\n\nfunc Foo() { return }\n"
+	if string(got) != want {
+		t.Errorf("file after replace =\n%q\nwant\n%q", got, want)
+	}
+
+	// File mode preserved.
+	info, _ := os.Stat(mainPath)
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("file mode = %o, want 0755", info.Mode().Perm())
+	}
+}
+
+func TestReplaceRangeInsertionAtBoundary(t *testing.T) {
+	// Empty range (start == end) is a pure insertion.
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath, []byte("AB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name": "replace_range",
+		"arguments": map[string]any{
+			"file":      "main.go",
+			"startLine": 1, "startCol": 2,
+			"endLine": 1, "endCol": 2,
+			"newText": "X",
+		},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("insertion errored: %+v", r.Content)
+	}
+	got, _ := os.ReadFile(mainPath)
+	if string(got) != "AXB\n" {
+		t.Errorf("file after insertion = %q, want %q", got, "AXB\n")
+	}
+}
+
+func TestReplaceRangeRoundTripsThroughDocumentStructure(t *testing.T) {
+	// End-to-end: document_structure → read_range → replace_range
+	// pattern that an agent would use to refactor a function body.
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	orig := "package main\n\nfunc Greet() string {\n\treturn \"hi\"\n}\n"
+	if err := os.WriteFile(mainPath, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// 1. Get the structure.
+	resp := s.request("tools/call", map[string]any{
+		"name":      "document_structure",
+		"arguments": map[string]any{"file": "main.go"},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	var nodes []structureNode
+	json.Unmarshal([]byte(r.Content[0].Text), &nodes)
+	var fn *structureNode
+	for i := range nodes {
+		if nodes[i].Name == "Greet" {
+			fn = &nodes[i]
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("Greet not found in document_structure")
+	}
+
+	// 2. Read the function's text via the discovered range.
+	resp = s.request("tools/call", map[string]any{
+		"name": "read_range",
+		"arguments": map[string]any{
+			"file":      "main.go",
+			"startLine": fn.StartLine, "startCol": fn.StartCol,
+			"endLine": fn.EndLine, "endCol": fn.EndCol,
+		},
+	})
+	r = struct {
+		Content []Content `json:"content"`
+	}{}
+	json.Unmarshal(resp.Result, &r)
+	var readPayload struct {
+		Text string `json:"text"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &readPayload)
+	if !strings.Contains(readPayload.Text, "func Greet()") {
+		t.Errorf("read_range didn't return the function: %q", readPayload.Text)
+	}
+
+	// 3. Replace the function with a new body.
+	newBody := "func Greet() string { return \"hello\" }"
+	resp = s.request("tools/call", map[string]any{
+		"name": "replace_range",
+		"arguments": map[string]any{
+			"file":      "main.go",
+			"startLine": fn.StartLine, "startCol": fn.StartCol,
+			"endLine": fn.EndLine, "endCol": fn.EndCol,
+			"newText": newBody,
+		},
+	})
+	r = struct {
+		Content []Content `json:"content"`
+	}{}
+	json.Unmarshal(resp.Result, &r)
+
+	got, _ := os.ReadFile(mainPath)
+	if !strings.Contains(string(got), "hello") {
+		t.Errorf("file doesn't contain the new body:\n%s", got)
+	}
+	if strings.Contains(string(got), "\"hi\"") {
+		t.Errorf("old body string still present:\n%s", got)
 	}
 }
 

@@ -102,6 +102,60 @@ func registerTools() map[string]Tool {
 }`),
 			Handler: handleRefresh,
 		},
+		"document_structure": {
+			Name: "document_structure",
+			Description: "Return the tree-sitter top-level structure of a file: one entry per " +
+				"named child of the root (functions, types, classes, imports, etc.) with the " +
+				"declaration's name where the grammar exposes one and the 1-based end-exclusive " +
+				"range. Supported languages: go, typescript (and .tsx), python, sql. " +
+				"Pair with `read_range` to inspect a single declaration's text and `replace_range` " +
+				"to edit it atomically.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "file": {"type": "string", "description": "Workspace-relative or absolute path."}
+  },
+  "required": ["file"]
+}`),
+			Handler: handleDocumentStructure,
+		},
+		"read_range": {
+			Name: "read_range",
+			Description: "Return the text between two 1-based (line, col) positions in a file. " +
+				"Convention matches `document_structure`'s output: startCol/startLine inclusive, " +
+				"endCol/endLine exclusive. Works on any file regardless of language.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "file":      {"type": "string"},
+    "startLine": {"type": "integer", "minimum": 1},
+    "startCol":  {"type": "integer", "minimum": 1},
+    "endLine":   {"type": "integer", "minimum": 1},
+    "endCol":    {"type": "integer", "minimum": 1}
+  },
+  "required": ["file", "startLine", "startCol", "endLine", "endCol"]
+}`),
+			Handler: handleReadRange,
+		},
+		"replace_range": {
+			Name: "replace_range",
+			Description: "Atomically replace the text between two 1-based (line, col) positions in a file " +
+				"with newText. Same range convention as `read_range`. File goes through temp + rename so a " +
+				"partial failure doesn't corrupt it; file mode is preserved.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "file":      {"type": "string"},
+    "startLine": {"type": "integer", "minimum": 1},
+    "startCol":  {"type": "integer", "minimum": 1},
+    "endLine":   {"type": "integer", "minimum": 1},
+    "endCol":    {"type": "integer", "minimum": 1},
+    "newText":   {"type": "string"}
+  },
+  "required": ["file", "startLine", "startCol", "endLine", "endCol", "newText"]
+}`),
+			Handler: handleReplaceRange,
+		},
 		"apply_rename": {
 			Name: "apply_rename",
 			Description: "Cross-language rename that WRITES the edits to disk instead of returning them. Same confidence policy and aliasing-safety check as `rename` — declared sites win when present, edits whose on-disk text doesn't match the name being renamed are skipped. " +
@@ -648,6 +702,178 @@ func handleDocumentSymbols(s *Server, args json.RawMessage) ([]Content, bool, er
 		return hits[i].Col < hits[j].Col
 	})
 	return jsonContent(hits), false, nil
+}
+
+// rangeArgs captures the shared (file, startLine, startCol, endLine,
+// endCol) input shape used by read_range and replace_range. 1-based,
+// end-exclusive — same as document_structure's output.
+type rangeArgs struct {
+	File      string `json:"file"`
+	StartLine int    `json:"startLine"`
+	StartCol  int    `json:"startCol"`
+	EndLine   int    `json:"endLine"`
+	EndCol    int    `json:"endCol"`
+}
+
+func (a rangeArgs) validate() error {
+	if a.File == "" {
+		return fmt.Errorf("file is required")
+	}
+	if a.StartLine < 1 || a.StartCol < 1 || a.EndLine < 1 || a.EndCol < 1 {
+		return fmt.Errorf("line and col must be >= 1 (got %+v)", a)
+	}
+	if a.EndLine < a.StartLine || (a.EndLine == a.StartLine && a.EndCol < a.StartCol) {
+		return fmt.Errorf("range end before start: %+v", a)
+	}
+	return nil
+}
+
+// resolveFileArg turns a workspace-relative or absolute file path
+// from a tool argument into an absolute one.
+func (s *Server) resolveFileArg(file string) string {
+	if filepath.IsAbs(file) {
+		return file
+	}
+	if root := s.getRoot(); root != "" {
+		return filepath.Join(root, file)
+	}
+	return file
+}
+
+// languageForFile dispatches by extension against the registry.
+// Returns "" if no language is registered for the file. Used by
+// document_structure to choose a tree-sitter grammar.
+func (s *Server) languageForFile(path string) string {
+	ext := strings.TrimPrefix(filepath.Ext(path), ".")
+	if ext == "" {
+		return ""
+	}
+	lang := s.registry.LookupByExt(ext)
+	if lang == nil {
+		return ""
+	}
+	return lang.Name
+}
+
+func handleDocumentStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var p struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if p.File == "" {
+		return nil, true, fmt.Errorf("file is required")
+	}
+	abs := s.resolveFileArg(p.File)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", p.File, err)
+	}
+	lang := s.languageForFile(abs)
+	if lang == "" {
+		return nil, true, fmt.Errorf("no language registered for %s", p.File)
+	}
+	nodes, err := symbols.StructureNodes(lang, content)
+	if err != nil {
+		return nil, true, err
+	}
+	return jsonContent(nodes), false, nil
+}
+
+func handleReadRange(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var a rangeArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if err := a.validate(); err != nil {
+		return nil, true, err
+	}
+	abs := s.resolveFileArg(a.File)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
+	}
+	startOff, ok := lineColToByteOffset(content, a.StartLine, a.StartCol)
+	if !ok {
+		return nil, true, fmt.Errorf("start out of range: %d:%d", a.StartLine, a.StartCol)
+	}
+	endOff, ok := lineColToByteOffset(content, a.EndLine, a.EndCol)
+	if !ok {
+		return nil, true, fmt.Errorf("end out of range: %d:%d", a.EndLine, a.EndCol)
+	}
+	if endOff > len(content) {
+		endOff = len(content)
+	}
+	if startOff > endOff {
+		return nil, true, fmt.Errorf("start byte offset %d > end %d", startOff, endOff)
+	}
+	return jsonContent(map[string]any{
+		"file":      a.File,
+		"startLine": a.StartLine,
+		"startCol":  a.StartCol,
+		"endLine":   a.EndLine,
+		"endCol":    a.EndCol,
+		"text":      string(content[startOff:endOff]),
+	}), false, nil
+}
+
+func handleReplaceRange(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var p struct {
+		rangeArgs
+		NewText string `json:"newText"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if err := p.rangeArgs.validate(); err != nil {
+		return nil, true, err
+	}
+	abs := s.resolveFileArg(p.File)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", p.File, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("stat %s: %w", p.File, err)
+	}
+	startOff, ok := lineColToByteOffset(content, p.StartLine, p.StartCol)
+	if !ok {
+		return nil, true, fmt.Errorf("start out of range: %d:%d", p.StartLine, p.StartCol)
+	}
+	endOff, ok := lineColToByteOffset(content, p.EndLine, p.EndCol)
+	if !ok {
+		return nil, true, fmt.Errorf("end out of range: %d:%d", p.EndLine, p.EndCol)
+	}
+	if endOff > len(content) {
+		endOff = len(content)
+	}
+	if startOff > endOff {
+		return nil, true, fmt.Errorf("start byte offset %d > end %d", startOff, endOff)
+	}
+
+	out := make([]byte, 0, len(content)-(endOff-startOff)+len(p.NewText))
+	out = append(out, content[:startOff]...)
+	out = append(out, p.NewText...)
+	out = append(out, content[endOff:]...)
+
+	tmp := abs + ".tslsmcp.tmp"
+	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+		return nil, true, fmt.Errorf("write temp: %w", err)
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return nil, true, fmt.Errorf("rename: %w", err)
+	}
+
+	return jsonContent(map[string]any{
+		"file":         p.File,
+		"replacedFrom": map[string]int{"line": p.StartLine, "col": p.StartCol},
+		"replacedTo":   map[string]int{"line": p.EndLine, "col": p.EndCol},
+		"bytesRemoved": endOff - startOff,
+		"bytesAdded":   len(p.NewText),
+	}), false, nil
 }
 
 // jsonContent marshals value into a single text content block — the

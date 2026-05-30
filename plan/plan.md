@@ -413,9 +413,16 @@ the full cross-language stack the LSP layer already serves to editors.
       produces 20 atomic edits across proto + openapi + jsonschema + go
       + ts + py + yaml + sql + md.
 - [x] More tools as use cases surfaced:
-      `list_bindings`, `document_symbols`, `refresh`, `apply_rename`
-      shipped — see entries above. Future tools land here as their
-      use cases come up.
+      `list_bindings`, `document_symbols`, `refresh`, `apply_rename`,
+      `document_structure`, `read_range`, `replace_range` shipped.
+      The last three form the AST-aware-editing pattern LLM agents
+      typically want: walk the syntactic structure of a file, read
+      a specific node's text, write a replacement back. Ranges (not
+      stable IDs) link the three so an edit between read and write
+      doesn't invalidate cached identifiers. `document_structure`
+      uses tree-sitter for go/typescript/python/sql; the other two
+      work on any file type. Future tools land here as their use
+      cases come up.
 - [x] Live editing tool: `apply_rename(name, newName)` builds the
       same plan as `rename` and writes the edits to disk. Per-file
       edits sorted (line desc, col desc) and applied right-to-left so

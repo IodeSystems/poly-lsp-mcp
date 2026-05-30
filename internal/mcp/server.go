@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/iodesystems/tslsmcp/internal/bindings"
@@ -66,6 +68,11 @@ type Server struct {
 	// whose bytes actually changed. See symbols.ParseCache.
 	parseCache *symbols.ParseCache
 
+	// cachePath is where parseCache is persisted between runs. Empty
+	// disables persistence (the cache lives only as long as the
+	// process). Production main.go sets this; tests typically don't.
+	cachePath string
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }
@@ -86,11 +93,22 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 	return s
 }
 
+// SetCachePath configures persistence: on Serve start the cache loads
+// from path if it exists; on Serve return (clean or otherwise) the
+// current cache is written back atomically via a temp file. Empty
+// path disables persistence (the default — tests get an in-memory-
+// only cache). main.go sets this for production runs.
+func (s *Server) SetCachePath(path string) {
+	s.cachePath = path
+}
+
 // Serve reads framed JSON-RPC messages from in and writes responses to
 // out until the stream closes or shutdown is observed.
 func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	s.enc = json.NewEncoder(out)
 	dec := json.NewDecoder(in)
+	s.maybeLoadCache()
+	defer s.maybeSaveCache()
 	for {
 		var msg jsonrpc.Message
 		if err := dec.Decode(&msg); err != nil {
@@ -375,4 +393,66 @@ func (s *Server) send(m *jsonrpc.Message) {
 	if err := s.enc.Encode(m); err != nil {
 		log.Printf("write: %v", err)
 	}
+}
+
+// maybeLoadCache pulls a previously-saved cache off disk when
+// persistence is configured. Missing files are silently OK (first
+// run). Version mismatches and decode errors are logged then ignored
+// — the in-memory cache stays empty and rebuilds from scratch, which
+// is always correct.
+func (s *Server) maybeLoadCache() {
+	if s.cachePath == "" {
+		return
+	}
+	f, err := os.Open(s.cachePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("mcp: open cache %s: %v", s.cachePath, err)
+		}
+		return
+	}
+	defer f.Close()
+	if err := s.parseCache.Load(f); err != nil {
+		log.Printf("mcp: load cache %s: %v (continuing with empty cache)", s.cachePath, err)
+		return
+	}
+	log.Printf("mcp: loaded %d entries from %s", s.parseCache.Len(), s.cachePath)
+}
+
+// maybeSaveCache writes the current cache back to disk when
+// persistence is configured. Uses temp-file + Rename so a crashed
+// process doesn't leave a half-written cache. Errors are logged but
+// not surfaced — failing to save a cache is never a reason to fail
+// the rest of the shutdown.
+func (s *Server) maybeSaveCache() {
+	if s.cachePath == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.cachePath), 0o755); err != nil {
+		log.Printf("mcp: mkdir cache dir: %v", err)
+		return
+	}
+	tmp := s.cachePath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		log.Printf("mcp: create cache tmp: %v", err)
+		return
+	}
+	if err := s.parseCache.Save(f); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		log.Printf("mcp: save cache: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		log.Printf("mcp: close cache tmp: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.cachePath); err != nil {
+		_ = os.Remove(tmp)
+		log.Printf("mcp: rename cache: %v", err)
+		return
+	}
+	log.Printf("mcp: saved %d entries to %s", s.parseCache.Len(), s.cachePath)
 }

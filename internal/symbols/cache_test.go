@@ -1,6 +1,9 @@
 package symbols
 
 import (
+	"bytes"
+	"encoding/gob"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,6 +67,143 @@ func TestParseCacheNilSafe(t *testing.T) {
 	c.Put("go", []byte("x"), nil) // must not panic
 	if c.Len() != 0 {
 		t.Errorf("Len = %d on nil cache, want 0", c.Len())
+	}
+}
+
+func TestParseCacheSaveLoadRoundTrip(t *testing.T) {
+	src := NewParseCacheLRU(0) // unbounded for deterministic shape
+	src.Put("go", []byte("alpha content"), []Hit{{Name: "A", Line: 1, Col: 1}})
+	src.Put("typescript", []byte("beta content"), []Hit{
+		{Name: "B", Line: 2, Col: 3},
+		{Name: "C", Line: 2, Col: 5},
+	})
+	src.Put("markdown", []byte("gamma content"), []Hit{{Name: "G", Line: 5, Col: 1}})
+
+	var buf bytes.Buffer
+	if err := src.Save(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := NewParseCacheLRU(0)
+	if err := dst.Load(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if dst.Len() != src.Len() {
+		t.Errorf("Len after Load = %d, want %d", dst.Len(), src.Len())
+	}
+
+	for _, c := range []struct {
+		lang    string
+		content string
+		want    string
+	}{
+		{"go", "alpha content", "A"},
+		{"typescript", "beta content", "B"},
+		{"markdown", "gamma content", "G"},
+	} {
+		hits, ok := dst.Get(c.lang, []byte(c.content))
+		if !ok {
+			t.Errorf("missing %s/%q after Load", c.lang, c.content)
+			continue
+		}
+		if len(hits) == 0 || hits[0].Name != c.want {
+			t.Errorf("%s/%q after Load: hits = %+v, want first %q", c.lang, c.content, hits, c.want)
+		}
+	}
+}
+
+func TestParseCacheLoadPreservesLRUOrdering(t *testing.T) {
+	// In the source: c put last, so c is newest, a is oldest.
+	src := NewParseCacheLRU(0)
+	src.Put("go", []byte("a"), []Hit{{Name: "a"}})
+	src.Put("go", []byte("b"), []Hit{{Name: "b"}})
+	src.Put("go", []byte("c"), []Hit{{Name: "c"}})
+
+	var buf bytes.Buffer
+	if err := src.Save(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reload into a cache with cap=2. After Load, the oldest entry
+	// ('a') should have been evicted to keep cap, matching what would
+	// happen if we'd replayed the Puts in order on a fresh cap-2 cache.
+	dst := NewParseCacheLRU(2)
+	if err := dst.Load(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if dst.Len() != 2 {
+		t.Errorf("Len = %d, want 2 after Load with cap 2", dst.Len())
+	}
+	if _, ok := dst.Get("go", []byte("a")); ok {
+		t.Error("oldest entry 'a' should have been evicted during Load")
+	}
+	if _, ok := dst.Get("go", []byte("b")); !ok {
+		t.Error("'b' should survive Load")
+	}
+	if _, ok := dst.Get("go", []byte("c")); !ok {
+		t.Error("'c' should survive Load")
+	}
+}
+
+func TestParseCacheLoadRejectsVersionMismatch(t *testing.T) {
+	// Hand-craft a cache file with a bogus version.
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(cacheFile{
+		Version: cacheFileVersion + 999,
+		Entries: nil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := NewParseCache()
+	err := c.Load(&buf)
+	if !errors.Is(err, ErrCacheVersion) {
+		t.Errorf("Load on version mismatch returned %v, want ErrCacheVersion", err)
+	}
+}
+
+func TestParseCacheLoadRejectsMalformedInput(t *testing.T) {
+	c := NewParseCache()
+	err := c.Load(bytes.NewReader([]byte("not a valid gob stream")))
+	if err == nil {
+		t.Error("Load accepted malformed input")
+	}
+}
+
+func TestParseCacheSaveNilSafe(t *testing.T) {
+	var c *ParseCache
+	var buf bytes.Buffer
+	if err := c.Save(&buf); err != nil {
+		t.Errorf("nil cache Save errored: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("nil cache wrote %d bytes, want 0", buf.Len())
+	}
+}
+
+func TestParseCacheLoadMergesIntoExisting(t *testing.T) {
+	// Source has X; dst has Y; after Load(src), dst should have both.
+	src := NewParseCacheLRU(0)
+	src.Put("go", []byte("x"), []Hit{{Name: "X"}})
+
+	var buf bytes.Buffer
+	if err := src.Save(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := NewParseCacheLRU(0)
+	dst.Put("go", []byte("y"), []Hit{{Name: "Y"}})
+
+	if err := dst.Load(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if dst.Len() != 2 {
+		t.Errorf("Len after merge = %d, want 2", dst.Len())
+	}
+	if _, ok := dst.Get("go", []byte("x")); !ok {
+		t.Error("loaded entry X missing")
+	}
+	if _, ok := dst.Get("go", []byte("y")); !ok {
+		t.Error("pre-existing entry Y lost")
 	}
 }
 

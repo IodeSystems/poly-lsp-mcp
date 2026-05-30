@@ -60,6 +60,7 @@ func runMCP() {
 	log.Printf("mcp: workspace root %s", root)
 
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+	srv.SetCachePath(filepath.Join(root, ".tslsmcp", "cache.gob"))
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}

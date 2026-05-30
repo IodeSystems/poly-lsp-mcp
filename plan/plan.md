@@ -346,9 +346,16 @@ Goal: switching branches in a stack doesn't re-parse the world.
       back when over cap. Five new tests cover eviction order,
       promote-on-Get, promote-on-Put-replace, the unbounded mode,
       and the default-cap sanity check.
-- [ ] Disk persistence. Cache currently lives for one process. A
-      `.tslsmcp/cache` store would survive restarts and avoid the
-      first-walk cost on agent restart. Defer until use cases ask.
+- [x] Disk persistence. `ParseCache.Save(w)` / `Load(r)` use a
+      version-tagged gob format. `mcp.Server.SetCachePath(path)` opts
+      a server into persistence: load on Serve start, save on Serve
+      return via temp + Rename for atomicity. `main.go` wires
+      `<root>/.tslsmcp/cache.gob` for the MCP subcommand; tests don't
+      set the path, so they get in-memory-only behavior with no file
+      pollution. Eight new tests cover round-trip, LRU-preserving
+      Load, version mismatch handling, malformed input, nil-cache
+      safety, merge-into-existing, end-to-end persistence across
+      sessions, and missing-file first-run behavior.
 - [ ] `internal/git` for explicit stack detection + eager prewarm.
       The on-demand cache covers the common "switched back to a
       branch you were just on" case for free. The remaining win

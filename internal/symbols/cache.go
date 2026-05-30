@@ -3,8 +3,36 @@ package symbols
 import (
 	"container/list"
 	"crypto/sha256"
+	"encoding/gob"
+	"fmt"
+	"io"
 	"sync"
 )
+
+// cacheFileVersion is bumped whenever the on-disk format changes in a
+// non-backwards-compatible way. Load returns ErrCacheVersion on
+// mismatch so callers can drop the file and start fresh instead of
+// reading garbage.
+const cacheFileVersion uint32 = 1
+
+// ErrCacheVersion is returned by ParseCache.Load when the on-disk
+// version doesn't match cacheFileVersion. Callers typically respond
+// by discarding the file and rebuilding from scratch.
+var ErrCacheVersion = fmt.Errorf("symbols: cache file version mismatch")
+
+// cacheFile is the on-disk shape. Version-tagged so future schema
+// changes can be detected (and the file regenerated) without
+// corrupting indexes built from stale data.
+type cacheFile struct {
+	Version uint32
+	Entries []cacheFileEntry
+}
+
+type cacheFileEntry struct {
+	Language string
+	Hash     [32]byte
+	Hits     []Hit
+}
 
 // defaultCacheEntries is the LRU cap NewParseCache picks when the
 // caller doesn't specify one. Sized so a workspace of a few thousand
@@ -86,7 +114,80 @@ func (c *ParseCache) Put(language string, content []byte, hits []Hit) {
 	if c == nil {
 		return
 	}
-	key := cacheKey{Language: language, Hash: sha256.Sum256(content)}
+	c.putRaw(cacheKey{Language: language, Hash: sha256.Sum256(content)}, hits)
+}
+
+// Len returns the number of entries currently in the cache. Diagnostic
+// and test use only.
+func (c *ParseCache) Len() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ll.Len()
+}
+
+// Save serializes the cache to w in a gob-encoded version-tagged
+// format. Iteration order is newest-first (front of the LRU queue)
+// so a subsequent Load reproduces the same LRU shape: the first
+// entry Loaded becomes the newest, matching Save's traversal order.
+func (c *ParseCache) Save(w io.Writer) error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entries := make([]cacheFileEntry, 0, c.ll.Len())
+	for e := c.ll.Front(); e != nil; e = e.Next() {
+		ce := e.Value.(*cacheEntry)
+		entries = append(entries, cacheFileEntry{
+			Language: ce.key.Language,
+			Hash:     ce.key.Hash,
+			Hits:     ce.hits,
+		})
+	}
+
+	return gob.NewEncoder(w).Encode(cacheFile{
+		Version: cacheFileVersion,
+		Entries: entries,
+	})
+}
+
+// Load reads a previously-saved cache from r and merges its entries
+// into c. The on-disk newest-first ordering is reproduced: the entry
+// that was newest at Save time ends up at the front of the LRU queue.
+// Entries already present in c are updated (their position promotes)
+// rather than duplicated.
+//
+// Returns ErrCacheVersion when the file's schema version doesn't
+// match the current build — callers typically catch that and drop
+// the file. Other decode errors propagate as-is.
+func (c *ParseCache) Load(r io.Reader) error {
+	if c == nil {
+		return fmt.Errorf("symbols: Load on nil cache")
+	}
+	var file cacheFile
+	if err := gob.NewDecoder(r).Decode(&file); err != nil {
+		return fmt.Errorf("decode cache file: %w", err)
+	}
+	if file.Version != cacheFileVersion {
+		return ErrCacheVersion
+	}
+	// Iterate back-to-front so the LAST putRaw ends up at the LRU
+	// front, matching the entry that was newest at Save time.
+	for i := len(file.Entries) - 1; i >= 0; i-- {
+		e := file.Entries[i]
+		c.putRaw(cacheKey{Language: e.Language, Hash: e.Hash}, e.Hits)
+	}
+	return nil
+}
+
+// putRaw is the hash-keyed insertion the public Put builds on. Load
+// uses it directly so it can replay entries whose original content
+// isn't available anymore.
+func (c *ParseCache) putRaw(key cacheKey, hits []Hit) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.m[key]; ok {
@@ -104,15 +205,4 @@ func (c *ParseCache) Put(language string, content []byte, hits []Hit) {
 			delete(c.m, oldEntry.key)
 		}
 	}
-}
-
-// Len returns the number of entries currently in the cache. Diagnostic
-// and test use only.
-func (c *ParseCache) Len() int {
-	if c == nil {
-		return 0
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.ll.Len()
 }

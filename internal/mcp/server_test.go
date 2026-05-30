@@ -1169,6 +1169,115 @@ func TestResourcesReadUnknownURIReturnsInvalidParams(t *testing.T) {
 	}
 }
 
+func TestSetCachePathPersistsAcrossSessions(t *testing.T) {
+	// Run two MCP sessions against the same cache path. The second
+	// session should load whatever the first one saved on Serve exit.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\n\nfunc Persisted() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(dir, ".tslsmcp", "cache.gob")
+
+	// Session 1: build + save.
+	{
+		reg, err := config.Default().Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := New(reg, dir, nil, nil)
+		srv.SetCachePath(cachePath)
+
+		sIn, cOut := io.Pipe()
+		cIn, sOut := io.Pipe()
+		done := make(chan error, 1)
+		go func() { done <- srv.Serve(sIn, sOut) }()
+
+		s := &mcpSession{
+			t: t, srv: srv, srvIn: cOut, clientR: json.NewDecoder(cIn),
+			clientW: cOut, done: done,
+		}
+		s.request("initialize", map[string]any{})
+		s.notify("notifications/initialized", map[string]any{})
+		if srv.parseCache.Len() == 0 {
+			t.Fatal("session 1: cache empty after initialize")
+		}
+		s.close()
+	}
+
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("cache file not written: %v", err)
+	}
+
+	// Session 2: load + verify.
+	{
+		reg, _ := config.Default().Build()
+		srv := New(reg, dir, nil, nil)
+		srv.SetCachePath(cachePath)
+
+		sIn, cOut := io.Pipe()
+		cIn, sOut := io.Pipe()
+		done := make(chan error, 1)
+		go func() { done <- srv.Serve(sIn, sOut) }()
+		s := &mcpSession{
+			t: t, srv: srv, srvIn: cOut, clientR: json.NewDecoder(cIn),
+			clientW: cOut, done: done,
+		}
+		s.request("initialize", map[string]any{})
+		s.notify("notifications/initialized", map[string]any{})
+		if srv.parseCache.Len() == 0 {
+			t.Error("session 2: cache empty after load (persistence not effective)")
+		}
+		// Sanity: tool still works.
+		resp := s.request("tools/call", map[string]any{
+			"name":      "find_references",
+			"arguments": map[string]any{"name": "Persisted"},
+		})
+		var r struct {
+			Content []Content `json:"content"`
+		}
+		json.Unmarshal(resp.Result, &r)
+		var hits []siteJSON
+		json.Unmarshal([]byte(r.Content[0].Text), &hits)
+		if len(hits) == 0 {
+			t.Error("Persisted name missing after reload")
+		}
+		s.close()
+	}
+}
+
+func TestSetCachePathLoadMissingFileIsClean(t *testing.T) {
+	// A cache path that doesn't exist yet should produce no error
+	// and no spam — first-run behavior.
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, ".tslsmcp", "cache.gob")
+
+	reg, _ := config.Default().Build()
+	srv := New(reg, "", nil, nil) // empty root → no index build, no cache writes
+	srv.SetCachePath(cachePath)
+
+	sIn, cOut := io.Pipe()
+	cIn, sOut := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(sIn, sOut) }()
+	s := &mcpSession{
+		t: t, srv: srv, srvIn: cOut, clientR: json.NewDecoder(cIn),
+		clientW: cOut, done: done,
+	}
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+	s.close()
+	// Server still wrote an empty cache file on exit — that's the
+	// "next session loads zero entries" path.
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Errorf("expected cache file to be created on exit, got %v", err)
+	}
+}
+
 func TestParseCachePersistsAcrossRefresh(t *testing.T) {
 	// First initialize populates the cache. A subsequent refresh
 	// against the same content must not add new entries — every file

@@ -411,11 +411,19 @@ the full cross-language stack the LSP layer already serves to editors.
   - `node_delete(file, range)` — equivalent to node_edit with empty
     newText but states intent. Exact deletion (no surrounding-
     whitespace trimming).
-  - `node_refactor(file, range, kind, ...kind_args)` — multi-modal
-    refactor channel. v0.2 ships `kind="rename"`; future kinds
-    (change_signature etc.) land here without growing the tool count.
-    Rename preserves the declared-bindings + aliasing-safety semantics
-    from the deleted apply_rename tool, atomically across every file.
+  - `node_refactor(file, range, refactor:{rename?, params?, return?})`
+    — multi-modal refactor channel with composable ops. The nested
+    `refactor` object combines any of: identifier rename
+    (workspace-wide, declared-bindings + aliasing-safety semantics),
+    Go function-signature parameter list rewrite, Go return-type
+    rewrite (including insertion into previously-void signatures).
+    When `params` changes the arity, callers across the workspace are
+    rewritten best-effort — args truncated on shrink, padded with
+    `goZeroValue(type)` placeholders on growth (`""`, `0`, `false`,
+    `nil`, or `*new(T)` for unknown named types). Spread (`f(x...)`)
+    callers are reported as `skipped`. Legacy `kind="rename",
+    newName=X` shape still accepted; internally normalized into the
+    nested form.
 
   Workspace-relative paths in all tool output; absolute paths accepted
   on input. poly-lsp-mcp://workspace and poly-lsp-mcp://bindings resources are

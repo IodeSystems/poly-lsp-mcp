@@ -1046,6 +1046,96 @@ func TestNodeRefactorSignatureChangeReturn(t *testing.T) {
 	})
 }
 
+// TestNodeRefactorSignatureCallSiteAddArg adds a parameter to a
+// function that's called from a sibling file. The call site should
+// be rewritten with a zero-value placeholder for the new arg.
+func TestNodeRefactorSignatureCallSiteAddArg(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.go"),
+		[]byte("package main\n\nfunc Greet(name string) string {\n\treturn name\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "caller.go"),
+		[]byte("package main\n\nfunc init() {\n\t_ = Greet(\"hi\")\n\t_ = Greet(\"there\")\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "lib.go",
+		"startLine": 3, "startCol": 6,
+		"endLine": 3, "endCol": 11,
+		"refactor": map[string]any{
+			"params": []map[string]any{
+				{"name": "name", "type": "string"},
+				{"name": "count", "type": "int"},
+			},
+		},
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "caller.go"))
+	if !strings.Contains(string(got), `Greet("hi", 0)`) {
+		t.Errorf("expected first call rewritten to Greet(\"hi\", 0); got:\n%s", got)
+	}
+	if !strings.Contains(string(got), `Greet("there", 0)`) {
+		t.Errorf("expected second call rewritten to Greet(\"there\", 0); got:\n%s", got)
+	}
+}
+
+// TestNodeRefactorSignatureCallSiteDropArg removes a parameter; call
+// sites drop their trailing arg accordingly.
+func TestNodeRefactorSignatureCallSiteDropArg(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.go"),
+		[]byte("package main\n\nfunc Greet(name string, count int) string {\n\treturn name\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "caller.go"),
+		[]byte("package main\n\nfunc init() {\n\t_ = Greet(\"hi\", 3)\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "lib.go",
+		"startLine": 3, "startCol": 6,
+		"endLine": 3, "endCol": 11,
+		"refactor": map[string]any{
+			"params": []map[string]any{
+				{"name": "name", "type": "string"},
+			},
+		},
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "caller.go"))
+	if !strings.Contains(string(got), `Greet("hi")`) {
+		t.Errorf("expected trailing arg dropped: %s", got)
+	}
+	if strings.Contains(string(got), `, 3`) {
+		t.Errorf("dropped arg still present: %s", got)
+	}
+}
+
 // TestNodeRefactorSignatureCombinedRename rewrites params AND renames
 // the function in the same call. The rename should also touch any
 // callers in the workspace (here: another file using the function).
@@ -1089,8 +1179,11 @@ func TestNodeRefactorSignatureCombinedRename(t *testing.T) {
 	if !strings.Contains(string(mainGot), "func Hello(name string, age int) string") {
 		t.Errorf("main.go declaration wrong:\n%s", mainGot)
 	}
-	if !strings.Contains(string(callerGot), "Hello(\"world\")") {
-		t.Errorf("caller.go didn't rename Greet → Hello:\n%s", callerGot)
+	// Call-site rewriting padded the second arg with the int zero
+	// value. Best-effort: the agent might tweak it after seeing
+	// diagnostics, but the call compiles and gopls can type-check.
+	if !strings.Contains(string(callerGot), `Hello("world", 0)`) {
+		t.Errorf("caller.go expected Hello(\"world\", 0) after rename + param-add; got:\n%s", callerGot)
 	}
 }
 

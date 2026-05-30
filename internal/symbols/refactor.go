@@ -97,6 +97,115 @@ func FindGoFunctionSignature(content []byte, line, col int) (*GoFunctionSignatur
 	return nil, nil
 }
 
+// GoCallSite describes one resolved call to a function in a single
+// Go file: where it lives + the byte range of the contents inside its
+// `(...)`. Used by call-site rewriting after a signature change.
+//
+// ArgsInnerStart / ArgsInnerEnd point at the bytes BETWEEN the parens
+// (so `Foo()` has Inner = (X, X) where X is the byte after `(`).
+// CurrentArgs is the list of argument expression source strings,
+// trimmed. Variadics with `...` and the spread form are flagged in
+// Skipped so the caller can leave them alone.
+type GoCallSite struct {
+	Line, Col       int
+	ArgsInnerStart  int
+	ArgsInnerEnd    int
+	CurrentArgs     []string
+	Skipped         string // non-empty: skip reason
+	HasSpread       bool   // f(x...) form
+}
+
+// FindGoCallSites walks `content` and returns every call expression
+// whose called function is an identifier or selector field matching
+// `name`. Identifier callers (Foo()) and selector callers (x.Foo())
+// both qualify so a renamed method shows up everywhere it's called.
+//
+// Doesn't traverse strings or comments by virtue of using tree-sitter
+// (call_expression doesn't live inside string_literal or comment
+// nodes).
+func FindGoCallSites(content []byte, name string) ([]GoCallSite, error) {
+	lang := LanguageByName("go")
+	if lang == nil {
+		return nil, fmt.Errorf("no tree-sitter grammar for go")
+	}
+	parser := sitter.NewParser()
+	parser.SetLanguage(lang)
+	tree, err := parser.ParseCtx(context.Background(), nil, content)
+	if err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	if tree == nil {
+		return nil, nil
+	}
+	defer tree.Close()
+
+	var sites []GoCallSite
+	var walk func(n *sitter.Node)
+	walk = func(n *sitter.Node) {
+		if n.Type() == "call_expression" {
+			if site, ok := callSiteForName(n, content, name); ok {
+				sites = append(sites, site)
+			}
+		}
+		count := int(n.NamedChildCount())
+		for i := range count {
+			walk(n.NamedChild(i))
+		}
+	}
+	walk(tree.RootNode())
+	return sites, nil
+}
+
+func callSiteForName(call *sitter.Node, content []byte, name string) (GoCallSite, bool) {
+	fn := call.ChildByFieldName("function")
+	if fn == nil {
+		return GoCallSite{}, false
+	}
+	switch fn.Type() {
+	case "identifier":
+		if fn.Content(content) != name {
+			return GoCallSite{}, false
+		}
+	case "selector_expression":
+		field := fn.ChildByFieldName("field")
+		if field == nil || field.Content(content) != name {
+			return GoCallSite{}, false
+		}
+	default:
+		return GoCallSite{}, false
+	}
+	args := call.ChildByFieldName("arguments")
+	if args == nil {
+		return GoCallSite{}, false
+	}
+	// argument_list spans `(` … `)` — inner range strips the parens.
+	innerStart := int(args.StartByte()) + 1
+	innerEnd := int(args.EndByte()) - 1
+	if innerEnd < innerStart {
+		innerEnd = innerStart
+	}
+
+	site := GoCallSite{
+		Line:           int(call.StartPoint().Row) + 1,
+		Col:            int(call.StartPoint().Column) + 1,
+		ArgsInnerStart: innerStart,
+		ArgsInnerEnd:   innerEnd,
+	}
+	count := int(args.NamedChildCount())
+	for i := range count {
+		arg := args.NamedChild(i)
+		txt := arg.Content(content)
+		site.CurrentArgs = append(site.CurrentArgs, txt)
+		if arg.Type() == "variadic_argument" {
+			site.HasSpread = true
+		}
+	}
+	if site.HasSpread {
+		site.Skipped = "spread-args"
+	}
+	return site, true
+}
+
 func extractGoSignature(decl *sitter.Node) (*GoFunctionSignature, error) {
 	sig := &GoFunctionSignature{Type: decl.Type()}
 

@@ -792,9 +792,36 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 		}
 	}
 
-	// Diagnostic round-trip on the edited file.
-	uri := pathToURI(abs)
-	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, dopts)
+	// Best-effort call-site rewriting: only meaningful when the
+	// parameter count changes. Same-count signature edits leave args
+	// alone — gopls's type checker is the authority on whether the
+	// existing expressions still fit.
+	currentName := oldName
+	if ops.Rename != "" {
+		currentName = ops.Rename
+	}
+	uris := []string{pathToURI(abs)}
+	contentsByURI := map[string][]byte{uris[0]: out}
+	if ops.Params != nil {
+		callResults, callContents := s.rewriteGoCallSites(abs, currentName, ops.Params)
+		// Merge call-site results into the per-file list.
+		for _, cr := range callResults {
+			// Avoid duplicating the declaration file if call sites
+			// also live there.
+			if cr.File == results[0].File {
+				results[0].Edits += cr.Edits
+				continue
+			}
+			results = append(results, cr)
+		}
+		for u, c := range callContents {
+			uris = append(uris, u)
+			contentsByURI[u] = c
+		}
+	}
+
+	// Diagnostic round-trip across every file we touched.
+	diags := s.collectDiagnostics(uris, contentsByURI, dopts)
 
 	payload := map[string]any{
 		"kind":                 "signature",
@@ -810,6 +837,151 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
 	}
 	return jsonContent(payload), false, nil
+}
+
+// rewriteGoCallSites walks every Go file in the index that mentions
+// `funcName` and rewrites its argument lists to match the new
+// parameter count. Three cases per call site:
+//
+//   - count matches: skip (type-only changes left for diagnostics)
+//   - new < old: drop trailing args
+//   - new > old: append zero-value placeholders for the new positions
+//
+// declFile is skipped at the file level so we don't rewrite the
+// signature's own call sites twice (the declaration itself isn't a
+// call expression, but if a function calls itself inside its body
+// we still want to fix that call — declFile is included in the walk
+// list, just deduplicated against the existing edit when reporting).
+func (s *Server) rewriteGoCallSites(declFile, funcName string, params []refactorParam) ([]applyResult, map[string][]byte) {
+	idx := s.getIndex()
+	if idx == nil {
+		return nil, nil
+	}
+	files := map[string]bool{}
+	for _, site := range idx.Lookup(funcName) {
+		if site.Language == "go" {
+			files[site.File] = true
+		}
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	zeroValues := make([]string, len(params))
+	for i, p := range params {
+		zeroValues[i] = goZeroValue(p.Type)
+	}
+	target := len(params)
+
+	var results []applyResult
+	updated := map[string][]byte{}
+	root := s.getRoot()
+	for file := range files {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		sites, err := symbols.FindGoCallSites(content, funcName)
+		if err != nil || len(sites) == 0 {
+			continue
+		}
+		type rewrite struct {
+			start, end int
+			newText    string
+		}
+		var edits []rewrite
+		skipped := 0
+		for _, cs := range sites {
+			if cs.Skipped != "" {
+				skipped++
+				continue
+			}
+			if len(cs.CurrentArgs) == target {
+				continue
+			}
+			newList := make([]string, 0, target)
+			for i := 0; i < target; i++ {
+				if i < len(cs.CurrentArgs) {
+					newList = append(newList, cs.CurrentArgs[i])
+				} else {
+					newList = append(newList, zeroValues[i])
+				}
+			}
+			edits = append(edits, rewrite{
+				start:   cs.ArgsInnerStart,
+				end:     cs.ArgsInnerEnd,
+				newText: strings.Join(newList, ", "),
+			})
+		}
+		if len(edits) == 0 {
+			continue
+		}
+		sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
+		out := append([]byte(nil), content...)
+		for _, e := range edits {
+			next := make([]byte, 0, len(out)-(e.end-e.start)+len(e.newText))
+			next = append(next, out[:e.start]...)
+			next = append(next, e.newText...)
+			next = append(next, out[e.end:]...)
+			out = next
+		}
+		info, err := os.Stat(file)
+		if err != nil {
+			continue
+		}
+		tmp := file + ".poly-lsp-mcp.tmp"
+		if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+			continue
+		}
+		if err := os.Rename(tmp, file); err != nil {
+			_ = os.Remove(tmp)
+			continue
+		}
+		s.refreshFileInIndex(file, out)
+
+		results = append(results, applyResult{
+			File:  relPath(file, root),
+			Edits: len(edits),
+		})
+		updated[pathToURI(file)] = out
+	}
+	return results, updated
+}
+
+// goZeroValue returns a Go expression whose value is the zero value
+// of `typ`. Used as a placeholder argument when a signature gains a
+// new parameter and we don't know what the caller wants there.
+//
+// Common types get idiomatic forms ("", 0, false, nil). For anything
+// else we fall back to *new(typ) — it compiles for arbitrary types
+// (structs, type aliases, generics with constraints) and produces
+// the language-level zero value. Idiomatic? No. Compiles? Yes.
+// Agents see it and replace via a follow-up edit.
+func goZeroValue(typ string) string {
+	typ = strings.TrimSpace(typ)
+	if strings.HasPrefix(typ, "*") {
+		return "nil"
+	}
+	switch typ {
+	case "string":
+		return `""`
+	case "bool":
+		return "false"
+	case "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"byte", "rune", "uintptr":
+		return "0"
+	case "float32", "float64", "complex64", "complex128":
+		return "0"
+	case "error", "any", "interface{}":
+		return "nil"
+	}
+	if strings.HasPrefix(typ, "[]") || strings.HasPrefix(typ, "map[") ||
+		strings.HasPrefix(typ, "chan ") || strings.HasPrefix(typ, "<-") ||
+		strings.HasPrefix(typ, "func(") {
+		return "nil"
+	}
+	return "*new(" + typ + ")"
 }
 
 // renderGoParams formats a parameter list as `(name type, name type)`.

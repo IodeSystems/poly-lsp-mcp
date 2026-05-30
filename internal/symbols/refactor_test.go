@@ -90,3 +90,101 @@ func TestFindGoFunctionSignatureMissing(t *testing.T) {
 		t.Errorf("expected nil for non-function position, got %+v", sig)
 	}
 }
+
+func TestFindGoCallSitesIdentifierCalls(t *testing.T) {
+	src := []byte(`package main
+
+func Greet(name string) string { return name }
+
+func use() {
+	_ = Greet("a")
+	_ = Greet("b")
+	_ = NotGreet()
+}
+`)
+	sites, err := FindGoCallSites(src, "Greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sites) != 2 {
+		t.Fatalf("got %d sites, want 2: %+v", len(sites), sites)
+	}
+	for _, s := range sites {
+		if len(s.CurrentArgs) != 1 {
+			t.Errorf("site %+v: want 1 arg", s)
+		}
+		if s.Skipped != "" {
+			t.Errorf("site %+v: unexpected skipped reason", s)
+		}
+	}
+}
+
+func TestFindGoCallSitesSelectorCalls(t *testing.T) {
+	src := []byte(`package main
+
+type R struct{}
+
+func (r R) Greet(name string) string { return name }
+
+func use(r R) {
+	_ = r.Greet("hi")
+}
+`)
+	sites, err := FindGoCallSites(src, "Greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sites) != 1 {
+		t.Fatalf("got %d sites, want 1", len(sites))
+	}
+	if sites[0].CurrentArgs[0] != `"hi"` {
+		t.Errorf("CurrentArgs[0] = %q", sites[0].CurrentArgs[0])
+	}
+}
+
+func TestFindGoCallSitesSpreadIsSkipped(t *testing.T) {
+	src := []byte(`package main
+
+func Apply(args ...int) int { return 0 }
+
+func use() {
+	args := []int{1, 2, 3}
+	_ = Apply(args...)
+}
+`)
+	sites, err := FindGoCallSites(src, "Apply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sites) != 1 {
+		t.Fatalf("got %d sites, want 1", len(sites))
+	}
+	if sites[0].Skipped == "" {
+		t.Errorf("expected spread skip reason, got %+v", sites[0])
+	}
+}
+
+func TestFindGoCallSitesEmptyArgsList(t *testing.T) {
+	src := []byte(`package main
+
+func Tick() {}
+
+func use() {
+	Tick()
+}
+`)
+	sites, err := FindGoCallSites(src, "Tick")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sites) != 1 {
+		t.Fatalf("got %d sites, want 1", len(sites))
+	}
+	if len(sites[0].CurrentArgs) != 0 {
+		t.Errorf("CurrentArgs should be empty, got %v", sites[0].CurrentArgs)
+	}
+	if sites[0].ArgsInnerStart != sites[0].ArgsInnerEnd {
+		t.Errorf("inner range should be empty for Tick(); got %d..%d",
+			sites[0].ArgsInnerStart, sites[0].ArgsInnerEnd)
+	}
+}

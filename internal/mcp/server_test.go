@@ -1025,6 +1025,148 @@ func TestApplyRenameMissingArgsIsToolError(t *testing.T) {
 	}
 }
 
+// ---- resources ----
+
+func TestInitializeAdvertisesResourcesCapability(t *testing.T) {
+	s := startSession(t, "")
+	defer s.close()
+	resp := s.request("initialize", map[string]any{})
+	var got struct {
+		Capabilities map[string]any `json:"capabilities"`
+	}
+	json.Unmarshal(resp.Result, &got)
+	if got.Capabilities["resources"] == nil {
+		t.Errorf("resources capability not advertised: %+v", got.Capabilities)
+	}
+}
+
+func TestResourcesListReturnsCatalog(t *testing.T) {
+	s := startSession(t, "")
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("resources/list", nil)
+	var got struct {
+		Resources []struct {
+			URI         string `json:"uri"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			MimeType    string `json:"mimeType"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	uris := map[string]bool{}
+	for _, r := range got.Resources {
+		uris[r.URI] = true
+		if r.Description == "" {
+			t.Errorf("resource %q has empty description", r.URI)
+		}
+		if r.MimeType == "" {
+			t.Errorf("resource %q has empty mimeType", r.URI)
+		}
+	}
+	for _, want := range []string{"tslsmcp://workspace", "tslsmcp://bindings"} {
+		if !uris[want] {
+			t.Errorf("resource %q missing from catalog", want)
+		}
+	}
+}
+
+func TestResourcesReadWorkspaceSummary(t *testing.T) {
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("resources/read", map[string]any{"uri": "tslsmcp://workspace"})
+	var got struct {
+		Contents []resourceContent `json:"contents"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Contents) != 1 {
+		t.Fatalf("got %d content blocks, want 1", len(got.Contents))
+	}
+	if got.Contents[0].URI != "tslsmcp://workspace" {
+		t.Errorf("content URI = %q, want tslsmcp://workspace", got.Contents[0].URI)
+	}
+	if got.Contents[0].MimeType != "application/json" {
+		t.Errorf("mimeType = %q, want application/json", got.Contents[0].MimeType)
+	}
+	var summary struct {
+		Root      string   `json:"root"`
+		Languages []string `json:"languages"`
+		Names     int      `json:"names"`
+		Declared  int      `json:"declared"`
+	}
+	if err := json.Unmarshal([]byte(got.Contents[0].Text), &summary); err != nil {
+		t.Fatalf("workspace summary not JSON: %v\n%s", err, got.Contents[0].Text)
+	}
+	if summary.Root != root {
+		t.Errorf("summary.root = %q, want %q", summary.Root, root)
+	}
+	if summary.Names == 0 {
+		t.Error("summary.names = 0 but polyglot fixture has content")
+	}
+	if len(summary.Languages) == 0 {
+		t.Error("summary.languages empty")
+	}
+}
+
+func TestResourcesReadBindingsCatalog(t *testing.T) {
+	root := polyglotFixture(t)
+	schemas := []config.Schema{{File: "api.proto", Dialect: "proto"}}
+	s := startSessionFull(t, root, nil, schemas)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("resources/read", map[string]any{"uri": "tslsmcp://bindings"})
+	var got struct {
+		Contents []resourceContent `json:"contents"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	var catalog []bindingSummary
+	if err := json.Unmarshal([]byte(got.Contents[0].Text), &catalog); err != nil {
+		t.Fatalf("bindings resource not JSON: %v\n%s", err, got.Contents[0].Text)
+	}
+	if len(catalog) == 0 {
+		t.Fatal("expected non-empty bindings catalog with proto schema declared")
+	}
+	// The resource and the tool should produce the same payload. Sanity:
+	// every entry must have a name + declared sites.
+	for _, b := range catalog {
+		if b.Name == "" {
+			t.Errorf("binding with empty name: %+v", b)
+		}
+		if b.SiteCount == 0 {
+			t.Errorf("binding %s has zero sites", b.Name)
+		}
+	}
+}
+
+func TestResourcesReadUnknownURIReturnsInvalidParams(t *testing.T) {
+	s := startSession(t, "")
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("resources/read", map[string]any{"uri": "tslsmcp://no-such"})
+	if resp.Error == nil {
+		t.Fatalf("expected error for unknown resource, got %s", resp.Result)
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
 func TestUnknownToolReturnsInvalidParams(t *testing.T) {
 	s := startSession(t, "")
 	defer s.close()

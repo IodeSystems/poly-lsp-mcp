@@ -61,7 +61,8 @@ type Server struct {
 	indexMu sync.RWMutex
 	index   *symbols.Index
 
-	tools map[string]Tool
+	tools     map[string]Tool
+	resources map[string]Resource
 }
 
 // New constructs an MCP server bound to a workspace. The root is the
@@ -75,6 +76,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		schemas:  schemas,
 	}
 	s.tools = registerTools()
+	s.resources = registerResources()
 	return s
 }
 
@@ -149,6 +151,10 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 		s.handleToolsList(req)
 	case "tools/call":
 		s.handleToolsCall(req)
+	case "resources/list":
+		s.handleResourcesList(req)
+	case "resources/read":
+		s.handleResourcesRead(req)
 	case "shutdown":
 		s.stateMu.Lock()
 		s.shutdown = true
@@ -194,7 +200,8 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	s.reply(req, map[string]any{
 		"protocolVersion": protocolVersion,
 		"capabilities": map[string]any{
-			"tools": map[string]any{},
+			"tools":     map[string]any{},
+			"resources": map[string]any{},
 		},
 		"serverInfo": map[string]any{
 			"name":    "tslsmcp",
@@ -226,6 +233,64 @@ func (s *Server) handleToolsList(req *jsonrpc.Message) {
 		}
 	}
 	s.reply(req, map[string]any{"tools": out})
+}
+
+// handleResourcesList returns the registered resource catalog. Output
+// is sorted by URI so prompt caches don't churn across runs.
+func (s *Server) handleResourcesList(req *jsonrpc.Message) {
+	type listEntry struct {
+		URI         string `json:"uri"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		MimeType    string `json:"mimeType,omitempty"`
+	}
+	out := make([]listEntry, 0, len(s.resources))
+	for _, r := range s.resources {
+		out = append(out, listEntry{
+			URI:         r.URI,
+			Name:        r.Name,
+			Description: r.Description,
+			MimeType:    r.MimeType,
+		})
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1].URI > out[j].URI; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	s.reply(req, map[string]any{"resources": out})
+}
+
+// handleResourcesRead returns the content of a single resource by URI.
+// Unknown URIs surface as JSON-RPC -32602 InvalidParams; read errors
+// from the resource itself bubble up as -32603 Internal so MCP clients
+// distinguish "you asked for X that doesn't exist" from "X failed to
+// produce content".
+func (s *Server) handleResourcesRead(req *jsonrpc.Message) {
+	var p struct {
+		URI string `json:"uri"`
+	}
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		s.replyError(req, errInvalidParams, fmt.Sprintf("bad resources/read params: %v", err))
+		return
+	}
+	res, ok := s.resources[p.URI]
+	if !ok {
+		s.replyError(req, errInvalidParams, fmt.Sprintf("unknown resource: %s", p.URI))
+		return
+	}
+	text, err := res.Read(s)
+	if err != nil {
+		s.replyError(req, errInternal, err.Error())
+		return
+	}
+	s.reply(req, map[string]any{
+		"contents": []resourceContent{{
+			URI:      res.URI,
+			MimeType: res.MimeType,
+			Text:     text,
+		}},
+	})
 }
 
 // handleToolsCall dispatches to the requested tool's handler. Tool

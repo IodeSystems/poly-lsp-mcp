@@ -373,8 +373,16 @@ the full cross-language stack the LSP layer already serves to editors.
       for partial-failure safety; file mode is preserved so executable
       bits survive. Response shape:
       `{name, newName, filesChanged, results: [{file, edits} | {file, skipped: reason}]}`.
-- [ ] `resources/list` and `resources/read` for treating workspace
-      files (or bindings catalog) as MCP resources.
+- [x] `resources/list` and `resources/read` MCP surface. Two
+      resources land in v0.1:
+      `tslsmcp://workspace` — JSON `{root, languages, names, declared}`
+      so clients can sanity-check what tslsmcp indexed without a tool
+      call;
+      `tslsmcp://bindings` — same JSON payload as the `list_bindings`
+      tool, exposed as a resource for MCP clients that pin resources
+      into model context. Capability `resources: {}` advertised in
+      initialize. More resources can be added by extending
+      registerResources.
 
 ## Non-goals (for now)
 

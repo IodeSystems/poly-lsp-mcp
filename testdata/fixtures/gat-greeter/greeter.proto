@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package greeter.v1;
+
+// GreeterService greets callers.
+//
+// @ref server/greeter.go:GreeterService
+service GreeterService {
+  // Hello says hi.
+  //
+  // @ref server/greeter.go:Hello
+  rpc Hello(HelloRequest) returns (HelloResponse);
+}
+
+// HelloRequest carries the caller's name and a mood.
+//
+// @ref server/types.go:HelloRequest
+message HelloRequest {
+  string name = 1;
+  Mood mood = 2;
+}
+
+// @ref server/types.go:HelloResponse
+message HelloResponse {
+  string greeting = 1;
+}
+
+// Mood is the caller's emotional state.
+//
+// @ref server/types.go:Mood
+enum Mood {
+  MOOD_UNSPECIFIED = 0;
+  // @ref server/types.go:MoodHappy
+  MOOD_HAPPY = 1;
+  MOOD_GRUMPY = 2;
+}

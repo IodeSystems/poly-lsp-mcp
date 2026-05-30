@@ -47,7 +47,7 @@ func TestLanguagesReturnsRegistrationOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"go", "typescript", "python", "markdown", "yaml", "json", "sql"}
+	want := []string{"go", "typescript", "python", "markdown", "yaml", "json", "sql", "proto", "graphql"}
 	got := r.Languages()
 	if len(got) != len(want) {
 		t.Fatalf("len = %d, want %d", len(got), len(want))

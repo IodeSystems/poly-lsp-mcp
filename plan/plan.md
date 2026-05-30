@@ -483,6 +483,34 @@ Tree-sitter intentionally skips comments — they aren't identifier nodes — so
 
 Hand-curated comment renames (per-binding "always include comments") would be a follow-up (`bindings.<name>.rename_includes_comments: true`); not implemented today.
 
+### Comment-marker scanner (universal)
+
+A universal pass runs alongside the lexical extractor on every walked file. It recognizes four marker shapes, regardless of language:
+
+| Marker | Origin | Confidence |
+|--------|--------|------------|
+| `@see <name>` | JSDoc / TSDoc / JavaDoc | comment (soft) |
+| `{@link <name>}` | TSDoc / JavaDoc | comment (soft) |
+| `@ref <name>` | Doxygen; our cross-language extension | declared (hard) |
+| `x-ref: <value>` | YAML/JSON extension key (`x-tslsmcp-source`, `x-source` also accepted) | declared (hard) |
+
+`@see` / `{@link}` are intentionally soft — they're how documentation refers to symbols, not declarations, so a default `node_refactor(rename)` skips them (same policy as plain comments). `@ref` / `x-ref` are hard — they're the convention generators use to point an emitted artifact at its source-of-truth in another language. Renames touch them by default.
+
+Reference token shapes the scanner accepts:
+
+| Form | Extracted name |
+|------|----------------|
+| `Foo` | `Foo` |
+| `Class#method` | `method` (JSDoc/JavaDoc class-member shorthand) |
+| `path/file.ts!Symbol` | `Symbol` (TypeDoc) |
+| `server/main.go:Symbol` | `Symbol` (path:symbol — our preferred `@ref` form) |
+| `server/main.go:42:18` | (skipped — positional, no usable name) |
+| `https://…` | (skipped — URL) |
+
+The new `ConfidenceComment` tier sits below lexical: at a deduped position, lexical and declared shadow the comment site. That's intentional — if a name appears as both a real reference and a comment marker at the same position, the real reference is the truthful entry.
+
+The scanner ships now because generator-side adoption is the real lever: emitters of cross-language artifacts (gat → GraphQL/OpenAPI, codegen → typed clients) can teach themselves to drop `@ref` markers without tslsmcp needing per-framework parsing dialects. See `../gwag/docs/plan.md` for the gat-side commitment.
+
 ### Schema auto-detection
 
 Schema auto-detection is opt-in via `auto_schemas: true` in tslsmcp.yaml. When set, `config.DetectSchemas(root, existing)` walks the workspace at startup and emits a Schema entry for each file matching one of these conservative heuristics:
@@ -494,6 +522,42 @@ Schema auto-detection is opt-in via `auto_schemas: true` in tslsmcp.yaml. When s
 Files explicitly declared in `schemas:` are skipped during detection (user wins). Detected schemas are appended to the user's list and processed identically by the resolver. Generic YAML/JSON without distinctive top-level keys is NOT classified, so values.yaml and config.json don't accidentally turn into bindings.
 
 When tslsmcp.yaml is partial (e.g. only `schemas:` declared, no `languages:`), defaults are merged in — empty registry would invisibly break the lexical pass.
+
+## Phase 5 — feedback loops for LLM edits
+
+LLM agents editing through MCP currently get no signal about whether their edit compiles. They have to call `node_read` afterwards and infer, or wait for an out-of-band smoke test. That's a real gap.
+
+### Diagnostics in edit/refactor responses
+
+- [x] `internal/multiplex.DiagnosticStore` — last-write-wins map of URI → []Diagnostic with a generation counter so `WaitAfter(uri, since)` only wakes on publishes that arrived AFTER the captured point (avoids a race where a publish lands between our edit and our wait). `Attach(child)` wires `child.SetNotificationHandler` to forward `textDocument/publishDiagnostics` into the store. Manager auto-attaches every spawned child (initial Start and restart).
+- [x] After `applyRangeRewrite` (the shared `node_edit` / `node_delete` write path) AND after each per-file rewrite in `node_refactor`, the server routes the URI through `manager.RouteByURI`, sends `didOpen` on first touch (with full file contents + languageId) then `didChange` + `didSave` on subsequent edits. Per-session `openDocs` map tracks (URI → version).
+- [x] Bounded wait via `Server.SetDiagnosticWait(d)` (default `defaultDiagnosticWait = 1500ms`; tests bump to 8s for gopls). Per-URI `WaitAfter` blocks until a publish arrives or context fires. Response carries both `diagnostics` AND `diagnosticsTimedOut: true` when any URI hit the deadline without a fresh publish — distinguishes "no errors in window" from "no errors exist."
+- [x] Tool response payload extended with `diagnosticsAvailable: bool`, `diagnosticsTimedOut: bool`, and `diagnostics: [{file, severity, code?, source?, message, startLine, startCol, endLine, endCol}]` (positions 1-based to match the rest of our wire shape). `node_refactor` rename emits a flat list keyed by file across every edited URI.
+- [x] Languages with no child LSP (markdown, yaml, plain text, schema-only files): `manager.RouteByURI` returns nil, so the URI is skipped entirely. `diagnosticsAvailable: false`, empty `diagnostics`. Agents that infer "no errors" from absence of items are wrong by construction — the flag is the load-bearing signal.
+- [x] Scope: response carries diagnostics for the edited URI(s) only. gopls publishes at the package level (sibling files can gain new diagnostics); those surface via the next tool call rather than bloating this response.
+- [x] `main.go runMCP` wires a fresh `multiplex.NewManager(reg)` into the MCP server. Tests without a manager exercise the index-only path and verify `diagnosticsAvailable: false`.
+- [x] Live gopls e2e (`TestNodeEditSurfacesGoplsDiagnostics`, skipped under `-short`): writes a clean `main.go`, calls `node_edit` to insert `doesNotExist()`, and asserts the response contains at least one error-severity diagnostic — proves the full path: write → didOpen → gopls publish → WaitAfter → response. Passes in ~1.2s against gopls 0.21.
+
+### Diagnostic enrichment (node-references-shaped payload)
+
+Each diagnostic carries enough structure that the agent can act on it without re-querying:
+
+- [x] `text`: source bytes between the diagnostic's start/end positions, capped at 256 chars with a mid-ellipsis on overflow. Saves a `node_read` round-trip.
+- [x] `context`: configurable lines before/after the diagnostic range (`contextLines`, default 3), each entry `{line, text}` with trailing whitespace stripped. Helps the agent see the surrounding declaration without a second tool call.
+- [x] `enclosingNode`: the top-level tree-sitter declaration containing the diagnostic position — `{type, name, startLine/Col, endLine/Col, nameStartLine/Col, nameEndLine/Col}`. Same shape as a `structure` node entry; pass the decl range to `node_edit` or the name range to `node_refactor(rename)`. New `symbols.EnclosingStructureNode(lang, content, line, col)` provides the lookup (root → named-children → containing range), with tests covering body-position lookup, identifier-position lookup, and unsupported languages.
+- [x] `references`: when the diagnostic range is a single identifier token, `idx.Lookup(name)` runs and the hits ship in the response as `[]siteJSON` (the same shape `node_references` already returns). For multi-token ranges (statement-level errors) the references list is omitted — saves dragging in unrelated lexical noise.
+- [x] Caps are configurable per call via tool args: `diagnosticLimit` (default 25), `referenceLimit` (default 15), `contextLines` (default 3). Tool args struct-embeds `diagnosticOptions` so the existing `rangeArgs` fields stay clean. Overflow surfaces as `droppedDiagnostics` on the parent payload and `truncated.references` per item — agents never have to guess whether they got a complete picture.
+- [x] gopls e2e extended: asserts `text == "doesNotExist"`, `context` includes the broken line, and `enclosingNode.Name == "main"` on the same broken-edit fixture. Proves the enrichment path against real LSP output end-to-end.
+
+### gat-greeter integration fixture
+
+- [x] `testdata/fixtures/gat-greeter/` — separate Go module (so gwag's dep tree doesn't pollute tslsmcp): `greeter.proto` with `@ref` markers on rpc / message / enum-type / enum-value, and a `cmd/dump-sdl/main.go` that uses `gat.ProtoSource` + `gat.New` + `ir.PrintSchemaSDL` to emit the rendered GraphQL SDL.
+- [x] `replace github.com/iodesystems/gwag => ../../../../gwag` in the fixture's go.mod so it uses the local checkout (the user's "latest gat") rather than a published version.
+- [x] Integration test (`internal/symbols/gat_fixture_test.go` behind `testing.Short()` so quick iterations can skip): `go run ./cmd/dump-sdl` against the fixture, capture stdout into a temp dir alongside a copy of the proto, build `symbols.Index` over that dir, assert declared sites exist for each `@ref` target (rpc, message, enum, enum value). Proves the live gat → tslsmcp linkage end-to-end.
+- [x] Registry change unblocked the scanner: `.proto` and `.graphql` / `.gql` are now in `config.Default().Languages`, both backed by `LexicalExtractor`. Without this the walker silently skipped these files, and the universal `@ref` scanner never ran on them — exactly the formats gat emits. (`go`/`ts`/`py` are tree-sitter; `proto`/`graphql` deliberately stay lexical so the comment scanner can still see embedded markers.)
+- [x] Fixture extended to cover gat's full `@ref` carriage after gwag commit `09df07a` ("@ref source-of-truth marker carriage"): `cmd/dump -format graphql|openapi` emits both the rendered SDL (block-string descriptions) and the OpenAPI JSON (`x-ref` extension on operations + `@ref` text inside `info.description`). Test asserts declared sites in every emitted file for the expected names — Hello hits all three (proto + SDL + OpenAPI), service/type/value markers hit the formats gat actually writes them into.
+- [x] `symbolFromRef` hardened against JSON-escape bleed: `(\S+)` could capture `Foo\n",` out of a JSON description string; the new leading-identifier walk drops everything past the first non-`[A-Za-z0-9_]` byte. Unit-tested with `Symbol\n`, `Symbol\t`, and the full `server/main.go:Symbol\n",` shape.
+- [ ] Once diagnostics are wired (Phase 5 above), extend the fixture with a Go file that imports a generated stub and a deliberately-broken edit — exercise the diagnostic-rollup path against a real compile error.
 
 ## Non-goals (for now)
 

@@ -72,6 +72,12 @@ func runMCP() {
 
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
 	srv.SetCachePath(filepath.Join(root, ".tslsmcp", "cache.gob"))
+	// Spawn child LSPs so node_edit / node_delete / node_refactor can
+	// surface publishDiagnostics in their responses. Manager.Start runs
+	// inside handleInitialize once we know which languages the
+	// workspace actually contains, so we just hand the pre-built
+	// Manager over here.
+	srv.SetManager(multiplex.NewManager(reg))
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}

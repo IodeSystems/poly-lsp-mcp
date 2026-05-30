@@ -132,6 +132,26 @@ func Default() *Config {
 				Extensions: []string{"sql", "psql"},
 				TreeSitter: "sql",
 			},
+			{
+				// Protobuf: registered so Build's walker visits .proto
+				// files (otherwise extension-less means the universal
+				// comment-marker scanner never runs over them, and
+				// generator-emitted @ref markers in .proto would be
+				// silently missed). Lexical pass; the bindings-side
+				// proto schema parser is a separate path.
+				Name:       "proto",
+				Extensions: []string{"proto"},
+				TreeSitter: "proto",
+			},
+			{
+				// GraphQL SDL: same rationale as proto. Tools like gat
+				// emit .graphql / .gql with embedded `@ref` markers in
+				// """..."""-quoted descriptions; we need to walk them
+				// to surface those markers.
+				Name:       "graphql",
+				Extensions: []string{"graphql", "gql"},
+				TreeSitter: "graphql",
+			},
 		},
 	}
 }

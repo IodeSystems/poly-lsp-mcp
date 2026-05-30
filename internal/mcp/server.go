@@ -19,9 +19,12 @@ import (
 	"path/filepath"
 	"sync"
 
+	"time"
+
 	"github.com/iodesystems/tslsmcp/internal/bindings"
 	"github.com/iodesystems/tslsmcp/internal/config"
 	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
+	"github.com/iodesystems/tslsmcp/internal/multiplex"
 	"github.com/iodesystems/tslsmcp/internal/symbols"
 )
 
@@ -73,9 +76,30 @@ type Server struct {
 	// process). Production main.go sets this; tests typically don't.
 	cachePath string
 
+	// manager owns child LSPs. Optional: nil means "index-only", in
+	// which case node_edit/node_delete/node_refactor return
+	// diagnosticsAvailable=false (no compiler talking to us). When
+	// present, edits route didOpen/didChange/didSave through the
+	// matching child and we wait briefly for publishDiagnostics.
+	manager *multiplex.Manager
+
+	// openDocs tracks which (URI, version) we've informed the child
+	// about. First write to a URI sends didOpen; subsequent writes
+	// send didChange. The version monotonically increases per LSP
+	// spec.
+	openDocsMu sync.Mutex
+	openDocs   map[string]int32
+
+	// diagnosticWait is the per-edit deadline for publishDiagnostics.
+	// 0 means use the default (1500ms). Tests set a smaller value to
+	// stay fast.
+	diagnosticWait time.Duration
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }
+
+const defaultDiagnosticWait = 1500 * time.Millisecond
 
 // New constructs an MCP server bound to a workspace. The root is the
 // directory whose files the symbol index will cover; bindings and
@@ -86,11 +110,35 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		root:     root,
 		bindings: declared,
 		schemas:  schemas,
+		openDocs: map[string]int32{},
 	}
 	s.tools = registerTools()
 	s.resources = registerResources()
 	s.parseCache = symbols.NewParseCache()
 	return s
+}
+
+// SetManager attaches a multiplex.Manager so node_edit / node_delete /
+// node_refactor can route didOpen/didChange/didSave to child LSPs and
+// pick up publishDiagnostics. Call once after New, before Serve.
+// Manager.Start is invoked from handleInitialize so child spawn waits
+// until we know which languages the workspace actually has.
+func (s *Server) SetManager(mgr *multiplex.Manager) {
+	s.manager = mgr
+}
+
+// SetDiagnosticWait overrides the per-edit deadline for waiting on
+// publishDiagnostics. Tests use this to keep fast; main.go leaves it
+// at the default (1500ms).
+func (s *Server) SetDiagnosticWait(d time.Duration) {
+	s.diagnosticWait = d
+}
+
+func (s *Server) diagWaitDuration() time.Duration {
+	if s.diagnosticWait > 0 {
+		return s.diagnosticWait
+	}
+	return defaultDiagnosticWait
 }
 
 // SetCachePath configures persistence: on Serve start the cache loads
@@ -183,6 +231,7 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 		s.stateMu.Lock()
 		s.shutdown = true
 		s.stateMu.Unlock()
+		s.stopManagerIfPresent()
 		s.reply(req, json.RawMessage("null"))
 	default:
 		if req.IsNotification() {
@@ -216,6 +265,7 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 					log.Printf("mcp initialize: applied %d schema-anchored site(s)", n)
 				}
 			}
+			s.startManagerIfPresent(idx)
 		}
 	} else {
 		log.Print("mcp initialize: no workspace root configured; tools will return errors")

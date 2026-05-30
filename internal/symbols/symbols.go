@@ -69,11 +69,13 @@ const sqlIdentifierQuery = `(identifier) @name`
 const pythonIdentifierQuery = `(identifier) @name`
 
 // Confidence ranks how trustworthy a Site is for a given Name.
+// Higher values win on same-position dedup in Lookup.
 type Confidence int
 
 const (
-	ConfidenceLexical  Confidence = iota // word-token match; high recall, low precision
-	ConfidenceDeclared                   // user-declared binding in tslsmcp.yaml
+	ConfidenceComment  Confidence = iota // soft reference from @see / @link in a comment
+	ConfidenceLexical                    // word-token match; high recall, low precision
+	ConfidenceDeclared                   // user-declared binding (Tier 2/3) or @ref / x-ref marker
 	ConfidenceLSP                        // result from a child LSP
 )
 
@@ -101,18 +103,21 @@ type Index struct {
 
 	sites         map[string][]Site
 	declaredSites map[string][]Site
+	commentSites  map[string][]Site
 }
 
 func NewIndex() *Index {
 	return &Index{
 		sites:         map[string][]Site{},
 		declaredSites: map[string][]Site{},
+		commentSites:  map[string][]Site{},
 	}
 }
 
-// Lookup returns every site for name, declared first then lexical, with
-// duplicates at the same (file, line, col) dropped (declared wins). The
-// returned slice is a copy; callers may mutate it freely.
+// Lookup returns every site for name from all three stores (declared,
+// lexical, comment) with same-(file, line, col) dedup — higher
+// confidence wins. The returned slice is a copy; callers may mutate
+// it freely.
 func (i *Index) Lookup(name string) []Site {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -128,6 +133,14 @@ func (i *Index) Lookup(name string) []Site {
 		out = append(out, s)
 	}
 	for _, s := range i.sites[name] {
+		k := key{s.File, s.Line, s.Col}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, s)
+	}
+	for _, s := range i.commentSites[name] {
 		if seen[key{s.File, s.Line, s.Col}] {
 			continue
 		}
@@ -163,6 +176,53 @@ func (i *Index) ClearDeclared() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.declaredSites = map[string][]Site{}
+}
+
+// InsertComment registers a soft reference produced by a comment-level
+// marker (@see / @link). Idempotent at (name, file, line, col).
+// Comment sites are visible to node_references but skipped by rename's
+// default policy.
+func (i *Index) InsertComment(name, file, language string, line, col int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, s := range i.commentSites[name] {
+		if s.File == file && s.Line == line && s.Col == col {
+			return
+		}
+	}
+	i.commentSites[name] = append(i.commentSites[name], Site{
+		File:       file,
+		Line:       line,
+		Col:        col,
+		Language:   language,
+		Confidence: ConfidenceComment,
+	})
+}
+
+// RefreshCommentsForFile replaces every comment-confidence site
+// associated with file. Called after node_edit / node_delete so the
+// new file content's @see / @link / @ref markers replace the prior
+// snapshot.
+func (i *Index) RefreshCommentsForFile(file string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.clearCommentFileLocked(file)
+}
+
+func (i *Index) clearCommentFileLocked(file string) {
+	for name, list := range i.commentSites {
+		kept := make([]Site, 0, len(list))
+		for _, s := range list {
+			if s.File != file {
+				kept = append(kept, s)
+			}
+		}
+		if len(kept) == 0 {
+			delete(i.commentSites, name)
+		} else {
+			i.commentSites[name] = kept
+		}
+	}
 }
 
 // Languages returns the distinct language names with at least one site
@@ -206,7 +266,9 @@ func (i *Index) DeclaredNames() []string {
 	return out
 }
 
-// Names returns every indexed name (lexical or declared), sorted.
+// Names returns every indexed name (lexical, declared, or comment),
+// sorted. Comment-only names are included so a marker like @see Foo in
+// a markdown file still surfaces in workspace symbol enumeration.
 func (i *Index) Names() []string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -215,6 +277,9 @@ func (i *Index) Names() []string {
 		set[k] = struct{}{}
 	}
 	for k := range i.declaredSites {
+		set[k] = struct{}{}
+	}
+	for k := range i.commentSites {
 		set[k] = struct{}{}
 	}
 	out := make([]string, 0, len(set))
@@ -358,6 +423,14 @@ var defaultExtractors = map[string]Extractor{
 	"yaml":     &LexicalExtractor{},
 	"json":     &LexicalExtractor{},
 	"markdown": &LexicalExtractor{},
+	// Proto and GraphQL SDL deliberately use the lexical extractor —
+	// not the bindings-side proto schema parser. The walker's job is
+	// to surface every identifier-shaped token AND let the
+	// comment-marker scanner pick up @ref / @see annotations.
+	// Generated artifacts (gat-rendered .graphql, codegen .proto)
+	// frequently embed cross-language back-references in comments.
+	"proto":   &LexicalExtractor{},
+	"graphql": &LexicalExtractor{},
 }
 
 // DefaultExtractor returns the registered extractor for a language, or
@@ -450,6 +523,18 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			cfg.cache.Put(lang.Name, content, hits)
 		}
 		idx.addHits(path, lang.Name, hits)
+
+		// Universal comment-marker pass — @see / {@link} → comment
+		// confidence, @ref / x-ref → declared. Runs on every file
+		// we walked, regardless of language.
+		for _, ref := range ExtractCommentRefs(content) {
+			switch ref.Confidence {
+			case ConfidenceDeclared:
+				idx.InsertDeclared(ref.Name, path, lang.Name, ref.Line, ref.Col)
+			default:
+				idx.InsertComment(ref.Name, path, lang.Name, ref.Line, ref.Col)
+			}
+		}
 		return nil
 	})
 	if err != nil {

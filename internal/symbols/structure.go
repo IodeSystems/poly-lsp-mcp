@@ -105,6 +105,87 @@ func StructureNodes(language string, content []byte) ([]StructureNode, error) {
 	return out, nil
 }
 
+// EnclosingStructureNode parses content with the language's grammar
+// and returns the smallest *named* descendant of the root that
+// contains (line, col). Useful when an external signal (LSP
+// diagnostic, search hit) points at a byte offset and the caller
+// wants the node-shaped context the agent can node_edit / rename
+// against.
+//
+// (line, col) is 1-based; "contains" is inclusive on the start side
+// and exclusive on the end. Returns nil + nil error when no node
+// contains the position (e.g., past EOF). Returns nil + error when
+// the language has no grammar.
+//
+// The returned StructureNode has both ranges populated using the same
+// findStructureNameNode logic as the top-level structure traversal.
+func EnclosingStructureNode(language string, content []byte, line, col int) (*StructureNode, error) {
+	lang := LanguageByName(language)
+	if lang == nil {
+		return nil, fmt.Errorf("no tree-sitter grammar for language %q", language)
+	}
+	parser := sitter.NewParser()
+	parser.SetLanguage(lang)
+	tree, err := parser.ParseCtx(context.Background(), nil, content)
+	if err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	if tree == nil {
+		return nil, fmt.Errorf("parse returned nil tree")
+	}
+	defer tree.Close()
+
+	row := uint32(line - 1)
+	column := uint32(col - 1)
+	root := tree.RootNode()
+
+	// Find the top-level (root-child) declaration that spans
+	// (line, col). The diagnostic position can land anywhere inside
+	// the body — we want the enclosing function/type/import/etc., not
+	// the leaf identifier or expression. Iterating root's named
+	// children gives that exact frame.
+	count := int(root.NamedChildCount())
+	for i := range count {
+		child := root.NamedChild(i)
+		sp := child.StartPoint()
+		ep := child.EndPoint()
+		if !pointInRange(row, column, sp, ep) {
+			continue
+		}
+		out := &StructureNode{
+			Type:      child.Type(),
+			StartLine: int(sp.Row) + 1,
+			StartCol:  int(sp.Column) + 1,
+			EndLine:   int(ep.Row) + 1,
+			EndCol:    int(ep.Column) + 1,
+		}
+		if nameNode := findStructureNameNode(child); nameNode != nil {
+			out.Name = nameNode.Content(content)
+			nsp := nameNode.StartPoint()
+			nep := nameNode.EndPoint()
+			out.NameStartLine = int(nsp.Row) + 1
+			out.NameStartCol = int(nsp.Column) + 1
+			out.NameEndLine = int(nep.Row) + 1
+			out.NameEndCol = int(nep.Column) + 1
+		}
+		return out, nil
+	}
+	return nil, nil
+}
+
+// pointInRange returns true when (row, column) lies inside
+// [sp, ep). The start is inclusive, the end is exclusive so adjacent
+// top-level declarations don't both claim a boundary position.
+func pointInRange(row, column uint32, sp, ep sitter.Point) bool {
+	if row < sp.Row || (row == sp.Row && column < sp.Column) {
+		return false
+	}
+	if row > ep.Row || (row == ep.Row && column >= ep.Column) {
+		return false
+	}
+	return true
+}
+
 // findStructureNameNode returns the identifier node that names a
 // top-level declaration, or nil if the grammar doesn't expose one.
 // Preferences in order:

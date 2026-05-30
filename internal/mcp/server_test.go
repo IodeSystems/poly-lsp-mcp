@@ -487,6 +487,107 @@ func TestNodeReferencesByIdentifierRange(t *testing.T) {
 	}
 }
 
+func TestNodeReferencesIncludesAtRefMarker(t *testing.T) {
+	// Comment markers in a .go file: tree-sitter doesn't index inside
+	// comments, so without the universal scanner the .go file would
+	// have zero hits for these names. The scanner adds:
+	//   @see Foo  → comment-confidence site
+	//   @ref Bar  → declared-confidence site
+	// Both should surface via node_references when queried from the
+	// peer file that defines the target name.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\n\n// @see TsHelper for the frontend impl.\n// @ref types.ts:SharedType\nfunc DoStuff() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "types.ts"),
+		[]byte("export const TsHelper = 1;\nexport type SharedType = string;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// Find TsHelper's range in types.ts to seed node_references.
+	sr := s.callTool("structure", map[string]any{"path": "types.ts"})
+	var f structureEntryWire
+	json.Unmarshal([]byte(sr.Content[0].Text), &f)
+	var tsHelper *structureEntryWire
+	for i := range f.Children {
+		if f.Children[i].Name == "TsHelper" {
+			tsHelper = &f.Children[i]
+			break
+		}
+	}
+	if tsHelper == nil {
+		t.Fatal("TsHelper not in types.ts structure")
+	}
+
+	r := s.callTool("node_references", map[string]any{
+		"file":      "types.ts",
+		"startLine": tsHelper.NameStartLine,
+		"startCol":  tsHelper.NameStartCol,
+		"endLine":   tsHelper.NameEndLine,
+		"endCol":    tsHelper.NameEndCol,
+	})
+	if r.IsError {
+		t.Fatalf("node_references TsHelper errored: %+v", r.Content)
+	}
+	var hits []siteJSON
+	json.Unmarshal([]byte(r.Content[0].Text), &hits)
+	var sawCommentGo bool
+	for _, h := range hits {
+		if h.File == "main.go" && h.Confidence == "comment" {
+			sawCommentGo = true
+		}
+	}
+	if !sawCommentGo {
+		t.Errorf("expected comment-confidence hit in main.go for TsHelper (from @see); hits=%+v", hits)
+	}
+
+	// SharedType: only in main.go via @ref + in types.ts as the
+	// declaration. The @ref site must show up as declared.
+	sr2 := s.callTool("structure", map[string]any{"path": "types.ts"})
+	json.Unmarshal([]byte(sr2.Content[0].Text), &f)
+	var shared *structureEntryWire
+	for i := range f.Children {
+		if f.Children[i].Name == "SharedType" {
+			shared = &f.Children[i]
+			break
+		}
+	}
+	if shared == nil {
+		t.Fatal("SharedType not in types.ts structure")
+	}
+	r2 := s.callTool("node_references", map[string]any{
+		"file":      "types.ts",
+		"startLine": shared.NameStartLine,
+		"startCol":  shared.NameStartCol,
+		"endLine":   shared.NameEndLine,
+		"endCol":    shared.NameEndCol,
+	})
+	if r2.IsError {
+		t.Fatalf("node_references SharedType errored: %+v", r2.Content)
+	}
+	var hits2 []siteJSON
+	json.Unmarshal([]byte(r2.Content[0].Text), &hits2)
+	var sawDeclaredGo bool
+	for _, h := range hits2 {
+		if h.File == "main.go" && h.Confidence == "declared" {
+			sawDeclaredGo = true
+		}
+	}
+	if !sawDeclaredGo {
+		t.Errorf("expected declared-confidence hit in main.go for SharedType (from @ref); hits=%+v", hits2)
+	}
+}
+
 func TestNodeReferencesEmptyRangeIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
@@ -606,6 +707,26 @@ func TestNodeEditRewritesFileAtomicallyAndRefreshesIndex(t *testing.T) {
 	}
 	if !names["Updated"] || names["Original"] {
 		t.Errorf("structure after edit didn't refresh: %+v", names)
+	}
+
+	// No multiplex manager attached in this session: the response
+	// must signal diagnosticsAvailable=false (and never silently
+	// claim "no errors").
+	var payload struct {
+		DiagnosticsAvailable bool `json:"diagnosticsAvailable"`
+		DiagnosticsTimedOut  bool `json:"diagnosticsTimedOut"`
+		Diagnostics          []struct {
+			Message string `json:"message"`
+		} `json:"diagnostics"`
+	}
+	if err := json.Unmarshal([]byte(r.Content[0].Text), &payload); err != nil {
+		t.Fatalf("decode node_edit response: %v", err)
+	}
+	if payload.DiagnosticsAvailable {
+		t.Errorf("diagnosticsAvailable=true without a manager; want false")
+	}
+	if len(payload.Diagnostics) != 0 {
+		t.Errorf("diagnostics non-empty without manager: %+v", payload.Diagnostics)
 	}
 }
 

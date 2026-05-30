@@ -466,27 +466,31 @@ func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
 func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		rangeArgs
+		diagnosticOptions
 		NewText string `json:"newText"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
-	return s.applyRangeRewrite(p.rangeArgs, p.NewText)
+	return s.applyRangeRewrite(p.rangeArgs, p.NewText, p.diagnosticOptions)
 }
 
 func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var a rangeArgs
-	if err := json.Unmarshal(args, &a); err != nil {
+	var p struct {
+		rangeArgs
+		diagnosticOptions
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
-	return s.applyRangeRewrite(a, "")
+	return s.applyRangeRewrite(p.rangeArgs, "", p.diagnosticOptions)
 }
 
 // applyRangeRewrite is the shared write path. Validates the range,
 // reads + edits + atomic-renames the file, then reparses just this
 // file's slice of the index so subsequent node_references sees the
 // new state.
-func (s *Server) applyRangeRewrite(a rangeArgs, newText string) ([]Content, bool, error) {
+func (s *Server) applyRangeRewrite(a rangeArgs, newText string, opts diagnosticOptions) ([]Content, bool, error) {
 	if err := a.validate(); err != nil {
 		return nil, true, err
 	}
@@ -530,13 +534,23 @@ func (s *Server) applyRangeRewrite(a rangeArgs, newText string) ([]Content, bool
 
 	s.refreshFileInIndex(abs, out)
 
-	return jsonContent(map[string]any{
-		"file":         a.File,
-		"replacedFrom": map[string]int{"line": a.StartLine, "col": a.StartCol},
-		"replacedTo":   map[string]int{"line": a.EndLine, "col": a.EndCol},
-		"bytesRemoved": endOff - startOff,
-		"bytesAdded":   len(newText),
-	}), false, nil
+	uri := pathToURI(abs)
+	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
+
+	payload := map[string]any{
+		"file":                 a.File,
+		"replacedFrom":         map[string]int{"line": a.StartLine, "col": a.StartCol},
+		"replacedTo":           map[string]int{"line": a.EndLine, "col": a.EndCol},
+		"bytesRemoved":         endOff - startOff,
+		"bytesAdded":           len(newText),
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
+	}
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
+	return jsonContent(payload), false, nil
 }
 
 // refreshFileInIndex re-extracts this file's slice into the index so
@@ -559,6 +573,20 @@ func (s *Server) refreshFileInIndex(abs string, content []byte) {
 	hits := ex.Extract(content)
 	idx.Refresh(abs, lang, hits)
 	s.parseCache.Put(lang, content, hits)
+
+	// Comment markers (@see / @link / @ref / x-ref) get re-scanned
+	// alongside the lexical pass. The Refresh call above only clears
+	// lexical sites for this file; clear comment sites separately so
+	// the new content's markers replace the prior snapshot.
+	idx.RefreshCommentsForFile(abs)
+	for _, ref := range symbols.ExtractCommentRefs(content) {
+		switch ref.Confidence {
+		case symbols.ConfidenceDeclared:
+			idx.InsertDeclared(ref.Name, abs, lang, ref.Line, ref.Col)
+		default:
+			idx.InsertComment(ref.Name, abs, lang, ref.Line, ref.Col)
+		}
+	}
 }
 
 // -------------------------------------------------------------- node_refactor
@@ -566,6 +594,7 @@ func (s *Server) refreshFileInIndex(abs string, content []byte) {
 func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		rangeArgs
+		diagnosticOptions
 		Kind            string `json:"kind"`
 		NewName         string `json:"newName"`
 		IncludeComments bool   `json:"includeComments"`
@@ -583,13 +612,13 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 		if p.NewName == "" {
 			return nil, true, errors.New("newName is required when kind='rename'")
 		}
-		return s.refactorRename(p.rangeArgs, p.NewName, p.IncludeComments)
+		return s.refactorRename(p.rangeArgs, p.NewName, p.IncludeComments, p.diagnosticOptions)
 	default:
 		return nil, true, fmt.Errorf("unsupported refactor kind: %q (try 'rename')", p.Kind)
 	}
 }
 
-func (s *Server) refactorRename(a rangeArgs, newName string, includeComments bool) ([]Content, bool, error) {
+func (s *Server) refactorRename(a rangeArgs, newName string, includeComments bool, opts diagnosticOptions) ([]Content, bool, error) {
 	idx := s.getIndex()
 	if idx == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
@@ -627,6 +656,7 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments boo
 	}
 
 	results := make([]applyResult, 0, len(order))
+	newContents := map[string][]byte{}
 	for _, abs := range order {
 		edits := byFile[abs]
 		rel := edits[0].RelFile
@@ -638,17 +668,32 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments boo
 		// After write, reparse the file's slice.
 		if newContent, err := os.ReadFile(abs); err == nil {
 			s.refreshFileInIndex(abs, newContent)
+			newContents[pathToURI(abs)] = newContent
 		}
 		results = append(results, applyResult{File: rel, Edits: n})
 	}
 
-	return jsonContent(map[string]any{
-		"kind":         "rename",
-		"oldName":      name,
-		"newName":      newName,
-		"filesChanged": len(results),
-		"results":      results,
-	}), false, nil
+	uris := make([]string, 0, len(newContents))
+	for u := range newContents {
+		uris = append(uris, u)
+	}
+	sort.Strings(uris)
+	diags := s.collectDiagnostics(uris, newContents, opts)
+
+	payload := map[string]any{
+		"kind":                 "rename",
+		"oldName":              name,
+		"newName":              newName,
+		"filesChanged":         len(results),
+		"results":              results,
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
+	}
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
+	return jsonContent(payload), false, nil
 }
 
 // findCommentMentions runs a workspace-wide word-boundary scan for
@@ -1001,6 +1046,8 @@ func relPath(abs, root string) string {
 
 func confidenceLabel(c symbols.Confidence) string {
 	switch c {
+	case symbols.ConfidenceComment:
+		return "comment"
 	case symbols.ConfidenceLexical:
 		return "lexical"
 	case symbols.ConfidenceDeclared:

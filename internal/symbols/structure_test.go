@@ -117,3 +117,43 @@ func TestStructureNodesUnsupportedLanguage(t *testing.T) {
 		t.Error("expected error for unsupported language")
 	}
 }
+
+func TestEnclosingStructureNodeReturnsContainingDecl(t *testing.T) {
+	src := []byte("package main\n\nfunc Greet() {\n\tfoo()\n}\n\nfunc Other() {}\n")
+	// Position inside Greet's body (line 4, "foo()").
+	got, err := EnclosingStructureNode("go", src, 4, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("nil node")
+	}
+	if got.Name != "Greet" {
+		t.Errorf("Name = %q, want Greet", got.Name)
+	}
+	if got.Type != "function_declaration" {
+		t.Errorf("Type = %q, want function_declaration", got.Type)
+	}
+	if got.StartLine != 3 || got.EndLine < 5 {
+		t.Errorf("range = (%d:%d-%d:%d), want lines 3..5", got.StartLine, got.StartCol, got.EndLine, got.EndCol)
+	}
+}
+
+func TestEnclosingStructureNodePositionAtIdentifier(t *testing.T) {
+	src := []byte("package main\n\nfunc Hello() {}\n")
+	// Position on the H of Hello (line 3, col 6).
+	got, err := EnclosingStructureNode("go", src, 3, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Name != "Hello" {
+		t.Errorf("got %+v, want enclosing Hello", got)
+	}
+}
+
+func TestEnclosingStructureNodeUnsupported(t *testing.T) {
+	_, err := EnclosingStructureNode("markdown", []byte("hi"), 1, 1)
+	if err == nil {
+		t.Error("expected error for unsupported language")
+	}
+}

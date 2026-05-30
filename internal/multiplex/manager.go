@@ -45,16 +45,29 @@ type Manager struct {
 	children map[string]*Child // language name → Child
 	caps     map[string]json.RawMessage
 
+	// diagnostics is a single store across every spawned child. Wired
+	// into each child via Attach during Start / restart so callers can
+	// WaitAfter(uri) for the next publishDiagnostics from whichever
+	// child owns that URI.
+	diagnostics *DiagnosticStore
+
 	shutdownMu     sync.Mutex
 	shutdownCalled bool
 }
 
 func NewManager(reg *config.Registry) *Manager {
 	return &Manager{
-		registry: reg,
-		children: map[string]*Child{},
-		caps:     map[string]json.RawMessage{},
+		registry:    reg,
+		children:    map[string]*Child{},
+		caps:        map[string]json.RawMessage{},
+		diagnostics: NewDiagnosticStore(),
 	}
+}
+
+// Diagnostics returns the manager's shared diagnostic store. Callers
+// use this to subscribe to publishDiagnostics across every child.
+func (m *Manager) Diagnostics() *DiagnosticStore {
+	return m.diagnostics
 }
 
 // restartPolicy returns the effective policy values, applying defaults
@@ -98,6 +111,9 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 			log.Printf("multiplex: spawn %s (%s): %v", name, lang.LSP.Cmd, err)
 			continue
 		}
+		// Subscribe to publishDiagnostics BEFORE Initialize so any
+		// startup diagnostics aren't lost.
+		m.diagnostics.Attach(child)
 		caps, err := child.Initialize(ctx, rootURI)
 		if err != nil {
 			log.Printf("multiplex: initialize %s: %v", name, err)
@@ -179,6 +195,7 @@ func (m *Manager) restart(name string) {
 			backoff = nextBackoff(backoff, maxBackoff)
 			continue
 		}
+		m.diagnostics.Attach(child)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		caps, err := child.Initialize(ctx, m.startRootURI)
 		cancel()

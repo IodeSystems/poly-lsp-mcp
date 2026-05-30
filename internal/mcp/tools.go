@@ -523,7 +523,7 @@ func handleRefresh(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		return nil, true, fmt.Errorf("no workspace root configured and none provided")
 	}
 
-	idx, err := symbols.Build(newRoot, s.registry)
+	idx, err := symbols.Build(newRoot, s.registry, symbols.WithCache(s.parseCache))
 	if err != nil {
 		return nil, true, fmt.Errorf("build index at %s: %w", newRoot, err)
 	}

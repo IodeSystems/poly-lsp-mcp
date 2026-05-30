@@ -383,10 +383,31 @@ var skipDirs = map[string]bool{
 // than this are silently skipped — generated bundles are not the target.
 const maxFileSize = 1 << 20 // 1 MiB
 
+// BuildOption tunes Build. Variadic so callers without special needs
+// can keep using the bare two-argument form.
+type BuildOption func(*buildConfig)
+
+type buildConfig struct {
+	cache *ParseCache
+}
+
+// WithCache plumbs a ParseCache through Build. Files whose
+// (language, content) is cached are reused without re-running the
+// extractor. Misses populate the cache as a side effect so subsequent
+// builds reuse them. Pass the same *ParseCache across Build calls to
+// realize the cache hit across refreshes.
+func WithCache(c *ParseCache) BuildOption {
+	return func(cfg *buildConfig) { cfg.cache = c }
+}
+
 // Build walks root recursively and indexes every file whose extension is
 // registered in reg. Returns the populated Index. The walk is sequential;
-// concurrency comes in Phase 3 alongside the stacked-branch index.
-func Build(root string, reg *config.Registry) (*Index, error) {
+// concurrent walks are a possible future optimization.
+func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, error) {
+	var cfg buildConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	idx := NewIndex()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -421,7 +442,14 @@ func Build(root string, reg *config.Registry) (*Index, error) {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
-		idx.addHits(path, lang.Name, ex.Extract(content))
+		var hits []Hit
+		if h, ok := cfg.cache.Get(lang.Name, content); ok {
+			hits = h
+		} else {
+			hits = ex.Extract(content)
+			cfg.cache.Put(lang.Name, content, hits)
+		}
+		idx.addHits(path, lang.Name, hits)
 		return nil
 	})
 	if err != nil {

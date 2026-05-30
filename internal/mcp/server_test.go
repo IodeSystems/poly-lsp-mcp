@@ -21,6 +21,7 @@ import (
 // shape but uses json.Encoder/Decoder instead of the LSP framer.
 type mcpSession struct {
 	t       *testing.T
+	srv     *Server // exposed for tests that need to peek at internals
 	srvIn   *io.PipeWriter
 	clientR *json.Decoder
 	clientW *io.PipeWriter
@@ -48,6 +49,7 @@ func startSessionFull(t *testing.T, root string, bs []config.Binding, ss []confi
 
 	return &mcpSession{
 		t:       t,
+		srv:     srv,
 		srvIn:   cOut,
 		clientR: json.NewDecoder(cIn),
 		clientW: cOut,
@@ -1164,6 +1166,83 @@ func TestResourcesReadUnknownURIReturnsInvalidParams(t *testing.T) {
 	}
 	if resp.Error.Code != -32602 {
 		t.Errorf("error code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestParseCachePersistsAcrossRefresh(t *testing.T) {
+	// First initialize populates the cache. A subsequent refresh
+	// against the same content must not add new entries — every file
+	// the walker visits already has a hit in the cache.
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	afterInit := s.srv.parseCache.Len()
+	if afterInit == 0 {
+		t.Fatal("parseCache empty after initialize; expected entries for indexed files")
+	}
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "refresh",
+		"arguments": map[string]any{},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("refresh errored: %+v", r.Content)
+	}
+	afterRefresh := s.srv.parseCache.Len()
+	if afterRefresh != afterInit {
+		t.Errorf("parseCache grew across refresh: %d -> %d (content unchanged → no new entries expected)",
+			afterInit, afterRefresh)
+	}
+}
+
+func TestParseCacheAddsEntriesOnContentChange(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath,
+		[]byte("package main\n\nfunc Original() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+	before := s.srv.parseCache.Len()
+
+	// Edit main.go; refresh; cache should gain exactly one entry for
+	// the new content (the old entry persists too).
+	if err := os.WriteFile(mainPath,
+		[]byte("package main\n\nfunc Updated() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp := s.request("tools/call", map[string]any{
+		"name":      "refresh",
+		"arguments": map[string]any{},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("refresh errored: %+v", r.Content)
+	}
+	after := s.srv.parseCache.Len()
+	if after != before+1 {
+		t.Errorf("parseCache size after content change: %d -> %d, want +1", before, after)
 	}
 }
 

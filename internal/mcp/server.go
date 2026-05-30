@@ -61,6 +61,11 @@ type Server struct {
 	indexMu sync.RWMutex
 	index   *symbols.Index
 
+	// parseCache is shared across all Build calls on this server so
+	// refresh() and refresh(workspace_root=…) only re-parse files
+	// whose bytes actually changed. See symbols.ParseCache.
+	parseCache *symbols.ParseCache
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }
@@ -77,6 +82,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 	}
 	s.tools = registerTools()
 	s.resources = registerResources()
+	s.parseCache = symbols.NewParseCache()
 	return s
 }
 
@@ -172,7 +178,7 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 // Tier-2 and Tier-3 bindings, and advertises tool capability.
 func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	if s.getRoot() != "" {
-		idx, err := symbols.Build(s.getRoot(), s.registry)
+		idx, err := symbols.Build(s.getRoot(), s.registry, symbols.WithCache(s.parseCache))
 		if err != nil {
 			log.Printf("mcp initialize: index build failed for %s: %v", s.getRoot(), err)
 		} else {

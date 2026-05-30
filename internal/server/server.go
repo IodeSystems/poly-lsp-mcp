@@ -58,6 +58,10 @@ type Server struct {
 
 	indexMu sync.RWMutex
 	index   *symbols.Index
+
+	// parseCache is shared across Build calls so didSave-driven
+	// rebuilds reuse parses of unchanged files. See symbols.ParseCache.
+	parseCache *symbols.ParseCache
 }
 
 // New constructs a Server. manager may be nil to skip child-LSP
@@ -66,7 +70,13 @@ type Server struct {
 // cross-language bindings; schemas may be nil for workspaces with no
 // Tier-3 schema-anchored bindings.
 func New(reg *config.Registry, manager *multiplex.Manager, declared []config.Binding, schemas []config.Schema) *Server {
-	return &Server{registry: reg, manager: manager, bindings: declared, schemas: schemas}
+	return &Server{
+		registry:   reg,
+		manager:    manager,
+		bindings:   declared,
+		schemas:    schemas,
+		parseCache: symbols.NewParseCache(),
+	}
 }
 
 func (s *Server) Serve(in io.Reader, out io.Writer) error {

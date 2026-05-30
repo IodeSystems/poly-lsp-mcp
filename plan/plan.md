@@ -321,14 +321,35 @@ schemas:
 
 Goal: switching branches in a stack doesn't re-parse the world.
 
-- [ ] `internal/git`:
-  - [ ] Detect stack via `git config branch.<name>.parent` or a
-        `.tslsmcp/stack` file (TBD; survey gt/branchless conventions).
-  - [ ] Compute the parent→child diff once per branch switch.
-- [ ] Symbol-index store keyed by `(file_content_hash, language)`.
-- [ ] On branch switch: invalidate only files whose content hash differs
-      from the parent branch's snapshot.
-- [ ] On working-tree edits: overlay over the branch's frozen index.
+- [x] Content-addressed parse cache. `internal/symbols.ParseCache` is
+      keyed by `(language, sha256(content))`. `symbols.Build` accepts
+      `WithCache(c)`; cache hits skip the extractor entirely.
+      Two files with identical content (across branches, across
+      worktrees, across renames) share one parse. Branch switches
+      that don't change a file's bytes get cache hits automatically
+      — the content-address scheme implicitly handles "files
+      unchanged from parent branch" without any git awareness in our
+      code.
+- [x] Working-tree overlay is automatic: we hash files as they are on
+      disk, so unsaved edits get fresh hashes and fresh parses on
+      next refresh.
+- [x] Server / MCP server / LSP server each hold a single
+      ParseCache across refresh / didSave / handleInitialize. Tests
+      verify the cache doesn't grow when content is unchanged, and
+      grows by exactly one entry per changed file.
+- [ ] Eviction policy (LRU or size cap). Current implementation is
+      unbounded in-memory; a long-running server visiting many
+      branches will accrete entries. Real-world agent runtimes
+      restart often enough that this isn't urgent — clean follow-up
+      when it becomes one.
+- [ ] Disk persistence. Cache currently lives for one process. A
+      `.tslsmcp/cache` store would survive restarts and avoid the
+      first-walk cost on agent restart. Defer until use cases ask.
+- [ ] `internal/git` for explicit stack detection + eager prewarm.
+      The on-demand cache covers the common "switched back to a
+      branch you were just on" case for free. The remaining win
+      (pre-parsing ancestor branches you haven't visited yet) needs
+      `git read-tree` plumbing and a policy choice; defer.
 
 ## Phase 4 — MCP
 

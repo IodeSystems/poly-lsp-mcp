@@ -107,7 +107,7 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 
 	root := pickRoot(p)
 	if root != "" {
-		idx, err := symbols.Build(root, s.registry)
+		idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache))
 		if err != nil {
 			log.Printf("initialize: index build failed for %s: %v", root, err)
 		} else {

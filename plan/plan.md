@@ -337,11 +337,15 @@ Goal: switching branches in a stack doesn't re-parse the world.
       ParseCache across refresh / didSave / handleInitialize. Tests
       verify the cache doesn't grow when content is unchanged, and
       grows by exactly one entry per changed file.
-- [ ] Eviction policy (LRU or size cap). Current implementation is
-      unbounded in-memory; a long-running server visiting many
-      branches will accrete entries. Real-world agent runtimes
-      restart often enough that this isn't urgent — clean follow-up
-      when it becomes one.
+- [x] Eviction policy. `ParseCache` is now an LRU keyed on the same
+      `(language, sha256(content))` tuple. `NewParseCache()` picks a
+      default cap (5000 entries) so long-running servers have a
+      stable memory ceiling; `NewParseCacheLRU(n)` is the explicit
+      constructor (n=0 means unbounded, useful in tests). Get moves
+      the entry to the front; Put adds at the front and evicts the
+      back when over cap. Five new tests cover eviction order,
+      promote-on-Get, promote-on-Put-replace, the unbounded mode,
+      and the default-cap sanity check.
 - [ ] Disk persistence. Cache currently lives for one process. A
       `.tslsmcp/cache` store would survive restarts and avoid the
       first-walk cost on agent restart. Defer until use cases ask.

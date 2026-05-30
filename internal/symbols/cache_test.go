@@ -67,6 +67,91 @@ func TestParseCacheNilSafe(t *testing.T) {
 	}
 }
 
+func TestParseCacheLRUEvictsOldestWhenCapped(t *testing.T) {
+	c := NewParseCacheLRU(2)
+	c.Put("go", []byte("a"), []Hit{{Name: "a"}})
+	c.Put("go", []byte("b"), []Hit{{Name: "b"}})
+	if c.Len() != 2 {
+		t.Fatalf("Len = %d, want 2", c.Len())
+	}
+	// Adding a third entry evicts the oldest ("a").
+	c.Put("go", []byte("c"), []Hit{{Name: "c"}})
+	if c.Len() != 2 {
+		t.Errorf("Len = %d after third Put, want 2", c.Len())
+	}
+	if _, ok := c.Get("go", []byte("a")); ok {
+		t.Error("oldest entry 'a' should have been evicted")
+	}
+	if _, ok := c.Get("go", []byte("b")); !ok {
+		t.Error("'b' should still be in cache")
+	}
+	if _, ok := c.Get("go", []byte("c")); !ok {
+		t.Error("'c' should still be in cache")
+	}
+}
+
+func TestParseCacheLRUGetPromotesToFront(t *testing.T) {
+	c := NewParseCacheLRU(2)
+	c.Put("go", []byte("a"), []Hit{{Name: "a"}})
+	c.Put("go", []byte("b"), []Hit{{Name: "b"}})
+	// Touch "a" so it becomes the most-recently-used.
+	if _, ok := c.Get("go", []byte("a")); !ok {
+		t.Fatal("a missing")
+	}
+	// Now add "c" — "b" should be evicted (oldest), "a" retained.
+	c.Put("go", []byte("c"), []Hit{{Name: "c"}})
+	if _, ok := c.Get("go", []byte("a")); !ok {
+		t.Error("'a' was promoted by Get; should not have been evicted")
+	}
+	if _, ok := c.Get("go", []byte("b")); ok {
+		t.Error("'b' should have been evicted (oldest after Get(a))")
+	}
+}
+
+func TestParseCacheLRUPutReplacePromotes(t *testing.T) {
+	// Repeated Put of the same key updates and promotes (no eviction).
+	c := NewParseCacheLRU(2)
+	c.Put("go", []byte("a"), []Hit{{Name: "a1"}})
+	c.Put("go", []byte("b"), []Hit{{Name: "b"}})
+	c.Put("go", []byte("a"), []Hit{{Name: "a2"}}) // update + promote
+	c.Put("go", []byte("c"), []Hit{{Name: "c"}})  // evict oldest
+
+	hits, ok := c.Get("go", []byte("a"))
+	if !ok || len(hits) != 1 || hits[0].Name != "a2" {
+		t.Errorf("a should hold updated value: ok=%v hits=%+v", ok, hits)
+	}
+	if _, ok := c.Get("go", []byte("b")); ok {
+		t.Error("'b' should be evicted; updating 'a' should have promoted it past 'b'")
+	}
+}
+
+func TestParseCacheUnboundedWithZeroCap(t *testing.T) {
+	c := NewParseCacheLRU(0)
+	for i := range 100 {
+		c.Put("go", []byte{byte(i)}, []Hit{{Name: "x"}})
+	}
+	if c.Len() != 100 {
+		t.Errorf("Len = %d, want 100 (no eviction)", c.Len())
+	}
+}
+
+func TestParseCacheDefaultConstructorHasCap(t *testing.T) {
+	c := NewParseCache()
+	// Without exposing maxEntries, prove the cap is finite by
+	// inserting one over and watching for eviction. Insert N+1
+	// entries; Len should saturate at N (the cap).
+	const N = defaultCacheEntries
+	for i := range N + 10 {
+		buf := make([]byte, 8)
+		buf[0] = byte(i)
+		buf[1] = byte(i >> 8)
+		c.Put("go", buf, []Hit{{Name: "x"}})
+	}
+	if c.Len() != N {
+		t.Errorf("Len = %d, want %d (default cap should bound the cache)", c.Len(), N)
+	}
+}
+
 func TestBuildPopulatesCacheOnFirstWalk(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "main.go"),

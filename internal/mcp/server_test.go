@@ -837,10 +837,113 @@ func TestNodeRefactorMissingKindIsError(t *testing.T) {
 		"file":      "main.go",
 		"startLine": 6, "startCol": 6,
 		"endLine": 6, "endCol": 12,
-		// no kind
+		// no kind and no refactor
 	})
 	if !r.IsError {
-		t.Errorf("expected isError on missing kind, got %+v", r)
+		t.Errorf("expected isError on missing kind/refactor, got %+v", r)
+	}
+}
+
+// TestNodeRefactorNestedShapeRenameIsEquivalent verifies the new
+// refactor:{rename: ...} shape produces the same result as the
+// legacy kind=rename, newName=... shape.
+func TestNodeRefactorNestedShapeRenameIsEquivalent(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath,
+		[]byte("package main\n\ntype UserID int\n\nvar u UserID = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	sr := s.callTool("structure", map[string]any{"path": "main.go"})
+	var f structureEntryWire
+	json.Unmarshal([]byte(sr.Content[0].Text), &f)
+	var typ *structureEntryWire
+	for i := range f.Children {
+		if f.Children[i].Name == "UserID" {
+			typ = &f.Children[i]
+			break
+		}
+	}
+	if typ == nil {
+		t.Fatal("UserID missing from structure")
+	}
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "main.go",
+		"startLine": typ.NameStartLine, "startCol": typ.NameStartCol,
+		"endLine": typ.NameEndLine, "endCol": typ.NameEndCol,
+		"refactor": map[string]any{
+			"rename": "PersonID",
+		},
+	})
+	if r.IsError {
+		t.Fatalf("nested-shape rename errored: %+v", r.Content)
+	}
+	var result refactorResult
+	json.Unmarshal([]byte(r.Content[0].Text), &result)
+	if result.OldName != "UserID" || result.NewName != "PersonID" {
+		t.Errorf("result header wrong: %+v", result)
+	}
+	got, _ := os.ReadFile(mainPath)
+	if strings.Contains(string(got), "UserID") {
+		t.Errorf("UserID still present after nested-shape rename: %s", got)
+	}
+	if !strings.Contains(string(got), "PersonID") {
+		t.Errorf("PersonID missing after nested-shape rename: %s", got)
+	}
+}
+
+// TestNodeRefactorConflictingShapesIsError makes sure callers don't
+// pass kind=rename, newName=X AND refactor:{rename: Y} with disagreeing
+// names — that ambiguity is rejected.
+func TestNodeRefactorConflictingShapesIsError(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "main.go",
+		"startLine": 6, "startCol": 6,
+		"endLine": 6, "endCol": 12,
+		"kind":     "rename",
+		"newName":  "X",
+		"refactor": map[string]any{"rename": "Y"},
+	})
+	if !r.IsError {
+		t.Errorf("expected isError on conflicting names, got %+v", r)
+	}
+}
+
+// TestNodeRefactorSignatureOpsNotYetImplemented documents the current
+// scope boundary: params/return aren't wired yet, so callers get a
+// clear error instead of silent rename-only behavior.
+func TestNodeRefactorSignatureOpsNotYetImplemented(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "main.go",
+		"startLine": 6, "startCol": 6,
+		"endLine": 6, "endCol": 12,
+		"refactor": map[string]any{
+			"return": "error",
+		},
+	})
+	if !r.IsError {
+		t.Errorf("expected isError for unimplemented return change, got %+v", r)
 	}
 }
 

@@ -591,10 +591,37 @@ func (s *Server) refreshFileInIndex(abs string, content []byte) {
 
 // -------------------------------------------------------------- node_refactor
 
+// refactorOps is the nested shape node_refactor accepts: pass any
+// non-empty subset of fields to apply that combination in one call.
+// rename touches the identifier across the workspace; params rebuilds
+// the function declaration's parameter list (and best-effort rewrites
+// call sites); return rebuilds the result type.
+type refactorOps struct {
+	Rename string          `json:"rename,omitempty"`
+	Params []refactorParam `json:"params,omitempty"`
+	Return string          `json:"return,omitempty"`
+}
+
+type refactorParam struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// nonEmpty reports whether at least one refactor op is requested.
+func (r refactorOps) nonEmpty() bool {
+	return r.Rename != "" || r.Params != nil || r.Return != ""
+}
+
 func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		rangeArgs
 		diagnosticOptions
+		// New shape — preferred. Nested object so callers can bundle
+		// multiple refactors in one tool call.
+		Refactor refactorOps `json:"refactor"`
+		// Legacy shape — kept for callers using the original
+		// kind=rename, newName= surface. Equivalent to
+		// refactor: {rename: <newName>}.
 		Kind            string `json:"kind"`
 		NewName         string `json:"newName"`
 		IncludeComments bool   `json:"includeComments"`
@@ -605,17 +632,34 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 	if err := p.rangeArgs.validate(); err != nil {
 		return nil, true, err
 	}
-	switch p.Kind {
-	case "":
-		return nil, true, errors.New("kind is required")
-	case "rename":
-		if p.NewName == "" {
-			return nil, true, errors.New("newName is required when kind='rename'")
+
+	// Normalize legacy kind=rename into the nested shape so the rest
+	// of the handler has one path.
+	ops := p.Refactor
+	if p.Kind != "" {
+		switch p.Kind {
+		case "rename":
+			if p.NewName == "" {
+				return nil, true, errors.New("newName is required when kind='rename'")
+			}
+			if ops.Rename != "" && ops.Rename != p.NewName {
+				return nil, true, errors.New("conflicting rename: kind/newName and refactor.rename disagree")
+			}
+			ops.Rename = p.NewName
+		default:
+			return nil, true, fmt.Errorf("unsupported refactor kind: %q (use refactor:{...} instead)", p.Kind)
 		}
-		return s.refactorRename(p.rangeArgs, p.NewName, p.IncludeComments, p.diagnosticOptions)
-	default:
-		return nil, true, fmt.Errorf("unsupported refactor kind: %q (try 'rename')", p.Kind)
 	}
+	if !ops.nonEmpty() {
+		return nil, true, errors.New("refactor must specify at least one of {rename, params, return}")
+	}
+	// Params + Return are signature ops; they need a Go function
+	// declaration at the range. Land that path in the next slice —
+	// this commit only ships the nested shape and the rename path.
+	if ops.Params != nil || ops.Return != "" {
+		return nil, true, errors.New("refactor.params and refactor.return not yet implemented (rename only for now)")
+	}
+	return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.diagnosticOptions)
 }
 
 func (s *Server) refactorRename(a rangeArgs, newName string, includeComments bool, opts diagnosticOptions) ([]Content, bool, error) {

@@ -371,8 +371,10 @@ the full cross-language stack the LSP layer already serves to editors.
       returns 24 hits across 9 languages; `rename(UserID, PersonID)`
       produces 20 atomic edits across proto + openapi + jsonschema + go
       + ts + py + yaml + sql + md.
-- [ ] More tools as use cases surface: `list_bindings`,
-      `document_symbols`, `did_save_refresh`, etc.
+- [x] More tools as use cases surfaced:
+      `list_bindings`, `document_symbols`, `refresh`, `apply_rename`
+      shipped — see entries above. Future tools land here as their
+      use cases come up.
 - [x] Live editing tool: `apply_rename(name, newName)` builds the
       same plan as `rename` and writes the edits to disk. Per-file
       edits sorted (line desc, col desc) and applied right-to-left so

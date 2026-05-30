@@ -10,6 +10,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -95,6 +96,20 @@ type Server struct {
 	// stay fast.
 	diagnosticWait time.Duration
 
+	// proactiveOpen controls whether handleInitialize, after spawning
+	// the manager, walks the workspace and sends didOpen for every
+	// file with a child LSP. This is how the poly-lsp-mcp://diagnostics
+	// resource becomes useful before any edits — gopls (and most LSPs)
+	// only publish after didOpen / didSave. Default true.
+	proactiveOpen bool
+
+	// proactiveOpenDoneMu guards proactiveOpenDone. The channel is
+	// (re)created at the start of each proactive walk and closed when
+	// it finishes. WaitForProactiveOpen reads it under the lock so a
+	// caller that races with initialize doesn't see a nil channel.
+	proactiveOpenDoneMu sync.Mutex
+	proactiveOpenDone   chan struct{}
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }
@@ -106,16 +121,46 @@ const defaultDiagnosticWait = 1500 * time.Millisecond
 // schemas are applied (Tier 2 then Tier 3) once `initialize` arrives.
 func New(reg *config.Registry, root string, declared []config.Binding, schemas []config.Schema) *Server {
 	s := &Server{
-		registry: reg,
-		root:     root,
-		bindings: declared,
-		schemas:  schemas,
-		openDocs: map[string]int32{},
+		registry:      reg,
+		root:          root,
+		bindings:      declared,
+		schemas:       schemas,
+		openDocs:      map[string]int32{},
+		proactiveOpen: true,
 	}
 	s.tools = registerTools()
 	s.resources = registerResources()
 	s.parseCache = symbols.NewParseCache()
 	return s
+}
+
+// SetProactiveOpen toggles the post-initialize workspace walk that
+// sends didOpen to every child LSP for every indexed file. Default
+// true — that's what makes poly-lsp-mcp://diagnostics useful before
+// any edits. Disable in tests where you want to control timing
+// precisely, or in workspaces too large to afford the up-front cost.
+func (s *Server) SetProactiveOpen(enabled bool) {
+	s.proactiveOpen = enabled
+}
+
+// WaitForProactiveOpen blocks until the most recent proactive-open
+// walk finishes, or ctx is done. Returns ctx.Err() on timeout, nil
+// otherwise. Safe to call before initialize: if no walk has started,
+// returns immediately with nil. Primarily for tests that need to
+// observe post-open state deterministically.
+func (s *Server) WaitForProactiveOpen(ctx context.Context) error {
+	s.proactiveOpenDoneMu.Lock()
+	ch := s.proactiveOpenDone
+	s.proactiveOpenDoneMu.Unlock()
+	if ch == nil {
+		return nil
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // SetManager attaches a multiplex.Manager so node_edit / node_delete /

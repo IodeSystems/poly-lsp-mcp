@@ -466,6 +466,17 @@ the full cross-language stack the LSP layer already serves to editors.
       "clean" from absence. Same default caps as edits (25 / 15 / 3).
       Capability `resources: {}` advertised in initialize. More
       resources can be added by extending registerResources.
+- [x] Proactive workspace open: after `manager.Start` succeeds,
+      `kickProactiveOpen` walks the workspace asynchronously and
+      sends `textDocument/didOpen` for every indexed file that
+      routes to a running child LSP. This is what makes
+      `poly-lsp-mcp://diagnostics` useful before any edit — gopls
+      (and most LSPs) only publish after a file is opened or saved.
+      Default on; `SetProactiveOpen(false)` opts out for huge
+      workspaces. Tests use `WaitForProactiveOpen(ctx)` to observe
+      completion; `TestProactiveOpenPopulatesDiagnosticsResource`
+      proves the resource shows the broken-file error within ~1s of
+      initialize, no edit required.
 
 ## Config setup: what's automatic, what isn't
 

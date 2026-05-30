@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"io/fs"
 	"log"
 	"net/url"
 	"os"
@@ -165,6 +166,118 @@ func (s *Server) startManagerIfPresent(idx *symbols.Index) {
 	defer cancel()
 	if err := s.manager.Start(ctx, s.getRoot(), pathToURI(s.getRoot()), langs); err != nil {
 		log.Printf("mcp initialize: manager.Start: %v", err)
+		return
+	}
+	if s.proactiveOpen {
+		s.kickProactiveOpen()
+	}
+}
+
+// kickProactiveOpen launches an async walk of the workspace that
+// sends textDocument/didOpen to the matching child LSP for every
+// file with a registered language. This is what makes the
+// poly-lsp-mcp://diagnostics resource useful before any edits —
+// gopls (and most LSPs) only publish diagnostics after didOpen /
+// didSave on a URI.
+//
+// Runs in a goroutine so initialize stays fast. A fresh
+// proactiveOpenDone channel is installed before the goroutine
+// starts, then closed when the walk finishes. Tests use
+// WaitForProactiveOpen to observe completion.
+func (s *Server) kickProactiveOpen() {
+	done := make(chan struct{})
+	s.proactiveOpenDoneMu.Lock()
+	s.proactiveOpenDone = done
+	s.proactiveOpenDoneMu.Unlock()
+
+	go func() {
+		defer close(done)
+		s.runProactiveOpen()
+	}()
+}
+
+// runProactiveOpen walks the workspace root and sends didOpen for
+// every file whose extension routes to a running child LSP. Skip
+// rules mirror symbols.Build: skipDirs for noise dirs, file-size cap
+// matching the index's own limit. Best effort throughout — failures
+// are logged but don't fail the walk.
+func (s *Server) runProactiveOpen() {
+	root := s.getRoot()
+	if root == "" {
+		return
+	}
+	var opened int
+	start := time.Now()
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if skipProactiveOpenDir(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || info.Size() > proactiveMaxFileSize {
+			return nil
+		}
+		uri := pathToURI(path)
+		child := s.manager.RouteByURI(uri)
+		if child == nil {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		s.notifyChildOfOpen(child, uri, content)
+		opened++
+		return nil
+	})
+	if err != nil {
+		log.Printf("mcp proactive open: walk %s: %v", root, err)
+	}
+	log.Printf("mcp proactive open: didOpen %d file(s) in %s", opened, time.Since(start))
+}
+
+const proactiveMaxFileSize = 1 << 20 // 1 MiB, matches symbols.Build
+
+// skipProactiveOpenDir mirrors the structure/index skip list so we
+// don't pour vendor/node_modules/.git into the child LSPs (which
+// would re-parse them anyway, wasting startup time).
+func skipProactiveOpenDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", "__pycache__", "dist", "build",
+		".idea", ".vscode", ".poly-lsp-mcp":
+		return true
+	}
+	return false
+}
+
+// notifyChildOfOpen is a leaner sibling of notifyChildOfEdit: just
+// didOpen, no didSave. Idempotent — if the URI is already opened in
+// this session, returns immediately. Used by the proactive walk so
+// follow-up edits still know whether to emit didOpen or didChange.
+func (s *Server) notifyChildOfOpen(child *multiplex.Child, uri string, content []byte) {
+	s.openDocsMu.Lock()
+	if _, opened := s.openDocs[uri]; opened {
+		s.openDocsMu.Unlock()
+		return
+	}
+	s.openDocs[uri] = 1
+	s.openDocsMu.Unlock()
+
+	languageID := s.languageIDForURI(uri)
+	if err := child.Notify("textDocument/didOpen", map[string]any{
+		"textDocument": map[string]any{
+			"uri":        uri,
+			"languageId": languageID,
+			"version":    1,
+			"text":       string(content),
+		},
+	}); err != nil {
+		log.Printf("mcp proactive didOpen %s: %v", uri, err)
 	}
 }
 

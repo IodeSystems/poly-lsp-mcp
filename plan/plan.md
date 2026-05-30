@@ -66,7 +66,18 @@ cross-language stitching yet (that's Phase 2).**
   - [x] `(*symbols.Index).Languages()` helper so the server can decide
         which children are worth spawning from the workspace it just
         indexed.
-  - [ ] Restart-on-crash with backoff *(deferred — needs policy choice)*.
+  - [x] Restart-on-crash with backoff. Each Start spawn gets a
+        watchdog goroutine waiting on child.Done. Unexpected exit
+        triggers `restart(name)`: exponential backoff starting at
+        `RestartInitialBackoff` (default 1s), doubling up to
+        `RestartMaxBackoff` (default 30s), giving up after
+        `RestartMaxAttempts` (default 5). The shutdown flag is
+        re-checked before each attempt so an in-flight Shutdown
+        cancels the retry loop cleanly. On success, the new child
+        replaces the old one in the children/caps maps and gets its
+        own watchdog. On exhaustion the language is dropped (so
+        RouteByURI returns nil and callers fall back to the symbol
+        index).
 - [x] Server integration:
   - [x] Generic `textDocument/*` forward through `Manager.RouteByURI`;
         notifications fire-and-forget, requests honor a 30s timeout

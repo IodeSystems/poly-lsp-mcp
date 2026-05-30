@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/iodesystems/tslsmcp/internal/config"
 )
@@ -22,14 +23,30 @@ import (
 // the supplied list, blocks on each Initialize, and discards children
 // that fail. Children that survive are kept until Shutdown.
 //
-// Restart-on-crash is a planned follow-up — currently a dead child stays
-// in the map and Call returns errors from it.
+// Restart-on-crash: a watchdog goroutine waits on each child's Done.
+// If the child exits without an orderly Shutdown call from the manager,
+// the watchdog respawns via exponential backoff up to RestartMaxAttempts
+// before giving up and removing the language from the table.
 type Manager struct {
 	registry *config.Registry
+
+	// Restart policy. Zero values mean: 1s initial backoff, 30s max
+	// backoff, 5 attempts. Tests override before calling Start.
+	RestartInitialBackoff time.Duration
+	RestartMaxBackoff     time.Duration
+	RestartMaxAttempts    int
+
+	// Captured at Start so the watchdog can respawn with the same
+	// shape it was originally given.
+	startCwd     string
+	startRootURI string
 
 	mu       sync.RWMutex
 	children map[string]*Child // language name → Child
 	caps     map[string]json.RawMessage
+
+	shutdownMu     sync.Mutex
+	shutdownCalled bool
 }
 
 func NewManager(reg *config.Registry) *Manager {
@@ -38,6 +55,24 @@ func NewManager(reg *config.Registry) *Manager {
 		children: map[string]*Child{},
 		caps:     map[string]json.RawMessage{},
 	}
+}
+
+// restartPolicy returns the effective policy values, applying defaults
+// for fields the caller left as zero.
+func (m *Manager) restartPolicy() (initial, max time.Duration, attempts int) {
+	initial = m.RestartInitialBackoff
+	if initial <= 0 {
+		initial = time.Second
+	}
+	max = m.RestartMaxBackoff
+	if max <= 0 {
+		max = 30 * time.Second
+	}
+	attempts = m.RestartMaxAttempts
+	if attempts <= 0 {
+		attempts = 5
+	}
+	return
 }
 
 // Start spawns one child per language in `languages` that is registered
@@ -51,6 +86,8 @@ func NewManager(reg *config.Registry) *Manager {
 // Start may be called only once per Manager; concurrent invocations are
 // not supported.
 func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []string) error {
+	m.startCwd = cwd
+	m.startRootURI = rootURI
 	for _, name := range languages {
 		lang := m.registry.LookupByName(name)
 		if lang == nil || lang.LSP == nil {
@@ -73,8 +110,108 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 		m.caps[name] = caps
 		m.mu.Unlock()
 		log.Printf("multiplex: %s ready", name)
+		go m.watch(name, child)
 	}
 	return nil
+}
+
+// watch blocks on child.Done. If the child exits while the manager
+// is still live, the watchdog kicks off a restart attempt with the
+// configured backoff policy. Watchdogs from previous incarnations
+// exit when their child is replaced — the new child gets its own.
+func (m *Manager) watch(name string, child *Child) {
+	<-child.Done()
+
+	m.shutdownMu.Lock()
+	stopping := m.shutdownCalled
+	m.shutdownMu.Unlock()
+	if stopping {
+		return
+	}
+
+	// Already replaced by a previous restart pass? Drop out so the
+	// most recent watchdog is the one in charge.
+	m.mu.RLock()
+	current := m.children[name]
+	m.mu.RUnlock()
+	if current != nil && current != child {
+		return
+	}
+
+	log.Printf("multiplex: %s exited unexpectedly: %v", name, child.Err())
+	m.restart(name)
+}
+
+// restart attempts to respawn the child for name with exponential
+// backoff. Each attempt re-checks the shutdown flag so a Shutdown call
+// arriving mid-restart cancels promptly. On exhaustion the language is
+// dropped from the table so RouteByURI returns nil (callers fall back
+// to the symbol index).
+func (m *Manager) restart(name string) {
+	lang := m.registry.LookupByName(name)
+	if lang == nil || lang.LSP == nil {
+		// Language vanished from the registry; nothing to restart.
+		m.mu.Lock()
+		delete(m.children, name)
+		delete(m.caps, name)
+		m.mu.Unlock()
+		return
+	}
+
+	initial, maxBackoff, maxAttempts := m.restartPolicy()
+	backoff := initial
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		time.Sleep(backoff)
+
+		m.shutdownMu.Lock()
+		stopping := m.shutdownCalled
+		m.shutdownMu.Unlock()
+		if stopping {
+			return
+		}
+
+		log.Printf("multiplex: restart %s attempt %d/%d", name, attempt, maxAttempts)
+
+		child, err := Spawn(name, lang.LSP, m.startCwd)
+		if err != nil {
+			log.Printf("multiplex: restart %s spawn failed: %v", name, err)
+			backoff = nextBackoff(backoff, maxBackoff)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		caps, err := child.Initialize(ctx, m.startRootURI)
+		cancel()
+		if err != nil {
+			log.Printf("multiplex: restart %s initialize failed: %v", name, err)
+			_ = child.Kill()
+			_ = child.Wait()
+			backoff = nextBackoff(backoff, maxBackoff)
+			continue
+		}
+
+		m.mu.Lock()
+		m.children[name] = child
+		m.caps[name] = caps
+		m.mu.Unlock()
+		log.Printf("multiplex: %s restarted", name)
+		go m.watch(name, child)
+		return
+	}
+
+	log.Printf("multiplex: gave up restarting %s after %d attempts", name, maxAttempts)
+	m.mu.Lock()
+	delete(m.children, name)
+	delete(m.caps, name)
+	m.mu.Unlock()
+}
+
+func nextBackoff(cur, max time.Duration) time.Duration {
+	next := cur * 2
+	if next > max {
+		return max
+	}
+	return next
 }
 
 // RouteByURI returns the Child for the given file URI, or nil if no
@@ -137,8 +274,14 @@ func (m *Manager) Languages() []string {
 
 // Shutdown sends shutdown+exit to every running child and waits for
 // them. Best-effort: errors are logged and accumulated but every child
-// gets a Kill if shutdown stalls past ctx.
+// gets a Kill if shutdown stalls past ctx. Sets the shutdown flag
+// first so watchdog goroutines don't try to respawn children we're
+// intentionally killing.
 func (m *Manager) Shutdown(ctx context.Context) error {
+	m.shutdownMu.Lock()
+	m.shutdownCalled = true
+	m.shutdownMu.Unlock()
+
 	m.mu.Lock()
 	children := m.children
 	m.children = map[string]*Child{}

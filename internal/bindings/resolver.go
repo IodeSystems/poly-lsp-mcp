@@ -19,8 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
 // Resolver applies bindings declared in config to a symbol index. The

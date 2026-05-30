@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/bindings"
-	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
+	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
 // forwardTimeout caps how long the server will wait on a child LSP
@@ -176,7 +176,7 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	result := map[string]any{
 		"capabilities": caps,
 		"serverInfo": map[string]any{
-			"name":    "tslsmcp",
+			"name":    "poly-lsp-mcp",
 			"version": "0.0.0",
 		},
 	}

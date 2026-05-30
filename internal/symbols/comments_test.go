@@ -61,7 +61,7 @@ paths:
     get:
       operationId: listProjects
       x-ref: server/main.go:listProjects
-      x-tslsmcp-source: server/main.go:listProjects
+      x-poly-lsp-mcp-source: server/main.go:listProjects
       x-source: "server/main.go:listProjects"
 `)
 	got := ExtractCommentRefs(src)

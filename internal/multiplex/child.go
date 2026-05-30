@@ -1,5 +1,5 @@
 // Package multiplex spawns and talks to child LSP processes on behalf of
-// the tslsmcp server. Each Child owns one subprocess plus its I/O loop;
+// the poly-lsp-mcp server. Each Child owns one subprocess plus its I/O loop;
 // the Manager (forthcoming) holds the map of language → Child and routes
 // textDocument/* requests by URI.
 //
@@ -21,8 +21,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
 )
 
 // Child supervises a single child LSP process. After Spawn returns
@@ -251,7 +251,7 @@ func (c *Child) Initialize(ctx context.Context, rootURI string) (json.RawMessage
 		"rootUri":      rootURI,
 		"capabilities": map[string]any{},
 		"clientInfo": map[string]any{
-			"name":    "tslsmcp",
+			"name":    "poly-lsp-mcp",
 			"version": "0.0.0",
 		},
 	}

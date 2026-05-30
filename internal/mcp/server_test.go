@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
 )
 
 // mcpSession drives a live MCP server through io.Pipe pairs using
@@ -174,8 +174,8 @@ func TestInitializeReturnsProtocolVersionAndServerInfo(t *testing.T) {
 	if got.Capabilities.Resources == nil {
 		t.Error("resources capability missing")
 	}
-	if got.ServerInfo.Name != "tslsmcp" {
-		t.Errorf("serverInfo.name = %q, want tslsmcp", got.ServerInfo.Name)
+	if got.ServerInfo.Name != "poly-lsp-mcp" {
+		t.Errorf("serverInfo.name = %q, want poly-lsp-mcp", got.ServerInfo.Name)
 	}
 }
 
@@ -391,7 +391,7 @@ func TestStructureFileWithoutTreeSitterGrammar(t *testing.T) {
 }
 
 func TestStructureUnknownExtensionReturnsTextNode(t *testing.T) {
-	// Files in extensions tslsmcp doesn't recognize (Dockerfile,
+	// Files in extensions poly-lsp-mcp doesn't recognize (Dockerfile,
 	// .toml, .env) still surface as text nodes so the agent can
 	// edit them.
 	dir := t.TempDir()
@@ -1067,14 +1067,14 @@ func TestResourcesListReturnsCatalog(t *testing.T) {
 	for _, r := range got.Resources {
 		uris[r.URI] = true
 	}
-	for _, want := range []string{"tslsmcp://workspace", "tslsmcp://bindings", "tslsmcp://diagnostics"} {
+	for _, want := range []string{"poly-lsp-mcp://workspace", "poly-lsp-mcp://bindings", "poly-lsp-mcp://diagnostics"} {
 		if !uris[want] {
 			t.Errorf("resource %q missing from catalog", want)
 		}
 	}
 }
 
-// tslsmcp://diagnostics with no manager attached: diagnosticsAvailable
+// poly-lsp-mcp://diagnostics with no manager attached: diagnosticsAvailable
 // must be false. The agent must NOT infer "compiles clean" from an
 // empty list when no LSP is talking to us.
 func TestResourcesReadDiagnosticsWithoutManager(t *testing.T) {
@@ -1084,7 +1084,7 @@ func TestResourcesReadDiagnosticsWithoutManager(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	resp := s.request("resources/read", map[string]any{"uri": "tslsmcp://diagnostics"})
+	resp := s.request("resources/read", map[string]any{"uri": "poly-lsp-mcp://diagnostics"})
 	var got struct {
 		Contents []resourceContent `json:"contents"`
 	}
@@ -1115,7 +1115,7 @@ func TestResourcesReadWorkspaceSummary(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	resp := s.request("resources/read", map[string]any{"uri": "tslsmcp://workspace"})
+	resp := s.request("resources/read", map[string]any{"uri": "poly-lsp-mcp://workspace"})
 	var got struct {
 		Contents []resourceContent `json:"contents"`
 	}
@@ -1145,7 +1145,7 @@ func TestResourcesReadBindingsCatalogWithSchemas(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	resp := s.request("resources/read", map[string]any{"uri": "tslsmcp://bindings"})
+	resp := s.request("resources/read", map[string]any{"uri": "poly-lsp-mcp://bindings"})
 	var got struct {
 		Contents []resourceContent `json:"contents"`
 	}
@@ -1163,7 +1163,7 @@ func TestResourcesReadUnknownURIReturnsInvalidParams(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	resp := s.request("resources/read", map[string]any{"uri": "tslsmcp://no-such"})
+	resp := s.request("resources/read", map[string]any{"uri": "poly-lsp-mcp://no-such"})
 	if resp.Error == nil || resp.Error.Code != -32602 {
 		t.Errorf("error = %+v, want -32602", resp.Error)
 	}
@@ -1181,7 +1181,7 @@ func TestSetCachePathPersistsAcrossSessions(t *testing.T) {
 		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cachePath := filepath.Join(dir, ".tslsmcp", "cache.gob")
+	cachePath := filepath.Join(dir, ".poly-lsp-mcp", "cache.gob")
 
 	// Session 1.
 	{

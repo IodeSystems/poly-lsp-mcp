@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Editor-side LSP conformance smoke.
 
-Drives the tslsmcp binary as a real subprocess with the request shapes
+Drives the poly-lsp-mcp binary as a real subprocess with the request shapes
 a typical LSP client (nvim-lspconfig, vs-code, helix) sends, then
 asserts every response against the LSP spec's required-field
 contracts. Catches integration gaps the in-process conformance pack
@@ -19,10 +19,10 @@ into CI.
 
 Usage:
     python3 scripts/smoke/editor_smoke.py
-        builds the binary at /tmp/tslsmcp_smoke if needed and runs
+        builds the binary at /tmp/poly_lsp_mcp_smoke if needed and runs
         the smoke against testdata/fixtures/polyglot.
 
-    python3 scripts/smoke/editor_smoke.py --binary /path/to/tslsmcp
+    python3 scripts/smoke/editor_smoke.py --binary /path/to/poly-lsp-mcp
         skips the build, uses an existing binary.
 
     python3 scripts/smoke/editor_smoke.py --workspace /path/to/repo
@@ -162,7 +162,7 @@ def realistic_initialize_params(workspace_root: str) -> dict[str, Any]:
     uri = "file://" + workspace_root
     return {
         "processId": os.getpid(),
-        "clientInfo": {"name": "tslsmcp-smoke", "version": "0.1"},
+        "clientInfo": {"name": "poly-lsp-mcp-smoke", "version": "0.1"},
         "locale": "en-US",
         "rootUri": uri,
         "rootPath": workspace_root,  # legacy field — must coexist with rootUri
@@ -204,7 +204,7 @@ def realistic_initialize_params(workspace_root: str) -> dict[str, Any]:
                 "regularExpressions": {"engine": "ECMAScript", "version": "ES2020"},
                 "markdown": {"parser": "marked", "version": "1.1.0"},
             },
-            "experimental": {"tslsmcp": True},
+            "experimental": {"poly-lsp-mcp": True},
         },
         "initializationOptions": {},
         "trace": "off",
@@ -221,7 +221,7 @@ def check_initialize_response(client: LSPClient, root: str) -> list[str]:
     if not isinstance(caps, dict):
         errs.append("missing capabilities object")
         return errs
-    # Server may advertise any subset; we want the ones tslsmcp owns.
+    # Server may advertise any subset; we want the ones poly-lsp-mcp owns.
     for must_have in (
         "workspaceSymbolProvider",
         "referencesProvider",
@@ -231,8 +231,8 @@ def check_initialize_response(client: LSPClient, root: str) -> list[str]:
         if must_have not in caps:
             errs.append(f"capabilities.{must_have} not advertised")
     info = result.get("serverInfo") or {}
-    if info.get("name") != "tslsmcp":
-        errs.append(f"serverInfo.name = {info.get('name')!r}, want 'tslsmcp'")
+    if info.get("name") != "poly-lsp-mcp":
+        errs.append(f"serverInfo.name = {info.get('name')!r}, want 'poly-lsp-mcp'")
     client.notify("initialized", {})
     return errs
 
@@ -361,7 +361,7 @@ def check_workspace_notifications_dropped_silently(client: LSPClient, root: str)
 
 
 def build_binary(out: str) -> str:
-    """Build tslsmcp into `out` from the repo root."""
+    """Build poly-lsp-mcp into `out` from the repo root."""
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     print(f"[build] {out} from {repo_root}", file=sys.stderr)
     res = subprocess.run(
@@ -378,7 +378,7 @@ def build_binary(out: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", help="tslsmcp binary path (default: build)")
+    parser.add_argument("--binary", help="poly-lsp-mcp binary path (default: build)")
     parser.add_argument(
         "--workspace",
         help="workspace root to test against (default: testdata/fixtures/polyglot)",
@@ -386,7 +386,7 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    binary = args.binary or build_binary("/tmp/tslsmcp_smoke")
+    binary = args.binary or build_binary("/tmp/poly_lsp_mcp_smoke")
     workspace = args.workspace or os.path.join(repo_root, "testdata", "fixtures", "polyglot")
 
     print(f"[smoke] binary={binary}")

@@ -6,19 +6,19 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/mcp"
-	"github.com/iodesystems/tslsmcp/internal/multiplex"
-	"github.com/iodesystems/tslsmcp/internal/server"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/mcp"
+	"github.com/iodesystems/poly-lsp-mcp/internal/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/internal/server"
 )
 
 func main() {
 	log.SetOutput(os.Stderr)
-	log.SetPrefix("tslsmcp ")
+	log.SetPrefix("poly-lsp-mcp ")
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	// Subcommand dispatch. Default (no subcommand) runs the LSP server.
-	// `tslsmcp mcp [flags]` runs the MCP server.
+	// `poly-lsp-mcp mcp [flags]` runs the MCP server.
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 		runMCP()
@@ -28,7 +28,7 @@ func main() {
 }
 
 func runLSP() {
-	configPath := flag.String("config", "tslsmcp.yaml", "language registry config file")
+	configPath := flag.String("config", "poly-lsp-mcp.yaml", "language registry config file")
 	flag.Parse()
 
 	cfg, reg := loadConfigOrDie(*configPath)
@@ -48,7 +48,7 @@ func runLSP() {
 }
 
 func runMCP() {
-	configPath := flag.String("config", "tslsmcp.yaml", "language registry config file")
+	configPath := flag.String("config", "poly-lsp-mcp.yaml", "language registry config file")
 	rootPath := flag.String("root", ".", "workspace root directory the symbol index covers")
 	flag.Parse()
 
@@ -71,7 +71,7 @@ func runMCP() {
 	}
 
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
-	srv.SetCachePath(filepath.Join(root, ".tslsmcp", "cache.gob"))
+	srv.SetCachePath(filepath.Join(root, ".poly-lsp-mcp", "cache.gob"))
 	// Spawn child LSPs so node_edit / node_delete / node_refactor can
 	// surface publishDiagnostics in their responses. Manager.Start runs
 	// inside handleInitialize once we know which languages the

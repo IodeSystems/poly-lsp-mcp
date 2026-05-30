@@ -9,7 +9,7 @@
 //
 // Per gwag commit 09df07a, gat carries the @ref marker through every
 // format it emits. Our universal scanner picks up both shapes — this
-// dumper produces the artifacts the tslsmcp integration test then
+// dumper produces the artifacts the poly-lsp-mcp integration test then
 // walks.
 //
 // Usage:

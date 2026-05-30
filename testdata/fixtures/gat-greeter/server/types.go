@@ -1,6 +1,6 @@
 // Hand-written stubs that mirror what protoc-gen-go would emit for
 // greeter.proto. Each Go type is @ref-linked back to its source-of-
-// truth in the proto so the tslsmcp comment scanner can stitch them
+// truth in the proto so the poly-lsp-mcp comment scanner can stitch them
 // together: a rename initiated from the proto would also touch these,
 // and the diagnostic path surfaces gopls errors against this file
 // when the contract drifts.

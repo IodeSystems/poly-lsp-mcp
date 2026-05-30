@@ -1,4 +1,4 @@
-module github.com/iodesystems/tslsmcp
+module github.com/iodesystems/poly-lsp-mcp
 
 go 1.26
 

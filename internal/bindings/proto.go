@@ -9,7 +9,7 @@ import (
 )
 
 // Proto schema extraction. Tier 3 reads protobuf files declared in
-// tslsmcp.yaml under `schemas:` and treats each named entity as a
+// poly-lsp-mcp.yaml under `schemas:` and treats each named entity as a
 // binding.
 //
 // Implementation: tree-sitter-protobuf via smacker/go-tree-sitter. The

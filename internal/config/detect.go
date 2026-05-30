@@ -57,11 +57,11 @@ func DetectSchemas(root string, existing []Schema) []Schema {
 
 // skipDetectDir mirrors the walker exclusions used elsewhere. We never
 // descend into .git, vendor dirs, build output, or our own
-// .tslsmcp cache directory.
+// .poly-lsp-mcp cache directory.
 func skipDetectDir(name string) bool {
 	switch name {
 	case ".git", "node_modules", "vendor", "__pycache__",
-		"dist", "build", ".idea", ".vscode", ".tslsmcp":
+		"dist", "build", ".idea", ".vscode", ".poly-lsp-mcp":
 		return true
 	}
 	return false

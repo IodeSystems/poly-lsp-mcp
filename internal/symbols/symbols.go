@@ -1,6 +1,6 @@
 // Package symbols is the cross-language index that sits above multiplex.
 // It answers "where does this name appear?" across every file regardless
-// of which child LSP owns it — the unique value-add of tslsmcp vs any
+// of which child LSP owns it — the unique value-add of poly-lsp-mcp vs any
 // single-language LSP.
 //
 // Three tiers (see plan/plan.md):
@@ -8,7 +8,7 @@
 //   - Tier 1 (this file): lexical. Word-token extraction with optional
 //     keyword filtering per language. Cheap, noisy, useful for
 //     workspace/symbol and as a soft signal for textDocument/references.
-//   - Tier 2: declared bindings from tslsmcp.yaml. Precise; drives safe
+//   - Tier 2: declared bindings from poly-lsp-mcp.yaml. Precise; drives safe
 //     cross-language rename.
 //   - Tier 3: schema-anchored (proto/openapi/jsonschema). Deferred.
 package symbols
@@ -29,7 +29,7 @@ import (
 	"github.com/smacker/go-tree-sitter/sql"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
 )
 
 // goIdentifierQuery captures every node Go's grammar uses to name a

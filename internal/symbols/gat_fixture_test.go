@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
-// TestGatGreeterFixture proves the live-gat → tslsmcp linkage across
+// TestGatGreeterFixture proves the live-gat → poly-lsp-mcp linkage across
 // every format gat now carries `@ref` through (gwag commit 09df07a:
 // "@ref source-of-truth marker carriage"):
 //

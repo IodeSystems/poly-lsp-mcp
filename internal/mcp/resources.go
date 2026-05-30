@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
 // Resource is one MCP resource the server exposes. Resources are
@@ -30,22 +30,22 @@ type resourceContent struct {
 
 // registerResources builds the read-only resource table the
 // resources/list and resources/read handlers consult. URIs use a
-// custom tslsmcp:// scheme so they don't collide with any file:// or
+// custom poly-lsp-mcp:// scheme so they don't collide with any file:// or
 // http:// URIs the agent might be tracking from other tools.
 func registerResources() map[string]Resource {
 	return map[string]Resource{
-		"tslsmcp://workspace": {
-			URI:  "tslsmcp://workspace",
+		"poly-lsp-mcp://workspace": {
+			URI:  "poly-lsp-mcp://workspace",
 			Name: "workspace",
-			Description: "Summary of what tslsmcp has indexed for this workspace: " +
+			Description: "Summary of what poly-lsp-mcp has indexed for this workspace: " +
 				"the resolved root path, the set of languages observed, the total " +
 				"name count, and how many of those names carry declared bindings. " +
-				"A quick way to confirm tslsmcp.yaml is doing what you expect.",
+				"A quick way to confirm poly-lsp-mcp.yaml is doing what you expect.",
 			MimeType: "application/json",
 			Read:     readWorkspace,
 		},
-		"tslsmcp://bindings": {
-			URI:  "tslsmcp://bindings",
+		"poly-lsp-mcp://bindings": {
+			URI:  "poly-lsp-mcp://bindings",
 			Name: "bindings",
 			Description: "Catalog of every cross-language binding (Tier 2 + Tier 3). " +
 				"Same payload as the `list_bindings` tool but exposed as a resource so " +
@@ -53,8 +53,8 @@ func registerResources() map[string]Resource {
 			MimeType: "application/json",
 			Read:     readBindings,
 		},
-		"tslsmcp://diagnostics": {
-			URI:  "tslsmcp://diagnostics",
+		"poly-lsp-mcp://diagnostics": {
+			URI:  "poly-lsp-mcp://diagnostics",
 			Name: "diagnostics",
 			Description: "Workspace-wide diagnostic snapshot from every running child LSP. " +
 				"Each entry has the same enriched shape as the diagnostics field on a " +

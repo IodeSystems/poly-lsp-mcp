@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
 )
 
 // Manager owns the set of running Child LSPs and routes incoming

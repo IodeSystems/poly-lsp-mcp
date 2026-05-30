@@ -61,7 +61,7 @@ func TestLanguagesReturnsRegistrationOrder(t *testing.T) {
 
 func TestLoadYAML(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "tslsmcp.yaml")
+	path := filepath.Join(dir, "poly-lsp-mcp.yaml")
 	yaml := `
 languages:
   - name: rust
@@ -96,7 +96,7 @@ languages:
 
 func TestLoadYAMLWithBindings(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "tslsmcp.yaml")
+	path := filepath.Join(dir, "poly-lsp-mcp.yaml")
 	yaml := `
 languages:
   - name: go
@@ -136,7 +136,7 @@ bindings:
 
 func TestLoadOrDefaultMergesDefaultLanguagesWhenOmitted(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "tslsmcp.yaml")
+	path := filepath.Join(dir, "poly-lsp-mcp.yaml")
 	// Only schemas declared — no languages section. Common pattern;
 	// the loader must fold defaults in so the registry isn't empty.
 	if err := os.WriteFile(path,

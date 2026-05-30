@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/multiplex"
 )
 
 // TestNodeEditSurfacesGoplsDiagnostics proves the full Phase 5 path:

@@ -5,7 +5,7 @@ driving the real binary as a subprocess.
 
 ## editor_smoke.py
 
-Drives `tslsmcp` over stdio with the request shapes a typical LSP
+Drives `poly-lsp-mcp` over stdio with the request shapes a typical LSP
 client (nvim-lspconfig, vs-code, helix) sends, and asserts every
 response against the LSP spec's required-field contracts.
 
@@ -13,7 +13,7 @@ response against the LSP spec's required-field contracts.
 python3 scripts/smoke/editor_smoke.py
 ```
 
-This builds the binary at `/tmp/tslsmcp_smoke` if needed and runs the
+This builds the binary at `/tmp/poly_lsp_mcp_smoke` if needed and runs the
 smoke against `testdata/fixtures/polyglot`. Override with `--binary`
 or `--workspace`. Exit 0 = every check passed.
 

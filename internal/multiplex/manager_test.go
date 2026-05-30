@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
 )
 
 // makeTestRegistry builds a Config / Registry with one synthetic language
-// whose LSP "binary" is the tslsmcp binary built by TestMain. The
+// whose LSP "binary" is the poly-lsp-mcp binary built by TestMain. The
 // extension is chosen to avoid clashing with the default registry so
 // routing tests are unambiguous.
 func makeTestRegistry(t *testing.T) *config.Registry {
@@ -19,7 +19,7 @@ func makeTestRegistry(t *testing.T) *config.Registry {
 		{
 			Name:       "stub",
 			Extensions: []string{"stub"},
-			LSP:        &config.LSP{Cmd: tslsmcpBinary},
+			LSP:        &config.LSP{Cmd: polyLspMcpBinary},
 			TreeSitter: "stub",
 		},
 		{
@@ -364,8 +364,8 @@ func TestPolyglotFixtureDrivesRouting(t *testing.T) {
 	// Use our stub binary as if it were every real LSP. Override only the
 	// languages we want to spawn.
 	cfg := &config.Config{Languages: []config.Language{
-		{Name: "go", Extensions: []string{"go", "mod"}, LSP: &config.LSP{Cmd: tslsmcpBinary}, TreeSitter: "go"},
-		{Name: "typescript", Extensions: []string{"ts", "tsx"}, LSP: &config.LSP{Cmd: tslsmcpBinary}, TreeSitter: "typescript"},
+		{Name: "go", Extensions: []string{"go", "mod"}, LSP: &config.LSP{Cmd: polyLspMcpBinary}, TreeSitter: "go"},
+		{Name: "typescript", Extensions: []string{"ts", "tsx"}, LSP: &config.LSP{Cmd: polyLspMcpBinary}, TreeSitter: "typescript"},
 		{Name: "yaml", Extensions: []string{"yaml"}, TreeSitter: "yaml"}, // no LSP
 	}}
 	reg, err := cfg.Build()

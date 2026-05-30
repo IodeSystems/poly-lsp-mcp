@@ -49,9 +49,9 @@ var (
 	linkRe = regexp.MustCompile(`\{@link\s+([^}|]+?)(?:\s*\|[^}]*)?\}`)
 	// @ref token  — same shape as @see; post-process parses file:symbol
 	refRe = regexp.MustCompile(`@ref\s+(\S+)`)
-	// x-ref / x-tslsmcp-source / x-source as YAML/JSON extension keys.
+	// x-ref / x-poly-lsp-mcp-source / x-source as YAML/JSON extension keys.
 	// Match the value (quoted or bare). Same shape parser.
-	xrefRe = regexp.MustCompile(`(?m)^\s*"?x-(?:ref|tslsmcp-source|source)"?\s*:\s*"?([^"\s,}]+)"?`)
+	xrefRe = regexp.MustCompile(`(?m)^\s*"?x-(?:ref|poly-lsp-mcp-source|source)"?\s*:\s*"?([^"\s,}]+)"?`)
 )
 
 // ExtractCommentRefs scans content for all four marker shapes and

@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
 )
 
 // sendRaw writes a framed message with the supplied JSON body straight

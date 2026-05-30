@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/multiplex"
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
 // diagnosticJSON is the wire shape we emit alongside edit responses.

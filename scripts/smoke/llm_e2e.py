@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""End-to-end LLM smoke against the tslsmcp MCP server.
+"""End-to-end LLM smoke against the poly-lsp-mcp MCP server.
 
-Spawns tslsmcp as an MCP subprocess pointed at a TEMP COPY of the
+Spawns poly-lsp-mcp as an MCP subprocess pointed at a TEMP COPY of the
 polyglot fixture, exposes the MCP tools to an OpenAI-compatible
 endpoint (no auth, configured for llm.iodesystems.com / Qwen), and
 asks the model to perform a cross-language rename. Reports the
@@ -162,7 +162,7 @@ USER_TASK = "Rename the UserID identifier to PersonID across this entire workspa
 
 
 def build_binary(repo_root: str, out_path: str) -> None:
-    print(f"[build] tslsmcp → {out_path}", file=sys.stderr)
+    print(f"[build] poly-lsp-mcp → {out_path}", file=sys.stderr)
     res = subprocess.run(
         ["go", "build", "-o", out_path, "."],
         cwd=repo_root,
@@ -177,7 +177,7 @@ def build_binary(repo_root: str, out_path: str) -> None:
 def walk_files(root: str) -> list[str]:
     out = []
     for d, _, files in os.walk(root):
-        if ".tslsmcp" in d:
+        if ".poly-lsp-mcp" in d:
             continue
         for f in files:
             out.append(os.path.relpath(os.path.join(d, f), root))
@@ -197,15 +197,15 @@ def main() -> int:
         print(f"[err] fixture missing: {src}", file=sys.stderr)
         return 1
 
-    tmp = tempfile.mkdtemp(prefix="tslsmcp_llm_")
+    tmp = tempfile.mkdtemp(prefix="poly_lsp_mcp_llm_")
     ws = os.path.join(tmp, "polyglot")
     shutil.copytree(src, ws)
 
-    # Write a tslsmcp.yaml declaring the polyglot fixture's schema
+    # Write a poly-lsp-mcp.yaml declaring the polyglot fixture's schema
     # files so api.proto, openapi.yaml, and user.schema.json contribute
     # bindings. Without this the LLM couldn't reach UserID inside
     # api.proto (the lexical registry doesn't include `.proto`).
-    cfg_path = os.path.join(ws, "tslsmcp.yaml")
+    cfg_path = os.path.join(ws, "poly-lsp-mcp.yaml")
     with open(cfg_path, "w") as cf:
         cf.write(
             "schemas:\n"
@@ -214,7 +214,7 @@ def main() -> int:
             "  - {file: user.schema.json, dialect: jsonschema}\n"
         )
 
-    binary = os.path.join(tmp, "tslsmcp")
+    binary = os.path.join(tmp, "poly-lsp-mcp")
     build_binary(repo_root, binary)
 
     print(f"[mcp] starting against {ws}", file=sys.stderr)

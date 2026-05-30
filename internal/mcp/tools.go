@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
 // Content is one block of tool output. MCP allows several block types
@@ -33,7 +33,7 @@ type Tool struct {
 	Handler     func(s *Server, args json.RawMessage) ([]Content, bool, error)
 }
 
-// registerTools returns the 6-tool surface tslsmcp exposes. Each tool
+// registerTools returns the 6-tool surface poly-lsp-mcp exposes. Each tool
 // does one job; there is no preview-vs-apply duplication and no
 // substring-vs-exact ambiguity. The surface mirrors how an LLM
 // actually thinks about code:
@@ -300,7 +300,7 @@ func structureForDir(abs, root string, depth int) (structureEntry, bool) {
 // into .git / node_modules / vendor / __pycache__ etc.
 func skipStructureDir(name string) bool {
 	switch name {
-	case ".git", "node_modules", "vendor", "__pycache__", "dist", "build", ".idea", ".vscode", ".tslsmcp":
+	case ".git", "node_modules", "vendor", "__pycache__", "dist", "build", ".idea", ".vscode", ".poly-lsp-mcp":
 		return true
 	}
 	return false
@@ -523,7 +523,7 @@ func (s *Server) applyRangeRewrite(a rangeArgs, newText string, opts diagnosticO
 	out = append(out, newText...)
 	out = append(out, content[endOff:]...)
 
-	tmp := abs + ".tslsmcp.tmp"
+	tmp := abs + ".poly-lsp-mcp.tmp"
 	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
 		return nil, true, fmt.Errorf("write temp: %w", err)
 	}
@@ -773,7 +773,7 @@ const maxScanSize = 1 << 20 // 1 MiB per file; mirrors the lexical pass
 func skipScanDir(name string) bool {
 	switch name {
 	case ".git", "node_modules", "vendor", "__pycache__",
-		"dist", "build", ".idea", ".vscode", ".tslsmcp":
+		"dist", "build", ".idea", ".vscode", ".poly-lsp-mcp":
 		return true
 	}
 	return false
@@ -836,7 +836,7 @@ type applyResult struct {
 
 // buildRenameEdits plans the rewrites for renaming `name` to `newName`.
 // Confidence policy: declared sites win when any are present
-// (precision opt-in via tslsmcp.yaml bindings or schemas), otherwise
+// (precision opt-in via poly-lsp-mcp.yaml bindings or schemas), otherwise
 // lexical hits as best effort. Aliasing safety: per-site on-disk text
 // must equal name; mismatches are skipped so aliasing bindings don't
 // substitute the wrong token.
@@ -957,7 +957,7 @@ func applyFileEdits(absFile string, edits []resolvedEdit) (int, error) {
 	if applied == 0 {
 		return 0, nil
 	}
-	tmp := absFile + ".tslsmcp.tmp"
+	tmp := absFile + ".poly-lsp-mcp.tmp"
 	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
 		return applied, err
 	}
@@ -1015,7 +1015,7 @@ func readRangeText(content []byte, a rangeArgs) (string, error) {
 }
 
 // bindingSummary is the catalog entry shape shared between
-// tslsmcp://bindings (resource) and any future tool that wants the
+// poly-lsp-mcp://bindings (resource) and any future tool that wants the
 // catalog. Lives here so resources.go can import it without a circular
 // reference.
 type bindingSummary struct {

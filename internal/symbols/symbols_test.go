@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
 )
 
 func TestLexicalExtractorFiltersKeywords(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
 // SchemaEntity is one named declaration extracted from a schema file
@@ -30,7 +30,7 @@ type SchemaEntity struct {
 //
 // Effect: a single entry in `schemas:` auto-binds every workspace
 // position where the schema's names appear, with no per-language sites
-// needed in tslsmcp.yaml. The dedup in Index.InsertDeclared keeps the
+// needed in poly-lsp-mcp.yaml. The dedup in Index.InsertDeclared keeps the
 // store clean even when user bindings and schema bindings overlap.
 func (r *Resolver) ApplySchemas(idx *symbols.Index, schemas []config.Schema) int {
 	inserted := 0

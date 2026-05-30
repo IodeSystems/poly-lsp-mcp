@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/multiplex"
 )
 
 // TestCrossLanguageDiagnosticOnGeneratedStub closes the Phase 5 loop:
@@ -22,7 +22,7 @@ import (
 // proto in a fresh module, spawns gopls via the MCP path, and edits
 // main.go to reference an undefined field on HelloResponse.
 //
-// gopls publishes the resulting type error; tslsmcp's diagnostic
+// gopls publishes the resulting type error; poly-lsp-mcp's diagnostic
 // enrichment then surfaces:
 //
 //   - text == the offending token

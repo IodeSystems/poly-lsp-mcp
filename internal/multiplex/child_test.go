@@ -12,26 +12,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
 )
 
-// tslsmcpBinary is the path of the tslsmcp binary built during TestMain.
+// polyLspMcpBinary is the path of the poly-lsp-mcp binary built during TestMain.
 // Tests spawn this binary as the child LSP — it speaks the protocol and
 // indexes the directory we point it at, so we can exercise the supervisor
 // end-to-end without an external dependency.
-var tslsmcpBinary string
+var polyLspMcpBinary string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "tslsmcp-mp-test-*")
+	dir, err := os.MkdirTemp("", "poly-lsp-mcp-mp-test-*")
 	if err != nil {
 		panic(err)
 	}
 	defer os.RemoveAll(dir)
 
-	tslsmcpBinary = filepath.Join(dir, "tslsmcp")
-	out, err := exec.Command("go", "build", "-o", tslsmcpBinary, "github.com/iodesystems/tslsmcp").CombinedOutput()
+	polyLspMcpBinary = filepath.Join(dir, "poly-lsp-mcp")
+	out, err := exec.Command("go", "build", "-o", polyLspMcpBinary, "github.com/iodesystems/poly-lsp-mcp").CombinedOutput()
 	if err != nil {
-		panic(fmt.Sprintf("build tslsmcp for tests: %v\n%s", err, out))
+		panic(fmt.Sprintf("build poly-lsp-mcp for tests: %v\n%s", err, out))
 	}
 
 	os.Exit(m.Run())
@@ -48,7 +48,7 @@ func polyglotDir(t *testing.T) string {
 }
 
 func TestSpawnAndHandshake(t *testing.T) {
-	child, err := Spawn("test", &config.LSP{Cmd: tslsmcpBinary}, t.TempDir())
+	child, err := Spawn("test", &config.LSP{Cmd: polyLspMcpBinary}, t.TempDir())
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestSpawnAndHandshake(t *testing.T) {
 	if err := json.Unmarshal(caps, &capsMap); err != nil {
 		t.Fatalf("decode caps: %v", err)
 	}
-	// tslsmcp child advertises these once the symbol-index wiring lands.
+	// poly-lsp-mcp child advertises these once the symbol-index wiring lands.
 	if capsMap["workspaceSymbolProvider"] != true {
 		t.Errorf("workspaceSymbolProvider missing from child caps: %+v", capsMap)
 	}
@@ -88,7 +88,7 @@ func TestSpawnAndHandshake(t *testing.T) {
 
 func TestCallRoutesThroughChildLSP(t *testing.T) {
 	fixture := polyglotDir(t)
-	child, err := Spawn("polyglot", &config.LSP{Cmd: tslsmcpBinary}, fixture)
+	child, err := Spawn("polyglot", &config.LSP{Cmd: polyLspMcpBinary}, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestCallRoutesThroughChildLSP(t *testing.T) {
 }
 
 func TestCallReturnsErrorAfterChildExit(t *testing.T) {
-	child, err := Spawn("test", &config.LSP{Cmd: tslsmcpBinary}, t.TempDir())
+	child, err := Spawn("test", &config.LSP{Cmd: polyLspMcpBinary}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestCallReturnsErrorAfterChildExit(t *testing.T) {
 
 func TestCallReturnsErrorOnContextCancel(t *testing.T) {
 	fixture := polyglotDir(t)
-	child, err := Spawn("polyglot", &config.LSP{Cmd: tslsmcpBinary}, fixture)
+	child, err := Spawn("polyglot", &config.LSP{Cmd: polyLspMcpBinary}, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}

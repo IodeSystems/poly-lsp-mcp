@@ -1,4 +1,4 @@
-// Package mcp serves the Model Context Protocol layer of tslsmcp.
+// Package mcp serves the Model Context Protocol layer of poly-lsp-mcp.
 // Unlike the LSP layer (which exists to talk to editors), MCP exposes
 // the same cross-language symbol/bindings/schemas machinery to LLM
 // agents through a small set of typed tools.
@@ -21,11 +21,11 @@ import (
 
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/bindings"
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
-	"github.com/iodesystems/tslsmcp/internal/multiplex"
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
 // protocolVersion is the date-coded MCP protocol revision we advertise.
@@ -278,7 +278,7 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 			"resources": map[string]any{},
 		},
 		"serverInfo": map[string]any{
-			"name":    "tslsmcp",
+			"name":    "poly-lsp-mcp",
 			"version": "0.0.0",
 		},
 	})

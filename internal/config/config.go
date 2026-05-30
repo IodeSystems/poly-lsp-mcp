@@ -1,7 +1,7 @@
 // Package config holds the language registry: how to recognize a file by
 // extension and which child LSP / tree-sitter grammar handles it.
 //
-// The on-disk format is YAML. A single config file (default tslsmcp.yaml at
+// The on-disk format is YAML. A single config file (default poly-lsp-mcp.yaml at
 // the workspace root) declares languages; built-in defaults cover go/ts/py
 // when no file is present.
 package config
@@ -57,7 +57,7 @@ type BindingSite struct {
 	Regex    []string `yaml:"regex,omitempty"`
 }
 
-// Schema declares a schema file the user wants tslsmcp to read for
+// Schema declares a schema file the user wants poly-lsp-mcp to read for
 // Tier-3 auto-bindings. Each named entity in the schema (proto message,
 // openapi schema, jsonschema definition) becomes a declared binding
 // whose sites cover (a) the declaration in the schema file and (b)
@@ -127,7 +127,7 @@ func Default() *Config {
 				// SQL well enough for identifier extraction; pg-specific
 				// constructs degrade gracefully). No default LSP — user
 				// can wire postgrestools / sqls / sql-language-server via
-				// tslsmcp.yaml if they want one.
+				// poly-lsp-mcp.yaml if they want one.
 				Name:       "sql",
 				Extensions: []string{"sql", "psql"},
 				TreeSitter: "sql",

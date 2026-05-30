@@ -14,28 +14,28 @@ import (
 	"testing"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
-	"github.com/iodesystems/tslsmcp/internal/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/multiplex"
 )
 
-// tslsmcpBinary is the path of the tslsmcp binary built during TestMain.
+// polyLspMcpBinary is the path of the poly-lsp-mcp binary built during TestMain.
 // Used by tests that need a real child LSP — the binary speaks the
 // protocol so we can exercise the server's forwarding paths against
 // itself without depending on gopls/tsserver/pylsp being installed.
-var tslsmcpBinary string
+var polyLspMcpBinary string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "tslsmcp-srv-test-*")
+	dir, err := os.MkdirTemp("", "poly-lsp-mcp-srv-test-*")
 	if err != nil {
 		panic(err)
 	}
 	defer os.RemoveAll(dir)
 
-	tslsmcpBinary = filepath.Join(dir, "tslsmcp")
-	out, err := exec.Command("go", "build", "-o", tslsmcpBinary, "github.com/iodesystems/tslsmcp").CombinedOutput()
+	polyLspMcpBinary = filepath.Join(dir, "poly-lsp-mcp")
+	out, err := exec.Command("go", "build", "-o", polyLspMcpBinary, "github.com/iodesystems/poly-lsp-mcp").CombinedOutput()
 	if err != nil {
-		panic(fmt.Sprintf("build tslsmcp for tests: %v\n%s", err, out))
+		panic(fmt.Sprintf("build poly-lsp-mcp for tests: %v\n%s", err, out))
 	}
 	os.Exit(m.Run())
 }
@@ -161,8 +161,8 @@ func TestInitializeAdvertisesCapabilities(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ServerInfo.Name != "tslsmcp" {
-		t.Errorf("serverInfo.name = %q, want tslsmcp", got.ServerInfo.Name)
+	if got.ServerInfo.Name != "poly-lsp-mcp" {
+		t.Errorf("serverInfo.name = %q, want poly-lsp-mcp", got.ServerInfo.Name)
 	}
 	if got.Capabilities["workspaceSymbolProvider"] != true {
 		t.Errorf("workspaceSymbolProvider not advertised: %+v", got.Capabilities)
@@ -374,12 +374,12 @@ func TestMergeCapabilitiesHandlesNilAndBadInputs(t *testing.T) {
 }
 
 // makeGoOverrideRegistry returns a registry where "go" points at the
-// tslsmcp test binary so tests can spin up a child LSP without a real
+// poly-lsp-mcp test binary so tests can spin up a child LSP without a real
 // language server installed.
 func makeGoOverrideRegistry(t *testing.T) *config.Registry {
 	t.Helper()
 	cfg := &config.Config{Languages: []config.Language{
-		{Name: "go", Extensions: []string{"go", "mod"}, LSP: &config.LSP{Cmd: tslsmcpBinary}, TreeSitter: "go"},
+		{Name: "go", Extensions: []string{"go", "mod"}, LSP: &config.LSP{Cmd: polyLspMcpBinary}, TreeSitter: "go"},
 	}}
 	reg, err := cfg.Build()
 	if err != nil {

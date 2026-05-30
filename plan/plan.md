@@ -1,4 +1,4 @@
-# tslsmcp — roadmap
+# poly-lsp-mcp — roadmap
 
 Fused multi-language LSP server. Child LSPs handle in-language semantics,
 tree-sitter handles parsing and cross-language linkages, and a symbol index
@@ -12,7 +12,7 @@ later via an external bridge.
         │                                       │
         ▼                                       │
   ┌──────────────────────────────┐              │
-  │  tslsmcp LSP                 │              │
+  │  poly-lsp-mcp LSP                 │              │
   │ ┌──────────────────────────┐ │              │
   │ │ symbol index (lexical /  │ │  ← cross-language layer
   │ │ declared / schema)       │ │              │
@@ -54,7 +54,7 @@ cross-language stitching yet (that's Phase 2).**
         server→client request method-not-found stub.
   - [x] LSP Initialize handshake; capabilities returned as `json.RawMessage`
         so the next slice can union without losing fields.
-  - [x] Test by spawning the tslsmcp binary as a child (TestMain builds it),
+  - [x] Test by spawning the poly-lsp-mcp binary as a child (TestMain builds it),
         verifying real `workspace/symbol` round-trip through the supervisor.
 - [x] `internal/multiplex` manager:
   - [x] Map of language → Child with eager spawn during Start.
@@ -219,7 +219,7 @@ Cheap, noisy, immediate value for "find everywhere this name appears."
 Precise. Required for safe cross-language rename, including string-literal
 sites (the unique value-add vs single-language LSPs).
 
-- [x] Extend `tslsmcp.yaml` with a `bindings` block.
+- [x] Extend `poly-lsp-mcp.yaml` with a `bindings` block.
       ```yaml
       bindings:
         - name: UserType
@@ -275,7 +275,7 @@ sites (the unique value-add vs single-language LSPs).
 
 ### Tier 3 — schema-anchored
 
-A single entry under `schemas:` in tslsmcp.yaml is enough to bind every
+A single entry under `schemas:` in poly-lsp-mcp.yaml is enough to bind every
 workspace position for the schema's named entities.
 
 ```yaml
@@ -359,7 +359,7 @@ Goal: switching branches in a stack doesn't re-parse the world.
       version-tagged gob format. `mcp.Server.SetCachePath(path)` opts
       a server into persistence: load on Serve start, save on Serve
       return via temp + Rename for atomicity. `main.go` wires
-      `<root>/.tslsmcp/cache.gob` for the MCP subcommand; tests don't
+      `<root>/.poly-lsp-mcp/cache.gob` for the MCP subcommand; tests don't
       set the path, so they get in-memory-only behavior with no file
       pollution. Eight new tests cover round-trip, LRU-preserving
       Load, version mismatch handling, malformed input, nil-cache
@@ -373,7 +373,7 @@ Goal: switching branches in a stack doesn't re-parse the world.
 
 ## Phase 4 — MCP
 
-We shipped **Option A**: same binary, new subcommand. `tslsmcp mcp
+We shipped **Option A**: same binary, new subcommand. `poly-lsp-mcp mcp
 --root <dir> [--config <file>]` boots a Model Context Protocol server
 over newline-delimited JSON-RPC 2.0 on stdio. The MCP layer reuses the
 symbol index, bindings resolver, and schema dialects so LLM agents get
@@ -418,7 +418,7 @@ the full cross-language stack the LSP layer already serves to editors.
     from the deleted apply_rename tool, atomically across every file.
 
   Workspace-relative paths in all tool output; absolute paths accepted
-  on input. tslsmcp://workspace and tslsmcp://bindings resources are
+  on input. poly-lsp-mcp://workspace and poly-lsp-mcp://bindings resources are
   unchanged.
 
 - [x] Live polyglot smoke against the 6-tool surface:
@@ -429,14 +429,14 @@ the full cross-language stack the LSP layer already serves to editors.
 
 - [x] Earlier (cut) tools and why:
       - find_symbol (substring) → cut; agents filter
-        tslsmcp://bindings or pick exact names from structure.
+        poly-lsp-mcp://bindings or pick exact names from structure.
       - find_references(name) → replaced by
         node_references(file, range) — point at a specific
         occurrence, no name-ambiguity.
       - document_symbols → cut; structure(file) covers it.
       - document_structure → renamed structure (now dispatches on
         directory vs file).
-      - list_bindings (tool) → cut; tslsmcp://bindings resource
+      - list_bindings (tool) → cut; poly-lsp-mcp://bindings resource
         still exposes the catalog.
       - rename (preview) → cut; node_refactor writes.
       - apply_rename → renamed node_refactor with kind=rename.
@@ -452,13 +452,13 @@ the full cross-language stack the LSP layer already serves to editors.
       file mode preserved so executable bits survive.
 - [x] `resources/list` and `resources/read` MCP surface. Three
       resources today:
-      `tslsmcp://workspace` — JSON `{root, languages, names, declared}`
-      so clients can sanity-check what tslsmcp indexed without a tool
+      `poly-lsp-mcp://workspace` — JSON `{root, languages, names, declared}`
+      so clients can sanity-check what poly-lsp-mcp indexed without a tool
       call;
-      `tslsmcp://bindings` — same JSON payload as the `list_bindings`
+      `poly-lsp-mcp://bindings` — same JSON payload as the `list_bindings`
       tool, exposed as a resource for MCP clients that pin resources
       into model context;
-      `tslsmcp://diagnostics` — workspace-wide diagnostic snapshot
+      `poly-lsp-mcp://diagnostics` — workspace-wide diagnostic snapshot
       from every running child LSP, enriched with the same
       `text` / `context` / `enclosingNode` / `references` shape edit
       responses use. `diagnosticsAvailable: false` when no LSP is
@@ -474,8 +474,8 @@ Three tiers, increasing user effort:
 | Tier | Setup | Coverage |
 |------|-------|----------|
 | 1 — lexical / tree-sitter | none | go / ts / tsx / py / md / yaml / json / sql out of the box; identifier-shaped tokens, with tree-sitter precision for code languages and lexical fallback for data formats. Unknown extensions surface as a single "text" node via `structure` so node_read / node_edit / node_delete still work. |
-| 2 — declared bindings | `bindings:` section in tslsmcp.yaml | Hand-declared cross-language identity for things tree-sitter can't see (string-literal config values, prose, languages we have no grammar for) and for aliasing across naming conventions (UserID ↔ user_id). |
-| 3 — schema-anchored | `schemas:` section in tslsmcp.yaml, one entry per schema file | Auto-derived bindings: parse the schema, bind every named entity (proto messages/enums/services/rpcs, openapi components.schemas.* + operationIds, jsonschema $defs.* + title), promote every workspace occurrence of those names to declared. One config line ≈ dozens of bindings. |
+| 2 — declared bindings | `bindings:` section in poly-lsp-mcp.yaml | Hand-declared cross-language identity for things tree-sitter can't see (string-literal config values, prose, languages we have no grammar for) and for aliasing across naming conventions (UserID ↔ user_id). |
+| 3 — schema-anchored | `schemas:` section in poly-lsp-mcp.yaml, one entry per schema file | Auto-derived bindings: parse the schema, bind every named entity (proto messages/enums/services/rpcs, openapi components.schemas.* + operationIds, jsonschema $defs.* + title), promote every workspace occurrence of those names to declared. One config line ≈ dozens of bindings. |
 
 ### Comments and prose
 
@@ -498,7 +498,7 @@ A universal pass runs alongside the lexical extractor on every walked file. It r
 | `@see <name>` | JSDoc / TSDoc / JavaDoc | comment (soft) |
 | `{@link <name>}` | TSDoc / JavaDoc | comment (soft) |
 | `@ref <name>` | Doxygen; our cross-language extension | declared (hard) |
-| `x-ref: <value>` | YAML/JSON extension key (`x-tslsmcp-source`, `x-source` also accepted) | declared (hard) |
+| `x-ref: <value>` | YAML/JSON extension key (`x-poly-lsp-mcp-source`, `x-source` also accepted) | declared (hard) |
 
 `@see` / `{@link}` are intentionally soft — they're how documentation refers to symbols, not declarations, so a default `node_refactor(rename)` skips them (same policy as plain comments). `@ref` / `x-ref` are hard — they're the convention generators use to point an emitted artifact at its source-of-truth in another language. Renames touch them by default.
 
@@ -515,11 +515,11 @@ Reference token shapes the scanner accepts:
 
 The new `ConfidenceComment` tier sits below lexical: at a deduped position, lexical and declared shadow the comment site. That's intentional — if a name appears as both a real reference and a comment marker at the same position, the real reference is the truthful entry.
 
-The scanner ships now because generator-side adoption is the real lever: emitters of cross-language artifacts (gat → GraphQL/OpenAPI, codegen → typed clients) can teach themselves to drop `@ref` markers without tslsmcp needing per-framework parsing dialects. See `../gwag/docs/plan.md` for the gat-side commitment.
+The scanner ships now because generator-side adoption is the real lever: emitters of cross-language artifacts (gat → GraphQL/OpenAPI, codegen → typed clients) can teach themselves to drop `@ref` markers without poly-lsp-mcp needing per-framework parsing dialects. See `../gwag/docs/plan.md` for the gat-side commitment.
 
 ### Schema auto-detection
 
-Schema auto-detection is opt-in via `auto_schemas: true` in tslsmcp.yaml. When set, `config.DetectSchemas(root, existing)` walks the workspace at startup and emits a Schema entry for each file matching one of these conservative heuristics:
+Schema auto-detection is opt-in via `auto_schemas: true` in poly-lsp-mcp.yaml. When set, `config.DetectSchemas(root, existing)` walks the workspace at startup and emits a Schema entry for each file matching one of these conservative heuristics:
 
 - `*.proto` extension → `proto`
 - YAML/JSON with a top-level `openapi:` or `swagger:` key → `openapi`
@@ -527,7 +527,7 @@ Schema auto-detection is opt-in via `auto_schemas: true` in tslsmcp.yaml. When s
 
 Files explicitly declared in `schemas:` are skipped during detection (user wins). Detected schemas are appended to the user's list and processed identically by the resolver. Generic YAML/JSON without distinctive top-level keys is NOT classified, so values.yaml and config.json don't accidentally turn into bindings.
 
-When tslsmcp.yaml is partial (e.g. only `schemas:` declared, no `languages:`), defaults are merged in — empty registry would invisibly break the lexical pass.
+When poly-lsp-mcp.yaml is partial (e.g. only `schemas:` declared, no `languages:`), defaults are merged in — empty registry would invisibly break the lexical pass.
 
 ## Phase 5 — feedback loops for LLM edits
 
@@ -558,9 +558,9 @@ Each diagnostic carries enough structure that the agent can act on it without re
 
 ### gat-greeter integration fixture
 
-- [x] `testdata/fixtures/gat-greeter/` — separate Go module (so gwag's dep tree doesn't pollute tslsmcp): `greeter.proto` with `@ref` markers on rpc / message / enum-type / enum-value, and a `cmd/dump-sdl/main.go` that uses `gat.ProtoSource` + `gat.New` + `ir.PrintSchemaSDL` to emit the rendered GraphQL SDL.
+- [x] `testdata/fixtures/gat-greeter/` — separate Go module (so gwag's dep tree doesn't pollute poly-lsp-mcp): `greeter.proto` with `@ref` markers on rpc / message / enum-type / enum-value, and a `cmd/dump-sdl/main.go` that uses `gat.ProtoSource` + `gat.New` + `ir.PrintSchemaSDL` to emit the rendered GraphQL SDL.
 - [x] `replace github.com/iodesystems/gwag => ../../../../gwag` in the fixture's go.mod so it uses the local checkout (the user's "latest gat") rather than a published version.
-- [x] Integration test (`internal/symbols/gat_fixture_test.go` behind `testing.Short()` so quick iterations can skip): `go run ./cmd/dump-sdl` against the fixture, capture stdout into a temp dir alongside a copy of the proto, build `symbols.Index` over that dir, assert declared sites exist for each `@ref` target (rpc, message, enum, enum value). Proves the live gat → tslsmcp linkage end-to-end.
+- [x] Integration test (`internal/symbols/gat_fixture_test.go` behind `testing.Short()` so quick iterations can skip): `go run ./cmd/dump-sdl` against the fixture, capture stdout into a temp dir alongside a copy of the proto, build `symbols.Index` over that dir, assert declared sites exist for each `@ref` target (rpc, message, enum, enum value). Proves the live gat → poly-lsp-mcp linkage end-to-end.
 - [x] Registry change unblocked the scanner: `.proto` and `.graphql` / `.gql` are now in `config.Default().Languages`, both backed by `LexicalExtractor`. Without this the walker silently skipped these files, and the universal `@ref` scanner never ran on them — exactly the formats gat emits. (`go`/`ts`/`py` are tree-sitter; `proto`/`graphql` deliberately stay lexical so the comment scanner can still see embedded markers.)
 - [x] Fixture extended to cover gat's full `@ref` carriage after gwag commit `09df07a` ("@ref source-of-truth marker carriage"): `cmd/dump -format graphql|openapi` emits both the rendered SDL (block-string descriptions) and the OpenAPI JSON (`x-ref` extension on operations + `@ref` text inside `info.description`). Test asserts declared sites in every emitted file for the expected names — Hello hits all three (proto + SDL + OpenAPI), service/type/value markers hit the formats gat actually writes them into.
 - [x] `symbolFromRef` hardened against JSON-escape bleed: `(\S+)` could capture `Foo\n",` out of a JSON description string; the new leading-identifier walk drops everything past the first non-`[A-Za-z0-9_]` byte. Unit-tested with `Symbol\n`, `Symbol\t`, and the full `server/main.go:Symbol\n",` shape.

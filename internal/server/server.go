@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/iodesystems/tslsmcp/internal/config"
-	"github.com/iodesystems/tslsmcp/internal/jsonrpc"
-	"github.com/iodesystems/tslsmcp/internal/multiplex"
-	"github.com/iodesystems/tslsmcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/internal/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
 )
 
 // LSP / JSON-RPC error codes we surface explicitly. Values match the

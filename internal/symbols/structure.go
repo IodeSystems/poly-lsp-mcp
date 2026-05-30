@@ -29,22 +29,30 @@ func LanguageByName(name string) *sitter.Language {
 	return nil
 }
 
-// StructureNode describes one top-level construct in a file: its
-// tree-sitter node type, an extracted name if the grammar exposes one
-// via a "name" field or an *_identifier descendant, and the 1-based
-// end-exclusive range it occupies.
+// StructureNode describes one top-level construct in a file. Two
+// ranges live on the same node by design:
 //
-// Range convention matches the rest of internal/mcp's range-based
-// tools: line and column are 1-based, end is exclusive (so a single
-// character at line 1 col 1 has range startLine=1 startCol=1
-// endLine=1 endCol=2).
+//   - Range  — the whole declaration. Pass to node_read / node_edit /
+//     node_refactor (when the refactor wants to replace the whole
+//     thing).
+//   - NameRange — just the identifier within the declaration, if the
+//     grammar exposes a name. Pass to node_references and to
+//     node_refactor with kind="rename" so the operation pins on the
+//     name token, not the surrounding declaration.
+//
+// Both are 1-based, end-exclusive (a single character at line 1 col 1
+// occupies startLine=1 startCol=1 endLine=1 endCol=2).
 type StructureNode struct {
-	Type      string `json:"type"`
-	Name      string `json:"name,omitempty"`
-	StartLine int    `json:"startLine"`
-	StartCol  int    `json:"startCol"`
-	EndLine   int    `json:"endLine"`
-	EndCol    int    `json:"endCol"`
+	Type           string `json:"type"`
+	Name           string `json:"name,omitempty"`
+	StartLine      int    `json:"startLine"`
+	StartCol       int    `json:"startCol"`
+	EndLine        int    `json:"endLine"`
+	EndCol         int    `json:"endCol"`
+	NameStartLine  int    `json:"nameStartLine,omitempty"`
+	NameStartCol   int    `json:"nameStartCol,omitempty"`
+	NameEndLine    int    `json:"nameEndLine,omitempty"`
+	NameEndCol     int    `json:"nameEndCol,omitempty"`
 }
 
 // StructureNodes parses content with the given language's grammar and
@@ -76,40 +84,51 @@ func StructureNodes(language string, content []byte) ([]StructureNode, error) {
 		child := root.NamedChild(i)
 		sp := child.StartPoint()
 		ep := child.EndPoint()
-		out = append(out, StructureNode{
+		entry := StructureNode{
 			Type:      child.Type(),
-			Name:      extractStructureName(child, content),
 			StartLine: int(sp.Row) + 1,
 			StartCol:  int(sp.Column) + 1,
 			EndLine:   int(ep.Row) + 1,
 			EndCol:    int(ep.Column) + 1,
-		})
+		}
+		if nameNode := findStructureNameNode(child); nameNode != nil {
+			entry.Name = nameNode.Content(content)
+			nsp := nameNode.StartPoint()
+			nep := nameNode.EndPoint()
+			entry.NameStartLine = int(nsp.Row) + 1
+			entry.NameStartCol = int(nsp.Column) + 1
+			entry.NameEndLine = int(nep.Row) + 1
+			entry.NameEndCol = int(nep.Column) + 1
+		}
+		out = append(out, entry)
 	}
 	return out, nil
 }
 
-// extractStructureName tries to find a name token for a top-level
-// declaration. Preferences in order:
+// findStructureNameNode returns the identifier node that names a
+// top-level declaration, or nil if the grammar doesn't expose one.
+// Preferences in order:
 //
-//  1. A direct `name` field (most languages' function_declaration etc.)
-//  2. The first *_identifier descendant within a small depth budget,
-//     for declarations that wrap the name a level deeper —
-//     type_declaration -> type_spec -> type_identifier in Go, or
-//     export_statement -> {function,class,type_alias}_declaration ->
+//  1. A direct `name` field (most function_declaration etc. have one).
+//  2. A direct *_identifier child.
+//  3. The same lookups one level deeper, for declarations that wrap
+//     the name an extra layer — type_declaration → type_spec →
+//     type_identifier in Go, or export_statement →
+//     {function,class,type_alias}_declaration →
 //     {identifier,type_identifier} in TypeScript.
 //
 // Depth is bounded so we don't descend into function bodies and pick
 // up some random local identifier.
-func extractStructureName(node *sitter.Node, content []byte) string {
-	if name := node.ChildByFieldName("name"); name != nil {
-		return name.Content(content)
-	}
-	return findIdentDescendant(node, content, 3)
+func findStructureNameNode(node *sitter.Node) *sitter.Node {
+	return findNameNodeDepth(node, 3)
 }
 
-func findIdentDescendant(node *sitter.Node, content []byte, depth int) string {
+func findNameNodeDepth(node *sitter.Node, depth int) *sitter.Node {
 	if depth <= 0 || node == nil {
-		return ""
+		return nil
+	}
+	if name := node.ChildByFieldName("name"); name != nil {
+		return name
 	}
 	count := int(node.NamedChildCount())
 	for i := range count {
@@ -117,21 +136,14 @@ func findIdentDescendant(node *sitter.Node, content []byte, depth int) string {
 		switch c.Type() {
 		case "identifier", "type_identifier", "field_identifier",
 			"package_identifier", "property_identifier":
-			return c.Content(content)
+			return c
 		}
 	}
-	// Second pass: descend into wrapper nodes (export_statement,
-	// type_spec, etc.) one level at a time. ChildByFieldName("name")
-	// on the inner node often resolves before we recurse, hence the
-	// pref-name short-circuit.
 	for i := range count {
 		c := node.NamedChild(i)
-		if name := c.ChildByFieldName("name"); name != nil {
-			return name.Content(content)
-		}
-		if name := findIdentDescendant(c, content, depth-1); name != "" {
-			return name
+		if found := findNameNodeDepth(c, depth-1); found != nil {
+			return found
 		}
 	}
-	return ""
+	return nil
 }

@@ -385,51 +385,71 @@ the full cross-language stack the LSP layer already serves to editors.
       `jsonrpc.Message` for the shapes and swaps the LSP Content-Length
       framing for newline-delimited JSON via `encoding/json`'s streaming
       Decoder/Encoder.
-- [x] Tools (v0.1):
-  - `find_symbol(query)` — case-insensitive substring search across the
-    cross-language index.
-  - `find_references(name)` — every workspace position for an exact
-    name, declared + lexical + schema-anchored.
-  - `rename(name, newName)` — returns a list of file edits
-    `{file, line, col, oldText, newText}` with the same confidence
-    policy and aliasing-safety check as the LSP rename handler.
-  - `list_bindings()` — catalog of declared bindings the index knows
-    about (Tier 2 + Tier 3). Per name: site count, languages covered,
-    every (file, line, col) position. Lets agents survey the
-    cross-language model without running rename queries.
-  - `document_symbols(file)` — every symbol in a single file, sorted
-    by (line, col), with confidence tags. Accepts workspace-relative
-    or absolute paths; output is always workspace-relative.
-  - `refresh(workspace_root?)` — rebuild the index from disk. With no
-    args, rebuilds the current root (after an agent finishes writing
-    edits). With `workspace_root`, points the same MCP instance at a
-    different absolute path (use case: one tslsmcp serves multiple
-    git worktrees of the same project). Bindings and schemas
-    configured at startup re-apply at the new root.
-- [x] Workspace-relative file paths in tool output for stable
-      cross-machine references.
-- [x] Live polyglot smoke through all three tools: `find_symbol(UserID)`
-      returns 24 hits across 9 languages; `rename(UserID, PersonID)`
-      produces 20 atomic edits across proto + openapi + jsonschema + go
-      + ts + py + yaml + sql + md.
-- [x] More tools as use cases surfaced:
-      `list_bindings`, `document_symbols`, `refresh`, `apply_rename`,
-      `document_structure`, `read_range`, `replace_range` shipped.
-      The last three form the AST-aware-editing pattern LLM agents
-      typically want: walk the syntactic structure of a file, read
-      a specific node's text, write a replacement back. Ranges (not
-      stable IDs) link the three so an edit between read and write
-      doesn't invalidate cached identifiers. `document_structure`
-      uses tree-sitter for go/typescript/python/sql; the other two
-      work on any file type. Future tools land here as their use
-      cases come up.
-- [x] Live editing tool: `apply_rename(name, newName)` builds the
-      same plan as `rename` and writes the edits to disk. Per-file
-      edits sorted (line desc, col desc) and applied right-to-left so
-      byte offsets don't shift; each file goes through temp + Rename
-      for partial-failure safety; file mode is preserved so executable
-      bits survive. Response shape:
-      `{name, newName, filesChanged, results: [{file, edits} | {file, skipped: reason}]}`.
+- [x] Tools (v0.2 — surface trimmed from 10 to 6):
+
+  The earlier surface (find_symbol / find_references / document_symbols /
+  document_structure / list_bindings / rename / apply_rename / refresh /
+  read_range / replace_range) had real ambiguity — preview vs apply,
+  substring vs exact, document_symbols vs document_structure — that
+  works against "one obvious way". v0.2 collapses to six tools that
+  each do one job:
+
+  - `structure(path, depth=1)` — hierarchical tour. At workspace level
+    walks directories; at file level returns tree-sitter named children
+    with BOTH the declaration range and the identifier's name range as
+    separate fields. Calling on the workspace root implicitly content-
+    hashes every file and refreshes the index for changed slices — no
+    explicit refresh tool needed.
+  - `node_references(file, range)` — references to the identifier at
+    range. Agent passes the `nameStart*`/`nameEnd*` fields from
+    structure; we read the text, use it as the lookup name, return
+    every workspace position (lexical + declared + schema-anchored).
+  - `node_read(file, range)` — text at range. Works on any file.
+  - `node_edit(file, range, newText)` — atomic rewrite at range via
+    temp + Rename. After the write the file's index slice is re-parsed
+    so subsequent `node_references` sees the new state.
+  - `node_delete(file, range)` — equivalent to node_edit with empty
+    newText but states intent. Exact deletion (no surrounding-
+    whitespace trimming).
+  - `node_refactor(file, range, kind, ...kind_args)` — multi-modal
+    refactor channel. v0.2 ships `kind="rename"`; future kinds
+    (change_signature etc.) land here without growing the tool count.
+    Rename preserves the declared-bindings + aliasing-safety semantics
+    from the deleted apply_rename tool, atomically across every file.
+
+  Workspace-relative paths in all tool output; absolute paths accepted
+  on input. tslsmcp://workspace and tslsmcp://bindings resources are
+  unchanged.
+
+- [x] Live polyglot smoke against the 6-tool surface:
+      `node_refactor(rename UserID, PersonID)` produces 9-file
+      cross-language rewrite (proto + openapi + jsonschema + go + ts +
+      py + yaml + sql + md); `node_references` returns 20 sites across
+      8 languages; `structure(., depth=2)` walks the workspace tree.
+
+- [x] Earlier (cut) tools and why:
+      - find_symbol (substring) → cut; agents filter
+        tslsmcp://bindings or pick exact names from structure.
+      - find_references(name) → replaced by
+        node_references(file, range) — point at a specific
+        occurrence, no name-ambiguity.
+      - document_symbols → cut; structure(file) covers it.
+      - document_structure → renamed structure (now dispatches on
+        directory vs file).
+      - list_bindings (tool) → cut; tslsmcp://bindings resource
+        still exposes the catalog.
+      - rename (preview) → cut; node_refactor writes.
+      - apply_rename → renamed node_refactor with kind=rename.
+      - refresh → cut; structure() does implicit FS sweep,
+        node_edit / node_delete refresh the file slice they wrote.
+      - read_range / replace_range → renamed node_read / node_edit;
+        node_delete is a sibling for explicit erasure.
+
+- [x] Live editing semantics merged into node_edit / node_delete /
+      node_refactor(rename). Per-file edits sorted (line desc, col
+      desc) and applied right-to-left so byte offsets don't shift;
+      each file goes through temp + Rename for partial-failure safety;
+      file mode preserved so executable bits survive.
 - [x] `resources/list` and `resources/read` MCP surface. Two
       resources land in v0.1:
       `tslsmcp://workspace` — JSON `{root, languages, names, declared}`

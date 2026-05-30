@@ -358,15 +358,6 @@ func (s *Server) getIndex() *symbols.Index {
 	return s.index
 }
 
-// setRoot updates the workspace root. Called from handleRefresh when
-// the caller asks to point the index at a different directory; future
-// tool output uses the new root for path relativization.
-func (s *Server) setRoot(root string) {
-	s.rootMu.Lock()
-	defer s.rootMu.Unlock()
-	s.root = root
-}
-
 // getRoot returns the current workspace root.
 func (s *Server) getRoot() string {
 	s.rootMu.RLock()

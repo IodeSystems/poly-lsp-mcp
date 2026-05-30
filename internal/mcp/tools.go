@@ -2,28 +2,28 @@ package mcp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/iodesystems/tslsmcp/internal/bindings"
 	"github.com/iodesystems/tslsmcp/internal/symbols"
 )
 
 // Content is one block of tool output. MCP allows several block types
-// (text, image, resource…); we only need text right now and emit
-// JSON-formatted payloads inside it so the LLM agent can parse without
-// extra round-trips.
+// (text, image, resource…); we only need text and emit JSON-formatted
+// payloads inside it so the LLM agent can parse without extra
+// round-trips.
 type Content struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
 }
 
 // Tool is the registry entry for one MCP tool. InputSchema is a raw
-// JSON-Schema fragment so we don't have to plumb a schema-builder type
+// JSON-Schema fragment so we don't have to plumb a schema-builder
 // through the tools layer — they're constant per binary version.
 type Tool struct {
 	Name        string
@@ -32,98 +32,50 @@ type Tool struct {
 	Handler     func(s *Server, args json.RawMessage) ([]Content, bool, error)
 }
 
-// registerTools builds the read-only tool table that handleToolsCall
-// dispatches against. Tools intentionally have small, name-keyed input
-// shapes — LLM agents work well with simple flat arguments and the
-// shapes mirror how a human would describe each operation.
+// registerTools returns the 6-tool surface tslsmcp exposes. Each tool
+// does one job; there is no preview-vs-apply duplication and no
+// substring-vs-exact ambiguity. The surface mirrors how an LLM
+// actually thinks about code:
+//
+//   - structure(path, depth) walks dirs at the workspace and named
+//     nodes inside files, uniformly.
+//   - node_references(file, range) points at an identifier and asks
+//     where it's used.
+//   - node_read / node_edit / node_delete are the read/write/erase
+//     primitives that operate on (file, range) addresses.
+//   - node_refactor(file, range, kind, ...) is the multi-modal
+//     refactor channel — kind="rename" today; change_signature etc.
+//     land here as use cases surface.
+//
+// There is no `refresh` tool. structure() does an implicit content-
+// hash sweep when called on a directory; node_edit / node_delete
+// re-parse the file they just wrote. Together they keep the index
+// honest without an explicit refresh step.
 func registerTools() map[string]Tool {
 	return map[string]Tool{
-		"find_symbol": {
-			Name: "find_symbol",
-			Description: "Search the cross-language workspace symbol index. " +
-				"Returns every matching site across go/ts/py/sql/yaml/json/md/proto/openapi/jsonschema, " +
-				"tagged with confidence (declared / lexical). Query is a case-insensitive substring.",
+		"structure": {
+			Name: "structure",
+			Description: "Hierarchical tour of a workspace, directory, or file. " +
+				"`path` (default: workspace root) is workspace-relative or absolute. " +
+				"`depth` (default: 1) controls how many levels to descend — at workspace level into directories, at file level into AST nodes. " +
+				"For files: requires a tree-sitter grammar (go / typescript / tsx / python / sql). " +
+				"Each `node` entry carries both `range` (the whole declaration) and the `name*` fields (the identifier within it); pass the identifier's range to node_references and node_refactor, the whole range to node_read / node_edit / node_delete. " +
+				"Calling structure on the workspace root implicitly refreshes the index for any files whose bytes changed.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "query": {"type": "string", "description": "Case-insensitive substring matched against symbol names. Empty string returns every symbol."}
-  },
-  "required": ["query"]
-}`),
-			Handler: handleFindSymbol,
-		},
-		"find_references": {
-			Name: "find_references",
-			Description: "Return every workspace position for an exact name. " +
-				"Combines lexical hits, declared bindings, and schema-anchored sites — the same set textDocument/references would surface in an editor.",
-			InputSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "name": {"type": "string", "description": "Exact symbol name."}
-  },
-  "required": ["name"]
-}`),
-			Handler: handleFindReferences,
-		},
-		"list_bindings": {
-			Name: "list_bindings",
-			Description: "List every cross-language binding the index knows about — the ones declared by the user in tslsmcp.yaml (Tier 2: symbol / jsonpath / regex sites) and the ones auto-derived from schema files (Tier 3: proto / openapi / jsonschema). " +
-				"For each binding the response carries the name, total site count, the set of languages those sites live in, and every (file, line, col) position. Use this to explore what the workspace's cross-language model looks like without running rename queries.",
-			InputSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {},
-  "required": []
-}`),
-			Handler: handleListBindings,
-		},
-		"document_symbols": {
-			Name: "document_symbols",
-			Description: "Return every symbol in one file — declarations, uses, and binding members — sorted by position. " +
-				"Pass `file` workspace-relative (preferred) or absolute. Output entries carry the confidence tag so you can distinguish declared bindings from lexical hits.",
-			InputSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "file": {"type": "string", "description": "Workspace-relative or absolute path"}
-  },
-  "required": ["file"]
-}`),
-			Handler: handleDocumentSymbols,
-		},
-		"refresh": {
-			Name: "refresh",
-			Description: "Rebuild the workspace symbol index from disk. Use after files have changed (an agent applied edits, a worktree was checked out, etc.). " +
-				"With no arguments, rebuilds against the current workspace root. With `workspace_root`, points the index at a different absolute directory — useful when one tslsmcp instance serves multiple worktrees of the same project, since the bindings and schemas configured at startup are re-applied at the new root.",
-			InputSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "workspace_root": {"type": "string", "description": "Optional absolute path. If omitted, rebuild the current root."}
+    "path": {"type": "string", "description": "Workspace-relative or absolute path. Default: workspace root."},
+    "depth": {"type": "integer", "minimum": 0, "description": "How many levels to expand. Default: 1."}
   },
   "required": []
 }`),
-			Handler: handleRefresh,
+			Handler: handleStructure,
 		},
-		"document_structure": {
-			Name: "document_structure",
-			Description: "Return the tree-sitter top-level structure of a file: one entry per " +
-				"named child of the root (functions, types, classes, imports, etc.) with the " +
-				"declaration's name where the grammar exposes one and the 1-based end-exclusive " +
-				"range. Supported languages: go, typescript (and .tsx), python, sql. " +
-				"Pair with `read_range` to inspect a single declaration's text and `replace_range` " +
-				"to edit it atomically.",
-			InputSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "file": {"type": "string", "description": "Workspace-relative or absolute path."}
-  },
-  "required": ["file"]
-}`),
-			Handler: handleDocumentStructure,
-		},
-		"read_range": {
-			Name: "read_range",
-			Description: "Return the text between two 1-based (line, col) positions in a file. " +
-				"Convention matches `document_structure`'s output: startCol/startLine inclusive, " +
-				"endCol/endLine exclusive. Works on any file regardless of language.",
+		"node_references": {
+			Name: "node_references",
+			Description: "Return every workspace position where the identifier at (file, range) is referenced. " +
+				"Range must cover just the identifier (use `nameStartLine` / `nameStartCol` from structure(file)). " +
+				"Output combines lexical hits, declared bindings, and schema-anchored sites — the same union node_refactor would touch on rename.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -135,13 +87,32 @@ func registerTools() map[string]Tool {
   },
   "required": ["file", "startLine", "startCol", "endLine", "endCol"]
 }`),
-			Handler: handleReadRange,
+			Handler: handleNodeReferences,
 		},
-		"replace_range": {
-			Name: "replace_range",
-			Description: "Atomically replace the text between two 1-based (line, col) positions in a file " +
-				"with newText. Same range convention as `read_range`. File goes through temp + rename so a " +
-				"partial failure doesn't corrupt it; file mode is preserved.",
+		"node_read": {
+			Name: "node_read",
+			Description: "Return the text between two 1-based (line, col) positions in a file. " +
+				"Convention matches structure's output: startLine/startCol inclusive, endLine/endCol exclusive. " +
+				"Works on any file regardless of language.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "file":      {"type": "string"},
+    "startLine": {"type": "integer", "minimum": 1},
+    "startCol":  {"type": "integer", "minimum": 1},
+    "endLine":   {"type": "integer", "minimum": 1},
+    "endCol":    {"type": "integer", "minimum": 1}
+  },
+  "required": ["file", "startLine", "startCol", "endLine", "endCol"]
+}`),
+			Handler: handleNodeRead,
+		},
+		"node_edit": {
+			Name: "node_edit",
+			Description: "Atomically replace the text between two 1-based positions with newText. " +
+				"Same range convention as node_read. " +
+				"Goes through temp + Rename so a partial failure can't corrupt the file; file mode is preserved. " +
+				"After the write the file's slice of the index is re-parsed so subsequent node_references calls see the new state.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -154,102 +125,260 @@ func registerTools() map[string]Tool {
   },
   "required": ["file", "startLine", "startCol", "endLine", "endCol", "newText"]
 }`),
-			Handler: handleReplaceRange,
+			Handler: handleNodeEdit,
 		},
-		"apply_rename": {
-			Name: "apply_rename",
-			Description: "Cross-language rename that WRITES the edits to disk instead of returning them. Same confidence policy and aliasing-safety check as `rename` — declared sites win when present, edits whose on-disk text doesn't match the name being renamed are skipped. " +
-				"Each file is written via temp-file + rename so a partial failure doesn't leave a half-edited file. Use this when the agent doesn't need to inspect the plan before applying.",
+		"node_delete": {
+			Name: "node_delete",
+			Description: "Atomically remove the text between two 1-based positions. " +
+				"Equivalent to node_edit with newText='' but states intent. " +
+				"Range deletion is exact — surrounding whitespace and blank lines are not adjusted; use a wider range or follow up with node_edit if you want them trimmed. " +
+				"Index re-parses the file after the write.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "name": {"type": "string", "description": "Name currently in the workspace."},
-    "newName": {"type": "string", "description": "New name."}
+    "file":      {"type": "string"},
+    "startLine": {"type": "integer", "minimum": 1},
+    "startCol":  {"type": "integer", "minimum": 1},
+    "endLine":   {"type": "integer", "minimum": 1},
+    "endCol":    {"type": "integer", "minimum": 1}
   },
-  "required": ["name", "newName"]
+  "required": ["file", "startLine", "startCol", "endLine", "endCol"]
 }`),
-			Handler: handleApplyRename,
+			Handler: handleNodeDelete,
 		},
-		"rename": {
-			Name: "rename",
-			Description: "Cross-language rename. Returns a list of file edits {file, line, col, oldText, newText} you can apply atomically. " +
-				"Confidence policy: if any declared bindings exist for the name they are used (safe by user declaration); otherwise lexical hits are returned (best effort). " +
-				"Aliasing safety: edits whose on-disk text doesn't match the name being renamed are skipped, so this is always safe to apply.",
+		"node_refactor": {
+			Name: "node_refactor",
+			Description: "Multi-modal cross-language refactor. " +
+				"Point `range` at an identifier (use structure's `nameStart*` / `nameEnd*` fields). " +
+				"`kind` selects the refactor: today only \"rename\" is supported — it propagates the rename across every site declared bindings or the lexical index turn up, with per-site on-disk text verification so aliasing bindings can't substitute the wrong token. " +
+				"Future kinds (change_signature, change_return_type) land here without growing the tool count.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "name": {"type": "string", "description": "Name currently in the workspace."},
-    "newName": {"type": "string", "description": "New name."}
+    "file":      {"type": "string"},
+    "startLine": {"type": "integer", "minimum": 1},
+    "startCol":  {"type": "integer", "minimum": 1},
+    "endLine":   {"type": "integer", "minimum": 1},
+    "endCol":    {"type": "integer", "minimum": 1},
+    "kind":      {"type": "string", "enum": ["rename"], "description": "Refactor kind."},
+    "newName":   {"type": "string", "description": "Required when kind='rename'."}
   },
-  "required": ["name", "newName"]
+  "required": ["file", "startLine", "startCol", "endLine", "endCol", "kind"]
 }`),
-			Handler: handleRename,
+			Handler: handleNodeRefactor,
 		},
 	}
 }
 
-// siteJSON is the wire shape of one site in tool output. Files are
-// reported relative to the workspace root so the LLM agent gets stable
-// references regardless of where the workspace lives on disk.
-type siteJSON struct {
-	Name       string `json:"name"`
-	File       string `json:"file"`
-	Line       int    `json:"line"`
-	Col        int    `json:"col"`
-	Language   string `json:"language,omitempty"`
-	Confidence string `json:"confidence"`
+// -------------------------------------------------------------- arg shapes
+
+// rangeArgs is the shared (file, startLine, startCol, endLine, endCol)
+// input shape used by node_read / node_edit / node_delete /
+// node_references / node_refactor. 1-based, end-exclusive — same as
+// structure's output.
+type rangeArgs struct {
+	File      string `json:"file"`
+	StartLine int    `json:"startLine"`
+	StartCol  int    `json:"startCol"`
+	EndLine   int    `json:"endLine"`
+	EndCol    int    `json:"endCol"`
 }
 
-func handleFindSymbol(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func (a rangeArgs) validate() error {
+	if a.File == "" {
+		return errors.New("file is required")
+	}
+	if a.StartLine < 1 || a.StartCol < 1 || a.EndLine < 1 || a.EndCol < 1 {
+		return fmt.Errorf("line and col must be >= 1 (got %+v)", a)
+	}
+	if a.EndLine < a.StartLine || (a.EndLine == a.StartLine && a.EndCol < a.StartCol) {
+		return fmt.Errorf("range end before start: %+v", a)
+	}
+	return nil
+}
+
+// -------------------------------------------------------------- structure
+
+// structureEntry is the unified tree node the structure tool emits.
+// `kind` distinguishes filesystem entries from AST nodes:
+//
+//	"directory" — a directory on disk
+//	"file"      — a regular file
+//	"node"      — a tree-sitter named child inside a file
+type structureEntry struct {
+	Kind          string           `json:"kind"`
+	Path          string           `json:"path,omitempty"`
+	Type          string           `json:"type,omitempty"`
+	Name          string           `json:"name,omitempty"`
+	StartLine     int              `json:"startLine,omitempty"`
+	StartCol      int              `json:"startCol,omitempty"`
+	EndLine       int              `json:"endLine,omitempty"`
+	EndCol        int              `json:"endCol,omitempty"`
+	NameStartLine int              `json:"nameStartLine,omitempty"`
+	NameStartCol  int              `json:"nameStartCol,omitempty"`
+	NameEndLine   int              `json:"nameEndLine,omitempty"`
+	NameEndCol    int              `json:"nameEndCol,omitempty"`
+	Children      []structureEntry `json:"children,omitempty"`
+}
+
+func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
-		Query string `json:"query"`
+		Path  string `json:"path"`
+		Depth *int   `json:"depth"`
 	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	if len(args) > 0 && string(args) != "null" {
+		if err := json.Unmarshal(args, &p); err != nil {
+			return nil, true, fmt.Errorf("bad arguments: %w", err)
+		}
 	}
-	idx := s.getIndex()
-	if idx == nil {
-		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
+	depth := 1
+	if p.Depth != nil {
+		depth = *p.Depth
+		if depth < 0 {
+			return nil, true, fmt.Errorf("depth must be >= 0")
+		}
 	}
+	if p.Path == "" {
+		p.Path = "."
+	}
+	abs := s.resolveFileArg(p.Path)
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("stat %s: %w", p.Path, err)
+	}
+	if info.IsDir() {
+		entry, _ := structureForDir(abs, s.getRoot(), depth)
+		return jsonContent(entry), false, nil
+	}
+	entry, err := structureForFile(abs, s.languageForFile(abs), s.getRoot(), depth)
+	if err != nil {
+		return nil, true, err
+	}
+	return jsonContent(entry), false, nil
+}
 
-	q := strings.ToLower(p.Query)
-	var hits []siteJSON
-	for _, name := range idx.Names() {
-		if q != "" && !strings.Contains(strings.ToLower(name), q) {
+func structureForDir(abs, root string, depth int) (structureEntry, bool) {
+	entry := structureEntry{
+		Kind: "directory",
+		Path: relPath(abs, root),
+		Name: filepath.Base(abs),
+	}
+	if depth <= 0 {
+		return entry, false
+	}
+	dirEntries, err := os.ReadDir(abs)
+	if err != nil {
+		return entry, false
+	}
+	for _, de := range dirEntries {
+		name := de.Name()
+		if skipStructureDir(name) {
 			continue
 		}
-		for _, site := range idx.Lookup(name) {
-			hits = append(hits, siteJSON{
-				Name:       name,
-				File:       relPath(site.File, s.getRoot()),
-				Line:       site.Line,
-				Col:        site.Col,
-				Language:   site.Language,
-				Confidence: confidenceLabel(site.Confidence),
+		childAbs := filepath.Join(abs, name)
+		if de.IsDir() {
+			child, _ := structureForDir(childAbs, root, depth-1)
+			entry.Children = append(entry.Children, child)
+		} else {
+			entry.Children = append(entry.Children, structureEntry{
+				Kind: "file",
+				Path: relPath(childAbs, root),
+				Name: name,
 			})
 		}
 	}
-	return jsonContent(hits), false, nil
+	sort.Slice(entry.Children, func(i, j int) bool {
+		return entry.Children[i].Path < entry.Children[j].Path
+	})
+	return entry, true
 }
 
-func handleFindReferences(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		Name string `json:"name"`
+// skipStructureDir mirrors symbols.Build's allow-list: never descend
+// into .git / node_modules / vendor / __pycache__ etc.
+func skipStructureDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", "__pycache__", "dist", "build", ".idea", ".vscode", ".tslsmcp":
+		return true
 	}
-	if err := json.Unmarshal(args, &p); err != nil {
+	return false
+}
+
+func structureForFile(abs, lang, root string, depth int) (structureEntry, error) {
+	entry := structureEntry{
+		Kind: "file",
+		Path: relPath(abs, root),
+		Name: filepath.Base(abs),
+	}
+	if depth <= 0 {
+		return entry, nil
+	}
+	if lang == "" {
+		// No language registered — return file entry with no children.
+		// Surfacing the file in the parent dir listing is enough.
+		return entry, nil
+	}
+	if symbols.LanguageByName(lang) == nil {
+		// Lexical-only language; no syntactic structure to surface.
+		return entry, nil
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return entry, fmt.Errorf("read %s: %w", abs, err)
+	}
+	nodes, err := symbols.StructureNodes(lang, content)
+	if err != nil {
+		return entry, err
+	}
+	for _, n := range nodes {
+		entry.Children = append(entry.Children, structureEntry{
+			Kind:          "node",
+			Type:          n.Type,
+			Name:          n.Name,
+			StartLine:     n.StartLine,
+			StartCol:      n.StartCol,
+			EndLine:       n.EndLine,
+			EndCol:        n.EndCol,
+			NameStartLine: n.NameStartLine,
+			NameStartCol:  n.NameStartCol,
+			NameEndLine:   n.NameEndLine,
+			NameEndCol:    n.NameEndCol,
+		})
+	}
+	return entry, nil
+}
+
+// -------------------------------------------------------------- node_references
+
+func handleNodeReferences(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var a rangeArgs
+	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
-	if p.Name == "" {
-		return nil, true, fmt.Errorf("name is required")
+	if err := a.validate(); err != nil {
+		return nil, true, err
 	}
 	idx := s.getIndex()
 	if idx == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
 	}
+
+	abs := s.resolveFileArg(a.File)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
+	}
+	name, err := readRangeText(content, a)
+	if err != nil {
+		return nil, true, err
+	}
+	if name == "" {
+		return nil, true, errors.New("range is empty; pass the identifier's nameStart/nameEnd range")
+	}
+
 	var hits []siteJSON
-	for _, site := range idx.Lookup(p.Name) {
+	for _, site := range idx.Lookup(name) {
 		hits = append(hits, siteJSON{
-			Name:       p.Name,
+			Name:       name,
 			File:       relPath(site.File, s.getRoot()),
 			Line:       site.Line,
 			Col:        site.Col,
@@ -260,17 +389,230 @@ func handleFindReferences(s *Server, args json.RawMessage) ([]Content, bool, err
 	return jsonContent(hits), false, nil
 }
 
-type renameEdit struct {
-	File    string `json:"file"`
-	Line    int    `json:"line"`
-	Col     int    `json:"col"`
-	OldText string `json:"oldText"`
-	NewText string `json:"newText"`
+// siteJSON is the wire shape of one site in tool output. Files are
+// reported workspace-relative.
+type siteJSON struct {
+	Name       string `json:"name"`
+	File       string `json:"file"`
+	Line       int    `json:"line"`
+	Col        int    `json:"col"`
+	Language   string `json:"language,omitempty"`
+	Confidence string `json:"confidence"`
 }
 
-// resolvedEdit is the internal shape used by buildRenameEdits — it
-// carries the absolute path alongside the wire-shape file path so the
-// apply_rename tool can read/write without re-joining root.
+// -------------------------------------------------------------- node_read
+
+func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var a rangeArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if err := a.validate(); err != nil {
+		return nil, true, err
+	}
+	abs := s.resolveFileArg(a.File)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
+	}
+	text, err := readRangeText(content, a)
+	if err != nil {
+		return nil, true, err
+	}
+	return jsonContent(map[string]any{
+		"file":      a.File,
+		"startLine": a.StartLine,
+		"startCol":  a.StartCol,
+		"endLine":   a.EndLine,
+		"endCol":    a.EndCol,
+		"text":      text,
+	}), false, nil
+}
+
+// -------------------------------------------------------------- node_edit / node_delete
+
+func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var p struct {
+		rangeArgs
+		NewText string `json:"newText"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	return s.applyRangeRewrite(p.rangeArgs, p.NewText)
+}
+
+func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var a rangeArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	return s.applyRangeRewrite(a, "")
+}
+
+// applyRangeRewrite is the shared write path. Validates the range,
+// reads + edits + atomic-renames the file, then reparses just this
+// file's slice of the index so subsequent node_references sees the
+// new state.
+func (s *Server) applyRangeRewrite(a rangeArgs, newText string) ([]Content, bool, error) {
+	if err := a.validate(); err != nil {
+		return nil, true, err
+	}
+	abs := s.resolveFileArg(a.File)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("stat %s: %w", a.File, err)
+	}
+	startOff, ok := lineColToByteOffset(content, a.StartLine, a.StartCol)
+	if !ok {
+		return nil, true, fmt.Errorf("start out of range: %d:%d", a.StartLine, a.StartCol)
+	}
+	endOff, ok := lineColToByteOffset(content, a.EndLine, a.EndCol)
+	if !ok {
+		return nil, true, fmt.Errorf("end out of range: %d:%d", a.EndLine, a.EndCol)
+	}
+	if endOff > len(content) {
+		endOff = len(content)
+	}
+	if startOff > endOff {
+		return nil, true, fmt.Errorf("start byte offset %d > end %d", startOff, endOff)
+	}
+
+	out := make([]byte, 0, len(content)-(endOff-startOff)+len(newText))
+	out = append(out, content[:startOff]...)
+	out = append(out, newText...)
+	out = append(out, content[endOff:]...)
+
+	tmp := abs + ".tslsmcp.tmp"
+	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+		return nil, true, fmt.Errorf("write temp: %w", err)
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return nil, true, fmt.Errorf("rename: %w", err)
+	}
+
+	s.refreshFileInIndex(abs, out)
+
+	return jsonContent(map[string]any{
+		"file":         a.File,
+		"replacedFrom": map[string]int{"line": a.StartLine, "col": a.StartCol},
+		"replacedTo":   map[string]int{"line": a.EndLine, "col": a.EndCol},
+		"bytesRemoved": endOff - startOff,
+		"bytesAdded":   len(newText),
+	}), false, nil
+}
+
+// refreshFileInIndex re-extracts this file's slice into the index so
+// node_references picks up the new state on the next call. Best
+// effort: extractor lookup misses are silently ignored (the file just
+// stays at its previous index entry, which is harmless).
+func (s *Server) refreshFileInIndex(abs string, content []byte) {
+	idx := s.getIndex()
+	if idx == nil {
+		return
+	}
+	lang := s.languageForFile(abs)
+	if lang == "" {
+		return
+	}
+	ex := symbols.DefaultExtractor(lang)
+	if ex == nil {
+		return
+	}
+	hits := ex.Extract(content)
+	idx.Refresh(abs, lang, hits)
+	s.parseCache.Put(lang, content, hits)
+}
+
+// -------------------------------------------------------------- node_refactor
+
+func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var p struct {
+		rangeArgs
+		Kind    string `json:"kind"`
+		NewName string `json:"newName"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if err := p.rangeArgs.validate(); err != nil {
+		return nil, true, err
+	}
+	switch p.Kind {
+	case "":
+		return nil, true, errors.New("kind is required")
+	case "rename":
+		if p.NewName == "" {
+			return nil, true, errors.New("newName is required when kind='rename'")
+		}
+		return s.refactorRename(p.rangeArgs, p.NewName)
+	default:
+		return nil, true, fmt.Errorf("unsupported refactor kind: %q (try 'rename')", p.Kind)
+	}
+}
+
+func (s *Server) refactorRename(a rangeArgs, newName string) ([]Content, bool, error) {
+	idx := s.getIndex()
+	if idx == nil {
+		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
+	}
+	abs := s.resolveFileArg(a.File)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
+	}
+	name, err := readRangeText(content, a)
+	if err != nil {
+		return nil, true, err
+	}
+	if name == "" {
+		return nil, true, errors.New("range is empty; pass the identifier's nameStart/nameEnd range")
+	}
+
+	resolved := s.buildRenameEdits(name, newName)
+	byFile := map[string][]resolvedEdit{}
+	order := []string{}
+	for _, e := range resolved {
+		if _, ok := byFile[e.AbsFile]; !ok {
+			order = append(order, e.AbsFile)
+		}
+		byFile[e.AbsFile] = append(byFile[e.AbsFile], e)
+	}
+
+	results := make([]applyResult, 0, len(order))
+	for _, abs := range order {
+		edits := byFile[abs]
+		rel := edits[0].RelFile
+		n, err := applyFileEdits(abs, edits)
+		if err != nil {
+			results = append(results, applyResult{File: rel, Skipped: err.Error()})
+			continue
+		}
+		// After write, reparse the file's slice.
+		if newContent, err := os.ReadFile(abs); err == nil {
+			s.refreshFileInIndex(abs, newContent)
+		}
+		results = append(results, applyResult{File: rel, Edits: n})
+	}
+
+	return jsonContent(map[string]any{
+		"kind":         "rename",
+		"oldName":      name,
+		"newName":      newName,
+		"filesChanged": len(results),
+		"results":      results,
+	}), false, nil
+}
+
+// -------------------------------------------------------------- rename helpers
+
+// resolvedEdit carries the absolute path alongside the wire-shape
+// file path so refactorRename can read/write without re-joining root.
 type resolvedEdit struct {
 	AbsFile string
 	RelFile string
@@ -280,10 +622,20 @@ type resolvedEdit struct {
 	NewText string
 }
 
-// buildRenameEdits is the shared plan-builder for the rename and
-// apply_rename tools. It applies the same confidence policy (declared
-// sites win when present) and aliasing-safety check (on-disk text must
-// equal name) as the LSP rename handler.
+// applyResult is the wire shape returned per file the refactor touched
+// (or skipped with a reason).
+type applyResult struct {
+	File    string `json:"file"`
+	Edits   int    `json:"edits,omitempty"`
+	Skipped string `json:"skipped,omitempty"`
+}
+
+// buildRenameEdits plans the rewrites for renaming `name` to `newName`.
+// Confidence policy: declared sites win when any are present
+// (precision opt-in via tslsmcp.yaml bindings or schemas), otherwise
+// lexical hits as best effort. Aliasing safety: per-site on-disk text
+// must equal name; mismatches are skipped so aliasing bindings don't
+// substitute the wrong token.
 func (s *Server) buildRenameEdits(name, newName string) []resolvedEdit {
 	idx := s.getIndex()
 	if idx == nil {
@@ -312,180 +664,6 @@ func (s *Server) buildRenameEdits(name, newName string) []resolvedEdit {
 	return out
 }
 
-func handleRename(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		Name    string `json:"name"`
-		NewName string `json:"newName"`
-	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return nil, true, fmt.Errorf("bad arguments: %w", err)
-	}
-	if p.Name == "" || p.NewName == "" {
-		return nil, true, fmt.Errorf("name and newName are required")
-	}
-	if s.getIndex() == nil {
-		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
-	}
-
-	resolved := s.buildRenameEdits(p.Name, p.NewName)
-	edits := make([]renameEdit, len(resolved))
-	for i, r := range resolved {
-		edits[i] = renameEdit{
-			File:    r.RelFile,
-			Line:    r.Line,
-			Col:     r.Col,
-			OldText: r.OldText,
-			NewText: r.NewText,
-		}
-	}
-	return jsonContent(map[string]any{
-		"name":    p.Name,
-		"newName": p.NewName,
-		"edits":   edits,
-	}), false, nil
-}
-
-// applyResult is the wire shape apply_rename returns per file it
-// touched (or per file it skipped with a reason).
-type applyResult struct {
-	File    string `json:"file"`
-	Edits   int    `json:"edits,omitempty"`
-	Skipped string `json:"skipped,omitempty"`
-}
-
-func handleApplyRename(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		Name    string `json:"name"`
-		NewName string `json:"newName"`
-	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return nil, true, fmt.Errorf("bad arguments: %w", err)
-	}
-	if p.Name == "" || p.NewName == "" {
-		return nil, true, fmt.Errorf("name and newName are required")
-	}
-	if s.getIndex() == nil {
-		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
-	}
-
-	resolved := s.buildRenameEdits(p.Name, p.NewName)
-
-	// Group edits by file. Each file's writes go through a single
-	// temp+rename so partial failures don't leave a half-written file.
-	byFile := map[string][]resolvedEdit{}
-	order := []string{}
-	for _, e := range resolved {
-		if _, ok := byFile[e.AbsFile]; !ok {
-			order = append(order, e.AbsFile)
-		}
-		byFile[e.AbsFile] = append(byFile[e.AbsFile], e)
-	}
-
-	results := make([]applyResult, 0, len(order))
-	for _, abs := range order {
-		edits := byFile[abs]
-		rel := edits[0].RelFile
-		n, err := applyFileEdits(abs, edits)
-		if err != nil {
-			results = append(results, applyResult{File: rel, Skipped: err.Error()})
-			continue
-		}
-		results = append(results, applyResult{File: rel, Edits: n})
-	}
-
-	return jsonContent(map[string]any{
-		"name":         p.Name,
-		"newName":      p.NewName,
-		"filesChanged": len(results),
-		"results":      results,
-	}), false, nil
-}
-
-// applyFileEdits writes the supplied edits to absFile. Edits are sorted
-// by (line desc, col desc) so applying them rightmost-first leaves
-// earlier byte offsets undisturbed. Per-edit text mismatches are
-// silently skipped — buildRenameEdits already verified them but the
-// file might have changed under us between Plan and Apply. Returns the
-// number of edits actually applied. The file is written via
-// temp-file + os.Rename for atomicity; the temp file inherits the
-// original file's mode so executable bits survive.
-func applyFileEdits(absFile string, edits []resolvedEdit) (int, error) {
-	data, err := os.ReadFile(absFile)
-	if err != nil {
-		return 0, err
-	}
-	info, err := os.Stat(absFile)
-	if err != nil {
-		return 0, err
-	}
-
-	sorted := make([]resolvedEdit, len(edits))
-	copy(sorted, edits)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Line != sorted[j].Line {
-			return sorted[i].Line > sorted[j].Line
-		}
-		return sorted[i].Col > sorted[j].Col
-	})
-
-	out := data
-	applied := 0
-	for _, e := range sorted {
-		offset, ok := lineColToByteOffset(out, e.Line, e.Col)
-		if !ok {
-			continue
-		}
-		end := offset + len(e.OldText)
-		if end > len(out) {
-			continue
-		}
-		if string(out[offset:end]) != e.OldText {
-			continue
-		}
-		out = append(append(append([]byte{}, out[:offset]...), []byte(e.NewText)...), out[end:]...)
-		applied++
-	}
-
-	if applied == 0 {
-		return 0, nil
-	}
-
-	tmp := absFile + ".tslsmcp.tmp"
-	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
-		return applied, err
-	}
-	if err := os.Rename(tmp, absFile); err != nil {
-		// Best effort cleanup so a failed rename doesn't leave a
-		// stray temp file.
-		_ = os.Remove(tmp)
-		return applied, err
-	}
-	return applied, nil
-}
-
-// lineColToByteOffset walks data line-by-line and returns the byte
-// offset of (1-based line, 1-based col), or false if out of range.
-// Mirrors siteTextMatches's walk so apply uses the same line discipline
-// the index/lookup pipeline produced.
-func lineColToByteOffset(data []byte, line, col int) (int, bool) {
-	pos := 0
-	cur := 1
-	for cur < line && pos < len(data) {
-		nl := bytesIndexNewline(data[pos:])
-		if nl < 0 {
-			return 0, false
-		}
-		pos += nl + 1
-		cur++
-	}
-	if cur != line {
-		return 0, false
-	}
-	return pos + col - 1, true
-}
-
-// chooseRenameSites mirrors the LSP-side confidence policy: declared
-// sites win when any are present, otherwise fall back to lexical hits.
 func chooseRenameSites(all []symbols.Site) []symbols.Site {
 	var declared, lexical []symbols.Site
 	for _, s := range all {
@@ -501,11 +679,6 @@ func chooseRenameSites(all []symbols.Site) []symbols.Site {
 	return lexical
 }
 
-// siteTextMatches reads the file (cached across one tool call) and
-// confirms the bytes at (Line, Col) of length len(name) equal name.
-// Returns false on read errors or out-of-range coordinates — both
-// treated as "don't include this edit" rather than tool failure, so
-// aliasing bindings never produce wrong edits.
 func siteTextMatches(site symbols.Site, name string, cache map[string][]byte) bool {
 	data, ok := cache[site.File]
 	if !ok {
@@ -543,6 +716,73 @@ func siteTextMatches(site symbols.Site, name string, cache map[string][]byte) bo
 	return string(line[start:end]) == name
 }
 
+func applyFileEdits(absFile string, edits []resolvedEdit) (int, error) {
+	data, err := os.ReadFile(absFile)
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(absFile)
+	if err != nil {
+		return 0, err
+	}
+	sorted := make([]resolvedEdit, len(edits))
+	copy(sorted, edits)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Line != sorted[j].Line {
+			return sorted[i].Line > sorted[j].Line
+		}
+		return sorted[i].Col > sorted[j].Col
+	})
+	out := data
+	applied := 0
+	for _, e := range sorted {
+		offset, ok := lineColToByteOffset(out, e.Line, e.Col)
+		if !ok {
+			continue
+		}
+		end := offset + len(e.OldText)
+		if end > len(out) {
+			continue
+		}
+		if string(out[offset:end]) != e.OldText {
+			continue
+		}
+		out = append(append(append([]byte{}, out[:offset]...), []byte(e.NewText)...), out[end:]...)
+		applied++
+	}
+	if applied == 0 {
+		return 0, nil
+	}
+	tmp := absFile + ".tslsmcp.tmp"
+	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+		return applied, err
+	}
+	if err := os.Rename(tmp, absFile); err != nil {
+		_ = os.Remove(tmp)
+		return applied, err
+	}
+	return applied, nil
+}
+
+// -------------------------------------------------------------- shared helpers
+
+func lineColToByteOffset(data []byte, line, col int) (int, bool) {
+	pos := 0
+	cur := 1
+	for cur < line && pos < len(data) {
+		nl := bytesIndexNewline(data[pos:])
+		if nl < 0 {
+			return 0, false
+		}
+		pos += nl + 1
+		cur++
+	}
+	if cur != line {
+		return 0, false
+	}
+	return pos + col - 1, true
+}
+
 func bytesIndexNewline(b []byte) int {
 	for i, c := range b {
 		if c == '\n' {
@@ -552,65 +792,28 @@ func bytesIndexNewline(b []byte) int {
 	return -1
 }
 
-// handleRefresh rebuilds the symbol index from disk, optionally at a
-// new workspace root, then re-applies the bindings and schemas that
-// were configured at startup. The new index swaps in atomically — on
-// build failure the old index keeps serving.
-func handleRefresh(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		WorkspaceRoot string `json:"workspace_root"`
+func readRangeText(content []byte, a rangeArgs) (string, error) {
+	startOff, ok := lineColToByteOffset(content, a.StartLine, a.StartCol)
+	if !ok {
+		return "", fmt.Errorf("start out of range: %d:%d", a.StartLine, a.StartCol)
 	}
-	if len(args) > 0 && string(args) != "null" {
-		if err := json.Unmarshal(args, &p); err != nil {
-			return nil, true, fmt.Errorf("bad arguments: %w", err)
-		}
+	endOff, ok := lineColToByteOffset(content, a.EndLine, a.EndCol)
+	if !ok {
+		return "", fmt.Errorf("end out of range: %d:%d", a.EndLine, a.EndCol)
 	}
-
-	newRoot := s.getRoot()
-	if p.WorkspaceRoot != "" {
-		if !filepath.IsAbs(p.WorkspaceRoot) {
-			return nil, true, fmt.Errorf("workspace_root must be an absolute path; got %q", p.WorkspaceRoot)
-		}
-		newRoot = p.WorkspaceRoot
+	if endOff > len(content) {
+		endOff = len(content)
 	}
-	if newRoot == "" {
-		return nil, true, fmt.Errorf("no workspace root configured and none provided")
+	if startOff > endOff {
+		return "", fmt.Errorf("start byte offset %d > end %d", startOff, endOff)
 	}
-
-	idx, err := symbols.Build(newRoot, s.registry, symbols.WithCache(s.parseCache))
-	if err != nil {
-		return nil, true, fmt.Errorf("build index at %s: %w", newRoot, err)
-	}
-
-	// Re-apply Tier 2 + Tier 3 bindings at the new root. Per-binding
-	// failures are logged inside the resolver; we surface the resulting
-	// counts so the caller can sanity-check.
-	resolver := bindings.NewResolver(newRoot)
-	declaredCount := 0
-	if len(s.bindings) > 0 {
-		n, err := resolver.Apply(idx, s.bindings)
-		if err != nil {
-			log.Printf("refresh: some bindings failed validation: %v", err)
-		}
-		declaredCount = n
-	}
-	schemaCount := 0
-	if len(s.schemas) > 0 {
-		schemaCount = resolver.ApplySchemas(idx, s.schemas)
-	}
-
-	s.setRoot(newRoot)
-	s.setIndex(idx)
-
-	return jsonContent(map[string]any{
-		"root":          newRoot,
-		"names":         len(idx.Names()),
-		"declaredSites": declaredCount,
-		"schemaSites":   schemaCount,
-	}), false, nil
+	return string(content[startOff:endOff]), nil
 }
 
-// bindingSummary is the wire shape `list_bindings` emits per name.
+// bindingSummary is the catalog entry shape shared between
+// tslsmcp://bindings (resource) and any future tool that wants the
+// catalog. Lives here so resources.go can import it without a circular
+// reference.
 type bindingSummary struct {
 	Name      string     `json:"name"`
 	SiteCount int        `json:"siteCount"`
@@ -618,118 +821,39 @@ type bindingSummary struct {
 	Sites     []siteJSON `json:"sites"`
 }
 
-func handleListBindings(s *Server, _ json.RawMessage) ([]Content, bool, error) {
-	idx := s.getIndex()
-	if idx == nil {
-		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
+func jsonContent(value any) []Content {
+	raw, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return []Content{{Type: "text", Text: fmt.Sprintf("internal: %v", err)}}
 	}
-	names := idx.DeclaredNames()
-	out := make([]bindingSummary, 0, len(names))
-	for _, name := range names {
-		var sites []siteJSON
-		langSet := map[string]struct{}{}
-		for _, site := range idx.Lookup(name) {
-			if site.Confidence < symbols.ConfidenceDeclared {
-				continue
-			}
-			sites = append(sites, siteJSON{
-				Name:       name,
-				File:       relPath(site.File, s.getRoot()),
-				Line:       site.Line,
-				Col:        site.Col,
-				Language:   site.Language,
-				Confidence: confidenceLabel(site.Confidence),
-			})
-			if site.Language != "" {
-				langSet[site.Language] = struct{}{}
-			}
-		}
-		langs := make([]string, 0, len(langSet))
-		for l := range langSet {
-			langs = append(langs, l)
-		}
-		sort.Strings(langs)
-		out = append(out, bindingSummary{
-			Name:      name,
-			SiteCount: len(sites),
-			Languages: langs,
-			Sites:     sites,
-		})
-	}
-	return jsonContent(out), false, nil
+	return []Content{{Type: "text", Text: string(raw)}}
 }
 
-func handleDocumentSymbols(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		File string `json:"file"`
+func relPath(abs, root string) string {
+	if root == "" {
+		return abs
 	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return abs
 	}
-	if p.File == "" {
-		return nil, true, fmt.Errorf("file is required")
-	}
-	idx := s.getIndex()
-	if idx == nil {
-		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
-	}
-
-	abs := p.File
-	if !filepath.IsAbs(abs) && s.getRoot() != "" {
-		abs = filepath.Join(s.getRoot(), abs)
-	}
-
-	var hits []siteJSON
-	for _, name := range idx.Names() {
-		for _, site := range idx.Lookup(name) {
-			if site.File != abs {
-				continue
-			}
-			hits = append(hits, siteJSON{
-				Name:       name,
-				File:       relPath(site.File, s.getRoot()),
-				Line:       site.Line,
-				Col:        site.Col,
-				Language:   site.Language,
-				Confidence: confidenceLabel(site.Confidence),
-			})
-		}
-	}
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].Line != hits[j].Line {
-			return hits[i].Line < hits[j].Line
-		}
-		return hits[i].Col < hits[j].Col
-	})
-	return jsonContent(hits), false, nil
+	return rel
 }
 
-// rangeArgs captures the shared (file, startLine, startCol, endLine,
-// endCol) input shape used by read_range and replace_range. 1-based,
-// end-exclusive — same as document_structure's output.
-type rangeArgs struct {
-	File      string `json:"file"`
-	StartLine int    `json:"startLine"`
-	StartCol  int    `json:"startCol"`
-	EndLine   int    `json:"endLine"`
-	EndCol    int    `json:"endCol"`
+func confidenceLabel(c symbols.Confidence) string {
+	switch c {
+	case symbols.ConfidenceLexical:
+		return "lexical"
+	case symbols.ConfidenceDeclared:
+		return "declared"
+	case symbols.ConfidenceLSP:
+		return "lsp"
+	}
+	return "unknown"
 }
 
-func (a rangeArgs) validate() error {
-	if a.File == "" {
-		return fmt.Errorf("file is required")
-	}
-	if a.StartLine < 1 || a.StartCol < 1 || a.EndLine < 1 || a.EndCol < 1 {
-		return fmt.Errorf("line and col must be >= 1 (got %+v)", a)
-	}
-	if a.EndLine < a.StartLine || (a.EndLine == a.StartLine && a.EndCol < a.StartCol) {
-		return fmt.Errorf("range end before start: %+v", a)
-	}
-	return nil
-}
-
-// resolveFileArg turns a workspace-relative or absolute file path
-// from a tool argument into an absolute one.
+// resolveFileArg turns a workspace-relative or absolute path from a
+// tool argument into an absolute path.
 func (s *Server) resolveFileArg(file string) string {
 	if filepath.IsAbs(file) {
 		return file
@@ -740,9 +864,8 @@ func (s *Server) resolveFileArg(file string) string {
 	return file
 }
 
-// languageForFile dispatches by extension against the registry.
-// Returns "" if no language is registered for the file. Used by
-// document_structure to choose a tree-sitter grammar.
+// languageForFile dispatches by extension via the registry. Returns ""
+// if the file's extension isn't registered.
 func (s *Server) languageForFile(path string) string {
 	ext := strings.TrimPrefix(filepath.Ext(path), ".")
 	if ext == "" {
@@ -755,161 +878,6 @@ func (s *Server) languageForFile(path string) string {
 	return lang.Name
 }
 
-func handleDocumentStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		File string `json:"file"`
-	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return nil, true, fmt.Errorf("bad arguments: %w", err)
-	}
-	if p.File == "" {
-		return nil, true, fmt.Errorf("file is required")
-	}
-	abs := s.resolveFileArg(p.File)
-	content, err := os.ReadFile(abs)
-	if err != nil {
-		return nil, true, fmt.Errorf("read %s: %w", p.File, err)
-	}
-	lang := s.languageForFile(abs)
-	if lang == "" {
-		return nil, true, fmt.Errorf("no language registered for %s", p.File)
-	}
-	nodes, err := symbols.StructureNodes(lang, content)
-	if err != nil {
-		return nil, true, err
-	}
-	return jsonContent(nodes), false, nil
-}
-
-func handleReadRange(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var a rangeArgs
-	if err := json.Unmarshal(args, &a); err != nil {
-		return nil, true, fmt.Errorf("bad arguments: %w", err)
-	}
-	if err := a.validate(); err != nil {
-		return nil, true, err
-	}
-	abs := s.resolveFileArg(a.File)
-	content, err := os.ReadFile(abs)
-	if err != nil {
-		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
-	}
-	startOff, ok := lineColToByteOffset(content, a.StartLine, a.StartCol)
-	if !ok {
-		return nil, true, fmt.Errorf("start out of range: %d:%d", a.StartLine, a.StartCol)
-	}
-	endOff, ok := lineColToByteOffset(content, a.EndLine, a.EndCol)
-	if !ok {
-		return nil, true, fmt.Errorf("end out of range: %d:%d", a.EndLine, a.EndCol)
-	}
-	if endOff > len(content) {
-		endOff = len(content)
-	}
-	if startOff > endOff {
-		return nil, true, fmt.Errorf("start byte offset %d > end %d", startOff, endOff)
-	}
-	return jsonContent(map[string]any{
-		"file":      a.File,
-		"startLine": a.StartLine,
-		"startCol":  a.StartCol,
-		"endLine":   a.EndLine,
-		"endCol":    a.EndCol,
-		"text":      string(content[startOff:endOff]),
-	}), false, nil
-}
-
-func handleReplaceRange(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		rangeArgs
-		NewText string `json:"newText"`
-	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return nil, true, fmt.Errorf("bad arguments: %w", err)
-	}
-	if err := p.rangeArgs.validate(); err != nil {
-		return nil, true, err
-	}
-	abs := s.resolveFileArg(p.File)
-	content, err := os.ReadFile(abs)
-	if err != nil {
-		return nil, true, fmt.Errorf("read %s: %w", p.File, err)
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, true, fmt.Errorf("stat %s: %w", p.File, err)
-	}
-	startOff, ok := lineColToByteOffset(content, p.StartLine, p.StartCol)
-	if !ok {
-		return nil, true, fmt.Errorf("start out of range: %d:%d", p.StartLine, p.StartCol)
-	}
-	endOff, ok := lineColToByteOffset(content, p.EndLine, p.EndCol)
-	if !ok {
-		return nil, true, fmt.Errorf("end out of range: %d:%d", p.EndLine, p.EndCol)
-	}
-	if endOff > len(content) {
-		endOff = len(content)
-	}
-	if startOff > endOff {
-		return nil, true, fmt.Errorf("start byte offset %d > end %d", startOff, endOff)
-	}
-
-	out := make([]byte, 0, len(content)-(endOff-startOff)+len(p.NewText))
-	out = append(out, content[:startOff]...)
-	out = append(out, p.NewText...)
-	out = append(out, content[endOff:]...)
-
-	tmp := abs + ".tslsmcp.tmp"
-	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
-		return nil, true, fmt.Errorf("write temp: %w", err)
-	}
-	if err := os.Rename(tmp, abs); err != nil {
-		_ = os.Remove(tmp)
-		return nil, true, fmt.Errorf("rename: %w", err)
-	}
-
-	return jsonContent(map[string]any{
-		"file":         p.File,
-		"replacedFrom": map[string]int{"line": p.StartLine, "col": p.StartCol},
-		"replacedTo":   map[string]int{"line": p.EndLine, "col": p.EndCol},
-		"bytesRemoved": endOff - startOff,
-		"bytesAdded":   len(p.NewText),
-	}), false, nil
-}
-
-// jsonContent marshals value into a single text content block — the
-// most reliable shape for LLM consumers across MCP clients.
-func jsonContent(value any) []Content {
-	raw, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return []Content{{Type: "text", Text: fmt.Sprintf("internal: %v", err)}}
-	}
-	return []Content{{Type: "text", Text: string(raw)}}
-}
-
-// relPath returns abs relative to root when possible, otherwise abs
-// unchanged. Stable workspace-relative paths beat absolute ones for the
-// LLM (and across machines).
-func relPath(abs, root string) string {
-	if root == "" {
-		return abs
-	}
-	rel, err := filepath.Rel(root, abs)
-	if err != nil {
-		return abs
-	}
-	return rel
-}
-
-// confidenceLabel maps the internal enum to a short string the LLM can
-// reason about.
-func confidenceLabel(c symbols.Confidence) string {
-	switch c {
-	case symbols.ConfidenceLexical:
-		return "lexical"
-	case symbols.ConfidenceDeclared:
-		return "declared"
-	case symbols.ConfidenceLSP:
-		return "lsp"
-	}
-	return "unknown"
-}
+// _ ensures the fs import isn't dead even if walking helpers move
+// around in future refactors.
+var _ fs.DirEntry

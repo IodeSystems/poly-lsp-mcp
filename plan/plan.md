@@ -415,15 +415,20 @@ the full cross-language stack the LSP layer already serves to editors.
     — multi-modal refactor channel with composable ops. The nested
     `refactor` object combines any of: identifier rename
     (workspace-wide, declared-bindings + aliasing-safety semantics),
-    Go function-signature parameter list rewrite, Go return-type
-    rewrite (including insertion into previously-void signatures).
-    When `params` changes the arity, callers across the workspace are
+    function-signature parameter list rewrite, and return-type
+    rewrite (including insertion into previously-void / unannotated
+    signatures). Supports **Go, TypeScript (.ts/.tsx/.js), and
+    Python** today via `symbols.FindFunctionSignature(language, ...)`
+    + `symbols.RewriteSignature` + per-language `langOps` (param
+    syntax, return-type prefix, zero values for added args). When
+    `params` changes the arity, callers across the workspace are
     rewritten best-effort — args truncated on shrink, padded with
-    `goZeroValue(type)` placeholders on growth (`""`, `0`, `false`,
-    `nil`, or `*new(T)` for unknown named types). Spread (`f(x...)`)
-    callers are reported as `skipped`. Legacy `kind="rename",
-    newName=X` shape still accepted; internally normalized into the
-    nested form.
+    language-appropriate zero values on growth (`""`, `0`, `false`,
+    `nil`/`null`/`None`, `[]`/`{}`, etc.). Spread/splat callers
+    (Go `f(x...)`, TS `f(...xs)`, Python `f(*args, **kw)`) are
+    reported as `skipped` so the agent decides. Legacy
+    `kind="rename", newName=X` shape still accepted; internally
+    normalized into the nested form.
 
   Workspace-relative paths in all tool output; absolute paths accepted
   on input. poly-lsp-mcp://workspace and poly-lsp-mcp://bindings resources are

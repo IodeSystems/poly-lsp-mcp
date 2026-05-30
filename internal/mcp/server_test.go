@@ -1187,6 +1187,100 @@ func TestNodeRefactorSignatureCombinedRename(t *testing.T) {
 	}
 }
 
+// TestNodeRefactorTSSignature exercises the TypeScript path: rewrite
+// a function declaration's params + return type via the same nested
+// refactor shape, plus call-site rewriting in a sibling file.
+func TestNodeRefactorTSSignature(t *testing.T) {
+	dir := t.TempDir()
+	libPath := filepath.Join(dir, "lib.ts")
+	if err := os.WriteFile(libPath,
+		[]byte("export function greet(name: string): string {\n\treturn name;\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callerPath := filepath.Join(dir, "caller.ts")
+	if err := os.WriteFile(callerPath,
+		[]byte("import {greet} from \"./lib\";\nconst out = greet(\"hi\");\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// greet's name starts at line 1 col 17 (after "export function ").
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "lib.ts",
+		"startLine": 1, "startCol": 17,
+		"endLine": 1, "endCol": 22,
+		"refactor": map[string]any{
+			"params": []map[string]any{
+				{"name": "name", "type": "string"},
+				{"name": "age", "type": "number"},
+			},
+			"return": "string",
+		},
+	})
+	if r.IsError {
+		t.Fatalf("TS signature refactor errored: %+v", r.Content)
+	}
+	libGot, _ := os.ReadFile(libPath)
+	callerGot, _ := os.ReadFile(callerPath)
+	if !strings.Contains(string(libGot), "function greet(name: string, age: number): string {") {
+		t.Errorf("lib.ts declaration wrong:\n%s", libGot)
+	}
+	if !strings.Contains(string(callerGot), `greet("hi", 0)`) {
+		t.Errorf("caller.ts call-site padding wrong; got:\n%s", callerGot)
+	}
+}
+
+// TestNodeRefactorPythonSignature exercises Python: rewrite params +
+// return type. Python uses `-> T:` for the return type, and the test
+// covers both inserting one (untyped → typed) and call-site padding.
+func TestNodeRefactorPythonSignature(t *testing.T) {
+	dir := t.TempDir()
+	libPath := filepath.Join(dir, "lib.py")
+	if err := os.WriteFile(libPath,
+		[]byte("def greet(name):\n    return name\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callerPath := filepath.Join(dir, "caller.py")
+	if err := os.WriteFile(callerPath,
+		[]byte("from lib import greet\nprint(greet(\"hi\"))\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// greet's name starts at line 1 col 5 (`def greet(`).
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "lib.py",
+		"startLine": 1, "startCol": 5,
+		"endLine": 1, "endCol": 10,
+		"refactor": map[string]any{
+			"params": []map[string]any{
+				{"name": "name", "type": "str"},
+				{"name": "items", "type": "list"},
+			},
+			"return": "str",
+		},
+	})
+	if r.IsError {
+		t.Fatalf("Python signature refactor errored: %+v", r.Content)
+	}
+	libGot, _ := os.ReadFile(libPath)
+	callerGot, _ := os.ReadFile(callerPath)
+	if !strings.Contains(string(libGot), "def greet(name: str, items: list) -> str:") {
+		t.Errorf("lib.py declaration wrong:\n%s", libGot)
+	}
+	if !strings.Contains(string(callerGot), `greet("hi", [])`) {
+		t.Errorf("caller.py call-site padding wrong; got:\n%s", callerGot)
+	}
+}
+
 func TestNodeRefactorUnknownKindIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()

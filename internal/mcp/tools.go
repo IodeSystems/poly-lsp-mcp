@@ -673,70 +673,38 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 // up; for now the diagnostic round-trip surfaces broken callers.
 func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments bool, dopts diagnosticOptions) ([]Content, bool, error) {
 	abs := s.resolveFileArg(a.File)
-	if lang := s.languageForFile(abs); lang != "go" {
-		return nil, true, fmt.Errorf("signature refactor only supports Go today (got %q)", lang)
+	lang := s.languageForFile(abs)
+	if !signatureSupportedLanguage(lang) {
+		return nil, true, fmt.Errorf("signature refactor not supported for language %q (try go / typescript / python)", lang)
 	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
 	}
-	sig, err := symbols.FindGoFunctionSignature(content, a.StartLine, a.StartCol)
+	sig, err := symbols.FindFunctionSignature(lang, content, a.StartLine, a.StartCol)
 	if err != nil {
 		return nil, true, fmt.Errorf("parse %s: %w", a.File, err)
 	}
 	if sig == nil {
-		return nil, true, fmt.Errorf("no Go function declaration at %s:%d:%d", a.File, a.StartLine, a.StartCol)
+		return nil, true, fmt.Errorf("no function declaration at %s:%d:%d", a.File, a.StartLine, a.StartCol)
 	}
 
 	oldName := string(content[sig.Name.Start:sig.Name.End])
 
-	// Build the signature-local edits, in reverse byte order so
-	// earlier offsets don't shift later ones during application.
-	type byteEdit struct {
-		Start, End int
-		NewText    string
+	// Apply signature-local edits via the language-dispatched
+	// rewriter. We DON'T pass ops.Rename to the rewriter because the
+	// workspace-wide rename path (refactorRename) needs to run across
+	// every file, not just the declaration — it touches the name in
+	// callers too. Local rename of just the declaration would leave
+	// callers desynced. The rename is applied later, after the
+	// signature edit lands.
+	localOps := symbols.SignatureOps{
+		Params: toSymbolsParams(ops.Params),
+		Return: ops.Return,
 	}
-	var edits []byteEdit
-
-	if ops.Params != nil {
-		edits = append(edits, byteEdit{
-			Start:   sig.Params.Start,
-			End:     sig.Params.End,
-			NewText: renderGoParams(ops.Params),
-		})
-	}
-	if ops.Return != "" {
-		newResult := formatGoReturnType(ops.Return)
-		if sig.Result.Empty() {
-			// Insert before the body's opening brace. Tree-sitter
-			// gives body's start; we put the result + a space just
-			// before it. The byte preceding the body is typically a
-			// space already; we add the type and a trailing space so
-			// the result-then-brace spacing matches gofmt's canon
-			// (`) func F() T {`).
-			edits = append(edits, byteEdit{
-				Start:   sig.BodyStart,
-				End:     sig.BodyStart,
-				NewText: newResult + " ",
-			})
-		} else {
-			edits = append(edits, byteEdit{
-				Start:   sig.Result.Start,
-				End:     sig.Result.End,
-				NewText: newResult,
-			})
-		}
-	}
-
-	// Apply local edits right-to-left so byte offsets stay valid.
-	sort.Slice(edits, func(i, j int) bool { return edits[i].Start > edits[j].Start })
-	out := append([]byte(nil), content...)
-	for _, e := range edits {
-		next := make([]byte, 0, len(out)-(e.End-e.Start)+len(e.NewText))
-		next = append(next, out[:e.Start]...)
-		next = append(next, e.NewText...)
-		next = append(next, out[e.End:]...)
-		out = next
+	out, n, err := symbols.RewriteSignature(content, sig, localOps)
+	if err != nil {
+		return nil, true, fmt.Errorf("rewrite signature: %w", err)
 	}
 
 	info, err := os.Stat(abs)
@@ -753,15 +721,11 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 	s.refreshFileInIndex(abs, out)
 
-	results := []applyResult{{File: relPath(abs, s.getRoot()), Edits: len(edits)}}
+	results := []applyResult{{File: relPath(abs, s.getRoot()), Edits: n}}
 
-	// If a rename was also requested, run the workspace-wide rename
-	// path on top of the signature change. We need to re-find the
-	// (now shifted) name range because the byte edits above may have
-	// moved it; passing the original rangeArgs would no longer
-	// point at the name. The rename path takes the identifier text
-	// at the range, so we use the post-edit name range.
-	postSig, err := symbols.FindGoFunctionSignature(out, a.StartLine, a.StartCol)
+	// Optional workspace-wide rename on top. Re-find the signature
+	// in the post-edit content because byte offsets moved.
+	postSig, err := symbols.FindFunctionSignature(lang, out, a.StartLine, a.StartCol)
 	if err != nil || postSig == nil {
 		return nil, true, fmt.Errorf("post-edit signature lookup failed: %v", err)
 	}
@@ -793,8 +757,8 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 
 	// Best-effort call-site rewriting: only meaningful when the
-	// parameter count changes. Same-count signature edits leave args
-	// alone — gopls's type checker is the authority on whether the
+	// parameter count changes. Same-count signature edits leave
+	// args alone — the type checker is the authority on whether
 	// existing expressions still fit.
 	currentName := oldName
 	if ops.Rename != "" {
@@ -803,11 +767,8 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	uris := []string{pathToURI(abs)}
 	contentsByURI := map[string][]byte{uris[0]: out}
 	if ops.Params != nil {
-		callResults, callContents := s.rewriteGoCallSites(abs, currentName, ops.Params)
-		// Merge call-site results into the per-file list.
+		callResults, callContents := s.rewriteCallSites(lang, currentName, ops.Params)
 		for _, cr := range callResults {
-			// Avoid duplicating the declaration file if call sites
-			// also live there.
 			if cr.File == results[0].File {
 				results[0].Edits += cr.Edits
 				continue
@@ -820,7 +781,6 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 		}
 	}
 
-	// Diagnostic round-trip across every file we touched.
 	diags := s.collectDiagnostics(uris, contentsByURI, dopts)
 
 	payload := map[string]any{
@@ -839,27 +799,35 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	return jsonContent(payload), false, nil
 }
 
-// rewriteGoCallSites walks every Go file in the index that mentions
-// `funcName` and rewrites its argument lists to match the new
-// parameter count. Three cases per call site:
+// signatureSupportedLanguage reports whether RewriteSignature has a
+// per-language implementation. Today: go / typescript / python.
+func signatureSupportedLanguage(lang string) bool {
+	switch lang {
+	case "go", "typescript", "python":
+		return true
+	}
+	return false
+}
+
+// rewriteCallSites walks every file in the index that mentions
+// funcName (filtered to the supplied language) and rewrites its
+// argument lists to match the new parameter count. Three cases per
+// call site:
 //
 //   - count matches: skip (type-only changes left for diagnostics)
 //   - new < old: drop trailing args
 //   - new > old: append zero-value placeholders for the new positions
 //
-// declFile is skipped at the file level so we don't rewrite the
-// signature's own call sites twice (the declaration itself isn't a
-// call expression, but if a function calls itself inside its body
-// we still want to fix that call — declFile is included in the walk
-// list, just deduplicated against the existing edit when reporting).
-func (s *Server) rewriteGoCallSites(declFile, funcName string, params []refactorParam) ([]applyResult, map[string][]byte) {
+// Per-site outcomes return as applyResult entries (one per touched
+// file); contents-by-URI for the diagnostic round-trip.
+func (s *Server) rewriteCallSites(language, funcName string, params []refactorParam) ([]applyResult, map[string][]byte) {
 	idx := s.getIndex()
 	if idx == nil {
 		return nil, nil
 	}
 	files := map[string]bool{}
 	for _, site := range idx.Lookup(funcName) {
-		if site.Language == "go" {
+		if site.Language == language {
 			files[site.File] = true
 		}
 	}
@@ -867,10 +835,7 @@ func (s *Server) rewriteGoCallSites(declFile, funcName string, params []refactor
 		return nil, nil
 	}
 
-	zeroValues := make([]string, len(params))
-	for i, p := range params {
-		zeroValues[i] = goZeroValue(p.Type)
-	}
+	symParams := toSymbolsParams(params)
 	target := len(params)
 
 	var results []applyResult
@@ -881,7 +846,7 @@ func (s *Server) rewriteGoCallSites(declFile, funcName string, params []refactor
 		if err != nil {
 			continue
 		}
-		sites, err := symbols.FindGoCallSites(content, funcName)
+		sites, err := symbols.FindCallSites(language, content, funcName)
 		if err != nil || len(sites) == 0 {
 			continue
 		}
@@ -890,27 +855,21 @@ func (s *Server) rewriteGoCallSites(declFile, funcName string, params []refactor
 			newText    string
 		}
 		var edits []rewrite
-		skipped := 0
 		for _, cs := range sites {
 			if cs.Skipped != "" {
-				skipped++
 				continue
 			}
 			if len(cs.CurrentArgs) == target {
 				continue
 			}
-			newList := make([]string, 0, target)
-			for i := 0; i < target; i++ {
-				if i < len(cs.CurrentArgs) {
-					newList = append(newList, cs.CurrentArgs[i])
-				} else {
-					newList = append(newList, zeroValues[i])
-				}
+			newInner, err := symbols.RewriteCallSiteArgs(language, cs.CurrentArgs, symParams)
+			if err != nil {
+				continue
 			}
 			edits = append(edits, rewrite{
 				start:   cs.ArgsInnerStart,
 				end:     cs.ArgsInnerEnd,
-				newText: strings.Join(newList, ", "),
+				newText: newInner,
 			})
 		}
 		if len(edits) == 0 {
@@ -948,73 +907,24 @@ func (s *Server) rewriteGoCallSites(declFile, funcName string, params []refactor
 	return results, updated
 }
 
-// goZeroValue returns a Go expression whose value is the zero value
-// of `typ`. Used as a placeholder argument when a signature gains a
-// new parameter and we don't know what the caller wants there.
-//
-// Common types get idiomatic forms ("", 0, false, nil). For anything
-// else we fall back to *new(typ) — it compiles for arbitrary types
-// (structs, type aliases, generics with constraints) and produces
-// the language-level zero value. Idiomatic? No. Compiles? Yes.
-// Agents see it and replace via a follow-up edit.
-func goZeroValue(typ string) string {
-	typ = strings.TrimSpace(typ)
-	if strings.HasPrefix(typ, "*") {
-		return "nil"
+// toSymbolsParams converts the MCP-side refactorParam shape into the
+// symbols-package Param shape (same fields, different package).
+func toSymbolsParams(params []refactorParam) []symbols.Param {
+	if params == nil {
+		return nil
 	}
-	switch typ {
-	case "string":
-		return `""`
-	case "bool":
-		return "false"
-	case "int", "int8", "int16", "int32", "int64",
-		"uint", "uint8", "uint16", "uint32", "uint64",
-		"byte", "rune", "uintptr":
-		return "0"
-	case "float32", "float64", "complex64", "complex128":
-		return "0"
-	case "error", "any", "interface{}":
-		return "nil"
+	out := make([]symbols.Param, len(params))
+	for i, p := range params {
+		out[i] = symbols.Param{Name: p.Name, Type: p.Type}
 	}
-	if strings.HasPrefix(typ, "[]") || strings.HasPrefix(typ, "map[") ||
-		strings.HasPrefix(typ, "chan ") || strings.HasPrefix(typ, "<-") ||
-		strings.HasPrefix(typ, "func(") {
-		return "nil"
-	}
-	return "*new(" + typ + ")"
-}
-
-// renderGoParams formats a parameter list as `(name type, name type)`.
-// Empty input → `()`. Used to rebuild the parameter_list contents
-// during a signature refactor.
-func renderGoParams(params []refactorParam) string {
-	if len(params) == 0 {
-		return "()"
-	}
-	parts := make([]string, 0, len(params))
-	for _, p := range params {
-		if p.Name == "" {
-			parts = append(parts, p.Type)
-		} else {
-			parts = append(parts, p.Name+" "+p.Type)
-		}
-	}
-	return "(" + strings.Join(parts, ", ") + ")"
-}
-
-// formatGoReturnType accepts the caller's return-type string and
-// returns it verbatim. The caller is responsible for wrapping tuple
-// returns in parens (`(string, error)`); we pass through so single
-// types like `string` don't get spurious parens.
-func formatGoReturnType(s string) string {
-	return strings.TrimSpace(s)
+	return out
 }
 
 // nameRangeAfterSignature returns a rangeArgs covering the name of a
 // freshly-rewritten signature, so the workspace rename can pin on
 // the right token. Line/col are 1-based; computed from byte offsets
 // inside `content`.
-func nameRangeAfterSignature(orig rangeArgs, sig *symbols.GoFunctionSignature, content []byte) rangeArgs {
+func nameRangeAfterSignature(orig rangeArgs, sig *symbols.FunctionSignature, content []byte) rangeArgs {
 	startLine, startCol := byteOffsetToLineColPos(content, sig.Name.Start)
 	endLine, endCol := byteOffsetToLineColPos(content, sig.Name.End)
 	return rangeArgs{

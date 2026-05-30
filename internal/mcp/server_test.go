@@ -740,6 +740,175 @@ func TestNodeRefactorUnknownKindIsError(t *testing.T) {
 	}
 }
 
+func TestNodeRefactorRenameDefaultSkipsComments(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath,
+		[]byte("package main\n\n// UserID is the canonical id\ntype UserID int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	sr := s.callTool("structure", map[string]any{"path": "main.go"})
+	var f structureEntryWire
+	json.Unmarshal([]byte(sr.Content[0].Text), &f)
+	var typ *structureEntryWire
+	for i := range f.Children {
+		if f.Children[i].Name == "UserID" {
+			typ = &f.Children[i]
+		}
+	}
+	if typ == nil {
+		t.Fatal("UserID not in structure")
+	}
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "main.go",
+		"startLine": typ.NameStartLine, "startCol": typ.NameStartCol,
+		"endLine": typ.NameEndLine, "endCol": typ.NameEndCol,
+		"kind":    "rename",
+		"newName": "PersonID",
+	})
+	if r.IsError {
+		t.Fatalf("rename errored: %+v", r.Content)
+	}
+	got, _ := os.ReadFile(mainPath)
+	// Default: the comment is preserved (still says UserID).
+	if !strings.Contains(string(got), "// UserID is the canonical id") {
+		t.Errorf("comment was rewritten without includeComments:\n%s", got)
+	}
+	if !strings.Contains(string(got), "type PersonID int") {
+		t.Errorf("type declaration not renamed:\n%s", got)
+	}
+}
+
+func TestNodeRefactorRenameIncludeCommentsTouchesComments(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath,
+		[]byte("package main\n\n// UserID is the canonical id\n// thisUserID stays as-is (partial word)\ntype UserID int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A README in markdown — also has a UserID reference in prose.
+	readmePath := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmePath,
+		[]byte("# polyglot\n\nThe `UserID` identifier crosses languages.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	sr := s.callTool("structure", map[string]any{"path": "main.go"})
+	var f structureEntryWire
+	json.Unmarshal([]byte(sr.Content[0].Text), &f)
+	var typ *structureEntryWire
+	for i := range f.Children {
+		if f.Children[i].Name == "UserID" {
+			typ = &f.Children[i]
+		}
+	}
+	if typ == nil {
+		t.Fatal("UserID not in structure")
+	}
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":            "main.go",
+		"startLine":       typ.NameStartLine,
+		"startCol":        typ.NameStartCol,
+		"endLine":         typ.NameEndLine,
+		"endCol":          typ.NameEndCol,
+		"kind":            "rename",
+		"newName":         "PersonID",
+		"includeComments": true,
+	})
+	if r.IsError {
+		t.Fatalf("rename errored: %+v", r.Content)
+	}
+
+	main, _ := os.ReadFile(mainPath)
+	readme, _ := os.ReadFile(readmePath)
+
+	if !strings.Contains(string(main), "// PersonID is the canonical id") {
+		t.Errorf("comment line not renamed:\n%s", main)
+	}
+	// Partial-word match MUST be preserved.
+	if !strings.Contains(string(main), "thisUserID") {
+		t.Errorf("partial-word match was wrongly renamed:\n%s", main)
+	}
+	if strings.Contains(string(main), "thisPersonID") {
+		t.Errorf("partial-word match was wrongly renamed:\n%s", main)
+	}
+	if !strings.Contains(string(readme), "The `PersonID` identifier") {
+		t.Errorf("markdown prose not renamed under includeComments:\n%s", readme)
+	}
+}
+
+func TestNodeRefactorRenameIncludeCommentsDedupesWithDeclaredSites(t *testing.T) {
+	// Declared sites already include the type declaration. The
+	// comment-scan must not produce a duplicate edit at that
+	// position (which would corrupt the file by replacing the same
+	// bytes twice).
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath,
+		[]byte("package main\n\n// UserID note\ntype UserID int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	sr := s.callTool("structure", map[string]any{"path": "main.go"})
+	var f structureEntryWire
+	json.Unmarshal([]byte(sr.Content[0].Text), &f)
+	var typ *structureEntryWire
+	for i := range f.Children {
+		if f.Children[i].Name == "UserID" {
+			typ = &f.Children[i]
+		}
+	}
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":            "main.go",
+		"startLine":       typ.NameStartLine,
+		"startCol":        typ.NameStartCol,
+		"endLine":         typ.NameEndLine,
+		"endCol":          typ.NameEndCol,
+		"kind":            "rename",
+		"newName":         "PersonID",
+		"includeComments": true,
+	})
+	if r.IsError {
+		t.Fatalf("rename errored: %+v", r.Content)
+	}
+	got, _ := os.ReadFile(mainPath)
+	want := "package main\n\n// PersonID note\ntype PersonID int\n"
+	if string(got) != want {
+		t.Errorf("rename + includeComments produced unexpected content:\nGOT:\n%s\nWANT:\n%s", got, want)
+	}
+}
+
 // ---- resources (unchanged surface) ----
 
 func TestInitializeAdvertisesResourcesCapability(t *testing.T) {

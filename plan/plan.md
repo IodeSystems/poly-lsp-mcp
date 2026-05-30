@@ -471,6 +471,20 @@ Three tiers, increasing user effort:
 | 2 — declared bindings | `bindings:` section in tslsmcp.yaml | Hand-declared cross-language identity for things tree-sitter can't see (string-literal config values, prose, languages we have no grammar for) and for aliasing across naming conventions (UserID ↔ user_id). |
 | 3 — schema-anchored | `schemas:` section in tslsmcp.yaml, one entry per schema file | Auto-derived bindings: parse the schema, bind every named entity (proto messages/enums/services/rpcs, openapi components.schemas.* + operationIds, jsonschema $defs.* + title), promote every workspace occurrence of those names to declared. One config line ≈ dozens of bindings. |
 
+### Comments and prose
+
+Tree-sitter intentionally skips comments — they aren't identifier nodes — so a default `node_refactor(kind=rename)` leaves comments untouched. This is the right safe default (a comment "we used to call this UserID" must not rewrite). For renames where the agent wants documentation references updated, pass `includeComments: true`:
+
+- Workspace-wide regex scan with `\b<name>\b` word-boundary anchors
+- Partial-word matches (`thisUserID`) are NOT touched — the anchor sees them as different tokens
+- Positions already in the declared/lexical rename plan are deduped
+- Per-file 1 MiB size cap mirrors the lexical pass
+- Same atomic temp + Rename write path
+
+Hand-curated comment renames (per-binding "always include comments") would be a follow-up (`bindings.<name>.rename_includes_comments: true`); not implemented today.
+
+### Schema auto-detection
+
 Schema auto-detection is opt-in via `auto_schemas: true` in tslsmcp.yaml. When set, `config.DetectSchemas(root, existing)` walks the workspace at startup and emits a Schema entry for each file matching one of these conservative heuristics:
 
 - `*.proto` extension → `proto`

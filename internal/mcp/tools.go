@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -151,17 +152,19 @@ func registerTools() map[string]Tool {
 			Description: "Multi-modal cross-language refactor. " +
 				"Point `range` at an identifier (use structure's `nameStart*` / `nameEnd*` fields). " +
 				"`kind` selects the refactor: today only \"rename\" is supported — it propagates the rename across every site declared bindings or the lexical index turn up, with per-site on-disk text verification so aliasing bindings can't substitute the wrong token. " +
+				"Set `includeComments` true for kind='rename' when you want documentation and comment references (which tree-sitter normally skips) renamed too — a workspace-wide word-boundary scan augments the plan; partial-word matches like `thisUserID` are not touched because the scan anchors on identifier boundaries. " +
 				"Future kinds (change_signature, change_return_type) land here without growing the tool count.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "file":      {"type": "string"},
-    "startLine": {"type": "integer", "minimum": 1},
-    "startCol":  {"type": "integer", "minimum": 1},
-    "endLine":   {"type": "integer", "minimum": 1},
-    "endCol":    {"type": "integer", "minimum": 1},
-    "kind":      {"type": "string", "enum": ["rename"], "description": "Refactor kind."},
-    "newName":   {"type": "string", "description": "Required when kind='rename'."}
+    "file":            {"type": "string"},
+    "startLine":       {"type": "integer", "minimum": 1},
+    "startCol":        {"type": "integer", "minimum": 1},
+    "endLine":         {"type": "integer", "minimum": 1},
+    "endCol":          {"type": "integer", "minimum": 1},
+    "kind":            {"type": "string", "enum": ["rename"], "description": "Refactor kind."},
+    "newName":         {"type": "string", "description": "Required when kind='rename'."},
+    "includeComments": {"type": "boolean", "description": "When kind='rename', also rename word-boundary mentions in comments / prose / non-indexed file types. Default false."}
   },
   "required": ["file", "startLine", "startCol", "endLine", "endCol", "kind"]
 }`),
@@ -563,8 +566,9 @@ func (s *Server) refreshFileInIndex(abs string, content []byte) {
 func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		rangeArgs
-		Kind    string `json:"kind"`
-		NewName string `json:"newName"`
+		Kind            string `json:"kind"`
+		NewName         string `json:"newName"`
+		IncludeComments bool   `json:"includeComments"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -579,13 +583,13 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 		if p.NewName == "" {
 			return nil, true, errors.New("newName is required when kind='rename'")
 		}
-		return s.refactorRename(p.rangeArgs, p.NewName)
+		return s.refactorRename(p.rangeArgs, p.NewName, p.IncludeComments)
 	default:
 		return nil, true, fmt.Errorf("unsupported refactor kind: %q (try 'rename')", p.Kind)
 	}
 }
 
-func (s *Server) refactorRename(a rangeArgs, newName string) ([]Content, bool, error) {
+func (s *Server) refactorRename(a rangeArgs, newName string, includeComments bool) ([]Content, bool, error) {
 	idx := s.getIndex()
 	if idx == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
@@ -604,6 +608,15 @@ func (s *Server) refactorRename(a rangeArgs, newName string) ([]Content, bool, e
 	}
 
 	resolved := s.buildRenameEdits(name, newName)
+	if includeComments {
+		// Workspace-wide word-boundary scan picks up positions the
+		// index intentionally doesn't see — most commonly comments,
+		// docstrings, markdown prose, and config formats we don't
+		// have a grammar for. \b anchors mean partial-word matches
+		// (thisUserID) are NOT renamed.
+		more := s.findCommentMentions(name, newName, resolved)
+		resolved = append(resolved, more...)
+	}
 	byFile := map[string][]resolvedEdit{}
 	order := []string{}
 	for _, e := range resolved {
@@ -636,6 +649,123 @@ func (s *Server) refactorRename(a rangeArgs, newName string) ([]Content, bool, e
 		"filesChanged": len(results),
 		"results":      results,
 	}), false, nil
+}
+
+// findCommentMentions runs a workspace-wide word-boundary scan for
+// name and returns a resolvedEdit per match whose position isn't
+// already covered by `existing`. Used by node_refactor with
+// kind=rename + includeComments=true to pick up comments / prose /
+// non-indexed file types the symbol index intentionally skips.
+//
+// Word-boundary anchoring keeps partial-word matches out (`thisUserID`
+// won't match `\bUserID\b`). Aliasing safety is implicit: the
+// rewriter still replaces the matched bytes verbatim, and we only
+// match the exact name.
+func (s *Server) findCommentMentions(name, newName string, existing []resolvedEdit) []resolvedEdit {
+	root := s.getRoot()
+	if root == "" {
+		return nil
+	}
+	type loc struct {
+		abs  string
+		line int
+		col  int
+	}
+	seen := map[loc]bool{}
+	for _, e := range existing {
+		seen[loc{e.AbsFile, e.Line, e.Col}] = true
+	}
+	re, err := regexp.Compile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	if err != nil {
+		return nil
+	}
+	var out []resolvedEdit
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if skipScanDir(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if info.Size() > maxScanSize {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		newlines := scanNewlineOffsets(data)
+		for _, m := range re.FindAllIndex(data, -1) {
+			line, col := byteOffsetToLineCol(m[0], newlines)
+			key := loc{path, line, col}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, resolvedEdit{
+				AbsFile: path,
+				RelFile: relPath(path, root),
+				Line:    line,
+				Col:     col,
+				OldText: name,
+				NewText: newName,
+			})
+		}
+		return nil
+	})
+	return out
+}
+
+const maxScanSize = 1 << 20 // 1 MiB per file; mirrors the lexical pass
+
+func skipScanDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", "__pycache__",
+		"dist", "build", ".idea", ".vscode", ".tslsmcp":
+		return true
+	}
+	return false
+}
+
+// scanNewlineOffsets returns the byte offset of every '\n' in data,
+// sorted. Used by byteOffsetToLineCol to convert a byte offset into
+// (line, col) in O(log n) per match.
+func scanNewlineOffsets(data []byte) []int {
+	var out []int
+	for i, b := range data {
+		if b == '\n' {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// byteOffsetToLineCol converts a byte offset into 1-based (line, col).
+// Mirrors offsetToLineCol in internal/bindings — duplicated here so
+// internal/mcp doesn't import that package's internals.
+func byteOffsetToLineCol(offset int, newlines []int) (int, int) {
+	lo, hi := 0, len(newlines)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if newlines[mid] < offset {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	line := lo + 1
+	lineStart := 0
+	if lo > 0 {
+		lineStart = newlines[lo-1] + 1
+	}
+	return line, offset - lineStart + 1
 }
 
 // -------------------------------------------------------------- rename helpers

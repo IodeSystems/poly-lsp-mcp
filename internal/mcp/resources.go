@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/iodesystems/tslsmcp/internal/symbols"
 )
@@ -52,6 +53,20 @@ func registerResources() map[string]Resource {
 			MimeType: "application/json",
 			Read:     readBindings,
 		},
+		"tslsmcp://diagnostics": {
+			URI:  "tslsmcp://diagnostics",
+			Name: "diagnostics",
+			Description: "Workspace-wide diagnostic snapshot from every running child LSP. " +
+				"Each entry has the same enriched shape as the diagnostics field on a " +
+				"node_edit / node_delete / node_refactor response (text / context / " +
+				"enclosingNode / references). diagnosticsAvailable is false when no LSP " +
+				"is running for any indexed language. The snapshot reflects whatever " +
+				"the LSPs have published so far — for fresh state, edit a file or " +
+				"open it via your editor; gopls in particular only publishes on " +
+				"didOpen / didChange / didSave.",
+			MimeType: "application/json",
+			Read:     readDiagnostics,
+		},
 	}
 }
 
@@ -72,6 +87,75 @@ func readWorkspace(s *Server) (string, error) {
 	raw, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal workspace: %w", err)
+	}
+	return string(raw), nil
+}
+
+// readDiagnostics emits a workspace-wide snapshot of every diagnostic
+// the child LSPs have published, enriched the same way as a node_edit
+// response (text / context / enclosingNode / references) so consumers
+// don't need a separate parser.
+//
+// When manager is nil OR no child LSP is currently running we return
+// diagnosticsAvailable=false and an empty list — there's no compiler
+// talking to us, so "no errors" can't be asserted. The agent must
+// treat the absence as "unknown," not "clean."
+func readDiagnostics(s *Server) (string, error) {
+	payload := map[string]any{
+		"diagnosticsAvailable": false,
+		"languages":            []string{},
+		"diagnostics":          []diagnosticJSON{},
+	}
+	if s.manager == nil {
+		raw, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return "", fmt.Errorf("marshal diagnostics: %w", err)
+		}
+		return string(raw), nil
+	}
+
+	langs := s.manager.Languages()
+	payload["languages"] = langs
+	if len(langs) == 0 {
+		raw, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return "", fmt.Errorf("marshal diagnostics: %w", err)
+		}
+		return string(raw), nil
+	}
+
+	snapshot := s.manager.Diagnostics().Snapshot()
+	// Enrich each diagnostic using package defaults — the resource
+	// has no per-call args, so cap behavior matches the edit-time
+	// defaults (25 / 15 / 3). Sorted by file then position so
+	// repeated reads are stable.
+	uris := make([]string, 0, len(snapshot))
+	for uri := range snapshot {
+		uris = append(uris, uri)
+	}
+	sort.Strings(uris)
+
+	opts := diagnosticOptions{}
+	limit := opts.diagnosticLimit()
+	items := make([]diagnosticJSON, 0, 32)
+	dropped := 0
+	for _, uri := range uris {
+		for _, d := range snapshot[uri] {
+			if len(items) >= limit {
+				dropped++
+				continue
+			}
+			items = append(items, s.enrichDiagnostic(uri, d, nil, opts))
+		}
+	}
+	payload["diagnosticsAvailable"] = true
+	payload["diagnostics"] = items
+	if dropped > 0 {
+		payload["droppedDiagnostics"] = dropped
+	}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal diagnostics: %w", err)
 	}
 	return string(raw), nil
 }

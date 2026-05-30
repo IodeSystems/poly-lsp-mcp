@@ -96,6 +96,22 @@ func (s *DiagnosticStore) Get(uri string) []Diagnostic {
 	return s.latest[uri]
 }
 
+// Snapshot returns a copy of the entire store as URI → []Diagnostic.
+// Empty result means no child LSP has published yet — either nothing
+// is open in the editor (with MCP, that's typical) OR the manager has
+// no children. Callers iterate to surface workspace-wide state.
+func (s *DiagnosticStore) Snapshot() map[string][]Diagnostic {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string][]Diagnostic, len(s.latest))
+	for uri, diags := range s.latest {
+		dup := make([]Diagnostic, len(diags))
+		copy(dup, diags)
+		out[uri] = dup
+	}
+	return out
+}
+
 // Gen returns the URI's current generation counter. Callers about to
 // trigger a publish (didSave / didChange) capture Gen first, then pass
 // it to WaitAfter — that way we only wake on publishes that arrive

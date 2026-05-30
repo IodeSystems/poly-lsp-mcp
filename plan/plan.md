@@ -450,16 +450,22 @@ the full cross-language stack the LSP layer already serves to editors.
       desc) and applied right-to-left so byte offsets don't shift;
       each file goes through temp + Rename for partial-failure safety;
       file mode preserved so executable bits survive.
-- [x] `resources/list` and `resources/read` MCP surface. Two
-      resources land in v0.1:
+- [x] `resources/list` and `resources/read` MCP surface. Three
+      resources today:
       `tslsmcp://workspace` — JSON `{root, languages, names, declared}`
       so clients can sanity-check what tslsmcp indexed without a tool
       call;
       `tslsmcp://bindings` — same JSON payload as the `list_bindings`
       tool, exposed as a resource for MCP clients that pin resources
-      into model context. Capability `resources: {}` advertised in
-      initialize. More resources can be added by extending
-      registerResources.
+      into model context;
+      `tslsmcp://diagnostics` — workspace-wide diagnostic snapshot
+      from every running child LSP, enriched with the same
+      `text` / `context` / `enclosingNode` / `references` shape edit
+      responses use. `diagnosticsAvailable: false` when no LSP is
+      running for any indexed language, so consumers can't infer
+      "clean" from absence. Same default caps as edits (25 / 15 / 3).
+      Capability `resources: {}` advertised in initialize. More
+      resources can be added by extending registerResources.
 
 ## Config setup: what's automatic, what isn't
 

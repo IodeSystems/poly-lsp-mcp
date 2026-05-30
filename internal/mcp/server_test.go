@@ -1067,10 +1067,44 @@ func TestResourcesListReturnsCatalog(t *testing.T) {
 	for _, r := range got.Resources {
 		uris[r.URI] = true
 	}
-	for _, want := range []string{"tslsmcp://workspace", "tslsmcp://bindings"} {
+	for _, want := range []string{"tslsmcp://workspace", "tslsmcp://bindings", "tslsmcp://diagnostics"} {
 		if !uris[want] {
 			t.Errorf("resource %q missing from catalog", want)
 		}
+	}
+}
+
+// tslsmcp://diagnostics with no manager attached: diagnosticsAvailable
+// must be false. The agent must NOT infer "compiles clean" from an
+// empty list when no LSP is talking to us.
+func TestResourcesReadDiagnosticsWithoutManager(t *testing.T) {
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("resources/read", map[string]any{"uri": "tslsmcp://diagnostics"})
+	var got struct {
+		Contents []resourceContent `json:"contents"`
+	}
+	json.Unmarshal(resp.Result, &got)
+	if len(got.Contents) != 1 {
+		t.Fatalf("got %d contents, want 1", len(got.Contents))
+	}
+	var payload struct {
+		DiagnosticsAvailable bool             `json:"diagnosticsAvailable"`
+		Languages            []string         `json:"languages"`
+		Diagnostics          []map[string]any `json:"diagnostics"`
+	}
+	if err := json.Unmarshal([]byte(got.Contents[0].Text), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.DiagnosticsAvailable {
+		t.Errorf("diagnosticsAvailable=true without a manager; want false")
+	}
+	if len(payload.Diagnostics) != 0 {
+		t.Errorf("diagnostics non-empty without manager: %+v", payload.Diagnostics)
 	}
 }
 

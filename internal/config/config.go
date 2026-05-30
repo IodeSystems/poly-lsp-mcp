@@ -150,11 +150,19 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// LoadOrDefault loads from path if it exists; otherwise returns Default().
-// The bool return is true when the on-disk file was used.
+// LoadOrDefault loads from path if it exists; otherwise returns
+// Default(). The bool return is true when the on-disk file was used.
+//
+// When the on-disk file omits a `languages:` section, the defaults are
+// merged in. This is the usual case: most users only override
+// bindings or schemas, and an empty registry would invisibly break
+// the lexical index (no files would walk, no symbols would surface).
 func LoadOrDefault(path string) (*Config, bool, error) {
 	c, err := Load(path)
 	if err == nil {
+		if len(c.Languages) == 0 {
+			c.Languages = Default().Languages
+		}
 		return c, true, nil
 	}
 	if os.IsNotExist(err) {

@@ -312,39 +312,68 @@ func structureForFile(abs, lang, root string, depth int) (structureEntry, error)
 	if depth <= 0 {
 		return entry, nil
 	}
-	if lang == "" {
-		// No language registered — return file entry with no children.
-		// Surfacing the file in the parent dir listing is enough.
-		return entry, nil
-	}
-	if symbols.LanguageByName(lang) == nil {
-		// Lexical-only language; no syntactic structure to surface.
-		return entry, nil
-	}
+
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return entry, fmt.Errorf("read %s: %w", abs, err)
 	}
-	nodes, err := symbols.StructureNodes(lang, content)
-	if err != nil {
-		return entry, err
+
+	// For files we have a tree-sitter grammar for, return named child
+	// nodes (declarations, types, classes, etc.).
+	if lang != "" && symbols.LanguageByName(lang) != nil {
+		nodes, err := symbols.StructureNodes(lang, content)
+		if err != nil {
+			return entry, err
+		}
+		for _, n := range nodes {
+			entry.Children = append(entry.Children, structureEntry{
+				Kind:          "node",
+				Type:          n.Type,
+				Name:          n.Name,
+				StartLine:     n.StartLine,
+				StartCol:      n.StartCol,
+				EndLine:       n.EndLine,
+				EndCol:        n.EndCol,
+				NameStartLine: n.NameStartLine,
+				NameStartCol:  n.NameStartCol,
+				NameEndLine:   n.NameEndLine,
+				NameEndCol:    n.NameEndCol,
+			})
+		}
+		return entry, nil
 	}
-	for _, n := range nodes {
-		entry.Children = append(entry.Children, structureEntry{
-			Kind:          "node",
-			Type:          n.Type,
-			Name:          n.Name,
-			StartLine:     n.StartLine,
-			StartCol:      n.StartCol,
-			EndLine:       n.EndLine,
-			EndCol:        n.EndCol,
-			NameStartLine: n.NameStartLine,
-			NameStartCol:  n.NameStartCol,
-			NameEndLine:   n.NameEndLine,
-			NameEndCol:    n.NameEndCol,
-		})
-	}
+
+	// Otherwise — language uses the lexical extractor only (yaml /
+	// json / markdown) or has no registered language at all (Dockerfile,
+	// TOML, HCL, .env, …). Either way, return a single "text" node
+	// covering the whole file so agents can node_read / node_edit /
+	// node_delete it like any other range.
+	endLine, endCol := contentEndPosition(content)
+	entry.Children = []structureEntry{{
+		Kind:      "node",
+		Type:      "text",
+		StartLine: 1,
+		StartCol:  1,
+		EndLine:   endLine,
+		EndCol:    endCol,
+	}}
 	return entry, nil
+}
+
+// contentEndPosition returns the 1-based (line, col) position one past
+// the last byte of content. For "abc\n" the end is (2, 1); for "abc"
+// it's (1, 4); for empty content it's (1, 1).
+func contentEndPosition(content []byte) (int, int) {
+	line, col := 1, 1
+	for _, b := range content {
+		if b == '\n' {
+			line++
+			col = 1
+		} else {
+			col++
+		}
+	}
+	return line, col
 }
 
 // -------------------------------------------------------------- node_references

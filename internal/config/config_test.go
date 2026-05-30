@@ -134,6 +134,31 @@ bindings:
 	}
 }
 
+func TestLoadOrDefaultMergesDefaultLanguagesWhenOmitted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tslsmcp.yaml")
+	// Only schemas declared — no languages section. Common pattern;
+	// the loader must fold defaults in so the registry isn't empty.
+	if err := os.WriteFile(path,
+		[]byte("schemas:\n  - {file: api.proto, dialect: proto}\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, used, err := LoadOrDefault(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !used {
+		t.Error("used = false on existing file")
+	}
+	if len(cfg.Languages) == 0 {
+		t.Error("Languages empty after LoadOrDefault — defaults not merged")
+	}
+	if len(cfg.Schemas) != 1 || cfg.Schemas[0].Dialect != "proto" {
+		t.Errorf("schemas dropped or wrong: %+v", cfg.Schemas)
+	}
+}
+
 func TestLoadOrDefaultMissingFile(t *testing.T) {
 	cfg, used, err := LoadOrDefault(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {

@@ -461,6 +461,20 @@ the full cross-language stack the LSP layer already serves to editors.
       initialize. More resources can be added by extending
       registerResources.
 
+## Config setup: what's automatic, what isn't
+
+Three tiers, increasing user effort:
+
+| Tier | Setup | Coverage |
+|------|-------|----------|
+| 1 — lexical / tree-sitter | none | go / ts / tsx / py / md / yaml / json / sql out of the box; identifier-shaped tokens, with tree-sitter precision for code languages and lexical fallback for data formats. Unknown extensions surface as a single "text" node via `structure` so node_read / node_edit / node_delete still work. |
+| 2 — declared bindings | `bindings:` section in tslsmcp.yaml | Hand-declared cross-language identity for things tree-sitter can't see (string-literal config values, prose, languages we have no grammar for) and for aliasing across naming conventions (UserID ↔ user_id). |
+| 3 — schema-anchored | `schemas:` section in tslsmcp.yaml, one entry per schema file | Auto-derived bindings: parse the schema, bind every named entity (proto messages/enums/services/rpcs, openapi components.schemas.* + operationIds, jsonschema $defs.* + title), promote every workspace occurrence of those names to declared. One config line ≈ dozens of bindings. |
+
+What we DON'T auto-detect today: schema files. A user must add `schemas:` to opt in. Could be a future opt-in flag (`auto_schemas: true`) that walks the workspace heuristically (`*.proto`, YAML with `openapi:`, JSON with `$schema:`). Deferred — explicit declaration is unambiguous.
+
+When tslsmcp.yaml is partial (e.g. only `schemas:` declared, no `languages:`), defaults are merged in — empty registry would invisibly break the lexical pass.
+
 ## Non-goals (for now)
 
 - Indexing the entire host filesystem; we only index inside the git root.

@@ -356,8 +356,10 @@ func TestStructureFileReturnsAstOutlineWithBothRanges(t *testing.T) {
 }
 
 func TestStructureFileWithoutTreeSitterGrammar(t *testing.T) {
-	// README.md has no tree-sitter grammar; structure returns the file
-	// entry with no children, not an error.
+	// Markdown has no tree-sitter grammar wired (lexical-only). The
+	// fallback returns a single "text" node covering the whole file
+	// so agents can node_read / node_edit / node_delete it the same
+	// way they would any other node.
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
@@ -373,8 +375,57 @@ func TestStructureFileWithoutTreeSitterGrammar(t *testing.T) {
 	if entry.Kind != "file" {
 		t.Errorf("kind = %q, want file", entry.Kind)
 	}
-	if len(entry.Children) != 0 {
-		t.Errorf("README returned children: %+v", entry.Children)
+	if len(entry.Children) != 1 {
+		t.Fatalf("got %d children, want 1 text node: %+v", len(entry.Children), entry.Children)
+	}
+	textNode := entry.Children[0]
+	if textNode.Kind != "node" || textNode.Type != "text" {
+		t.Errorf("text fallback shape wrong: %+v", textNode)
+	}
+	if textNode.StartLine != 1 || textNode.StartCol != 1 {
+		t.Errorf("text node should start at 1:1, got %d:%d", textNode.StartLine, textNode.StartCol)
+	}
+	if textNode.EndLine < textNode.StartLine {
+		t.Errorf("text node range malformed: %+v", textNode)
+	}
+}
+
+func TestStructureUnknownExtensionReturnsTextNode(t *testing.T) {
+	// Files in extensions tslsmcp doesn't recognize (Dockerfile,
+	// .toml, .env) still surface as text nodes so the agent can
+	// edit them.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(path, []byte("FROM golang:1.26\nCOPY . /app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("structure", map[string]any{"path": "Dockerfile"})
+	if r.IsError {
+		t.Fatalf("structure errored: %+v", r.Content)
+	}
+	var entry structureEntryWire
+	json.Unmarshal([]byte(r.Content[0].Text), &entry)
+	if len(entry.Children) != 1 || entry.Children[0].Type != "text" {
+		t.Errorf("expected one text node for Dockerfile, got %+v", entry.Children)
+	}
+	// Agent reads + edits via node_read / node_edit using that range.
+	tn := entry.Children[0]
+	rd := s.callTool("node_read", map[string]any{
+		"file":      "Dockerfile",
+		"startLine": tn.StartLine, "startCol": tn.StartCol,
+		"endLine": tn.EndLine, "endCol": tn.EndCol,
+	})
+	var payload struct {
+		Text string `json:"text"`
+	}
+	json.Unmarshal([]byte(rd.Content[0].Text), &payload)
+	if payload.Text != "FROM golang:1.26\nCOPY . /app\n" {
+		t.Errorf("text node read returned %q, want full Dockerfile body", payload.Text)
 	}
 }
 

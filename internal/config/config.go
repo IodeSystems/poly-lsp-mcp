@@ -69,9 +69,10 @@ type Schema struct {
 
 // Config is the on-disk shape.
 type Config struct {
-	Languages []Language `yaml:"languages"`
-	Bindings  []Binding  `yaml:"bindings,omitempty"`
-	Schemas   []Schema   `yaml:"schemas,omitempty"`
+	Languages   []Language `yaml:"languages"`
+	Bindings    []Binding  `yaml:"bindings,omitempty"`
+	Schemas     []Schema   `yaml:"schemas,omitempty"`
+	AutoSchemas bool       `yaml:"auto_schemas,omitempty"`
 }
 
 // Registry is the in-memory lookup view: extension → language. Built from a

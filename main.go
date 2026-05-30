@@ -59,6 +59,17 @@ func runMCP() {
 	}
 	log.Printf("mcp: workspace root %s", root)
 
+	if cfg.AutoSchemas {
+		detected := config.DetectSchemas(root, cfg.Schemas)
+		if len(detected) > 0 {
+			log.Printf("auto-schemas: detected %d schema file(s):", len(detected))
+			for _, s := range detected {
+				log.Printf("  - %s (%s)", s.File, s.Dialect)
+			}
+			cfg.Schemas = append(cfg.Schemas, detected...)
+		}
+	}
+
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
 	srv.SetCachePath(filepath.Join(root, ".tslsmcp", "cache.gob"))
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {

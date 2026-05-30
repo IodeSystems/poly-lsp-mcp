@@ -471,7 +471,13 @@ Three tiers, increasing user effort:
 | 2 — declared bindings | `bindings:` section in tslsmcp.yaml | Hand-declared cross-language identity for things tree-sitter can't see (string-literal config values, prose, languages we have no grammar for) and for aliasing across naming conventions (UserID ↔ user_id). |
 | 3 — schema-anchored | `schemas:` section in tslsmcp.yaml, one entry per schema file | Auto-derived bindings: parse the schema, bind every named entity (proto messages/enums/services/rpcs, openapi components.schemas.* + operationIds, jsonschema $defs.* + title), promote every workspace occurrence of those names to declared. One config line ≈ dozens of bindings. |
 
-What we DON'T auto-detect today: schema files. A user must add `schemas:` to opt in. Could be a future opt-in flag (`auto_schemas: true`) that walks the workspace heuristically (`*.proto`, YAML with `openapi:`, JSON with `$schema:`). Deferred — explicit declaration is unambiguous.
+Schema auto-detection is opt-in via `auto_schemas: true` in tslsmcp.yaml. When set, `config.DetectSchemas(root, existing)` walks the workspace at startup and emits a Schema entry for each file matching one of these conservative heuristics:
+
+- `*.proto` extension → `proto`
+- YAML/JSON with a top-level `openapi:` or `swagger:` key → `openapi`
+- YAML/JSON with a top-level `$schema:` key OR `*.schema.json` filename → `jsonschema`
+
+Files explicitly declared in `schemas:` are skipped during detection (user wins). Detected schemas are appended to the user's list and processed identically by the resolver. Generic YAML/JSON without distinctive top-level keys is NOT classified, so values.yaml and config.json don't accidentally turn into bindings.
 
 When tslsmcp.yaml is partial (e.g. only `schemas:` declared, no `languages:`), defaults are merged in — empty registry would invisibly break the lexical pass.
 

@@ -232,7 +232,7 @@ func TestToolsListReturnsRegisteredTools(t *testing.T) {
 			t.Errorf("tool %q has empty inputSchema", tool.Name)
 		}
 	}
-	for _, want := range []string{"find_symbol", "find_references", "rename", "list_bindings", "document_symbols", "refresh"} {
+	for _, want := range []string{"find_symbol", "find_references", "rename", "list_bindings", "document_symbols", "refresh", "apply_rename"} {
 		if !names[want] {
 			t.Errorf("tool %q missing from list", want)
 		}
@@ -869,6 +869,159 @@ func TestRefreshToolReappliesSchemas(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("UserID/proto binding missing after refresh: %+v", cat)
+	}
+}
+
+type applyStatus struct {
+	Name         string        `json:"name"`
+	NewName      string        `json:"newName"`
+	FilesChanged int           `json:"filesChanged"`
+	Results      []applyResult `json:"results"`
+}
+
+func TestApplyRenameToolWritesEditsToDisk(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	helperPath := filepath.Join(dir, "helper.go")
+	original := "package main\n\ntype UserID int\n\nfunc f(id UserID) {}\n"
+	if err := os.WriteFile(mainPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(helperPath,
+		[]byte("package main\n\nfunc g(x UserID) UserID { return x }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "apply_rename",
+		"arguments": map[string]any{"name": "UserID", "newName": "PersonID"},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("apply_rename errored: %+v", r.Content)
+	}
+	var status applyStatus
+	json.Unmarshal([]byte(r.Content[0].Text), &status)
+	if status.FilesChanged != 2 {
+		t.Errorf("filesChanged = %d, want 2", status.FilesChanged)
+	}
+	for _, res := range status.Results {
+		if res.Skipped != "" {
+			t.Errorf("file %s skipped: %s", res.File, res.Skipped)
+		}
+		if res.Edits == 0 {
+			t.Errorf("file %s had zero edits applied", res.File)
+		}
+	}
+
+	mainAfter, _ := os.ReadFile(mainPath)
+	helperAfter, _ := os.ReadFile(helperPath)
+	if strings.Contains(string(mainAfter), "UserID") {
+		t.Errorf("main.go still contains UserID after rename:\n%s", mainAfter)
+	}
+	if !strings.Contains(string(mainAfter), "PersonID") {
+		t.Errorf("main.go missing PersonID after rename:\n%s", mainAfter)
+	}
+	if strings.Contains(string(helperAfter), "UserID") {
+		t.Errorf("helper.go still contains UserID after rename:\n%s", helperAfter)
+	}
+	if !strings.Contains(string(helperAfter), "PersonID") {
+		t.Errorf("helper.go missing PersonID after rename:\n%s", helperAfter)
+	}
+	// Sanity: surrounding text preserved.
+	if !strings.Contains(string(mainAfter), "package main") {
+		t.Error("apply_rename damaged the file header")
+	}
+	if !strings.Contains(string(mainAfter), "func f(id PersonID) {}") {
+		t.Errorf("apply_rename produced unexpected main.go:\n%s", mainAfter)
+	}
+}
+
+func TestApplyRenamePreservesFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "run.go")
+	if err := os.WriteFile(scriptPath,
+		[]byte("package main\n\nfunc Target() {}\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	s.request("tools/call", map[string]any{
+		"name":      "apply_rename",
+		"arguments": map[string]any{"name": "Target", "newName": "Renamed"},
+	})
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("file permission lost: got %o, want 0755", info.Mode().Perm())
+	}
+}
+
+func TestApplyRenameNoMatchesReturnsZeroFiles(t *testing.T) {
+	root := polyglotFixture(t)
+	s := startSessionFull(t, root, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "apply_rename",
+		"arguments": map[string]any{"name": "DefinitelyNotInWorkspace", "newName": "Whatever"},
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if r.IsError {
+		t.Fatalf("no-match should not error: %+v", r.Content)
+	}
+	var status applyStatus
+	json.Unmarshal([]byte(r.Content[0].Text), &status)
+	if status.FilesChanged != 0 {
+		t.Errorf("filesChanged = %d, want 0 for no-match", status.FilesChanged)
+	}
+}
+
+func TestApplyRenameMissingArgsIsToolError(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/call", map[string]any{
+		"name":      "apply_rename",
+		"arguments": map[string]any{"name": "UserID"}, // no newName
+	})
+	var r struct {
+		Content []Content `json:"content"`
+		IsError bool      `json:"isError"`
+	}
+	json.Unmarshal(resp.Result, &r)
+	if !r.IsError {
+		t.Errorf("expected isError=true for missing newName, got %+v", r)
 	}
 }
 

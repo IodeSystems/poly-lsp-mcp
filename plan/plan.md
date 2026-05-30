@@ -347,8 +347,13 @@ the full cross-language stack the LSP layer already serves to editors.
       + ts + py + yaml + sql + md.
 - [ ] More tools as use cases surface: `list_bindings`,
       `document_symbols`, `did_save_refresh`, etc.
-- [ ] Live editing tool: instead of returning edits for the agent to
-      apply, atomically apply them ourselves on `apply_rename`.
+- [x] Live editing tool: `apply_rename(name, newName)` builds the
+      same plan as `rename` and writes the edits to disk. Per-file
+      edits sorted (line desc, col desc) and applied right-to-left so
+      byte offsets don't shift; each file goes through temp + Rename
+      for partial-failure safety; file mode is preserved so executable
+      bits survive. Response shape:
+      `{name, newName, filesChanged, results: [{file, edits} | {file, skipped: reason}]}`.
 - [ ] `resources/list` and `resources/read` for treating workspace
       files (or bindings catalog) as MCP resources.
 

@@ -102,6 +102,20 @@ func registerTools() map[string]Tool {
 }`),
 			Handler: handleRefresh,
 		},
+		"apply_rename": {
+			Name: "apply_rename",
+			Description: "Cross-language rename that WRITES the edits to disk instead of returning them. Same confidence policy and aliasing-safety check as `rename` — declared sites win when present, edits whose on-disk text doesn't match the name being renamed are skipped. " +
+				"Each file is written via temp-file + rename so a partial failure doesn't leave a half-edited file. Use this when the agent doesn't need to inspect the plan before applying.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "description": "Name currently in the workspace."},
+    "newName": {"type": "string", "description": "New name."}
+  },
+  "required": ["name", "newName"]
+}`),
+			Handler: handleApplyRename,
+		},
 		"rename": {
 			Name: "rename",
 			Description: "Cross-language rename. Returns a list of file edits {file, line, col, oldText, newText} you can apply atomically. " +
@@ -200,6 +214,50 @@ type renameEdit struct {
 	NewText string `json:"newText"`
 }
 
+// resolvedEdit is the internal shape used by buildRenameEdits — it
+// carries the absolute path alongside the wire-shape file path so the
+// apply_rename tool can read/write without re-joining root.
+type resolvedEdit struct {
+	AbsFile string
+	RelFile string
+	Line    int
+	Col     int
+	OldText string
+	NewText string
+}
+
+// buildRenameEdits is the shared plan-builder for the rename and
+// apply_rename tools. It applies the same confidence policy (declared
+// sites win when present) and aliasing-safety check (on-disk text must
+// equal name) as the LSP rename handler.
+func (s *Server) buildRenameEdits(name, newName string) []resolvedEdit {
+	idx := s.getIndex()
+	if idx == nil {
+		return nil
+	}
+	sites := chooseRenameSites(idx.Lookup(name))
+	if len(sites) == 0 {
+		return nil
+	}
+	fileCache := map[string][]byte{}
+	out := make([]resolvedEdit, 0, len(sites))
+	root := s.getRoot()
+	for _, site := range sites {
+		if !siteTextMatches(site, name, fileCache) {
+			continue
+		}
+		out = append(out, resolvedEdit{
+			AbsFile: site.File,
+			RelFile: relPath(site.File, root),
+			Line:    site.Line,
+			Col:     site.Col,
+			OldText: name,
+			NewText: newName,
+		})
+	}
+	return out
+}
+
 func handleRename(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Name    string `json:"name"`
@@ -211,38 +269,165 @@ func handleRename(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	if p.Name == "" || p.NewName == "" {
 		return nil, true, fmt.Errorf("name and newName are required")
 	}
-	idx := s.getIndex()
-	if idx == nil {
+	if s.getIndex() == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
 	}
 
-	sites := chooseRenameSites(idx.Lookup(p.Name))
-	if len(sites) == 0 {
-		return jsonContent(map[string]any{
-			"name": p.Name, "newName": p.NewName, "edits": []renameEdit{},
-		}), false, nil
-	}
-
-	fileCache := map[string][]byte{}
-	edits := []renameEdit{}
-	for _, site := range sites {
-		if !siteTextMatches(site, p.Name, fileCache) {
-			continue
+	resolved := s.buildRenameEdits(p.Name, p.NewName)
+	edits := make([]renameEdit, len(resolved))
+	for i, r := range resolved {
+		edits[i] = renameEdit{
+			File:    r.RelFile,
+			Line:    r.Line,
+			Col:     r.Col,
+			OldText: r.OldText,
+			NewText: r.NewText,
 		}
-		edits = append(edits, renameEdit{
-			File:    relPath(site.File, s.getRoot()),
-			Line:    site.Line,
-			Col:     site.Col,
-			OldText: p.Name,
-			NewText: p.NewName,
-		})
 	}
-
 	return jsonContent(map[string]any{
 		"name":    p.Name,
 		"newName": p.NewName,
 		"edits":   edits,
 	}), false, nil
+}
+
+// applyResult is the wire shape apply_rename returns per file it
+// touched (or per file it skipped with a reason).
+type applyResult struct {
+	File    string `json:"file"`
+	Edits   int    `json:"edits,omitempty"`
+	Skipped string `json:"skipped,omitempty"`
+}
+
+func handleApplyRename(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var p struct {
+		Name    string `json:"name"`
+		NewName string `json:"newName"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if p.Name == "" || p.NewName == "" {
+		return nil, true, fmt.Errorf("name and newName are required")
+	}
+	if s.getIndex() == nil {
+		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
+	}
+
+	resolved := s.buildRenameEdits(p.Name, p.NewName)
+
+	// Group edits by file. Each file's writes go through a single
+	// temp+rename so partial failures don't leave a half-written file.
+	byFile := map[string][]resolvedEdit{}
+	order := []string{}
+	for _, e := range resolved {
+		if _, ok := byFile[e.AbsFile]; !ok {
+			order = append(order, e.AbsFile)
+		}
+		byFile[e.AbsFile] = append(byFile[e.AbsFile], e)
+	}
+
+	results := make([]applyResult, 0, len(order))
+	for _, abs := range order {
+		edits := byFile[abs]
+		rel := edits[0].RelFile
+		n, err := applyFileEdits(abs, edits)
+		if err != nil {
+			results = append(results, applyResult{File: rel, Skipped: err.Error()})
+			continue
+		}
+		results = append(results, applyResult{File: rel, Edits: n})
+	}
+
+	return jsonContent(map[string]any{
+		"name":         p.Name,
+		"newName":      p.NewName,
+		"filesChanged": len(results),
+		"results":      results,
+	}), false, nil
+}
+
+// applyFileEdits writes the supplied edits to absFile. Edits are sorted
+// by (line desc, col desc) so applying them rightmost-first leaves
+// earlier byte offsets undisturbed. Per-edit text mismatches are
+// silently skipped — buildRenameEdits already verified them but the
+// file might have changed under us between Plan and Apply. Returns the
+// number of edits actually applied. The file is written via
+// temp-file + os.Rename for atomicity; the temp file inherits the
+// original file's mode so executable bits survive.
+func applyFileEdits(absFile string, edits []resolvedEdit) (int, error) {
+	data, err := os.ReadFile(absFile)
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(absFile)
+	if err != nil {
+		return 0, err
+	}
+
+	sorted := make([]resolvedEdit, len(edits))
+	copy(sorted, edits)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Line != sorted[j].Line {
+			return sorted[i].Line > sorted[j].Line
+		}
+		return sorted[i].Col > sorted[j].Col
+	})
+
+	out := data
+	applied := 0
+	for _, e := range sorted {
+		offset, ok := lineColToByteOffset(out, e.Line, e.Col)
+		if !ok {
+			continue
+		}
+		end := offset + len(e.OldText)
+		if end > len(out) {
+			continue
+		}
+		if string(out[offset:end]) != e.OldText {
+			continue
+		}
+		out = append(append(append([]byte{}, out[:offset]...), []byte(e.NewText)...), out[end:]...)
+		applied++
+	}
+
+	if applied == 0 {
+		return 0, nil
+	}
+
+	tmp := absFile + ".tslsmcp.tmp"
+	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+		return applied, err
+	}
+	if err := os.Rename(tmp, absFile); err != nil {
+		// Best effort cleanup so a failed rename doesn't leave a
+		// stray temp file.
+		_ = os.Remove(tmp)
+		return applied, err
+	}
+	return applied, nil
+}
+
+// lineColToByteOffset walks data line-by-line and returns the byte
+// offset of (1-based line, 1-based col), or false if out of range.
+// Mirrors siteTextMatches's walk so apply uses the same line discipline
+// the index/lookup pipeline produced.
+func lineColToByteOffset(data []byte, line, col int) (int, bool) {
+	pos := 0
+	cur := 1
+	for cur < line && pos < len(data) {
+		nl := bytesIndexNewline(data[pos:])
+		if nl < 0 {
+			return 0, false
+		}
+		pos += nl + 1
+		cur++
+	}
+	if cur != line {
+		return 0, false
+	}
+	return pos + col - 1, true
 }
 
 // chooseRenameSites mirrors the LSP-side confidence policy: declared

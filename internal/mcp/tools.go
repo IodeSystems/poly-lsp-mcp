@@ -653,13 +653,221 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 	if !ops.nonEmpty() {
 		return nil, true, errors.New("refactor must specify at least one of {rename, params, return}")
 	}
-	// Params + Return are signature ops; they need a Go function
-	// declaration at the range. Land that path in the next slice —
-	// this commit only ships the nested shape and the rename path.
-	if ops.Params != nil || ops.Return != "" {
-		return nil, true, errors.New("refactor.params and refactor.return not yet implemented (rename only for now)")
+	signatureOps := ops.Params != nil || ops.Return != ""
+	if !signatureOps {
+		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.diagnosticOptions)
 	}
-	return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.diagnosticOptions)
+	return s.refactorSignature(p.rangeArgs, ops, p.IncludeComments, p.diagnosticOptions)
+}
+
+// refactorSignature handles refactor ops that change a function's
+// signature — params, return type, or both, optionally combined with
+// a rename. Today this is Go-only; non-Go files at the range get a
+// clear error.
+//
+// The signature rewrite is purely declaration-local: parameters /
+// result are rebuilt; the body is left untouched. When rename is also
+// set, the existing workspace-wide rename path runs in addition so
+// callers get the new name. Best-effort call-site rewriting (drop
+// removed args, insert zero values for added ones) lands in a follow-
+// up; for now the diagnostic round-trip surfaces broken callers.
+func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments bool, dopts diagnosticOptions) ([]Content, bool, error) {
+	abs := s.resolveFileArg(a.File)
+	if lang := s.languageForFile(abs); lang != "go" {
+		return nil, true, fmt.Errorf("signature refactor only supports Go today (got %q)", lang)
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
+	}
+	sig, err := symbols.FindGoFunctionSignature(content, a.StartLine, a.StartCol)
+	if err != nil {
+		return nil, true, fmt.Errorf("parse %s: %w", a.File, err)
+	}
+	if sig == nil {
+		return nil, true, fmt.Errorf("no Go function declaration at %s:%d:%d", a.File, a.StartLine, a.StartCol)
+	}
+
+	oldName := string(content[sig.Name.Start:sig.Name.End])
+
+	// Build the signature-local edits, in reverse byte order so
+	// earlier offsets don't shift later ones during application.
+	type byteEdit struct {
+		Start, End int
+		NewText    string
+	}
+	var edits []byteEdit
+
+	if ops.Params != nil {
+		edits = append(edits, byteEdit{
+			Start:   sig.Params.Start,
+			End:     sig.Params.End,
+			NewText: renderGoParams(ops.Params),
+		})
+	}
+	if ops.Return != "" {
+		newResult := formatGoReturnType(ops.Return)
+		if sig.Result.Empty() {
+			// Insert before the body's opening brace. Tree-sitter
+			// gives body's start; we put the result + a space just
+			// before it. The byte preceding the body is typically a
+			// space already; we add the type and a trailing space so
+			// the result-then-brace spacing matches gofmt's canon
+			// (`) func F() T {`).
+			edits = append(edits, byteEdit{
+				Start:   sig.BodyStart,
+				End:     sig.BodyStart,
+				NewText: newResult + " ",
+			})
+		} else {
+			edits = append(edits, byteEdit{
+				Start:   sig.Result.Start,
+				End:     sig.Result.End,
+				NewText: newResult,
+			})
+		}
+	}
+
+	// Apply local edits right-to-left so byte offsets stay valid.
+	sort.Slice(edits, func(i, j int) bool { return edits[i].Start > edits[j].Start })
+	out := append([]byte(nil), content...)
+	for _, e := range edits {
+		next := make([]byte, 0, len(out)-(e.End-e.Start)+len(e.NewText))
+		next = append(next, out[:e.Start]...)
+		next = append(next, e.NewText...)
+		next = append(next, out[e.End:]...)
+		out = next
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("stat %s: %w", a.File, err)
+	}
+	tmp := abs + ".poly-lsp-mcp.tmp"
+	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+		return nil, true, fmt.Errorf("write temp: %w", err)
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return nil, true, fmt.Errorf("rename: %w", err)
+	}
+	s.refreshFileInIndex(abs, out)
+
+	results := []applyResult{{File: relPath(abs, s.getRoot()), Edits: len(edits)}}
+
+	// If a rename was also requested, run the workspace-wide rename
+	// path on top of the signature change. We need to re-find the
+	// (now shifted) name range because the byte edits above may have
+	// moved it; passing the original rangeArgs would no longer
+	// point at the name. The rename path takes the identifier text
+	// at the range, so we use the post-edit name range.
+	postSig, err := symbols.FindGoFunctionSignature(out, a.StartLine, a.StartCol)
+	if err != nil || postSig == nil {
+		return nil, true, fmt.Errorf("post-edit signature lookup failed: %v", err)
+	}
+	if ops.Rename != "" && ops.Rename != oldName {
+		nameRangeArgs := nameRangeAfterSignature(a, postSig, out)
+		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, diagnosticOptions{})
+		if renameErr != nil {
+			return renameContent, renameIsErr, renameErr
+		}
+		var renamePayload map[string]any
+		if len(renameContent) > 0 {
+			_ = json.Unmarshal([]byte(renameContent[0].Text), &renamePayload)
+		}
+		if extra, ok := renamePayload["results"].([]any); ok {
+			for _, r := range extra {
+				if m, ok := r.(map[string]any); ok {
+					file, _ := m["file"].(string)
+					if file == "" || file == results[0].File {
+						continue
+					}
+					edits := 0
+					if v, ok := m["edits"].(float64); ok {
+						edits = int(v)
+					}
+					results = append(results, applyResult{File: file, Edits: edits})
+				}
+			}
+		}
+	}
+
+	// Diagnostic round-trip on the edited file.
+	uri := pathToURI(abs)
+	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, dopts)
+
+	payload := map[string]any{
+		"kind":                 "signature",
+		"oldName":              oldName,
+		"newName":              ops.Rename,
+		"filesChanged":         len(results),
+		"results":              results,
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
+	}
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
+	return jsonContent(payload), false, nil
+}
+
+// renderGoParams formats a parameter list as `(name type, name type)`.
+// Empty input → `()`. Used to rebuild the parameter_list contents
+// during a signature refactor.
+func renderGoParams(params []refactorParam) string {
+	if len(params) == 0 {
+		return "()"
+	}
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
+		if p.Name == "" {
+			parts = append(parts, p.Type)
+		} else {
+			parts = append(parts, p.Name+" "+p.Type)
+		}
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// formatGoReturnType accepts the caller's return-type string and
+// returns it verbatim. The caller is responsible for wrapping tuple
+// returns in parens (`(string, error)`); we pass through so single
+// types like `string` don't get spurious parens.
+func formatGoReturnType(s string) string {
+	return strings.TrimSpace(s)
+}
+
+// nameRangeAfterSignature returns a rangeArgs covering the name of a
+// freshly-rewritten signature, so the workspace rename can pin on
+// the right token. Line/col are 1-based; computed from byte offsets
+// inside `content`.
+func nameRangeAfterSignature(orig rangeArgs, sig *symbols.GoFunctionSignature, content []byte) rangeArgs {
+	startLine, startCol := byteOffsetToLineColPos(content, sig.Name.Start)
+	endLine, endCol := byteOffsetToLineColPos(content, sig.Name.End)
+	return rangeArgs{
+		File:      orig.File,
+		StartLine: startLine, StartCol: startCol,
+		EndLine: endLine, EndCol: endCol,
+	}
+}
+
+// byteOffsetToLineColPos converts a 0-based byte offset to a 1-based
+// (line, col) position. Mirrors lineColToByteOffset's inverse.
+func byteOffsetToLineColPos(content []byte, offset int) (int, int) {
+	if offset > len(content) {
+		offset = len(content)
+	}
+	line, col := 1, 1
+	for i := 0; i < offset; i++ {
+		if content[i] == '\n' {
+			line++
+			col = 1
+		} else {
+			col++
+		}
+	}
+	return line, col
 }
 
 func (s *Server) refactorRename(a rangeArgs, newName string, includeComments bool, opts diagnosticOptions) ([]Content, bool, error) {

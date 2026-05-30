@@ -925,25 +925,172 @@ func TestNodeRefactorConflictingShapesIsError(t *testing.T) {
 	}
 }
 
-// TestNodeRefactorSignatureOpsNotYetImplemented documents the current
-// scope boundary: params/return aren't wired yet, so callers get a
-// clear error instead of silent rename-only behavior.
-func TestNodeRefactorSignatureOpsNotYetImplemented(t *testing.T) {
-	s := startSession(t, polyglotFixture(t))
+// TestNodeRefactorSignatureChangeParams rewrites a Go function's
+// parameter list via the nested refactor shape and verifies the
+// declaration on disk reflects the new params.
+func TestNodeRefactorSignatureChangeParams(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.go")
+	src := "package main\n\nfunc Greet(name string) string {\n\treturn name\n}\n"
+	if err := os.WriteFile(mainPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	sr := s.callTool("structure", map[string]any{"path": "main.go"})
+	var f structureEntryWire
+	json.Unmarshal([]byte(sr.Content[0].Text), &f)
+	var fn *structureEntryWire
+	for i := range f.Children {
+		if f.Children[i].Name == "Greet" {
+			fn = &f.Children[i]
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("Greet missing from structure")
+	}
+
+	r := s.callTool("node_refactor", map[string]any{
+		"file":      "main.go",
+		"startLine": fn.NameStartLine, "startCol": fn.NameStartCol,
+		"endLine": fn.NameEndLine, "endCol": fn.NameEndCol,
+		"refactor": map[string]any{
+			"params": []map[string]any{
+				{"name": "name", "type": "string"},
+				{"name": "age", "type": "int"},
+			},
+		},
+	})
+	if r.IsError {
+		t.Fatalf("signature refactor errored: %+v", r.Content)
+	}
+	got, _ := os.ReadFile(mainPath)
+	if !strings.Contains(string(got), "func Greet(name string, age int) string") {
+		t.Errorf("declaration not rewritten:\n%s", got)
+	}
+}
+
+// TestNodeRefactorSignatureChangeReturn rewrites the return type.
+// Covers both the "replace existing result" and "insert when void"
+// branches.
+func TestNodeRefactorSignatureChangeReturn(t *testing.T) {
+	t.Run("replace-existing", func(t *testing.T) {
+		dir := t.TempDir()
+		mainPath := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(mainPath,
+			[]byte("package main\n\nfunc Greet() string {\n\treturn \"hi\"\n}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+			[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s := startSessionFull(t, dir, nil, nil)
+		defer s.close()
+		s.request("initialize", map[string]any{})
+		s.notify("notifications/initialized", map[string]any{})
+
+		r := s.callTool("node_refactor", map[string]any{
+			"file":      "main.go",
+			"startLine": 3, "startCol": 6,
+			"endLine": 3, "endCol": 11,
+			"refactor": map[string]any{"return": "(string, error)"},
+		})
+		if r.IsError {
+			t.Fatalf("errored: %+v", r.Content)
+		}
+		got, _ := os.ReadFile(mainPath)
+		if !strings.Contains(string(got), "func Greet() (string, error)") {
+			t.Errorf("return type not rewritten:\n%s", got)
+		}
+	})
+
+	t.Run("insert-into-void", func(t *testing.T) {
+		dir := t.TempDir()
+		mainPath := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(mainPath,
+			[]byte("package main\n\nfunc Greet() {\n\t_ = \"hi\"\n}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+			[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s := startSessionFull(t, dir, nil, nil)
+		defer s.close()
+		s.request("initialize", map[string]any{})
+		s.notify("notifications/initialized", map[string]any{})
+
+		r := s.callTool("node_refactor", map[string]any{
+			"file":      "main.go",
+			"startLine": 3, "startCol": 6,
+			"endLine": 3, "endCol": 11,
+			"refactor": map[string]any{"return": "error"},
+		})
+		if r.IsError {
+			t.Fatalf("errored: %+v", r.Content)
+		}
+		got, _ := os.ReadFile(mainPath)
+		if !strings.Contains(string(got), "func Greet() error {") {
+			t.Errorf("void → typed return not inserted correctly:\n%s", got)
+		}
+	})
+}
+
+// TestNodeRefactorSignatureCombinedRename rewrites params AND renames
+// the function in the same call. The rename should also touch any
+// callers in the workspace (here: another file using the function).
+func TestNodeRefactorSignatureCombinedRename(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\n\nfunc Greet(name string) string {\n\treturn name\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "caller.go"),
+		[]byte("package main\n\nfunc init() {\n\t_ = Greet(\"world\")\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
 	r := s.callTool("node_refactor", map[string]any{
 		"file":      "main.go",
-		"startLine": 6, "startCol": 6,
-		"endLine": 6, "endCol": 12,
+		"startLine": 3, "startCol": 6,
+		"endLine": 3, "endCol": 11,
 		"refactor": map[string]any{
-			"return": "error",
+			"rename": "Hello",
+			"params": []map[string]any{
+				{"name": "name", "type": "string"},
+				{"name": "age", "type": "int"},
+			},
 		},
 	})
-	if !r.IsError {
-		t.Errorf("expected isError for unimplemented return change, got %+v", r)
+	if r.IsError {
+		t.Fatalf("combined refactor errored: %+v", r.Content)
+	}
+	mainGot, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	callerGot, _ := os.ReadFile(filepath.Join(dir, "caller.go"))
+	if !strings.Contains(string(mainGot), "func Hello(name string, age int) string") {
+		t.Errorf("main.go declaration wrong:\n%s", mainGot)
+	}
+	if !strings.Contains(string(callerGot), "Hello(\"world\")") {
+		t.Errorf("caller.go didn't rename Greet → Hello:\n%s", callerGot)
 	}
 }
 

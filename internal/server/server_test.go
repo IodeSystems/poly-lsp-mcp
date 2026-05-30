@@ -942,6 +942,37 @@ func TestSchemaAnchoredJSONSchemaPullsSchemaFileIntoRename(t *testing.T) {
 	}
 }
 
+func TestWorkspaceNotificationsAreAcceptedNotMethodNotFound(t *testing.T) {
+	// workspace/didChangeConfiguration and didChangeWorkspaceFolders are
+	// notifications, so they don't return a response. But before this
+	// slice the default case would have dropped them as "unknown
+	// notification" silently — fine for clients but a missed fanout to
+	// any running children. Verify the server still responds to a
+	// follow-up request after broadcasting (proves the dispatch path
+	// for these notifications didn't crash the loop).
+	s := startSession(t)
+	defer s.close()
+
+	s.request("initialize", map[string]any{})
+	s.notify("initialized", map[string]any{})
+
+	s.notify("workspace/didChangeConfiguration", map[string]any{
+		"settings": map[string]any{"trace": "verbose"},
+	})
+	s.notify("workspace/didChangeWorkspaceFolders", map[string]any{
+		"event": map[string]any{
+			"added":   []map[string]any{{"uri": "file:///tmp/x", "name": "x"}},
+			"removed": []any{},
+		},
+	})
+
+	// Sanity request — server still functional.
+	resp := s.request("workspace/symbol", map[string]any{"query": ""})
+	if resp.Error != nil {
+		t.Errorf("server stopped responding after workspace notifications: %+v", resp.Error)
+	}
+}
+
 func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	s := startSession(t)
 	defer s.close()

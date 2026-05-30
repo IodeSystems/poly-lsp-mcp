@@ -165,6 +165,11 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 		s.handleRename(req)
 	case "textDocument/didSave":
 		s.handleDidSave(req)
+	case "workspace/didChangeConfiguration", "workspace/didChangeWorkspaceFolders":
+		// Workspace-scoped notifications get fanned out to every running
+		// child so per-language servers can react. The parent server has
+		// no state to update for these yet (single-root design).
+		s.broadcastNotification(req)
 	default:
 		// Generic textDocument/* forwarding: anything we don't intercept
 		// goes to the child LSP for the URI's language. Server-owned
@@ -178,6 +183,20 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 		}
 		s.replyError(req, errMethodNotFound, fmt.Sprintf("method not found: %s", req.Method))
 	}
+}
+
+// broadcastNotification fans a workspace-scoped notification out to
+// every running child via the manager. Silently no-ops when the
+// manager is absent (single-server-only setups, tests).
+func (s *Server) broadcastNotification(req *jsonrpc.Message) {
+	if s.manager == nil {
+		return
+	}
+	var params any
+	if len(req.Params) > 0 {
+		params = json.RawMessage(req.Params)
+	}
+	s.manager.Broadcast(req.Method, params)
 }
 
 // stopManager drains the manager (best-effort) and clears the pointer.

@@ -92,8 +92,15 @@ cross-language stitching yet (that's Phase 2).**
   - [x] `Server.New(reg, manager)` — manager may be nil so tests can
         skip child-spawn latency.
   - [x] `shutdown` drains the manager (5s timeout) before exit.
-  - [ ] Workspace folder broadcast + `didChangeConfiguration` fanout
-        *(not yet — needs per-child params shaping per LSP spec)*.
+  - [x] Workspace folder broadcast + `didChangeConfiguration` fanout.
+        `Manager.Broadcast(method, params)` sends one notification to
+        every running child, logs per-child errors, never aborts the
+        fanout. Server dispatch routes
+        `workspace/didChangeConfiguration` and
+        `workspace/didChangeWorkspaceFolders` through it. Params pass
+        through as `json.RawMessage` so per-child shaping happens on
+        the child's side — we don't try to second-guess LSP spec
+        differences across child servers.
 - [x] Tree-sitter integration (rolled into `internal/symbols` rather
       than a separate `internal/treesitter` package):
   - Binding: smacker/go-tree-sitter (decision locked in the Go slice).

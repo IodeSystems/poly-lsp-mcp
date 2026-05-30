@@ -259,6 +259,24 @@ func (m *Manager) Capabilities() map[string]json.RawMessage {
 	return out
 }
 
+// Broadcast sends one notification to every running child. Errors are
+// logged per child but don't abort the fanout — workspace-scoped
+// notifications (didChangeConfiguration, didChangeWorkspaceFolders)
+// are best-effort by design.
+func (m *Manager) Broadcast(method string, params any) {
+	m.mu.RLock()
+	children := make([]*Child, 0, len(m.children))
+	for _, c := range m.children {
+		children = append(children, c)
+	}
+	m.mu.RUnlock()
+	for _, c := range children {
+		if err := c.Notify(method, params); err != nil {
+			log.Printf("multiplex: broadcast %s to %s: %v", method, c.name, err)
+		}
+	}
+}
+
 // Languages returns the names of running children, sorted. Useful for
 // diagnostics and as a sanity check after Start.
 func (m *Manager) Languages() []string {

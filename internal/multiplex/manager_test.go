@@ -289,6 +289,36 @@ func TestRestartIsCancelledByShutdown(t *testing.T) {
 	}
 }
 
+func TestBroadcastFanoutToAllChildren(t *testing.T) {
+	reg := makeTestRegistry(t)
+	m := NewManager(reg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cwd := t.TempDir()
+	if err := m.Start(ctx, cwd, "file://"+cwd, []string{"stub"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Shutdown(ctx) })
+
+	// The stub child accepts arbitrary notifications without error
+	// (default dispatch case is a no-op for unknown notifications).
+	// We can't directly observe "received" without reaching into the
+	// child, but Notify returning nil means the message was framed
+	// and written successfully — that's the contract Broadcast offers.
+	m.Broadcast("workspace/didChangeConfiguration", map[string]any{"settings": map[string]any{"k": "v"}})
+	// Issue a real request afterwards to verify the child is still
+	// healthy — a malformed broadcast would have crashed the JSON-RPC
+	// stream.
+	child := m.RouteByURI("file:///x.stub")
+	if child == nil {
+		t.Fatal("child gone after broadcast")
+	}
+	if _, err := child.Call(ctx, "workspace/symbol", map[string]any{"query": ""}); err != nil {
+		t.Errorf("post-broadcast call errored: %v", err)
+	}
+}
+
 func TestShutdownStopsChildren(t *testing.T) {
 	reg := makeTestRegistry(t)
 	m := NewManager(reg)

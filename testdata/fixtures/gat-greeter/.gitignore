@@ -1,0 +1,5 @@
+# Stray binaries from accidental `go build` invocations inside the
+# fixture. The fixture is `go run`-only; nothing here should be
+# checked in as an executable.
+/dump
+/dump-sdl

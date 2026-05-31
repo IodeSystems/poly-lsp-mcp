@@ -217,7 +217,7 @@ func TestEOFWithoutShutdownReturnsSentinel(t *testing.T) {
 
 // ---- tools/list ----
 
-func TestToolsListAdvertisesSixToolSurface(t *testing.T) {
+func TestToolsListAdvertisesSevenToolSurface(t *testing.T) {
 	s := startSession(t, "")
 	defer s.close()
 	s.request("initialize", map[string]any{})
@@ -241,6 +241,7 @@ func TestToolsListAdvertisesSixToolSurface(t *testing.T) {
 		"node_edit":       false,
 		"node_delete":     false,
 		"node_refactor":   false,
+		"search":          false,
 	}
 	for _, tool := range got.Tools {
 		if _, ok := want[tool.Name]; ok {
@@ -546,6 +547,182 @@ func TestStructureGrepInvalidRegexIsError(t *testing.T) {
 		"path": ".",
 		"grep": "[invalid(",
 	})
+	if !r.IsError {
+		t.Errorf("expected isError for invalid regex, got %+v", r)
+	}
+}
+
+// ---- search ----
+
+// TestSearchFindsAcrossFiles exercises the search tool's primary job:
+// regex over file contents, sorted hits with positions.
+func TestSearchFindsAcrossFiles(t *testing.T) {
+	dir := t.TempDir()
+	for path, body := range map[string]string{
+		"a.go":     "package main\n// TODO: clean this up\nfunc foo() {}\n",
+		"sub/b.go": "package sub\n// TODO(carl): another\n",
+		"c.md":     "# Header\n\nTODO write docs\n",
+	} {
+		full := filepath.Join(dir, path)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		os.WriteFile(full, []byte(body), 0o644)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("search", map[string]any{"pattern": "TODO"})
+	if r.IsError {
+		t.Fatalf("search errored: %+v", r.Content)
+	}
+	var payload struct {
+		TotalMatches int `json:"totalMatches"`
+		Matches      []struct {
+			File        string `json:"file"`
+			Line        int    `json:"line"`
+			Col         int    `json:"col"`
+			MatchEndCol int    `json:"matchEndCol"`
+			Text        string `json:"text"`
+		} `json:"matches"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.TotalMatches != 3 {
+		t.Errorf("totalMatches = %d, want 3", payload.TotalMatches)
+	}
+	for _, m := range payload.Matches {
+		if m.Col < 1 || m.MatchEndCol <= m.Col {
+			t.Errorf("bad position: %+v", m)
+		}
+		if !strings.Contains(m.Text, "TODO") {
+			t.Errorf("text %q missing TODO", m.Text)
+		}
+	}
+}
+
+// TestSearchGlobFilter scopes the walk by basename pattern.
+func TestSearchGlobFilter(t *testing.T) {
+	dir := t.TempDir()
+	for path, body := range map[string]string{
+		"a.go": "TODO go\n",
+		"b.py": "TODO py\n",
+		"c.md": "TODO md\n",
+	} {
+		os.WriteFile(filepath.Join(dir, path), []byte(body), 0o644)
+	}
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("search", map[string]any{
+		"pattern": "TODO",
+		"glob":    "*.go",
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		TotalMatches int `json:"totalMatches"`
+		Matches      []struct {
+			File string `json:"file"`
+		} `json:"matches"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.TotalMatches != 1 || payload.Matches[0].File != "a.go" {
+		t.Errorf("glob didn't restrict to *.go: %+v", payload)
+	}
+}
+
+// TestSearchLimitOverflowReported makes sure droppedMatches surfaces
+// the overflow count.
+func TestSearchLimitOverflowReported(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("X\nX\nX\nX\nX\n"), 0o644)
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("search", map[string]any{
+		"pattern": "X",
+		"limit":   2,
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		TotalMatches   int `json:"totalMatches"`
+		DroppedMatches int `json:"droppedMatches"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.TotalMatches != 2 {
+		t.Errorf("totalMatches = %d, want 2", payload.TotalMatches)
+	}
+	if payload.DroppedMatches != 3 {
+		t.Errorf("droppedMatches = %d, want 3", payload.DroppedMatches)
+	}
+}
+
+// TestSearchContextLines verifies the optional context-window field
+// is populated when requested.
+func TestSearchContextLines(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"),
+		[]byte("line 1\nline 2\nMATCH\nline 4\nline 5\n"), 0o644)
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("search", map[string]any{
+		"pattern":      "MATCH",
+		"contextLines": 2,
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		Matches []struct {
+			Before []string `json:"before"`
+			After  []string `json:"after"`
+		} `json:"matches"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if len(payload.Matches) != 1 {
+		t.Fatalf("want 1 match, got %+v", payload.Matches)
+	}
+	m := payload.Matches[0]
+	if len(m.Before) != 2 || len(m.After) != 2 {
+		t.Errorf("Before/After = %+v / %+v", m.Before, m.After)
+	}
+}
+
+// TestSearchEmptyPatternIsError + TestSearchInvalidRegexIsError —
+// the agent should hear about bad input clearly.
+func TestSearchEmptyPatternIsError(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("search", map[string]any{})
+	if !r.IsError {
+		t.Errorf("expected isError for empty pattern, got %+v", r)
+	}
+}
+
+func TestSearchInvalidRegexIsError(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("search", map[string]any{"pattern": "[invalid("})
 	if !r.IsError {
 		t.Errorf("expected isError for invalid regex, got %+v", r)
 	}

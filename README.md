@@ -50,11 +50,12 @@ Child LSP requests (`hover`, `definition`, completion, signature help, code acti
 poly-lsp-mcp mcp --root /path/to/workspace
 ```
 
-Speaks MCP (newline-delimited JSON-RPC) over stdio. Six tools:
+Speaks MCP (newline-delimited JSON-RPC) over stdio. Seven tools:
 
 | Tool | Purpose |
 |------|---------|
-| `structure` | Directory walk OR tree-sitter named children of a file with decl + name ranges. Optional `grep` regex prunes to matching subtrees. |
+| `structure` | Directory walk OR tree-sitter named children of a file with decl + name ranges. Optional `grep` regex prunes to matching subtrees (by name). |
+| `search` | Regex search over file *contents* across the workspace. Use this for full-text search; `structure(grep=…)` is for symbol/file-name search. |
 | `node_references` | Workspace-wide references to the identifier at a range (lexical / declared / comment confidence). |
 | `node_read` | Read whole file, line preview, or byte-precise range. |
 | `node_edit` | Atomic write: whole-file create-or-overwrite, range replace, or unified-diff patch. |
@@ -68,6 +69,7 @@ Most tools are polymorphic — pick the input shape that fits the task. The "nod
 | Tool | `{file}` | `{file, line, offset?, limit?}` | `{file, range}` | `{file, diff}` | Other |
 |---|---|---|---|---|---|
 | `structure` | ✓ (listing, optional `grep`, `depth`) | — | — | — | — |
+| `search` | — | — | — | — | `{pattern, path?, glob?, limit?, contextLines?}` |
 | `node_read` | ✓ whole file | ✓ line preview (default limit 50) | ✓ byte-precise text | — | — |
 | `node_edit` | ✓ (with `newText`: create-or-overwrite, auto-mkdir parent) | — | ✓ (with `newText`: range replace) | ✓ unified-diff patch (strict context) | — |
 | `node_delete` | ✓ delete file from disk | — | ✓ delete range | — | — |

@@ -202,6 +202,31 @@ func registerTools() map[string]Tool {
 }`),
 			Handler: handleNodeRefactor,
 		},
+		"search": {
+			Name: "search",
+			Description: "Regex search over file contents across the workspace. " +
+				"`pattern` is a Go regex (use `(?i)…` inline for case-insensitive). " +
+				"`path` (default: workspace root) scopes the walk. " +
+				"`glob` (filepath.Match pattern over file basenames, e.g. `*.go`) filters which files get scanned. " +
+				"`limit` (default 100) caps hits; overflow surfaces as `droppedMatches`. " +
+				"`contextLines` (default 0) returns N lines before AND after each match for previewing. " +
+				"Each hit returns `{file, line, col, matchEndCol, text}` (text is the whole matched line). " +
+				"Use this for full-text search — comment hunting, finding stringly-typed magic values, etc. " +
+				"For symbol/file-NAME search use structure(grep=…) instead — it's tree-sitter aware. " +
+				"Binary files, the standard noise dirs (.git / node_modules / vendor / __pycache__ / dist / build), and files > 1 MiB are skipped silently.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "pattern":      {"type": "string"},
+    "path":         {"type": "string", "description": "Workspace-relative or absolute. Default: workspace root."},
+    "glob":         {"type": "string", "description": "filepath.Match pattern over basenames. Default: every file."},
+    "limit":        {"type": "integer", "minimum": 1, "description": "Max hits. Default 100."},
+    "contextLines": {"type": "integer", "minimum": 0, "description": "Lines before/after each match. Default 0."}
+  },
+  "required": ["pattern"]
+}`),
+			Handler: handleSearch,
+		},
 	}
 }
 
@@ -254,6 +279,85 @@ type structureEntry struct {
 	NameEndLine   int              `json:"nameEndLine,omitempty"`
 	NameEndCol    int              `json:"nameEndCol,omitempty"`
 	Children      []structureEntry `json:"children,omitempty"`
+}
+
+// -------------------------------------------------------------- search
+
+func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
+	var p struct {
+		Pattern      string `json:"pattern"`
+		Path         string `json:"path"`
+		Glob         string `json:"glob"`
+		Limit        *int   `json:"limit"`
+		ContextLines *int   `json:"contextLines"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if p.Pattern == "" {
+		return nil, true, errors.New("pattern is required")
+	}
+	re, err := regexp.Compile(p.Pattern)
+	if err != nil {
+		return nil, true, fmt.Errorf("invalid pattern: %w", err)
+	}
+	if p.Path == "" {
+		p.Path = "."
+	}
+	root := s.resolveFileArg(p.Path)
+	limit := 100
+	if p.Limit != nil {
+		if *p.Limit < 1 {
+			return nil, true, errors.New("limit must be >= 1")
+		}
+		limit = *p.Limit
+	}
+	ctxLines := 0
+	if p.ContextLines != nil {
+		if *p.ContextLines < 0 {
+			return nil, true, errors.New("contextLines must be >= 0")
+		}
+		ctxLines = *p.ContextLines
+	}
+
+	hits, dropped, err := symbols.Search(root, re, symbols.SearchOptions{
+		Glob:         p.Glob,
+		Limit:        limit,
+		ContextLines: ctxLines,
+	})
+	if err != nil {
+		return nil, true, err
+	}
+
+	type wireHit struct {
+		File        string   `json:"file"`
+		Line        int      `json:"line"`
+		Col         int      `json:"col"`
+		MatchEndCol int      `json:"matchEndCol"`
+		Text        string   `json:"text"`
+		Before      []string `json:"before,omitempty"`
+		After       []string `json:"after,omitempty"`
+	}
+	out := make([]wireHit, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, wireHit{
+			File:        relPath(h.File, s.getRoot()),
+			Line:        h.Line,
+			Col:         h.Col,
+			MatchEndCol: h.MatchEndCol,
+			Text:        h.Text,
+			Before:      h.Before,
+			After:       h.After,
+		})
+	}
+	payload := map[string]any{
+		"totalMatches": len(out),
+		"matches":      out,
+	}
+	if dropped > 0 {
+		payload["droppedMatches"] = dropped
+	}
+	return jsonContent(payload), false, nil
 }
 
 func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {

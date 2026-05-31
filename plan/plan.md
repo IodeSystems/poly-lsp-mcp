@@ -718,10 +718,17 @@ subsume it.
    `{file}` whole-file delete (`os.Remove` + drop the file's
    slice from the index). Operator-grade destructive — surfaces
    errors clearly when the path is missing or is a directory.
-5. [ ] Once 1–4 are in, autowork3 drops `read_file` /
-   `write_file` / `grep` / `ls` from `cmd/worker/main.go`.
-   Filed in autowork3's `plan/plan.md` (per-thread MCP
-   follow-ups) as the consuming change.
+5. [x] New `search` MCP tool — regex over file contents across the
+   workspace. `symbols.Search(root, pattern, opts)` library helper
+   does the walk (same skip-dirs + 1 MiB cap as Build, binary
+   skip via null-byte probe, optional glob over basenames). Tool
+   wraps it with `pattern` / `path?` / `glob?` / `limit?` (default
+   100) / `contextLines?` (default 0). `structure(grep=…)` stays
+   for symbol/file-name search; `search` is the full-text channel.
+   Closes the last `shell grep` gap from the autowork3 worker.
+6. [ ] autowork3 drops `read_file` / `write_file` / `grep` / `ls`
+   from `cmd/worker/main.go`. Filed in autowork3's `plan/plan.md`
+   (per-thread MCP follow-ups) as the consuming change.
 
 ## Non-goals (for now)
 

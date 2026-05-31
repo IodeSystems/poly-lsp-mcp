@@ -613,6 +613,96 @@ Each diagnostic carries enough structure that the agent can act on it without re
 - [x] `symbolFromRef` hardened against JSON-escape bleed: `(\S+)` could capture `Foo\n",` out of a JSON description string; the new leading-identifier walk drops everything past the first non-`[A-Za-z0-9_]` byte. Unit-tested with `Symbol\n`, `Symbol\t`, and the full `server/main.go:Symbol\n",` shape.
 - [x] `testdata/fixtures/gat-greeter/server/{types.go,main.go}` — hand-written stubs shaped like `protoc-gen-go` output, `@ref`-linked back to `greeter.proto`. `TestCrossLanguageDiagnosticOnGeneratedStub` synthesizes a flat Go module from these files in a tempdir, spawns gopls via the MCP path, edits `main.go` to reference an undefined field on `HelloResponse`, and asserts the diagnostic comes back enriched (text, context, enclosingNode.Name=="Run") AND that `node_references` on `HelloResponse` from `types.go` returns both the Go declaration and the proto's `@ref`-anchored site. Closes the Phase-5 cross-language fixture loop.
 
+## Phase 6 — tool ergonomics (filed 2026-05-30)
+
+Surfaced from autowork3 integration. The 6 v0.2 tools cover the
+**semantic** axis (identifier-resolution, cross-language references,
+structured rename) but force the agent into auxiliary builtin tools
+(`read_file`, `grep`, `ls`, `write_file`) for everything else.
+Goal of this phase: make `mcp_*` a complete editor surface so an
+LLM agent can ship with **just `shell` + the MCP tool set**, no
+workspace-side `read_file`/`grep`/`ls`/`write_file` shims.
+
+### Gaps surfaced
+
+**1. `structure` has no symbol/text filter.**
+- Today: `structure(path?, depth?)` returns the full subtree at
+  `path` (workspace, dir, or file).
+- Want: `structure(path?, depth?, grep?)` where `grep` is a regex
+  matched against each node's `name` (file basename for files,
+  identifier for code symbols, dir name for directories) and only
+  matching subtrees survive. Effectively the union of `ls` (when
+  no grep) and `grep --include` (when grep is set).
+- Agent flow this enables: instead of `shell grep -r FooBar`,
+  call `structure(., depth=∞, grep="FooBar")`; results carry
+  language-aware ranges so a follow-up `node_read` / `node_edit`
+  has the right `(file, range)` without a second probe.
+- Wins ls + the symbol-filter axis of grep in one call. Pure-text
+  grep over comments/strings still needs `shell grep`.
+
+**2. `node_read` rejects whole-file reads + line-offset reads.**
+- Today: all four position fields required.
+- Want a `node` selector form that's polymorphic:
+  - `{file}` → whole file (the read_file replacement).
+  - `{file, line, offset?, limit?}` → starting at `line`, optional
+    `offset` skipped, `limit` lines returned. Replaces
+    `read_file path | sed -n 'start,endp'` for previews.
+  - `{file, startLine, startCol, endLine, endCol}` → existing
+    range form, untouched.
+- Decision: input schema becomes a oneOf or all-fields-optional
+  with validation; pick whichever Huma's JSON-Schema generator
+  produces cleanest agent-facing tool descriptions for.
+- Same shape extends to `node_delete` (whole-file = delete file)
+  but be careful: today `node_delete` is the deliberate-intent
+  variant of `node_edit({newText:""})`. A "delete the whole file"
+  primitive needs its own discussion (operator-grade destructive
+  action, distinct from a range delete).
+
+**3. `node_edit` has no "create file" mode and no diff-based form.**
+- Today: requires `(file, range, newText)`; the file must exist
+  AND the range must fall within it.
+- Want:
+  - `{file, newText}` with no range → if file doesn't exist,
+    create it with `newText`; if it does, full-file rewrite.
+    Replaces `write_file` for new files + wholesale rewrites.
+  - `{file, diff}` → unified-diff form. Agent emits a patch
+    against the current file content; we apply via the same
+    temp + Rename path the range form uses. Saves multiple
+    round-trips when the change touches several non-contiguous
+    regions of the same file (today's agent has to call
+    `node_edit` once per region; a single diff fits in one
+    Turn).
+- Open question: do we keep the `(range, newText)` form once
+  `diff` is shipped? Probably yes — it's more compact for
+  single-region edits and avoids the cost of computing a
+  diff client-side. Three input shapes, one tool, polymorphic
+  on which fields are set.
+
+### Why this matters for autowork3
+
+The autowork3 worker container currently ships these builtins
+alongside the MCP tools: `shell, read_file, write_file, grep, ls`.
+That's 5 extra tool descriptions per LLM call (real token cost on
+every Turn) AND a parallel dispatch path the worker has to
+maintain. Once Phase 6 lands, the worker's surface shrinks to
+`shell` + MCP — same capability, fewer code paths.
+
+`shell` still survives even after Phase 6 — it's the escape hatch
+for everything that isn't read/edit/structure (running tests,
+running git, anything project-specific). MCP shouldn't try to
+subsume it.
+
+### Implementation order
+
+1. `structure` grep (smallest surface, additive to existing
+   schema, no removals).
+2. `node_read` polymorphic input (whole-file + line/offset).
+3. `node_edit` create-on-write + diff form.
+4. Once 1–3 are in, autowork3 drops `read_file` / `write_file`
+   / `grep` / `ls` from `cmd/worker/main.go`. Filed in
+   autowork3's `plan/plan.md` (per-thread MCP follow-ups) as
+   the consuming change.
+
 ## Non-goals (for now)
 
 - Indexing the entire host filesystem; we only index inside the git root.

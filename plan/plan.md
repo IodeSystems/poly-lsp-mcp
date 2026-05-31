@@ -730,6 +730,79 @@ subsume it.
    from `cmd/worker/main.go`. Filed in autowork3's `plan/plan.md`
    (per-thread MCP follow-ups) as the consuming change.
 
+## Phase 6.1 — natural-intent shapes (filed 2026-05-31)
+
+Surfaced during an autowork3 end-to-end trial: the model reached for
+`node_read({file, startLine, endLine})` — "read lines 35 through
+37" — and the polymorphic validator rejected it:
+
+  > range form requires all of startLine, startCol, endLine, endCol
+
+That's a fair message for the implemented schema (range = four
+fields, preview = `{line, limit}`, whole-file = `{file}`) but it's
+not the model's natural prior. Most LLMs are trained on tool
+surfaces where "give me lines A through B" is `{path, startLine,
+endLine}` — exactly the shape they emit first.
+
+The principle: **the tool should match the model's prior; we
+shouldn't make the model burn tokens figuring out our special
+syntax.** When a model reaches for it that way initially, that's
+the most obvious way.
+
+### Gap
+
+Today's `node_read` accepts:
+- `{file}` — whole file
+- `{file, line, offset?, limit?}` — preview
+- `{file, startLine, startCol, endLine, endCol}` — range (cols required)
+
+Missing: `{file, startLine, endLine}` (no cols). Should be accepted
+and treated as a line-pair range. Equivalent to `{file, line:
+startLine, limit: endLine - startLine + 1}` semantically, but the
+input shape matches the model's intuition without the renaming.
+Same return shape (text + actual covered lines) is fine.
+
+Same gap likely applies to `node_edit({file, startLine, endLine,
+newText})` and `node_delete({file, startLine, endLine})` —
+whole-line edits/deletes without the agent having to compute cols.
+
+### Implementation sketch
+
+Inside the polymorphic validator: if `startLine` AND `endLine` are
+set AND `startCol` + `endCol` are unset, accept as a line-pair
+range. Default `startCol = 1`, `endCol = len(line[endLine]) + 1`
+(end-of-line exclusive). Wires to the same range-form code path as
+today.
+
+Detection should NOT require both cols to be unset to disambiguate
+— `{startLine, endLine, startCol}` (one col, missing partner) is
+still ambiguous and should still error, just with a clearer
+message: "if any startCol/endCol is set, all four are required;
+omit both to use line-pair form".
+
+### Out of scope
+
+- `{file, startLine}` without `endLine` — single-line read. Could
+  alias to `{line: startLine, limit: 1}` but it's also reasonably
+  asked for by preview-form callers; leave both forms alone for
+  now.
+- Mixed `{startLine, endCol}` (line + half-col) — ambiguous, error
+  out. Don't try to be clever.
+
+### Evidence
+
+From an autowork3 trial (impl dev session
+`8b9f3327-e94a-4602-8177-e34b79ad7608`, 2026-05-31): model called
+`mcp_node_read` after applying an edit to verify the result. Got
+the validator error; retried with the preview form and succeeded.
+Single MCP error across 29 successful tool results in that
+session, but the call shape suggests every model will hit it the
+first time it tries to spot-check a multi-line edit.
+
+(autowork3's tool span now captures `arguments` for any future
+debug session, so the next occurrence will land the exact JSON in
+the spans table — see autowork3 commit `<this branch>`.)
+
 ## Non-goals (for now)
 
 - Indexing the entire host filesystem; we only index inside the git root.

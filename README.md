@@ -54,14 +54,29 @@ Speaks MCP (newline-delimited JSON-RPC) over stdio. Six tools:
 
 | Tool | Purpose |
 |------|---------|
-| `structure(path, depth=1)` | Directory walk OR tree-sitter named children of a file with decl + name ranges. |
-| `node_references(file, range)` | Workspace-wide references to the identifier at range (lexical / declared / comment confidence). |
-| `node_read(file, range)` | Text at range. |
-| `node_edit(file, range, newText)` | Atomic rewrite + index refresh + LSP diagnostic round-trip. |
-| `node_delete(file, range)` | Equivalent to node_edit with empty text. |
-| `node_refactor(file, range, refactor)` | Composable refactor channel: `refactor: {rename?, params?, return?}`. |
+| `structure` | Directory walk OR tree-sitter named children of a file with decl + name ranges. Optional `grep` regex prunes to matching subtrees. |
+| `node_references` | Workspace-wide references to the identifier at a range (lexical / declared / comment confidence). |
+| `node_read` | Read whole file, line preview, or byte-precise range. |
+| `node_edit` | Atomic write: whole-file create-or-overwrite, range replace, or unified-diff patch. |
+| `node_delete` | Delete a range OR delete the whole file. |
+| `node_refactor` | Composable cross-language refactor: `refactor:{rename?, params?, return?}`. Supports go / typescript / python. |
 
-Three resources:
+### Tool capability matrix
+
+Most tools are polymorphic — pick the input shape that fits the task. The "node" prefix in the names is historical from the early AST-only days; today the tools work at three levels: raw file, line preview, and AST/range.
+
+| Tool | `{file}` | `{file, line, offset?, limit?}` | `{file, range}` | `{file, diff}` | Other |
+|---|---|---|---|---|---|
+| `structure` | ✓ (listing, optional `grep`, `depth`) | — | — | — | — |
+| `node_read` | ✓ whole file | ✓ line preview (default limit 50) | ✓ byte-precise text | — | — |
+| `node_edit` | ✓ (with `newText`: create-or-overwrite, auto-mkdir parent) | — | ✓ (with `newText`: range replace) | ✓ unified-diff patch (strict context) | — |
+| `node_delete` | ✓ delete file from disk | — | ✓ delete range | — | — |
+| `node_references` | — | — | ✓ identifier range required | — | — |
+| `node_refactor` | — | — | ✓ identifier range required | — | `refactor:{rename, params, return}` |
+
+`node_read` / `node_edit` / `node_delete` work on **any file** regardless of language or whether a tree-sitter grammar exists — markdown, JSON, plain text, config files all fine. AST features only activate when you ask for them via `structure` or pass identifier ranges to the semantic tools.
+
+### Resources
 
 - `poly-lsp-mcp://workspace` — `{root, languages, names, declared}` summary.
 - `poly-lsp-mcp://bindings` — every declared cross-language binding (Tier 2 + Tier 3).

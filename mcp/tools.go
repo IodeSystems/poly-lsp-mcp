@@ -58,11 +58,10 @@ func registerTools() map[string]Tool {
 			Name: "structure",
 			Description: "Hierarchical tour of a workspace, directory, or file. " +
 				"`path` (default: workspace root) is workspace-relative or absolute. " +
-				"`depth` (default: 1, or 32 when `grep` is set) controls how many levels to descend — at workspace level into directories, at file level into AST nodes. " +
-				"`grep` is an optional regex matched against each entry's `name` (file basename, directory name, or code identifier); only subtrees containing a match survive. Use it instead of shelling out to grep when looking for a file or symbol by name. " +
-				"For files: requires a tree-sitter grammar (go / typescript / tsx / python / sql). " +
-				"Each `node` entry carries both `range` (the whole declaration) and the `name*` fields (the identifier within it); pass the identifier's range to node_references and node_refactor, the whole range to node_read / node_edit / node_delete. " +
-				"Calling structure on the workspace root implicitly refreshes the index for any files whose bytes changed.",
+				"`depth` (default 1; 32 when `grep` is set) controls descent — directories at workspace level, AST nodes at file level. " +
+				"`grep` is an optional regex matched against each entry's name (file basename, directory name, or code identifier); subtrees without a match are pruned. Use it instead of grep when looking for a file or symbol by name. " +
+				"Each `node` entry has both `range` (the whole declaration — pass to node_read/edit/delete) and `nameStart/End*` fields (the identifier — pass to node_references and node_refactor). " +
+				"Tree-sitter grammars: go / typescript / tsx / python / sql.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -118,11 +117,10 @@ func registerTools() map[string]Tool {
 		"node_edit": {
 			Name: "node_edit",
 			Description: "Atomically edit a file. Three input shapes (pick one): " +
-				"{file, startLine, startCol, endLine, endCol, newText} → replace the text in that range with newText (same range convention as node_read). " +
-				"{file, newText} → create the file if missing, otherwise overwrite the whole contents (replaces shelling out to write_file). " +
-				"{file, diff} → apply a unified-diff patch against the current contents (one tool call for non-contiguous multi-region edits; LLM-generated patches with context lines work). " +
-				"All shapes go through temp + Rename so a partial failure can't corrupt the file; existing file mode is preserved. " +
-				"After the write the file's slice of the index is re-parsed and the diagnostic round-trip runs.",
+				"{file, startLine, startCol, endLine, endCol, newText} → replace that range with newText (same convention as node_read). " +
+				"{file, newText} → create or overwrite the whole file (replaces write_file; parent dirs auto-created). " +
+				"{file, diff} → apply a unified-diff patch (one tool call for non-contiguous multi-region edits; strict context matching). " +
+				"Writes are atomic and the response includes LSP diagnostics from any child language server.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -159,24 +157,48 @@ func registerTools() map[string]Tool {
 		},
 		"node_refactor": {
 			Name: "node_refactor",
-			Description: "Multi-modal cross-language refactor. " +
+			Description: "Composable cross-language refactor. " +
 				"Point `range` at an identifier (use structure's `nameStart*` / `nameEnd*` fields). " +
-				"`kind` selects the refactor: today only \"rename\" is supported — it propagates the rename across every site declared bindings or the lexical index turn up, with per-site on-disk text verification so aliasing bindings can't substitute the wrong token. " +
-				"Set `includeComments` true for kind='rename' when you want documentation and comment references (which tree-sitter normally skips) renamed too — a workspace-wide word-boundary scan augments the plan; partial-word matches like `thisUserID` are not touched because the scan anchors on identifier boundaries. " +
-				"Future kinds (change_signature, change_return_type) land here without growing the tool count.",
+				"`refactor` is an object selecting one or more ops to apply in a single call: " +
+				"`rename` (workspace-wide rename across declared bindings, schema-anchored sites, and lexical hits — with per-site on-disk text verification so aliasing bindings can't substitute the wrong token); " +
+				"`params` (rebuild the function's parameter list — go / typescript / python; callers across the workspace get their arg lists rewritten best-effort, padded with language-appropriate zero values on growth, truncated on shrink, spread/splat callers reported as skipped); " +
+				"`return` (replace the return type, or insert one into a previously-void / unannotated signature). " +
+				"Combine all three to change name + signature + return type in one tool call. " +
+				"`includeComments` extends rename to documentation/prose via a word-boundary scan; partial-word matches like `thisUserID` stay untouched. " +
+				"Legacy shape `kind=\"rename\", newName=X` still accepted; internally normalized into `refactor:{rename: X}`.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "file":            {"type": "string"},
-    "startLine":       {"type": "integer", "minimum": 1},
-    "startCol":        {"type": "integer", "minimum": 1},
-    "endLine":         {"type": "integer", "minimum": 1},
-    "endCol":          {"type": "integer", "minimum": 1},
-    "kind":            {"type": "string", "enum": ["rename"], "description": "Refactor kind."},
+    "file":      {"type": "string"},
+    "startLine": {"type": "integer", "minimum": 1},
+    "startCol":  {"type": "integer", "minimum": 1},
+    "endLine":   {"type": "integer", "minimum": 1},
+    "endCol":    {"type": "integer", "minimum": 1},
+    "refactor": {
+      "type": "object",
+      "description": "Composable ops; supply at least one field.",
+      "properties": {
+        "rename": {"type": "string", "description": "New identifier name."},
+        "params": {
+          "type": "array",
+          "description": "Replacement parameter list. Each entry: {name, type}.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "type": {"type": "string"}
+            },
+            "required": ["name", "type"]
+          }
+        },
+        "return": {"type": "string", "description": "New return type (Go tuples: include parens, e.g., \"(string, error)\")."}
+      }
+    },
+    "kind":            {"type": "string", "enum": ["rename"], "description": "Legacy shape. Prefer refactor:{rename: X}."},
     "newName":         {"type": "string", "description": "Required when kind='rename'."},
-    "includeComments": {"type": "boolean", "description": "When kind='rename', also rename word-boundary mentions in comments / prose / non-indexed file types. Default false."}
+    "includeComments": {"type": "boolean", "description": "Rename word-boundary mentions in comments / prose / non-indexed file types too. Default false."}
   },
-  "required": ["file", "startLine", "startCol", "endLine", "endCol", "kind"]
+  "required": ["file", "startLine", "startCol", "endLine", "endCol"]
 }`),
 			Handler: handleNodeRefactor,
 		},

@@ -552,6 +552,106 @@ func TestStructureGrepInvalidRegexIsError(t *testing.T) {
 	}
 }
 
+// TestStructureNodeLimitAutoCapEmitsHint: a directory with many
+// files should trigger the auto node-count cap and surface the
+// truncation metadata so the agent can narrow.
+func TestStructureNodeLimitAutoCapEmitsHint(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 400; i++ {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d.txt", i)), []byte("x\n"), 0o644)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("structure", map[string]any{"path": "."})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		Truncated       bool   `json:"truncated"`
+		TruncatedReason string `json:"truncatedReason"`
+		TotalNodes      int    `json:"totalNodes"`
+		ShownNodes      int    `json:"shownNodes"`
+		NodeLimit       int    `json:"nodeLimit"`
+		Hint            string `json:"hint"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if !payload.Truncated || payload.TruncatedReason != "auto" {
+		t.Errorf("expected auto-cap truncation; got %+v", payload)
+	}
+	if payload.TotalNodes < 400 {
+		t.Errorf("totalNodes = %d, want >= 400", payload.TotalNodes)
+	}
+	if payload.NodeLimit != 250 {
+		t.Errorf("nodeLimit = %d, want 250 (default)", payload.NodeLimit)
+	}
+	if payload.ShownNodes > payload.NodeLimit {
+		t.Errorf("shownNodes %d exceeds nodeLimit %d", payload.ShownNodes, payload.NodeLimit)
+	}
+	if payload.Hint == "" {
+		t.Errorf("hint missing on auto-cap")
+	}
+}
+
+// TestStructureNodeLimitExplicit: when the agent passes nodeLimit,
+// the reason flips from "auto" to "nodeLimit" so the agent knows
+// they were in control.
+func TestStructureNodeLimitExplicit(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 30; i++ {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%02d.txt", i)), []byte("x"), 0o644)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("structure", map[string]any{
+		"path":      ".",
+		"nodeLimit": 5,
+	})
+	var payload struct {
+		Truncated       bool   `json:"truncated"`
+		TruncatedReason string `json:"truncatedReason"`
+		TotalNodes      int    `json:"totalNodes"`
+		Hint            string `json:"hint"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.TruncatedReason != "nodeLimit" {
+		t.Errorf("reason = %q, want nodeLimit", payload.TruncatedReason)
+	}
+	if !strings.Contains(payload.Hint, "nodeLimit") {
+		t.Errorf("hint should mention nodeLimit; got %q", payload.Hint)
+	}
+}
+
+// TestStructureUnderLimitNoTruncation: small directories return
+// without truncation metadata polluting the payload.
+func TestStructureUnderLimitNoTruncation(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("x"), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("structure", map[string]any{"path": "."})
+	var payload struct {
+		Truncated bool `json:"truncated"`
+		Hint      string `json:"hint"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.Truncated {
+		t.Errorf("small tree should not be truncated; got %+v", payload)
+	}
+	if payload.Hint != "" {
+		t.Errorf("no hint expected on small tree; got %q", payload.Hint)
+	}
+}
+
 // ---- search ----
 
 // TestSearchFindsAcrossFiles exercises the search tool's primary job:
@@ -1043,7 +1143,9 @@ func TestNodeReadLinePreview(t *testing.T) {
 			Text string `json:"text"`
 		}
 		json.Unmarshal([]byte(r.Content[0].Text), &payload)
-		if payload.Text != "line 7\nline 8\nline 9\nline 10" {
+		// Trailing newline preserved because we read through EOF and
+		// the source ends with \n.
+		if payload.Text != "line 7\nline 8\nline 9\nline 10\n" {
 			t.Errorf("text = %q", payload.Text)
 		}
 	})
@@ -1177,8 +1279,155 @@ func TestNodeEditMixedShapesIsError(t *testing.T) {
 	}
 }
 
-// TestNodeReadMixedShapesIsError: can't combine line-preview and
-// range fields in one call.
+// TestNodeReadAutoCapEmitsHint: a file larger than the auto-cap
+// triggers truncatedReason="auto" + totals + hint when the agent
+// didn't specify any limit.
+func TestNodeReadAutoCapEmitsHint(t *testing.T) {
+	dir := t.TempDir()
+	// 300 lines × ~20 chars each ≈ 6000 chars — well past the 2k
+	// budget so the auto-cap fires.
+	var buf strings.Builder
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&buf, "this is line %d of the file\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(buf.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_read", map[string]any{"file": "big.txt"})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		Truncated       bool   `json:"truncated"`
+		TruncatedReason string `json:"truncatedReason"`
+		Hint            string `json:"hint"`
+		TotalLines      int    `json:"totalLines"`
+		TotalChars      int    `json:"totalChars"`
+		MaxLineLength   int    `json:"maxLineLength"`
+		StartLine       int    `json:"startLine"`
+		EndLine         int    `json:"endLine"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if !payload.Truncated || payload.TruncatedReason != "auto" {
+		t.Errorf("expected auto-cap truncation; got %+v", payload)
+	}
+	if payload.TotalLines != 300 {
+		t.Errorf("totalLines = %d, want 300", payload.TotalLines)
+	}
+	if payload.Hint == "" {
+		t.Errorf("hint missing on auto-cap")
+	}
+	if payload.EndLine >= payload.TotalLines {
+		t.Errorf("endLine %d should be less than totalLines on auto-cap", payload.EndLine)
+	}
+}
+
+// TestNodeReadUserLimitEmitsLimitReason: when the agent set lineLimit
+// explicitly, the truncation reason reflects that (not "auto") and
+// the hint still tells them how to continue.
+func TestNodeReadUserLimitEmitsLimitReason(t *testing.T) {
+	dir := t.TempDir()
+	var buf strings.Builder
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&buf, "line %d\n", i)
+	}
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte(buf.String()), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_read", map[string]any{
+		"file":      "a.txt",
+		"lineLimit": 3,
+	})
+	var payload struct {
+		Truncated       bool   `json:"truncated"`
+		TruncatedReason string `json:"truncatedReason"`
+		Hint            string `json:"hint"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.TruncatedReason != "lineLimit" {
+		t.Errorf("reason = %q, want lineLimit", payload.TruncatedReason)
+	}
+	if !strings.Contains(payload.Hint, "startLine=4") {
+		t.Errorf("hint should suggest startLine=4 to continue; got %q", payload.Hint)
+	}
+}
+
+// TestNodeReadLineLengthTruncation: lineLength clips long lines and
+// reports it.
+func TestNodeReadLineLengthTruncation(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"),
+		[]byte("short\n"+strings.Repeat("X", 500)+"\nalso short\n"), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_read", map[string]any{
+		"file":       "a.txt",
+		"lineLimit":  10,
+		"lineLength": 20,
+	})
+	var payload struct {
+		Truncated       bool   `json:"truncated"`
+		TruncatedReason string `json:"truncatedReason"`
+		Text            string `json:"text"`
+		MaxLineLength   int    `json:"maxLineLength"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.TruncatedReason != "lineLength" {
+		t.Errorf("reason = %q, want lineLength", payload.TruncatedReason)
+	}
+	if !strings.Contains(payload.Text, "…") {
+		t.Errorf("expected ellipsis on truncated long line; got %q", payload.Text)
+	}
+	if payload.MaxLineLength != 500 {
+		t.Errorf("maxLineLength = %d, want 500", payload.MaxLineLength)
+	}
+}
+
+// TestNodeReadStartLineOnly: agent passes only startLine, expects
+// auto-cap from that line forward.
+func TestNodeReadStartLineOnly(t *testing.T) {
+	dir := t.TempDir()
+	var buf strings.Builder
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&buf, "line %d\n", i)
+	}
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte(buf.String()), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_read", map[string]any{
+		"file":      "a.txt",
+		"startLine": 5,
+	})
+	var payload struct {
+		StartLine int    `json:"startLine"`
+		EndLine   int    `json:"endLine"`
+		Text      string `json:"text"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.StartLine != 5 || payload.EndLine != 10 {
+		t.Errorf("startLine/endLine = %d..%d, want 5..10", payload.StartLine, payload.EndLine)
+	}
+	if !strings.HasPrefix(payload.Text, "line 5\n") {
+		t.Errorf("text should start at line 5; got %q", payload.Text)
+	}
+}
+
+// TestNodeReadMixedShapesIsError: can't combine line-based caps
+// (lineLimit / lineLength) with the byte-precise range form.
 func TestNodeReadMixedShapesIsError(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi\n"), 0o644)
@@ -1189,7 +1438,7 @@ func TestNodeReadMixedShapesIsError(t *testing.T) {
 
 	r := s.callTool("node_read", map[string]any{
 		"file":      "a.txt",
-		"line":      1,
+		"lineLimit": 1,
 		"startLine": 1, "startCol": 1, "endLine": 1, "endCol": 2,
 	})
 	if !r.IsError {

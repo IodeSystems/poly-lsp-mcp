@@ -59,15 +59,17 @@ func registerTools() map[string]Tool {
 			Description: "Hierarchical tour of a workspace, directory, or file. " +
 				"`path` (default: workspace root) is workspace-relative or absolute. " +
 				"`depth` (default 1; 32 when `grep` is set) controls descent — directories at workspace level, AST nodes at file level. " +
-				"`grep` is an optional regex matched against each entry's name (file basename, directory name, or code identifier); subtrees without a match are pruned. Use it instead of grep when looking for a file or symbol by name. " +
+				"`grep` is an optional regex matched against each entry's name (file basename, directory name, or code identifier); subtrees without a match are pruned. Use it for symbol/file-name search; use the `search` tool for full-text content search. " +
+				"`nodeLimit` (default 250) caps how many entries return. When the cap fires, the response sets `truncated: true` + `truncatedReason: \"auto\" | \"nodeLimit\"` + `totalNodes` + `hint` so the agent knows how much was clipped and how to widen. " +
 				"Each `node` entry has both `range` (the whole declaration — pass to node_read/edit/delete) and `nameStart/End*` fields (the identifier — pass to node_references and node_refactor). " +
 				"Tree-sitter grammars: go / typescript / tsx / python / sql.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "path":  {"type": "string", "description": "Workspace-relative or absolute path. Default: workspace root."},
-    "depth": {"type": "integer", "minimum": 0, "description": "How many levels to expand. Default: 1, or 32 when grep is set."},
-    "grep":  {"type": "string", "description": "Optional regex; only nodes whose name matches (or have a matching descendant) survive."}
+    "path":      {"type": "string", "description": "Workspace-relative or absolute path. Default: workspace root."},
+    "depth":     {"type": "integer", "minimum": 0, "description": "How many levels to expand. Default: 1, or 32 when grep is set."},
+    "grep":      {"type": "string", "description": "Optional regex; only nodes whose name matches (or have a matching descendant) survive."},
+    "nodeLimit": {"type": "integer", "minimum": 1, "description": "Cap total entries in the response. Default 250. Triggers truncatedReason / hint metadata when it fires."}
   },
   "required": []
 }`),
@@ -93,22 +95,22 @@ func registerTools() map[string]Tool {
 		},
 		"node_read": {
 			Name: "node_read",
-			Description: "Return text from a file. Three input shapes (pick one): " +
-				"{file} → entire file contents. " +
-				"{file, line, offset?, limit?} → line preview: starts at `line + offset` (default offset 0), returns `limit` lines (default 50). " +
-				"{file, startLine, startCol, endLine, endCol} → byte-precise range. startLine/startCol inclusive, endLine/endCol exclusive (matches structure's output). " +
-				"Replaces shelling out to read_file / cat / sed -n.",
+			Description: "Read a file. Only `file` is required; every other field is optional and dispatches the shape: " +
+				"no args → whole file, auto-capped at ~2k chars (returns `truncated: true` plus `totalChars` / `totalLines` / `maxLineLength` when the cap kicks in so the agent knows the full size). " +
+				"`startLine` (default 1) starts reading at that line; `lineLimit` (default: auto — enough lines to fit ~2k chars) caps how many lines come back; `lineLength` (default: unbounded) truncates each line at that many chars (handy for files with huge lines like minified JS). " +
+				"`startLine, startCol, endLine, endCol` together engage byte-precise slicing (matches structure's range output). " +
+				"When any cap fires, the response includes the full source's `totalChars`, `totalLines`, `maxLineLength` so the agent can decide whether to widen and re-call. " +
+				"Replaces read_file / cat / sed -n.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "file":      {"type": "string"},
-    "line":      {"type": "integer", "minimum": 1, "description": "Anchor line for line-preview form."},
-    "offset":    {"type": "integer", "minimum": 0, "description": "Lines to skip past anchor. Default 0."},
-    "limit":     {"type": "integer", "minimum": 1, "description": "Lines to return. Default 50."},
-    "startLine": {"type": "integer", "minimum": 1},
-    "startCol":  {"type": "integer", "minimum": 1},
-    "endLine":   {"type": "integer", "minimum": 1},
-    "endCol":    {"type": "integer", "minimum": 1}
+    "file":       {"type": "string"},
+    "startLine":  {"type": "integer", "minimum": 1, "description": "Where to start reading. Default 1."},
+    "lineLimit":  {"type": "integer", "minimum": 1, "description": "Max lines returned. Default: enough to fit ~2k chars."},
+    "lineLength": {"type": "integer", "minimum": 1, "description": "Truncate each line at this many chars. Default: keep full lines."},
+    "startCol":   {"type": "integer", "minimum": 1, "description": "Byte-precise form: required with startLine, endLine, endCol."},
+    "endLine":    {"type": "integer", "minimum": 1},
+    "endCol":     {"type": "integer", "minimum": 1}
   },
   "required": ["file"]
 }`),
@@ -360,11 +362,18 @@ func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	return jsonContent(payload), false, nil
 }
 
+// defaultStructureNodeLimit caps how many entries a structure call
+// returns when the agent doesn't specify nodeLimit. Picked to keep
+// responses contained without forcing the agent to think about
+// pagination on every call — most files and dirs are smaller.
+const defaultStructureNodeLimit = 250
+
 func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
-		Path  string `json:"path"`
-		Depth *int   `json:"depth"`
-		Grep  string `json:"grep"`
+		Path      string `json:"path"`
+		Depth     *int   `json:"depth"`
+		Grep      string `json:"grep"`
+		NodeLimit *int   `json:"nodeLimit"`
 	}
 	if len(args) > 0 && string(args) != "null" {
 		if err := json.Unmarshal(args, &p); err != nil {
@@ -395,13 +404,23 @@ func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	if p.Path == "" {
 		p.Path = "."
 	}
+	autoNodeCap := p.NodeLimit == nil
+	nodeLimit := defaultStructureNodeLimit
+	if p.NodeLimit != nil {
+		if *p.NodeLimit < 1 {
+			return nil, true, fmt.Errorf("nodeLimit must be >= 1")
+		}
+		nodeLimit = *p.NodeLimit
+	}
+
 	abs := s.resolveFileArg(p.Path)
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("stat %s: %w", p.Path, err)
 	}
+
+	var entry structureEntry
 	if info.IsDir() {
-		var entry structureEntry
 		if grepRe != nil {
 			// grep mode: expand files into their AST nodes so a
 			// regex over identifiers can hit them. The plain
@@ -417,20 +436,134 @@ func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
 			}
 			entry = pruned
 		}
+	} else {
+		entry, err = structureForFile(abs, s.languageForFile(abs), s.getRoot(), depth)
+		if err != nil {
+			return nil, true, err
+		}
+		if grepRe != nil {
+			pruned, ok := pruneStructure(entry, grepRe)
+			if !ok {
+				return jsonContent(emptyDirEntry(entry)), false, nil
+			}
+			entry = pruned
+		}
+	}
+
+	totalNodes := countStructureNodes(entry)
+	if totalNodes <= nodeLimit {
 		return jsonContent(entry), false, nil
 	}
-	entry, err := structureForFile(abs, s.languageForFile(abs), s.getRoot(), depth)
-	if err != nil {
-		return nil, true, err
+	// Tree exceeded the limit. Clip in DFS order so the early
+	// branches stay intact, and emit truncation metadata so the
+	// agent knows what got cut and how to drill in.
+	clipped := clipStructure(entry, nodeLimit)
+	payload := map[string]any{
+		"kind":            clipped.Kind,
+		"path":            clipped.Path,
+		"type":            clipped.Type,
+		"name":            clipped.Name,
+		"startLine":       clipped.StartLine,
+		"startCol":        clipped.StartCol,
+		"endLine":         clipped.EndLine,
+		"endCol":          clipped.EndCol,
+		"nameStartLine":   clipped.NameStartLine,
+		"nameStartCol":    clipped.NameStartCol,
+		"nameEndLine":     clipped.NameEndLine,
+		"nameEndCol":      clipped.NameEndCol,
+		"children":        clipped.Children,
+		"truncated":       true,
+		"truncatedReason": chooseStructureReason(autoNodeCap),
+		"totalNodes":      totalNodes,
+		"shownNodes":      countStructureNodes(clipped),
+		"nodeLimit":       nodeLimit,
+		"hint":            structureHint(autoNodeCap, nodeLimit, totalNodes, grepRe != nil),
 	}
-	if grepRe != nil {
-		pruned, ok := pruneStructure(entry, grepRe)
-		if !ok {
-			return jsonContent(emptyDirEntry(entry)), false, nil
+	// Drop zero-valued fields to keep the payload tidy — they'd be
+	// emitted as 0 / "" by map serialization but the JSON tags use
+	// omitempty when going through the struct path.
+	tidyStructureMap(payload)
+	return jsonContent(payload), false, nil
+}
+
+// countStructureNodes counts entries in a tree (root + every
+// descendant). Used to gate truncation and to report shownNodes.
+func countStructureNodes(e structureEntry) int {
+	count := 1
+	for _, c := range e.Children {
+		count += countStructureNodes(c)
+	}
+	return count
+}
+
+// clipStructure returns a copy of e truncated to at most limit
+// entries (counting root). Walks DFS so early branches stay intact;
+// once the budget is exhausted, remaining siblings + descendants are
+// dropped. The original tree is not mutated.
+func clipStructure(e structureEntry, limit int) structureEntry {
+	budget := limit
+	out, _ := clipStructureWithBudget(e, &budget)
+	return out
+}
+
+func clipStructureWithBudget(e structureEntry, budget *int) (structureEntry, bool) {
+	if *budget <= 0 {
+		return structureEntry{}, false
+	}
+	*budget--
+	out := e
+	out.Children = nil
+	for _, c := range e.Children {
+		if *budget <= 0 {
+			break
 		}
-		entry = pruned
+		sub, ok := clipStructureWithBudget(c, budget)
+		if !ok {
+			break
+		}
+		out.Children = append(out.Children, sub)
 	}
-	return jsonContent(entry), false, nil
+	return out, true
+}
+
+func chooseStructureReason(autoCap bool) string {
+	if autoCap {
+		return "auto"
+	}
+	return "nodeLimit"
+}
+
+func structureHint(autoCap bool, limit, total int, grep bool) string {
+	if autoCap {
+		if grep {
+			return fmt.Sprintf("Auto-capped at %d/%d nodes. Narrow the regex or pass a larger nodeLimit.", limit, total)
+		}
+		return fmt.Sprintf("Auto-capped at %d/%d nodes. Use a deeper path, set grep to filter, or pass a larger nodeLimit.", limit, total)
+	}
+	return fmt.Sprintf("Trimmed to %d/%d nodes (your nodeLimit). Widen nodeLimit or narrow the path to see more.", limit, total)
+}
+
+// tidyStructureMap drops zero-valued ints / strings from a wire
+// payload so the response doesn't carry `startLine: 0` etc. on a
+// directory entry. Mirrors the omitempty annotations on
+// structureEntry.
+func tidyStructureMap(m map[string]any) {
+	for k, v := range m {
+		switch t := v.(type) {
+		case int:
+			if t == 0 {
+				delete(m, k)
+			}
+		case string:
+			if t == "" {
+				delete(m, k)
+			}
+		case []structureEntry:
+			if len(t) == 0 {
+				delete(m, k)
+			}
+		}
+	}
 }
 
 // structureForDirExpanded is the grep-mode variant of structureForDir:
@@ -711,18 +844,36 @@ type siteJSON struct {
 // nodeReadArgs accepts the three polymorphic input shapes for
 // node_read. All fields except File are optional; the handler
 // detects which shape the caller meant.
+// nodeReadArgs is the polymorphic input for node_read. ALL fields are
+// optional except file. The handler picks a shape from which fields
+// were set; sensible defaults fill the rest.
 type nodeReadArgs struct {
 	File string `json:"file"`
-	// Line-preview form (pointer-typed so we can detect "set").
+
+	// Line-based reading. StartLine alone (or no args at all) is the
+	// common case; LineLimit / LineLength tune the size budget.
+	StartLine  *int `json:"startLine,omitempty"`
+	LineLimit  *int `json:"lineLimit,omitempty"`  // max lines returned
+	LineLength *int `json:"lineLength,omitempty"` // truncate each line at this many chars
+
+	// Byte-precise range form. All four (with StartLine) must be set
+	// together to engage. StartCol presence is the disambiguator vs
+	// the line-based form.
+	StartCol *int `json:"startCol,omitempty"`
+	EndLine  *int `json:"endLine,omitempty"`
+	EndCol   *int `json:"endCol,omitempty"`
+
+	// Legacy aliases — the v0.2 names. Accepted but discouraged in
+	// the description.
 	Line   *int `json:"line,omitempty"`
-	Offset *int `json:"offset,omitempty"`
 	Limit  *int `json:"limit,omitempty"`
-	// Byte-precise range form.
-	StartLine *int `json:"startLine,omitempty"`
-	StartCol  *int `json:"startCol,omitempty"`
-	EndLine   *int `json:"endLine,omitempty"`
-	EndCol    *int `json:"endCol,omitempty"`
+	Offset *int `json:"offset,omitempty"`
 }
+
+// defaultReadCharBudget is the implicit cap when the agent doesn't
+// set lineLimit explicitly. Tuned to be "a reasonable preview" —
+// usually 30-60 lines of code, well under typical context budgets.
+const defaultReadCharBudget = 2048
 
 func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var a nodeReadArgs
@@ -733,23 +884,34 @@ func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		return nil, true, errors.New("file is required")
 	}
 
-	hasRange := a.StartLine != nil || a.StartCol != nil || a.EndLine != nil || a.EndCol != nil
-	hasLine := a.Line != nil
-	if hasRange && hasLine {
-		return nil, true, errors.New("cannot combine line-preview form ({line, offset, limit}) with range form ({startLine, startCol, endLine, endCol})")
+	// Legacy alias mapping.
+	if a.Line != nil && a.StartLine == nil {
+		a.StartLine = a.Line
+	}
+	if a.Limit != nil && a.LineLimit == nil {
+		a.LineLimit = a.Limit
+	}
+	if a.Offset != nil && a.StartLine != nil {
+		// Legacy `offset` advanced past `line` to compute the real
+		// start. Fold it in for back-compat.
+		adjusted := *a.StartLine + *a.Offset
+		a.StartLine = &adjusted
 	}
 
+	hasRange := a.StartCol != nil || a.EndLine != nil || a.EndCol != nil
+	hasLineCaps := a.LineLimit != nil || a.LineLength != nil
 	abs := s.resolveFileArg(a.File)
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
 	}
 
-	switch {
-	case hasRange:
-		// All four range fields must be present for the range form.
+	if hasRange {
 		if a.StartLine == nil || a.StartCol == nil || a.EndLine == nil || a.EndCol == nil {
-			return nil, true, errors.New("range form requires all of startLine, startCol, endLine, endCol")
+			return nil, true, errors.New("byte-precise range form needs startLine, startCol, endLine, and endCol all set")
+		}
+		if hasLineCaps {
+			return nil, true, errors.New("cannot combine byte-precise range form with lineLimit / lineLength")
 		}
 		r := rangeArgs{
 			File:      a.File,
@@ -769,59 +931,186 @@ func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
 			"endLine": r.EndLine, "endCol": r.EndCol,
 			"text": text,
 		}), false, nil
-
-	case hasLine:
-		// Line preview: lines [Line+Offset, Line+Offset+Limit-1].
-		anchor := *a.Line
-		off := 0
-		if a.Offset != nil {
-			off = *a.Offset
-		}
-		limit := 50
-		if a.Limit != nil {
-			limit = *a.Limit
-		}
-		if anchor < 1 || off < 0 || limit < 1 {
-			return nil, true, errors.New("line >= 1, offset >= 0, limit >= 1")
-		}
-		start := anchor + off
-		text, returnedStart, returnedEnd := sliceLines(content, start, limit)
-		return jsonContent(map[string]any{
-			"file":      a.File,
-			"startLine": returnedStart,
-			"endLine":   returnedEnd,
-			"text":      text,
-		}), false, nil
-
-	default:
-		// Whole-file form.
-		return jsonContent(map[string]any{
-			"file": a.File,
-			"text": string(content),
-		}), false, nil
 	}
+
+	// Line-based read. Defaults:
+	//   startLine = 1
+	//   lineLength = unbounded
+	//   lineLimit = auto (fit ~defaultReadCharBudget chars)
+	startLine := 1
+	if a.StartLine != nil {
+		startLine = *a.StartLine
+	}
+	if startLine < 1 {
+		return nil, true, errors.New("startLine must be >= 1")
+	}
+	lineLength := 0
+	if a.LineLength != nil {
+		if *a.LineLength < 1 {
+			return nil, true, errors.New("lineLength must be >= 1")
+		}
+		lineLength = *a.LineLength
+	}
+	var lineLimit int // 0 means "auto"
+	if a.LineLimit != nil {
+		if *a.LineLimit < 1 {
+			return nil, true, errors.New("lineLimit must be >= 1")
+		}
+		lineLimit = *a.LineLimit
+	}
+
+	out := buildReadPayload(content, a.File, startLine, lineLimit, lineLength)
+	return jsonContent(out), false, nil
 }
 
-// sliceLines returns the requested line window (1-based, inclusive
-// on both ends), capped to the actual file extent. start past EOF
-// returns empty text. Returns the actual start/end line numbers
-// returned so the caller can echo them back.
-func sliceLines(content []byte, start, limit int) (text string, returnedStart, returnedEnd int) {
+// buildReadPayload builds the response map for the line-based read
+// shape. Splits content, applies startLine, optional per-line
+// truncation, then takes either the user's lineLimit lines or as
+// many as fit in defaultReadCharBudget. Whenever the returned slice
+// is shorter than the full source (or per-line truncation kicked
+// in), the response includes the full source's totalChars /
+// totalLines / maxLineLength so the agent can decide whether to
+// widen and re-call.
+//
+// truncatedReason distinguishes WHY the slice was clipped:
+//
+//	"auto"       → no user-set lineLimit; the implicit ~2k char
+//	               budget fired. The most surprising case for the
+//	               agent — a `hint` is included pointing at how to
+//	               widen.
+//	"lineLimit"  → user asked for fewer lines than the source has.
+//	"lineLength" → individual lines truncated by user's lineLength
+//	               with no line-count truncation.
+//
+// When multiple causes apply at once, the priority is auto >
+// lineLimit > lineLength and the hint mentions all of them.
+func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLength int) map[string]any {
+	lines := splitNodeReadLines(content)
+	totalLines := len(lines)
+	totalChars := len(content)
+
+	// Maximum line length in the SOURCE (pre-truncation). Useful
+	// signal that the agent is asking about a file with very long
+	// lines (minified JS, generated code).
+	maxLineLen := 0
+	for _, l := range lines {
+		if len(l) > maxLineLen {
+			maxLineLen = len(l)
+		}
+	}
+
+	out := map[string]any{
+		"file": file,
+	}
+	if startLine > totalLines {
+		out["startLine"] = startLine
+		out["endLine"] = startLine
+		out["text"] = ""
+		out["truncated"] = true
+		out["truncatedReason"] = "past-eof"
+		out["hint"] = fmt.Sprintf("startLine=%d is past the last line (file has %d lines).", startLine, totalLines)
+		out["totalLines"] = totalLines
+		out["totalChars"] = totalChars
+		out["maxLineLength"] = maxLineLen
+		return out
+	}
+
+	// Take the slice from startLine onward, truncating per-line if
+	// requested. Char accounting tracks the projected size after
+	// any truncation has applied.
+	collected := make([]string, 0, totalLines-(startLine-1))
+	charsCollected := 0
+	autoLimit := lineLimit == 0
+	budget := defaultReadCharBudget
+	endLine := startLine - 1
+	for i := startLine - 1; i < totalLines; i++ {
+		ln := lines[i]
+		if lineLength > 0 && len(ln) > lineLength {
+			ln = ln[:lineLength] + "…"
+		}
+		// Per-line "+1" accounts for the rejoining \n.
+		cost := len(ln) + 1
+		if autoLimit {
+			if charsCollected+cost > budget && len(collected) > 0 {
+				break
+			}
+		} else if len(collected) >= lineLimit {
+			break
+		}
+		collected = append(collected, ln)
+		charsCollected += cost
+		endLine = i + 1
+	}
+
+	text := strings.Join(collected, "\n")
+	// Preserve a trailing newline if the source had one AND we read
+	// through to the last line. Mirrors the file's natural shape so
+	// a whole-file read returns bytes exactly as on disk.
+	if endLine == totalLines && len(content) > 0 && content[len(content)-1] == '\n' {
+		text += "\n"
+	}
+
+	out["startLine"] = startLine
+	out["endLine"] = endLine
+	out["text"] = text
+
+	// Classify the truncation: did the line count get clipped?
+	// Did individual lines get truncated by lineLength?
+	clippedByCount := endLine < totalLines
+	clippedByLength := lineLength > 0 && maxLineLen > lineLength
+	if !clippedByCount && !clippedByLength {
+		return out
+	}
+
+	// Choose the dominant reason for the agent's primary signal.
+	reason := ""
+	switch {
+	case clippedByCount && autoLimit:
+		reason = "auto"
+	case clippedByCount && !autoLimit:
+		reason = "lineLimit"
+	case clippedByLength:
+		reason = "lineLength"
+	}
+
+	// Hint sentence — what the agent should do next.
+	var hint strings.Builder
+	switch reason {
+	case "auto":
+		fmt.Fprintf(&hint, "Returned %d/%d lines (auto-cap at ~%d chars). Pass lineLimit to widen, or call again with startLine=%d to continue.",
+			endLine-startLine+1, totalLines, defaultReadCharBudget, endLine+1)
+	case "lineLimit":
+		fmt.Fprintf(&hint, "Returned %d/%d lines (lineLimit=%d). Call again with startLine=%d to continue.",
+			endLine-startLine+1, totalLines, lineLimit, endLine+1)
+	case "lineLength":
+		fmt.Fprintf(&hint, "Lines truncated to %d chars (max source line was %d chars). Pass a larger lineLength to keep full lines.",
+			lineLength, maxLineLen)
+	}
+	if clippedByLength && reason != "lineLength" {
+		fmt.Fprintf(&hint, " Also: lines truncated to %d chars (max source line was %d).", lineLength, maxLineLen)
+	}
+
+	out["truncated"] = true
+	out["truncatedReason"] = reason
+	out["hint"] = hint.String()
+	out["totalLines"] = totalLines
+	out["totalChars"] = totalChars
+	out["maxLineLength"] = maxLineLen
+	return out
+}
+
+// splitNodeReadLines splits content on \n, drops the trailing empty
+// entry produced by a final newline so endLine math matches the
+// editor's reckoning, and strips \r from CRLF inputs.
+func splitNodeReadLines(content []byte) []string {
 	lines := strings.Split(string(content), "\n")
-	// Drop the trailing empty entry that Split produces on a
-	// final newline, so end-of-file math matches "line count" by
-	// the editor's reckoning.
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	if start > len(lines) {
-		return "", start, start
+	for i, l := range lines {
+		lines[i] = strings.TrimSuffix(l, "\r")
 	}
-	end := start + limit - 1
-	if end > len(lines) {
-		end = len(lines)
-	}
-	return strings.Join(lines[start-1:end], "\n"), start, end
+	return lines
 }
 
 // -------------------------------------------------------------- node_edit / node_delete

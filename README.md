@@ -66,15 +66,17 @@ Speaks MCP (newline-delimited JSON-RPC) over stdio. Seven tools:
 
 Most tools are polymorphic — pick the input shape that fits the task. The "node" prefix in the names is historical from the early AST-only days; today the tools work at three levels: raw file, line preview, and AST/range.
 
-| Tool | `{file}` | `{file, line, offset?, limit?}` | `{file, range}` | `{file, diff}` | Other |
+| Tool | `{file}` | line-based | byte-precise range | `{file, diff}` | Other |
 |---|---|---|---|---|---|
-| `structure` | ✓ (listing, optional `grep`, `depth`) | — | — | — | — |
+| `structure` | ✓ (listing, optional `grep`, `depth`, `nodeLimit`) | — | — | — | — |
 | `search` | — | — | — | — | `{pattern, path?, glob?, limit?, contextLines?}` |
-| `node_read` | ✓ whole file | ✓ line preview (default limit 50) | ✓ byte-precise text | — | — |
+| `node_read` | ✓ whole file (auto-capped ~2k chars; reports `truncated` / `totalChars` / `totalLines` / `hint`) | ✓ `{file, startLine?, lineLimit?, lineLength?}` | ✓ `{file, startLine, startCol, endLine, endCol}` | — | — |
 | `node_edit` | ✓ (with `newText`: create-or-overwrite, auto-mkdir parent) | — | ✓ (with `newText`: range replace) | ✓ unified-diff patch (strict context) | — |
 | `node_delete` | ✓ delete file from disk | — | ✓ delete range | — | — |
 | `node_references` | — | — | ✓ identifier range required | — | — |
 | `node_refactor` | — | — | ✓ identifier range required | — | `refactor:{rename, params, return}` |
+
+**Truncation contract.** `structure` and `node_read` both auto-cap on size (250 nodes / ~2k chars by default). When the cap fires they emit `truncated: true` plus `truncatedReason` (`"auto"` when the implicit cap fired, `"nodeLimit"` / `"lineLimit"` / `"lineLength"` when the agent set the cap), `totalNodes` or `totalChars` / `totalLines` / `maxLineLength`, and a `hint` string explaining how to widen or continue. The agent never has to wonder whether a response was clipped.
 
 `node_read` / `node_edit` / `node_delete` work on **any file** regardless of language or whether a tree-sitter grammar exists — markdown, JSON, plain text, config files all fine. AST features only activate when you ask for them via `structure` or pass identifier ranges to the semantic tools.
 

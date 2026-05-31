@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -441,6 +442,115 @@ func TestStructureRejectsNegativeDepth(t *testing.T) {
 	}
 }
 
+// TestStructureGrepMatchesIdentifier exercises the symbol-search
+// case: grep="UserID" against the polyglot fixture should surface
+// the file containing UserID's declaration, with the matching
+// node entries retained.
+func TestStructureGrepMatchesIdentifier(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("structure", map[string]any{
+		"path": ".",
+		"grep": "UserID",
+	})
+	if r.IsError {
+		t.Fatalf("structure grep errored: %+v", r.Content)
+	}
+	var got structureEntryWire
+	json.Unmarshal([]byte(r.Content[0].Text), &got)
+	// Walk the result tree looking for a node named UserID.
+	var visit func(e structureEntryWire) bool
+	visit = func(e structureEntryWire) bool {
+		if e.Kind == "node" && e.Name == "UserID" {
+			return true
+		}
+		for _, c := range e.Children {
+			if visit(c) {
+				return true
+			}
+		}
+		return false
+	}
+	if !visit(got) {
+		t.Errorf("grep=UserID didn't surface a matching node; tree=%+v", got)
+	}
+}
+
+// TestStructureGrepMatchesFileBasename: grep="main.go" should keep
+// the main.go entry across the workspace tree.
+func TestStructureGrepMatchesFileBasename(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("structure", map[string]any{
+		"path": ".",
+		"grep": `^main\.go$`,
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var got structureEntryWire
+	json.Unmarshal([]byte(r.Content[0].Text), &got)
+	var hits int
+	var visit func(e structureEntryWire)
+	visit = func(e structureEntryWire) {
+		if e.Kind == "file" && e.Name == "main.go" {
+			hits++
+		}
+		for _, c := range e.Children {
+			visit(c)
+		}
+	}
+	visit(got)
+	if hits == 0 {
+		t.Errorf("expected main.go in pruned tree; got %+v", got)
+	}
+}
+
+// TestStructureGrepNoMatchReturnsEmpty: a regex that matches nothing
+// returns the root entry with no children — not an error.
+func TestStructureGrepNoMatchReturnsEmpty(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("structure", map[string]any{
+		"path": ".",
+		"grep": "DefinitelyNotARealNameAnywhereInThisFixture",
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var got structureEntryWire
+	json.Unmarshal([]byte(r.Content[0].Text), &got)
+	if len(got.Children) != 0 {
+		t.Errorf("expected no children when grep matches nothing; got %+v", got.Children)
+	}
+}
+
+// TestStructureGrepInvalidRegexIsError: malformed regex must surface
+// as an error, not return zero results silently.
+func TestStructureGrepInvalidRegexIsError(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("structure", map[string]any{
+		"path": ".",
+		"grep": "[invalid(",
+	})
+	if !r.IsError {
+		t.Errorf("expected isError for invalid regex, got %+v", r)
+	}
+}
+
 // ---- node_references ----
 
 func TestNodeReferencesByIdentifierRange(t *testing.T) {
@@ -641,6 +751,275 @@ func TestNodeReadReturnsExactText(t *testing.T) {
 	}
 }
 
+// TestNodeReadWholeFile exercises the {file} shape: no positions →
+// entire contents, replaces the agent's read_file shim.
+func TestNodeReadWholeFile(t *testing.T) {
+	dir := t.TempDir()
+	body := "line one\nline two\nline three\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_read", map[string]any{"file": "a.txt"})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		Text string `json:"text"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if payload.Text != body {
+		t.Errorf("text = %q, want %q", payload.Text, body)
+	}
+}
+
+// TestNodeReadLinePreview exercises the {file, line, offset?, limit?}
+// shape — sed -n equivalent.
+func TestNodeReadLinePreview(t *testing.T) {
+	dir := t.TempDir()
+	// 10 lines numbered 1..10
+	body := ""
+	for i := 1; i <= 10; i++ {
+		body += fmt.Sprintf("line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	t.Run("line + limit", func(t *testing.T) {
+		r := s.callTool("node_read", map[string]any{
+			"file":  "a.txt",
+			"line":  3,
+			"limit": 2,
+		})
+		if r.IsError {
+			t.Fatalf("errored: %+v", r.Content)
+		}
+		var payload struct {
+			StartLine int    `json:"startLine"`
+			EndLine   int    `json:"endLine"`
+			Text      string `json:"text"`
+		}
+		json.Unmarshal([]byte(r.Content[0].Text), &payload)
+		if payload.Text != "line 3\nline 4" {
+			t.Errorf("text = %q", payload.Text)
+		}
+		if payload.StartLine != 3 || payload.EndLine != 4 {
+			t.Errorf("returned range = %d..%d, want 3..4", payload.StartLine, payload.EndLine)
+		}
+	})
+
+	t.Run("line + offset", func(t *testing.T) {
+		r := s.callTool("node_read", map[string]any{
+			"file":   "a.txt",
+			"line":   2,
+			"offset": 3,
+			"limit":  1,
+		})
+		if r.IsError {
+			t.Fatalf("errored: %+v", r.Content)
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		json.Unmarshal([]byte(r.Content[0].Text), &payload)
+		if payload.Text != "line 5" {
+			t.Errorf("text = %q, want \"line 5\" (line=2 + offset=3 = 5)", payload.Text)
+		}
+	})
+
+	t.Run("line past EOF returns empty", func(t *testing.T) {
+		r := s.callTool("node_read", map[string]any{
+			"file": "a.txt",
+			"line": 100,
+		})
+		if r.IsError {
+			t.Fatalf("errored: %+v", r.Content)
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		json.Unmarshal([]byte(r.Content[0].Text), &payload)
+		if payload.Text != "" {
+			t.Errorf("text past EOF = %q, want empty", payload.Text)
+		}
+	})
+
+	t.Run("line + default limit", func(t *testing.T) {
+		// Default limit 50 with file of only 10 lines → return rest.
+		r := s.callTool("node_read", map[string]any{
+			"file": "a.txt",
+			"line": 7,
+		})
+		if r.IsError {
+			t.Fatalf("errored: %+v", r.Content)
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		json.Unmarshal([]byte(r.Content[0].Text), &payload)
+		if payload.Text != "line 7\nline 8\nline 9\nline 10" {
+			t.Errorf("text = %q", payload.Text)
+		}
+	})
+}
+
+// TestNodeEditCreateFile exercises the {file, newText} no-range
+// shape against a path that doesn't exist yet.
+func TestNodeEditCreateFile(t *testing.T) {
+	dir := t.TempDir()
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_edit", map[string]any{
+		"file":    "new/sub/file.txt",
+		"newText": "hello world\n",
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		Created      bool `json:"created"`
+		BytesAdded   int  `json:"bytesAdded"`
+		BytesRemoved int  `json:"bytesRemoved"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if !payload.Created {
+		t.Errorf("expected created=true, got %+v", payload)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "new/sub/file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello world\n" {
+		t.Errorf("file contents = %q", got)
+	}
+}
+
+// TestNodeEditOverwriteFile uses {file, newText} on an existing file
+// — full-contents rewrite.
+func TestNodeEditOverwriteFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("old contents\n"), 0o600)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_edit", map[string]any{
+		"file":    "a.txt",
+		"newText": "new contents\n",
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if string(got) != "new contents\n" {
+		t.Errorf("file = %q", got)
+	}
+	// Mode should be preserved across the overwrite.
+	info, _ := os.Stat(filepath.Join(dir, "a.txt"))
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestNodeEditDiff exercises the {file, diff} shape on a multi-hunk
+// unified diff.
+func TestNodeEditDiff(t *testing.T) {
+	dir := t.TempDir()
+	orig := "alpha\nbravo\ncharlie\ndelta\necho\n"
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte(orig), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	diff := "@@ -1,1 +1,1 @@\n-alpha\n+ALPHA\n@@ -4,1 +4,1 @@\n-delta\n+DELTA\n"
+	r := s.callTool("node_edit", map[string]any{
+		"file": "a.txt",
+		"diff": diff,
+	})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if string(got) != "ALPHA\nbravo\ncharlie\nDELTA\necho\n" {
+		t.Errorf("file = %q", got)
+	}
+}
+
+// TestNodeEditDiffContextMismatchIsError: a stale patch surfaces a
+// clear error so the agent regenerates.
+func TestNodeEditDiffContextMismatchIsError(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha\nbravo\n"), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	diff := "@@ -1,2 +1,2 @@\n-NOT REAL\n+changed\n bravo\n"
+	r := s.callTool("node_edit", map[string]any{
+		"file": "a.txt",
+		"diff": diff,
+	})
+	if !r.IsError {
+		t.Errorf("expected isError on context mismatch, got %+v", r)
+	}
+}
+
+// TestNodeEditMixedShapesIsError: rejecting conflicting input shapes.
+func TestNodeEditMixedShapesIsError(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi\n"), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	cases := []map[string]any{
+		{"file": "a.txt", "diff": "stuff", "startLine": 1, "startCol": 1, "endLine": 1, "endCol": 1},
+		{"file": "a.txt", "diff": "stuff", "newText": "hi"},
+	}
+	for _, c := range cases {
+		r := s.callTool("node_edit", c)
+		if !r.IsError {
+			t.Errorf("expected isError for %+v, got %+v", c, r)
+		}
+	}
+}
+
+// TestNodeReadMixedShapesIsError: can't combine line-preview and
+// range fields in one call.
+func TestNodeReadMixedShapesIsError(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi\n"), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_read", map[string]any{
+		"file":      "a.txt",
+		"line":      1,
+		"startLine": 1, "startCol": 1, "endLine": 1, "endCol": 2,
+	})
+	if !r.IsError {
+		t.Errorf("expected isError when both shapes set, got %+v", r)
+	}
+}
+
 func TestNodeEditRewritesFileAtomicallyAndRefreshesIndex(t *testing.T) {
 	dir := t.TempDir()
 	mainPath := filepath.Join(dir, "main.go")
@@ -752,6 +1131,69 @@ func TestNodeDeleteRemovesRange(t *testing.T) {
 	got, _ := os.ReadFile(mainPath)
 	if string(got) != "AB\n" {
 		t.Errorf("after delete = %q, want %q", got, "AB\n")
+	}
+}
+
+// TestNodeDeleteWholeFile uses the {file} no-range shape to remove
+// the file from disk.
+func TestNodeDeleteWholeFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "doomed.txt")
+	if err := os.WriteFile(path, []byte("bye\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_delete", map[string]any{"file": "doomed.txt"})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		Deleted      bool  `json:"deleted"`
+		BytesRemoved int64 `json:"bytesRemoved"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if !payload.Deleted || payload.BytesRemoved != 4 {
+		t.Errorf("payload = %+v", payload)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("file still exists after whole-file delete: %v", err)
+	}
+}
+
+// TestNodeDeleteWholeFileMissingIsError: deleting a path that
+// doesn't exist surfaces an error instead of silent success.
+func TestNodeDeleteWholeFileMissingIsError(t *testing.T) {
+	dir := t.TempDir()
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_delete", map[string]any{"file": "no-such.txt"})
+	if !r.IsError {
+		t.Errorf("expected isError for missing file, got %+v", r)
+	}
+}
+
+// TestNodeDeleteWholeFileDirectoryIsError: rejecting whole-file
+// delete on a directory (we don't recurse).
+func TestNodeDeleteWholeFileDirectoryIsError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_delete", map[string]any{"file": "sub"})
+	if !r.IsError {
+		t.Errorf("expected isError for directory, got %+v", r)
 	}
 }
 

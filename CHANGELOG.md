@@ -37,6 +37,11 @@ The project ships from `main` without semver tags today. This section captures t
 ### MCP surface
 
 - Six tools: `structure`, `node_references`, `node_read`, `node_edit`, `node_delete`, `node_refactor`.
+- **Phase 6 tool ergonomics** — input shapes expanded so the agent can ship with just MCP + `shell` (no `read_file`/`write_file`/`grep`/`ls` shims):
+  - `structure` accepts `grep` (regex) — matches file basenames, directory names, code identifiers; subtrees without a match get pruned. Auto-bumps depth to 32 when `grep` is set.
+  - `node_read` accepts `{file}` (whole file), `{file, line, offset?, limit?}` (line preview, defaults `offset=0` / `limit=50`), or the existing `{file, startLine/Col, endLine/Col}` byte-precise range.
+  - `node_edit` accepts `{file, newText}` (create-or-overwrite, auto-mkdir parent), `{file, diff}` (unified-diff patch with strict context matching), or the existing `{file, range, newText}` form.
+  - `node_delete` accepts `{file}` (whole-file delete — operator-grade destructive, errors clearly on missing/directory paths) or the existing range form.
 - Three resources: `poly-lsp-mcp://workspace`, `poly-lsp-mcp://bindings`, `poly-lsp-mcp://diagnostics`.
 - `node_refactor` supports Go / TypeScript / Python with composable ops:
   - `rename`: workspace-wide identifier rewrite (declared-binding + aliasing safety).

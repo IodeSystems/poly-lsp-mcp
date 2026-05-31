@@ -58,15 +58,17 @@ func registerTools() map[string]Tool {
 			Name: "structure",
 			Description: "Hierarchical tour of a workspace, directory, or file. " +
 				"`path` (default: workspace root) is workspace-relative or absolute. " +
-				"`depth` (default: 1) controls how many levels to descend — at workspace level into directories, at file level into AST nodes. " +
+				"`depth` (default: 1, or 32 when `grep` is set) controls how many levels to descend — at workspace level into directories, at file level into AST nodes. " +
+				"`grep` is an optional regex matched against each entry's `name` (file basename, directory name, or code identifier); only subtrees containing a match survive. Use it instead of shelling out to grep when looking for a file or symbol by name. " +
 				"For files: requires a tree-sitter grammar (go / typescript / tsx / python / sql). " +
 				"Each `node` entry carries both `range` (the whole declaration) and the `name*` fields (the identifier within it); pass the identifier's range to node_references and node_refactor, the whole range to node_read / node_edit / node_delete. " +
 				"Calling structure on the workspace root implicitly refreshes the index for any files whose bytes changed.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "Workspace-relative or absolute path. Default: workspace root."},
-    "depth": {"type": "integer", "minimum": 0, "description": "How many levels to expand. Default: 1."}
+    "path":  {"type": "string", "description": "Workspace-relative or absolute path. Default: workspace root."},
+    "depth": {"type": "integer", "minimum": 0, "description": "How many levels to expand. Default: 1, or 32 when grep is set."},
+    "grep":  {"type": "string", "description": "Optional regex; only nodes whose name matches (or have a matching descendant) survive."}
   },
   "required": []
 }`),
@@ -92,48 +94,56 @@ func registerTools() map[string]Tool {
 		},
 		"node_read": {
 			Name: "node_read",
-			Description: "Return the text between two 1-based (line, col) positions in a file. " +
-				"Convention matches structure's output: startLine/startCol inclusive, endLine/endCol exclusive. " +
-				"Works on any file regardless of language.",
+			Description: "Return text from a file. Three input shapes (pick one): " +
+				"{file} → entire file contents. " +
+				"{file, line, offset?, limit?} → line preview: starts at `line + offset` (default offset 0), returns `limit` lines (default 50). " +
+				"{file, startLine, startCol, endLine, endCol} → byte-precise range. startLine/startCol inclusive, endLine/endCol exclusive (matches structure's output). " +
+				"Replaces shelling out to read_file / cat / sed -n.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "file":      {"type": "string"},
+    "line":      {"type": "integer", "minimum": 1, "description": "Anchor line for line-preview form."},
+    "offset":    {"type": "integer", "minimum": 0, "description": "Lines to skip past anchor. Default 0."},
+    "limit":     {"type": "integer", "minimum": 1, "description": "Lines to return. Default 50."},
     "startLine": {"type": "integer", "minimum": 1},
     "startCol":  {"type": "integer", "minimum": 1},
     "endLine":   {"type": "integer", "minimum": 1},
     "endCol":    {"type": "integer", "minimum": 1}
   },
-  "required": ["file", "startLine", "startCol", "endLine", "endCol"]
+  "required": ["file"]
 }`),
 			Handler: handleNodeRead,
 		},
 		"node_edit": {
 			Name: "node_edit",
-			Description: "Atomically replace the text between two 1-based positions with newText. " +
-				"Same range convention as node_read. " +
-				"Goes through temp + Rename so a partial failure can't corrupt the file; file mode is preserved. " +
-				"After the write the file's slice of the index is re-parsed so subsequent node_references calls see the new state.",
+			Description: "Atomically edit a file. Three input shapes (pick one): " +
+				"{file, startLine, startCol, endLine, endCol, newText} → replace the text in that range with newText (same range convention as node_read). " +
+				"{file, newText} → create the file if missing, otherwise overwrite the whole contents (replaces shelling out to write_file). " +
+				"{file, diff} → apply a unified-diff patch against the current contents (one tool call for non-contiguous multi-region edits; LLM-generated patches with context lines work). " +
+				"All shapes go through temp + Rename so a partial failure can't corrupt the file; existing file mode is preserved. " +
+				"After the write the file's slice of the index is re-parsed and the diagnostic round-trip runs.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "file":      {"type": "string"},
+    "newText":   {"type": "string", "description": "New contents. With range: replaces that span. Without range: whole-file create-or-overwrite."},
+    "diff":      {"type": "string", "description": "Unified-diff patch. Mutually exclusive with newText/range."},
     "startLine": {"type": "integer", "minimum": 1},
     "startCol":  {"type": "integer", "minimum": 1},
     "endLine":   {"type": "integer", "minimum": 1},
-    "endCol":    {"type": "integer", "minimum": 1},
-    "newText":   {"type": "string"}
+    "endCol":    {"type": "integer", "minimum": 1}
   },
-  "required": ["file", "startLine", "startCol", "endLine", "endCol", "newText"]
+  "required": ["file"]
 }`),
 			Handler: handleNodeEdit,
 		},
 		"node_delete": {
 			Name: "node_delete",
-			Description: "Atomically remove the text between two 1-based positions. " +
-				"Equivalent to node_edit with newText='' but states intent. " +
-				"Range deletion is exact — surrounding whitespace and blank lines are not adjusted; use a wider range or follow up with node_edit if you want them trimmed. " +
-				"Index re-parses the file after the write.",
+			Description: "Delete text or a whole file. Two input shapes (pick one): " +
+				"{file, startLine, startCol, endLine, endCol} → atomically remove the text in that range (file stays, just shorter). Equivalent to node_edit{newText:''} but states intent. " +
+				"{file} → delete the whole file from disk. Operator-grade destructive — the file is removed and its slice dropped from the symbol index, no temp + Rename undo. " +
+				"Range deletion is exact: surrounding whitespace / blank lines are not adjusted; use a wider range or follow up with node_edit if you want them trimmed.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -143,7 +153,7 @@ func registerTools() map[string]Tool {
     "endLine":   {"type": "integer", "minimum": 1},
     "endCol":    {"type": "integer", "minimum": 1}
   },
-  "required": ["file", "startLine", "startCol", "endLine", "endCol"]
+  "required": ["file"]
 }`),
 			Handler: handleNodeDelete,
 		},
@@ -228,13 +238,28 @@ func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Path  string `json:"path"`
 		Depth *int   `json:"depth"`
+		Grep  string `json:"grep"`
 	}
 	if len(args) > 0 && string(args) != "null" {
 		if err := json.Unmarshal(args, &p); err != nil {
 			return nil, true, fmt.Errorf("bad arguments: %w", err)
 		}
 	}
+	var grepRe *regexp.Regexp
+	if p.Grep != "" {
+		re, err := regexp.Compile(p.Grep)
+		if err != nil {
+			return nil, true, fmt.Errorf("invalid grep regex: %w", err)
+		}
+		grepRe = re
+	}
+	// Default depth: 1 for a plain "show me this level" call; 32 when
+	// grep is set (the agent wants a search, not a listing). Caller
+	// can override either way.
 	depth := 1
+	if grepRe != nil {
+		depth = 32
+	}
 	if p.Depth != nil {
 		depth = *p.Depth
 		if depth < 0 {
@@ -250,14 +275,137 @@ func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		return nil, true, fmt.Errorf("stat %s: %w", p.Path, err)
 	}
 	if info.IsDir() {
-		entry, _ := structureForDir(abs, s.getRoot(), depth)
+		var entry structureEntry
+		if grepRe != nil {
+			// grep mode: expand files into their AST nodes so a
+			// regex over identifiers can hit them. The plain
+			// directory walker stops at filenames.
+			entry = s.structureForDirExpanded(abs, s.getRoot(), depth)
+		} else {
+			entry, _ = structureForDir(abs, s.getRoot(), depth)
+		}
+		if grepRe != nil {
+			pruned, ok := pruneStructure(entry, grepRe)
+			if !ok {
+				return jsonContent(emptyDirEntry(entry)), false, nil
+			}
+			entry = pruned
+		}
 		return jsonContent(entry), false, nil
 	}
 	entry, err := structureForFile(abs, s.languageForFile(abs), s.getRoot(), depth)
 	if err != nil {
 		return nil, true, err
 	}
+	if grepRe != nil {
+		pruned, ok := pruneStructure(entry, grepRe)
+		if !ok {
+			return jsonContent(emptyDirEntry(entry)), false, nil
+		}
+		entry = pruned
+	}
 	return jsonContent(entry), false, nil
+}
+
+// structureForDirExpanded is the grep-mode variant of structureForDir:
+// recurses into subdirectories AND expands every file's AST nodes
+// (cap depth at a sensible bound to avoid runaway). Used only when
+// `grep` is set on the structure call.
+func (s *Server) structureForDirExpanded(abs, root string, depth int) structureEntry {
+	entry := structureEntry{
+		Kind: "directory",
+		Path: relPath(abs, root),
+		Name: filepath.Base(abs),
+	}
+	if depth <= 0 {
+		return entry
+	}
+	dirEntries, err := os.ReadDir(abs)
+	if err != nil {
+		return entry
+	}
+	for _, de := range dirEntries {
+		name := de.Name()
+		if skipStructureDir(name) {
+			continue
+		}
+		childAbs := filepath.Join(abs, name)
+		if de.IsDir() {
+			child := s.structureForDirExpanded(childAbs, root, depth-1)
+			entry.Children = append(entry.Children, child)
+			continue
+		}
+		// Files: pull their AST nodes (one level deep is plenty —
+		// agents grep for top-level decls, not nested locals).
+		fileEntry, err := structureForFile(childAbs, s.languageForFile(childAbs), root, 1)
+		if err != nil {
+			// Fall back to a name-only file entry on parse failure
+			// so grep on the basename still works.
+			fileEntry = structureEntry{
+				Kind: "file",
+				Path: relPath(childAbs, root),
+				Name: name,
+			}
+		}
+		entry.Children = append(entry.Children, fileEntry)
+	}
+	sort.Slice(entry.Children, func(i, j int) bool {
+		return entry.Children[i].Path < entry.Children[j].Path
+	})
+	return entry
+}
+
+// pruneStructure walks the tree and keeps only entries whose own
+// `name` matches re, OR whose descendants contain a match. Returns
+// (pruned-entry, true) when something survives, (zero, false) when
+// nothing in the subtree matched.
+//
+// File / directory leaves match on their basename; AST node leaves
+// match on their identifier. Directories without surviving children
+// are dropped; files without surviving AST children but matching
+// basename keep their child list intact (the agent often wants the
+// node ranges when they grep for a filename).
+func pruneStructure(e structureEntry, re *regexp.Regexp) (structureEntry, bool) {
+	selfMatch := re.MatchString(e.Name)
+
+	var kept []structureEntry
+	for _, c := range e.Children {
+		if k, ok := pruneStructure(c, re); ok {
+			kept = append(kept, k)
+		}
+	}
+
+	if selfMatch {
+		// File / node with matching name: keep all original children
+		// so the agent can drill in without a second call. Dir with
+		// matching name: keep only matching children — there's no
+		// "drill in" value-add for unrelated siblings.
+		switch e.Kind {
+		case "file", "node":
+			return e, true
+		case "directory":
+			out := e
+			out.Children = kept
+			return out, true
+		}
+	}
+	if len(kept) > 0 {
+		out := e
+		out.Children = kept
+		return out, true
+	}
+	return structureEntry{}, false
+}
+
+// emptyDirEntry returns a stripped-down version of e with no children
+// — used when grep filtered everything out. Preserves Kind / Path /
+// Name so the caller knows what they asked about.
+func emptyDirEntry(e structureEntry) structureEntry {
+	return structureEntry{
+		Kind: e.Kind,
+		Path: e.Path,
+		Name: e.Name,
+	}
 }
 
 func structureForDir(abs, root string, depth int) (structureEntry, bool) {
@@ -434,56 +582,257 @@ type siteJSON struct {
 
 // -------------------------------------------------------------- node_read
 
+// nodeReadArgs accepts the three polymorphic input shapes for
+// node_read. All fields except File are optional; the handler
+// detects which shape the caller meant.
+type nodeReadArgs struct {
+	File string `json:"file"`
+	// Line-preview form (pointer-typed so we can detect "set").
+	Line   *int `json:"line,omitempty"`
+	Offset *int `json:"offset,omitempty"`
+	Limit  *int `json:"limit,omitempty"`
+	// Byte-precise range form.
+	StartLine *int `json:"startLine,omitempty"`
+	StartCol  *int `json:"startCol,omitempty"`
+	EndLine   *int `json:"endLine,omitempty"`
+	EndCol    *int `json:"endCol,omitempty"`
+}
+
 func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var a rangeArgs
+	var a nodeReadArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
-	if err := a.validate(); err != nil {
-		return nil, true, err
+	if a.File == "" {
+		return nil, true, errors.New("file is required")
 	}
+
+	hasRange := a.StartLine != nil || a.StartCol != nil || a.EndLine != nil || a.EndCol != nil
+	hasLine := a.Line != nil
+	if hasRange && hasLine {
+		return nil, true, errors.New("cannot combine line-preview form ({line, offset, limit}) with range form ({startLine, startCol, endLine, endCol})")
+	}
+
 	abs := s.resolveFileArg(a.File)
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
 	}
-	text, err := readRangeText(content, a)
-	if err != nil {
-		return nil, true, err
+
+	switch {
+	case hasRange:
+		// All four range fields must be present for the range form.
+		if a.StartLine == nil || a.StartCol == nil || a.EndLine == nil || a.EndCol == nil {
+			return nil, true, errors.New("range form requires all of startLine, startCol, endLine, endCol")
+		}
+		r := rangeArgs{
+			File:      a.File,
+			StartLine: *a.StartLine, StartCol: *a.StartCol,
+			EndLine: *a.EndLine, EndCol: *a.EndCol,
+		}
+		if err := r.validate(); err != nil {
+			return nil, true, err
+		}
+		text, err := readRangeText(content, r)
+		if err != nil {
+			return nil, true, err
+		}
+		return jsonContent(map[string]any{
+			"file":      a.File,
+			"startLine": r.StartLine, "startCol": r.StartCol,
+			"endLine": r.EndLine, "endCol": r.EndCol,
+			"text": text,
+		}), false, nil
+
+	case hasLine:
+		// Line preview: lines [Line+Offset, Line+Offset+Limit-1].
+		anchor := *a.Line
+		off := 0
+		if a.Offset != nil {
+			off = *a.Offset
+		}
+		limit := 50
+		if a.Limit != nil {
+			limit = *a.Limit
+		}
+		if anchor < 1 || off < 0 || limit < 1 {
+			return nil, true, errors.New("line >= 1, offset >= 0, limit >= 1")
+		}
+		start := anchor + off
+		text, returnedStart, returnedEnd := sliceLines(content, start, limit)
+		return jsonContent(map[string]any{
+			"file":      a.File,
+			"startLine": returnedStart,
+			"endLine":   returnedEnd,
+			"text":      text,
+		}), false, nil
+
+	default:
+		// Whole-file form.
+		return jsonContent(map[string]any{
+			"file": a.File,
+			"text": string(content),
+		}), false, nil
 	}
-	return jsonContent(map[string]any{
-		"file":      a.File,
-		"startLine": a.StartLine,
-		"startCol":  a.StartCol,
-		"endLine":   a.EndLine,
-		"endCol":    a.EndCol,
-		"text":      text,
-	}), false, nil
+}
+
+// sliceLines returns the requested line window (1-based, inclusive
+// on both ends), capped to the actual file extent. start past EOF
+// returns empty text. Returns the actual start/end line numbers
+// returned so the caller can echo them back.
+func sliceLines(content []byte, start, limit int) (text string, returnedStart, returnedEnd int) {
+	lines := strings.Split(string(content), "\n")
+	// Drop the trailing empty entry that Split produces on a
+	// final newline, so end-of-file math matches "line count" by
+	// the editor's reckoning.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if start > len(lines) {
+		return "", start, start
+	}
+	end := start + limit - 1
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return strings.Join(lines[start-1:end], "\n"), start, end
 }
 
 // -------------------------------------------------------------- node_edit / node_delete
 
+// nodeEditArgs accepts the three polymorphic input shapes for
+// node_edit. Pointers distinguish "set" from zero so we can detect
+// which shape the caller meant.
+type nodeEditArgs struct {
+	File    string `json:"file"`
+	NewText string `json:"newText"`
+	Diff    string `json:"diff"`
+
+	// Range form (existing).
+	StartLine *int `json:"startLine,omitempty"`
+	StartCol  *int `json:"startCol,omitempty"`
+	EndLine   *int `json:"endLine,omitempty"`
+	EndCol    *int `json:"endCol,omitempty"`
+
+	diagnosticOptions
+}
+
 func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		rangeArgs
-		diagnosticOptions
-		NewText string `json:"newText"`
-	}
+	var p nodeEditArgs
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
-	return s.applyRangeRewrite(p.rangeArgs, p.NewText, p.diagnosticOptions)
+	if p.File == "" {
+		return nil, true, errors.New("file is required")
+	}
+
+	hasRange := p.StartLine != nil || p.StartCol != nil || p.EndLine != nil || p.EndCol != nil
+	hasDiff := p.Diff != ""
+	switch {
+	case hasDiff && hasRange:
+		return nil, true, errors.New("cannot combine diff with range form")
+	case hasDiff && p.NewText != "":
+		return nil, true, errors.New("cannot combine diff with newText")
+	case hasDiff:
+		return s.applyDiffRewrite(p.File, p.Diff, p.diagnosticOptions)
+	case hasRange:
+		if p.StartLine == nil || p.StartCol == nil || p.EndLine == nil || p.EndCol == nil {
+			return nil, true, errors.New("range form requires all of startLine, startCol, endLine, endCol")
+		}
+		return s.applyRangeRewrite(rangeArgs{
+			File:      p.File,
+			StartLine: *p.StartLine, StartCol: *p.StartCol,
+			EndLine: *p.EndLine, EndCol: *p.EndCol,
+		}, p.NewText, p.diagnosticOptions)
+	default:
+		// {file, newText} no range → create-or-overwrite. newText
+		// can be empty (writes an empty file).
+		return s.applyWholeFileWrite(p.File, p.NewText, p.diagnosticOptions)
+	}
+}
+
+// nodeDeleteArgs accepts the two polymorphic input shapes for
+// node_delete. Same pattern as node_edit / node_read.
+type nodeDeleteArgs struct {
+	File      string `json:"file"`
+	StartLine *int   `json:"startLine,omitempty"`
+	StartCol  *int   `json:"startCol,omitempty"`
+	EndLine   *int   `json:"endLine,omitempty"`
+	EndCol    *int   `json:"endCol,omitempty"`
+	diagnosticOptions
 }
 
 func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		rangeArgs
-		diagnosticOptions
-	}
+	var p nodeDeleteArgs
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
-	return s.applyRangeRewrite(p.rangeArgs, "", p.diagnosticOptions)
+	if p.File == "" {
+		return nil, true, errors.New("file is required")
+	}
+	hasRange := p.StartLine != nil || p.StartCol != nil || p.EndLine != nil || p.EndCol != nil
+	if hasRange {
+		if p.StartLine == nil || p.StartCol == nil || p.EndLine == nil || p.EndCol == nil {
+			return nil, true, errors.New("range form requires all of startLine, startCol, endLine, endCol")
+		}
+		return s.applyRangeRewrite(rangeArgs{
+			File:      p.File,
+			StartLine: *p.StartLine, StartCol: *p.StartCol,
+			EndLine: *p.EndLine, EndCol: *p.EndCol,
+		}, "", p.diagnosticOptions)
+	}
+	// {file} no range → delete the whole file. Operator-grade
+	// destructive: the file is removed from disk and its slice
+	// dropped from the index.
+	return s.applyWholeFileDelete(p.File, p.diagnosticOptions)
+}
+
+// applyWholeFileDelete removes the file from disk + drops its slice
+// from the symbol index. Distinct from a range-delete (which leaves
+// the file in place) because the action is irreversible from the
+// agent's side — no temp + Rename safety net, just os.Remove.
+//
+// Returns an error when the file doesn't exist so the agent gets a
+// clear "already gone" signal instead of silent success.
+func (s *Server) applyWholeFileDelete(file string, opts diagnosticOptions) ([]Content, bool, error) {
+	abs := s.resolveFileArg(file)
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("stat %s: %w", file, err)
+	}
+	if info.IsDir() {
+		return nil, true, fmt.Errorf("%s is a directory; node_delete doesn't recurse", file)
+	}
+	bytesRemoved := info.Size()
+	if err := os.Remove(abs); err != nil {
+		return nil, true, fmt.Errorf("remove %s: %w", file, err)
+	}
+	// Drop the file's slice from the index. There's no
+	// "refresh-to-empty" — we synthesize an empty extractor result.
+	if idx := s.getIndex(); idx != nil {
+		if lang := s.languageForFile(abs); lang != "" {
+			idx.Refresh(abs, lang, nil)
+		}
+	}
+
+	uri := pathToURI(abs)
+	// No content for the diagnostic round-trip — the file is gone.
+	// gopls reacts to file-on-disk disappearance via its own
+	// watcher (or won't react at all in headless MCP); we just
+	// pass an empty content map.
+	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{}, opts)
+	payload := map[string]any{
+		"file":                 file,
+		"deleted":              true,
+		"bytesRemoved":         bytesRemoved,
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
+	}
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
+	return jsonContent(payload), false, nil
 }
 
 // applyRangeRewrite is the shared write path. Validates the range,
@@ -543,6 +892,104 @@ func (s *Server) applyRangeRewrite(a rangeArgs, newText string, opts diagnosticO
 		"replacedTo":           map[string]int{"line": a.EndLine, "col": a.EndCol},
 		"bytesRemoved":         endOff - startOff,
 		"bytesAdded":           len(newText),
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
+	}
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
+	return jsonContent(payload), false, nil
+}
+
+// applyWholeFileWrite is the {file, newText} no-range branch: create
+// the file if missing, otherwise overwrite the whole contents. Same
+// atomic temp + Rename path the range form uses; preserves the
+// existing file's mode when overwriting, defaults to 0644 when
+// creating.
+func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOptions) ([]Content, bool, error) {
+	abs := s.resolveFileArg(file)
+	created := false
+	mode := os.FileMode(0o644)
+	bytesRemoved := 0
+	if info, err := os.Stat(abs); err == nil {
+		mode = info.Mode().Perm()
+		if existing, err := os.ReadFile(abs); err == nil {
+			bytesRemoved = len(existing)
+		}
+	} else if os.IsNotExist(err) {
+		created = true
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return nil, true, fmt.Errorf("mkdir parent: %w", err)
+		}
+	} else {
+		return nil, true, fmt.Errorf("stat %s: %w", file, err)
+	}
+
+	out := []byte(newText)
+	tmp := abs + ".poly-lsp-mcp.tmp"
+	if err := os.WriteFile(tmp, out, mode); err != nil {
+		return nil, true, fmt.Errorf("write temp: %w", err)
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return nil, true, fmt.Errorf("rename: %w", err)
+	}
+	s.refreshFileInIndex(abs, out)
+
+	uri := pathToURI(abs)
+	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
+	payload := map[string]any{
+		"file":                 file,
+		"created":              created,
+		"bytesRemoved":         bytesRemoved,
+		"bytesAdded":           len(out),
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
+	}
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
+	return jsonContent(payload), false, nil
+}
+
+// applyDiffRewrite is the {file, diff} branch: parse the unified
+// diff, apply against the file's current content, atomic write
+// back. Errors surface the hunk/line that caused the mismatch so the
+// agent can regenerate the patch against fresh content. File must
+// already exist — create-on-write goes through the no-range path.
+func (s *Server) applyDiffRewrite(file, diff string, opts diagnosticOptions) ([]Content, bool, error) {
+	abs := s.resolveFileArg(file)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", file, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("stat %s: %w", file, err)
+	}
+	out, err := ApplyUnifiedDiff(content, diff)
+	if err != nil {
+		return nil, true, fmt.Errorf("apply diff: %w", err)
+	}
+
+	tmp := abs + ".poly-lsp-mcp.tmp"
+	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+		return nil, true, fmt.Errorf("write temp: %w", err)
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return nil, true, fmt.Errorf("rename: %w", err)
+	}
+	s.refreshFileInIndex(abs, out)
+
+	uri := pathToURI(abs)
+	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
+	payload := map[string]any{
+		"file":                 file,
+		"bytesRemoved":         len(content),
+		"bytesAdded":           len(out),
 		"diagnosticsAvailable": diags.Available,
 		"diagnosticsTimedOut":  diags.TimedOut,
 		"diagnostics":          diags.Items,

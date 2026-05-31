@@ -613,15 +613,16 @@ Each diagnostic carries enough structure that the agent can act on it without re
 - [x] `symbolFromRef` hardened against JSON-escape bleed: `(\S+)` could capture `Foo\n",` out of a JSON description string; the new leading-identifier walk drops everything past the first non-`[A-Za-z0-9_]` byte. Unit-tested with `Symbol\n`, `Symbol\t`, and the full `server/main.go:Symbol\n",` shape.
 - [x] `testdata/fixtures/gat-greeter/server/{types.go,main.go}` — hand-written stubs shaped like `protoc-gen-go` output, `@ref`-linked back to `greeter.proto`. `TestCrossLanguageDiagnosticOnGeneratedStub` synthesizes a flat Go module from these files in a tempdir, spawns gopls via the MCP path, edits `main.go` to reference an undefined field on `HelloResponse`, and asserts the diagnostic comes back enriched (text, context, enclosingNode.Name=="Run") AND that `node_references` on `HelloResponse` from `types.go` returns both the Go declaration and the proto's `@ref`-anchored site. Closes the Phase-5 cross-language fixture loop.
 
-## Phase 6 — tool ergonomics (filed 2026-05-30)
+## Phase 6 — tool ergonomics (shipped)
 
 Surfaced from autowork3 integration. The 6 v0.2 tools cover the
 **semantic** axis (identifier-resolution, cross-language references,
-structured rename) but force the agent into auxiliary builtin tools
+structured rename) but forced the agent into auxiliary builtin tools
 (`read_file`, `grep`, `ls`, `write_file`) for everything else.
-Goal of this phase: make `mcp_*` a complete editor surface so an
-LLM agent can ship with **just `shell` + the MCP tool set**, no
-workspace-side `read_file`/`grep`/`ls`/`write_file` shims.
+Goal: make `mcp_*` a complete editor surface so an LLM agent can
+ship with just MCP + `shell` (the escape hatch for tests/git/
+project-specific commands), no workspace-side
+`read_file`/`grep`/`ls`/`write_file` shims.
 
 ### Gaps surfaced
 
@@ -692,16 +693,35 @@ for everything that isn't read/edit/structure (running tests,
 running git, anything project-specific). MCP shouldn't try to
 subsume it.
 
-### Implementation order
+### Implementation order — all shipped
 
-1. `structure` grep (smallest surface, additive to existing
-   schema, no removals).
-2. `node_read` polymorphic input (whole-file + line/offset).
-3. `node_edit` create-on-write + diff form.
-4. Once 1–3 are in, autowork3 drops `read_file` / `write_file`
-   / `grep` / `ls` from `cmd/worker/main.go`. Filed in
-   autowork3's `plan/plan.md` (per-thread MCP follow-ups) as
-   the consuming change.
+1. [x] `structure` gains `grep` regex param. Matches each entry's
+   `name` (file basename, directory name, code identifier);
+   subtrees with no descendant match are pruned. Auto-bumps depth
+   to 32 when `grep` is set, so the agent doesn't need to ask
+   for a deep walk explicitly. Grep-mode expands files into their
+   AST nodes so identifier matching works alongside filename
+   matching. Tests cover identifier match / basename match /
+   no-match-returns-empty / invalid-regex-is-error.
+2. [x] `node_read` polymorphic input: `{file}` whole-file,
+   `{file, line, offset?, limit?}` line preview (defaults
+   offset=0, limit=50), existing `{file, startLine/Col,
+   endLine/Col}` byte-precise range. Mixed shapes are
+   error. Tests cover each form including past-EOF.
+3. [x] `node_edit` polymorphic: existing range form,
+   `{file, newText}` create-or-overwrite (auto-mkdir parent),
+   `{file, diff}` unified-diff patch (strict context matching,
+   in-order hunks, CRLF normalization). Tests cover each form
+   plus context-mismatch and mixed-shape errors. `ApplyUnifiedDiff`
+   lives in `mcp/diff.go` for reuse.
+4. [x] `node_delete` polymorphic: existing range form,
+   `{file}` whole-file delete (`os.Remove` + drop the file's
+   slice from the index). Operator-grade destructive — surfaces
+   errors clearly when the path is missing or is a directory.
+5. [ ] Once 1–4 are in, autowork3 drops `read_file` /
+   `write_file` / `grep` / `ls` from `cmd/worker/main.go`.
+   Filed in autowork3's `plan/plan.md` (per-thread MCP
+   follow-ups) as the consuming change.
 
 ## Non-goals (for now)
 

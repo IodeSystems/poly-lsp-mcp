@@ -171,20 +171,23 @@ Disable per-session via `Server.SetGitPrewarm(false)` if the up-front cost outwe
 
 ## Testing
 
+Convenience targets in the `Makefile`:
+
 ```sh
-# Full suite (skips live-LSP and live-gat tests):
-go test -short ./...
-
-# Including live gopls + gat fixture:
-go test ./...
-
-# Real-binary LSP conformance smoke:
-python3 scripts/smoke/editor_smoke.py
-
-# Live LLM e2e smoke (requires llm.iodesystems.com or your own
-# OpenAI-compatible endpoint):
-python3 scripts/smoke/llm_e2e.py
+make test          # short suite — fast, skips live-LSP / live-gat e2e
+make test-all      # full suite (needs gopls + git on PATH)
+make test-race     # short suite + race detector (per-PR gate)
+make test-race-all # full suite + race detector (pre-release)
+make check         # vet + test + test-race
+make smoke-editor  # real-binary LSP conformance smoke
+make smoke-llm     # live LLM end-to-end smoke
 ```
+
+The race detector is the standing concurrency gate — exercises the
+`DiagnosticStore` ↔ child-LSP-readloop interactions, parse cache
+under concurrent reads/writes, and the manager spawn/restart
+goroutines. Clean under three consecutive `make test-race-all`
+runs as of the most recent commit on `main`.
 
 ## Layout
 

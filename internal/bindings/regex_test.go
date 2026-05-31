@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/iodesystems/poly-lsp-mcp/internal/config"
-	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
 func TestEvalRegexSinglePatternNoCapture(t *testing.T) {

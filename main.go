@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/iodesystems/poly-lsp-mcp/internal/config"
-	"github.com/iodesystems/poly-lsp-mcp/internal/mcp"
-	"github.com/iodesystems/poly-lsp-mcp/internal/multiplex"
-	"github.com/iodesystems/poly-lsp-mcp/internal/server"
+	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/mcp"
+	"github.com/iodesystems/poly-lsp-mcp/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/server"
 )
 
 func main() {

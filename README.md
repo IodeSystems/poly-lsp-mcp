@@ -189,26 +189,65 @@ under concurrent reads/writes, and the manager spawn/restart
 goroutines. Clean under three consecutive `make test-race-all`
 runs as of the most recent commit on `main`.
 
+## Library usage
+
+The same packages the standalone binary uses are importable. See
+`examples/embed/main.go` for a small program that builds an MCP
+server in its own process.
+
+```go
+import (
+    "github.com/iodesystems/poly-lsp-mcp/config"
+    "github.com/iodesystems/poly-lsp-mcp/mcp"
+    "github.com/iodesystems/poly-lsp-mcp/multiplex"
+)
+
+cfg, _, _ := config.LoadOrDefault("poly-lsp-mcp.yaml")
+reg, _ := cfg.Build()
+srv := mcp.New(reg, "/path/to/workspace", cfg.Bindings, cfg.Schemas)
+srv.SetManager(multiplex.NewManager(reg))
+srv.Serve(os.Stdin, os.Stdout)
+```
+
+Public packages (stable):
+
+| Package | What's in it |
+|---|---|
+| `config` | Language registry, YAML loader, `auto_schemas` detect. |
+| `mcp` | MCP server, tools, resources. |
+| `server` | LSP server (multiplex + index fallback). |
+| `multiplex` | Child LSP supervisor + `DiagnosticStore`. |
+| `symbols` | Cross-language index, parse cache, tree-sitter extractors, refactor primitives (`FindFunctionSignature`, `RewriteSignature`, `FindCallSites`, `PrewarmFromBranch`). |
+
+Internal-only (subject to change without notice):
+
+- `internal/bindings` — declared-binding resolver + schema dialects (used by `server` and `mcp` directly).
+- `internal/git` — `git` binary wrapper (used by `symbols.PrewarmFromBranch` and `mcp`'s prewarm).
+- `internal/jsonrpc` — JSON-RPC 2.0 framing.
+
 ## Layout
 
 ```
 main.go                      entry, subcommand dispatch
-internal/jsonrpc/            JSON-RPC framing
-internal/server/             LSP server
-internal/mcp/                MCP server + tools + resources
-internal/multiplex/          child LSP supervisor + diagnostic store
-internal/symbols/            index, tree-sitter extractors, lexical
+config/                      language registry, YAML loader, schema
+                             auto-detect (PUBLIC)
+mcp/                         MCP server + tools + resources (PUBLIC)
+server/                      LSP server (PUBLIC)
+multiplex/                   child LSP supervisor + diagnostic store
+                             (PUBLIC)
+symbols/                     index, tree-sitter extractors, lexical
                              fallback, parse cache, comment scanner,
                              refactor primitives, branch prewarm
+                             (PUBLIC)
+internal/jsonrpc/            JSON-RPC framing
 internal/bindings/           declared bindings (Tier 2) + schema
                              dialects (Tier 3)
-internal/config/             language registry, YAML loader, schema
-                             auto-detect
 internal/git/                git binary wrapper
 testdata/fixtures/polyglot/  multi-language fixture
 testdata/fixtures/gat-greeter/
                              live gat → poly-lsp-mcp @ref fixture +
                              cross-language diagnostic Go server
+examples/embed/              library-mode example
 plan/plan.md                 phased roadmap (all phases shipped)
 ```
 

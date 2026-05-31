@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/iodesystems/poly-lsp-mcp/internal/config"
-	"github.com/iodesystems/poly-lsp-mcp/internal/symbols"
+	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
 // buildIndex constructs an Index pre-populated with lexical sites for a

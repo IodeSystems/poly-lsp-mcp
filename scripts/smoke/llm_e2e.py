@@ -107,6 +107,51 @@ class MCP:
 # ----- OpenAI-compatible chat ----------------------------------------------
 
 
+MAX_LLM_RETRIES = 5
+RETRY_BACKOFF_FALLBACK_S = 15
+
+
+def _parse_retry_after(header_value: str) -> float | None:
+    """RFC 7231 Retry-After: seconds (int) or HTTP-date. Return seconds
+    or None when the header is absent / unparseable."""
+    if not header_value:
+        return None
+    try:
+        return float(header_value.strip())
+    except ValueError:
+        pass
+    # HTTP-date form — convert to delta seconds. Use email.utils for
+    # the parser (stdlib, handles every RFC 1123 case).
+    try:
+        import email.utils
+        import time as _time
+
+        parsed = email.utils.parsedate_to_datetime(header_value)
+        return max(0.0, parsed.timestamp() - _time.time())
+    except Exception:
+        return None
+
+
+def _retry_after_from_body(err: urllib.error.HTTPError) -> float | None:
+    """Some endpoints stash the retry hint in the JSON body instead of
+    (or in addition to) the header. Look for {retry_after: N} or
+    {error: {retry_after: N}}."""
+    try:
+        body_text = err.read().decode("utf-8", errors="replace")
+        payload = json.loads(body_text)
+    except Exception:
+        return None
+    for candidate in (payload.get("retry_after"), (payload.get("error") or {}).get("retry_after")):
+        if isinstance(candidate, (int, float)):
+            return float(candidate)
+        if isinstance(candidate, str):
+            try:
+                return float(candidate)
+            except ValueError:
+                continue
+    return None
+
+
 def llm_chat(endpoint: str, model: str, messages: list[dict], tools: list[dict]) -> dict:
     body = json.dumps(
         {
@@ -116,13 +161,47 @@ def llm_chat(endpoint: str, model: str, messages: list[dict], tools: list[dict])
             "max_tokens": 1500,
         }
     ).encode()
-    req = urllib.request.Request(
-        endpoint,
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as r:
-        return json.loads(r.read())
+
+    # Optional Bearer auth — most OpenAI-compatible endpoints accept
+    # it and the busy-tier ones rate-limit harder on anonymous calls.
+    # Honors both POLY_LSP_MCP_LLM_TOKEN and the conventional
+    # OPENAI_API_KEY, in that priority order.
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("POLY_LSP_MCP_LLM_TOKEN") or os.environ.get("OPENAI_API_KEY")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    for attempt in range(1, MAX_LLM_RETRIES + 1):
+        req = urllib.request.Request(endpoint, data=body, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == MAX_LLM_RETRIES:
+                # On non-429 or last attempt, surface the body in the
+                # message so failures are debuggable.
+                try:
+                    body_text = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body_text = ""
+                raise urllib.error.HTTPError(
+                    e.url, e.code, f"{e.reason}: {body_text[:300]}", e.headers, None
+                )
+            wait_s = _parse_retry_after(e.headers.get("Retry-After", ""))
+            if wait_s is None:
+                wait_s = _retry_after_from_body(e)
+            if wait_s is None:
+                # Exponential-ish fallback when the server didn't tell
+                # us when to come back. 15s, 30s, 45s, 60s, …
+                wait_s = RETRY_BACKOFF_FALLBACK_S * attempt
+            print(
+                f"[llm] 429, retrying in {wait_s:.0f}s (attempt {attempt}/{MAX_LLM_RETRIES})",
+                file=sys.stderr,
+            )
+            import time as _time
+
+            _time.sleep(wait_s)
+    raise RuntimeError("llm_chat: exhausted retries without success")
 
 
 def to_openai_tools(mcp_tools: list[dict]) -> list[dict]:

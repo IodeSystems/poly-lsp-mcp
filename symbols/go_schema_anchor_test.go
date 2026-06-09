@@ -51,3 +51,37 @@ func TestGoSchemaAnchorExtractor(t *testing.T) {
 		}
 	}
 }
+
+// TestGoSchemaAnchorConfigurable proves the anchor keys are config-driven:
+// SetGoSchemaAnchorKeys replaces the default so a non-huma op-id field works.
+func TestGoSchemaAnchorConfigurable(t *testing.T) {
+	saved := goSchemaAnchorKeys
+	defer func() { goSchemaAnchorKeys = saved }()
+
+	SetGoSchemaAnchorKeys([]string{"RouteName"})
+	src := []byte("package p\n" +
+		"var _ = Route{RouteName: \"listWidgets\", OperationID: \"ignored\"}\n")
+	hits := DefaultExtractor("go").Extract(src)
+
+	var sawRoute, sawOpID bool
+	for _, h := range hits {
+		switch h.Name {
+		case "listWidgets":
+			sawRoute = true
+		case "ignored":
+			sawOpID = true
+		}
+	}
+	if !sawRoute {
+		t.Error("configured anchor key RouteName was not applied (listWidgets missing)")
+	}
+	if sawOpID {
+		t.Error("OperationID still anchored after override replaced it")
+	}
+
+	// Empty keeps current set (no-op), so the default path is unaffected.
+	SetGoSchemaAnchorKeys(nil)
+	if _, ok := goSchemaAnchorKeys["RouteName"]; !ok {
+		t.Error("SetGoSchemaAnchorKeys(nil) should be a no-op, not a reset")
+	}
+}

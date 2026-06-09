@@ -73,6 +73,13 @@ type Config struct {
 	Bindings    []Binding  `yaml:"bindings,omitempty"`
 	Schemas     []Schema   `yaml:"schemas,omitempty"`
 	AutoSchemas bool       `yaml:"auto_schemas,omitempty"`
+	// GoSchemaAnchors: Go struct-field names whose string VALUE names a schema
+	// entity — the codegen source of a generated API name (e.g. huma/gat's
+	// OperationID → the GraphQL field / OpenAPI operationId). Indexing the string
+	// lets cross-language rename reach the Go registration that regenerates the
+	// field. Empty → the default [OperationID]; set it to teach other frameworks'
+	// op-id fields.
+	GoSchemaAnchors []string `yaml:"go_schema_anchors,omitempty"`
 }
 
 // Registry is the in-memory lookup view: extension → language. Built from a

@@ -10,6 +10,7 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/server"
+	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
 func main() {
@@ -94,6 +95,7 @@ func loadConfigOrDie(path string) (*config.Config, *config.Registry) {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	symbols.SetGoSchemaAnchorKeys(cfg.GoSchemaAnchors) // empty → default [OperationID]
 	if used {
 		log.Printf("config: loaded %s", path)
 	} else {

@@ -22,8 +22,25 @@ type goSchemaAnchorExtractor struct {
 }
 
 // goSchemaAnchorKeys: struct-field names whose string value names a schema entity.
-// OperationID is huma/gat's operation id (becomes the gat GraphQL field name).
+// OperationID is huma/gat's operation id (becomes the gat GraphQL field name). The
+// set is config-driven via SetGoSchemaAnchorKeys (default below); the extractor reads
+// this package var at extract time, so a startup override applies everywhere.
 var goSchemaAnchorKeys = map[string]struct{}{"OperationID": {}}
+
+// SetGoSchemaAnchorKeys overrides which Go struct-field names are treated as
+// schema-source anchors (config `go_schema_anchors`). Empty keeps the default
+// ([OperationID]). Intended to be called once at startup, before extraction.
+func SetGoSchemaAnchorKeys(keys []string) {
+	m := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		if k != "" {
+			m[k] = struct{}{}
+		}
+	}
+	if len(m) > 0 {
+		goSchemaAnchorKeys = m
+	}
+}
 
 func newGoSchemaAnchorExtractor(base Extractor, lang *sitter.Language) *goSchemaAnchorExtractor {
 	const q = `(keyed_element

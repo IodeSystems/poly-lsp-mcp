@@ -406,10 +406,17 @@ var defaultExtractors = map[string]Extractor{
 	// `function`/`return`/`export`/etc. as non-identifier nodes — we
 	// only need to subtract the type-name builtins the grammar surfaces
 	// as type_identifier.
-	"typescript": mustTreeSitterExtractor(tsx.GetLanguage(), tsxIdentifierQuery, keywordSet(
-		"string", "number", "boolean", "any", "unknown", "never",
-		"object", "void", "undefined", "null",
-	)),
+	// Wrapped so GraphQL embedded in graphql(`...`) / gql`...` template literals
+	// (the graphql-codegen / graphql-request pattern) is indexed too — otherwise a
+	// GraphQL field reference inside a TS query string is invisible (the body is an
+	// opaque string node), which breaks cross-language rename of gat/codegen ops.
+	"typescript": newEmbeddedGraphQLExtractor(
+		mustTreeSitterExtractor(tsx.GetLanguage(), tsxIdentifierQuery, keywordSet(
+			"string", "number", "boolean", "any", "unknown", "never",
+			"object", "void", "undefined", "null",
+		)),
+		tsx.GetLanguage(),
+	),
 	"sql": mustTreeSitterExtractor(sql.GetLanguage(), sqlIdentifierQuery, nil),
 	// Python via tree-sitter. Keywords filter is trimmed to the builtins
 	// the grammar surfaces as identifier nodes — proper Python keywords

@@ -229,6 +229,23 @@ func registerTools() map[string]Tool {
 }`),
 			Handler: handleSearch,
 		},
+		"node_rename_file": {
+			Name: "node_rename_file",
+			Description: "Move/rename a file AND rewrite the import specifiers that point at it across the " +
+				"workspace (the workspace/willRenameFiles capability). Without this a file rename leaves every " +
+				"importer with a dangling path. TS/JS today: relative specifiers (extensionless or extensioned), " +
+				"`import`/`export … from`, dynamic `import()`, and `require()`. Go imports are package-based " +
+				"(a same-package move needs no edit); Python dotted imports are not yet rewritten.",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "from": {"type": "string", "description": "Existing file path (workspace-relative or absolute)."},
+    "to":   {"type": "string", "description": "New file path. Parent dirs are created; must not already exist."}
+  },
+  "required": ["from", "to"]
+}`),
+			Handler: handleNodeRenameFile,
+		},
 	}
 }
 

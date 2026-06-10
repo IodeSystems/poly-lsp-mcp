@@ -142,6 +142,37 @@ Plus a **universal comment scanner** that runs on every walked file:
 
 Generators that emit cross-language artifacts (e.g., gat in gwag emits `@ref` back-references in proto / GraphQL SDL / OpenAPI x-ref) get cross-language linkage for free with no per-framework parsing dialect on our side.
 
+## Derivation-aware refactoring (`@derived`)
+
+Tiers 1–3 answer *"are these the same symbol?"*. Generated code needs a stronger, **directional** relationship: a GraphQL field or a generated Go struct field isn't the *same as* its source — it's **derived from** it, and regenerates. Editing the derived copy is futile (codegen overwrites it); the edit belongs at the source. poly-lsp-mcp models this as `@derived` edges that **the generators emit** — it never guesses the mapping by replicating a naming rule. (A lexical name-match across namespaces — a Go string vs a GraphQL field, a column vs a PascalCase field — is a *guess*, and guesses are advisory only.)
+
+**Two emitters today** (both monorepo forks):
+
+- **gat** (gwag) emits `@derived(operationId: "x")` on every generated GraphQL SDL field — it derives from the Go huma operation with that `OperationID`.
+- **the sqlc-metaquery fork** emits a `derived:"table.column"` struct tag on every generated Go field — it derives from that schema column.
+
+**The SQL root is the migration-fold.** A column's source of truth isn't any single file — it's the cumulative result of the ordered migrations. `migrations.Fold` parses the DDL (CREATE/ALTER TABLE, CREATE/DROP VIEW) across the `*.up.sql` files in order and yields each column's current **defining site**.
+
+**Consumers** turn the declared edges into authoritative bindings at index build:
+
+- `ApplyDerived` reads SDL `@derived` → binds each field's Go `OperationID` source (declared confidence).
+- `ApplyDerivedSQL` reads the `derived:` tags → folds the migrations → binds each column's defining migration site (declared).
+
+Because the link is **declared, not guessed**, cross-namespace lexical matches stay advisory: `node_refactor` renames the authoritative sites and returns the lexical ones under `candidates` — *recommendations, not actions* — unless you opt in with `applyCandidates: true`.
+
+### The variance model
+
+Renaming a `@derived` **source** (a column, an operation) is *mode-ambiguous*: rename the underlying definition (cascading to every dependent), or alias it locally? `node_refactor` **fails closed** — applies nothing, returns `variance: true` plus the source(s) and the modes:
+
+| mode | effect | automated |
+|------|--------|-----------|
+| `underlying` | rename the source + cascade every reference; derived layers regenerate | ✅ |
+| `projection` | rename one projection/alias, leave the source | manual |
+| `mapping` | keep the source name, add an alias so the derived name changes | manual |
+| `hide` | (delete) drop from a view / json tag instead of dropping the source | manual |
+
+Prescribe one with `resolution: {mode, target}`; `target` (`file:line`) disambiguates **fan-in** when more than one source shares a name. Same fail-closed posture as the candidates rule — extended from *whether* to act to *how*.
+
 ## Diagnostics in edit responses (MCP)
 
 After every `node_edit` / `node_delete` / `node_refactor`:
@@ -172,7 +203,7 @@ Supports Go, TypeScript (.ts/.tsx/.js), and Python.
 }
 ```
 
-- **rename**: workspace-wide, with declared-binding + aliasing safety. Touches comments and prose only when `includeComments: true`.
+- **rename**: workspace-wide, with declared-binding + aliasing safety. Touches comments and prose only when `includeComments: true`. Cross-namespace lexical guesses are returned as `candidates` (apply with `applyCandidates: true`); renaming a `@derived` source fails closed pending `resolution: {mode, target}` — see [Derivation-aware refactoring](#derivation-aware-refactoring-derived).
 - **params**: rebuilds the function declaration. When arity changes, callers across the workspace are rewritten best-effort — args truncated on shrink, padded with language-appropriate zero values on growth (`""`, `0`, `false`, `nil` / `null` / `None`, `[]` / `{}`, …). Spread / splat callers are reported as `skipped` so you decide.
 - **return**: replaces the existing return type or inserts one into a previously-void declaration.
 
@@ -260,7 +291,10 @@ symbols/                     index, tree-sitter extractors, lexical
                              (PUBLIC)
 internal/jsonrpc/            JSON-RPC framing
 internal/bindings/           declared bindings (Tier 2) + schema
-                             dialects (Tier 3)
+                             dialects (Tier 3) + @derived consumers
+                             (gat / sqlc → declared sources)
+internal/migrations/         *.up.sql migration-fold → cumulative
+                             schema (the SQL derivation root)
 internal/git/                git binary wrapper
 testdata/fixtures/polyglot/  multi-language fixture
 testdata/fixtures/gat-greeter/
@@ -272,6 +306,6 @@ plan/plan.md                 phased roadmap (all phases shipped)
 
 ## Status
 
-Phase 0 through Phase 5 plus the stacked-branch tail of Phase 3 are all shipped. The roadmap is effectively complete; further work is scope expansion (new refactor kinds, more language coverage) and ergonomics.
+Phase 0 through Phase 5 plus the stacked-branch tail of Phase 3 are all shipped. On top of that, the **derivation model** (`@derived` emit→consume→fail-closed variance refactor, with the SQL migration-fold) is complete. The roadmap is effectively complete; further work is scope expansion (new refactor kinds, more `@derived` emitters/modes, more language coverage) and ergonomics.
 
 See `plan/plan.md` for the full feature history with rationale for each design decision.

@@ -198,7 +198,8 @@ func registerTools() map[string]Tool {
     },
     "kind":            {"type": "string", "enum": ["rename"], "description": "Legacy shape. Prefer refactor:{rename: X}."},
     "newName":         {"type": "string", "description": "Required when kind='rename'."},
-    "includeComments": {"type": "boolean", "description": "Rename word-boundary mentions in comments / prose / non-indexed file types too. Default false."}
+    "includeComments": {"type": "boolean", "description": "Rename word-boundary mentions in comments / prose / non-indexed file types too. Default false."},
+    "applyCandidates": {"type": "boolean", "description": "Also rename the lexical name-match sites that are cross-namespace GUESSES. Default false: those sites are returned under 'candidates' (recommendations) and NOT touched — review them, then re-run with applyCandidates:true. Authoritative sites (declared @derived/binding, child-LSP) are always renamed."}
   },
   "required": ["file", "startLine", "startCol", "endLine", "endCol"]
 }`),
@@ -1504,6 +1505,10 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 		Kind            string `json:"kind"`
 		NewName         string `json:"newName"`
 		IncludeComments bool   `json:"includeComments"`
+		// ApplyCandidates also renames the lexical name-match sites that are
+		// guesses across namespaces (otherwise they're returned as candidates,
+		// not touched). Explicit intent to act on a guess.
+		ApplyCandidates bool `json:"applyCandidates"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -1534,7 +1539,7 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 	}
 	signatureOps := ops.Params != nil || ops.Return != ""
 	if !signatureOps {
-		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.diagnosticOptions)
+		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.diagnosticOptions)
 	}
 	return s.refactorSignature(p.rangeArgs, ops, p.IncludeComments, p.diagnosticOptions)
 }
@@ -1610,7 +1615,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 	if ops.Rename != "" && ops.Rename != oldName {
 		nameRangeArgs := nameRangeAfterSignature(a, postSig, out)
-		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, diagnosticOptions{})
+		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, diagnosticOptions{})
 		if renameErr != nil {
 			return renameContent, renameIsErr, renameErr
 		}
@@ -1831,7 +1836,7 @@ func byteOffsetToLineColPos(content []byte, offset int) (int, int) {
 	return line, col
 }
 
-func (s *Server) refactorRename(a rangeArgs, newName string, includeComments bool, opts diagnosticOptions) ([]Content, bool, error) {
+func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, applyCandidates bool, opts diagnosticOptions) ([]Content, bool, error) {
 	idx := s.getIndex()
 	if idx == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
@@ -1849,7 +1854,7 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments boo
 		return nil, true, errors.New("range is empty; pass the identifier's nameStart/nameEnd range")
 	}
 
-	resolved := s.buildRenameEdits(name, newName)
+	resolved, candidates := s.buildRenameEdits(name, newName, applyCandidates)
 	if includeComments {
 		// Workspace-wide word-boundary scan picks up positions the
 		// index intentionally doesn't see — most commonly comments,
@@ -1905,6 +1910,21 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments boo
 	}
 	if diags.DroppedDiagnostics > 0 {
 		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
+	// Guessed (lexical, cross-namespace) sites are RECOMMENDED, not actioned —
+	// surface them so the caller can review and opt in with applyCandidates:true.
+	if len(candidates) > 0 {
+		root := s.getRoot()
+		recs := make([]map[string]any, 0, len(candidates))
+		for _, c := range candidates {
+			recs = append(recs, map[string]any{
+				"file": relPath(c.File, root), "line": c.Line, "col": c.Col,
+				"language": c.Language, "confidence": confidenceLabel(c.Confidence),
+			})
+		}
+		payload["candidates"] = recs
+		payload["candidatesNote"] = "lexical name-match sites NOT renamed (a guess across namespaces). " +
+			"Review and re-run with applyCandidates:true to include them."
 	}
 	return jsonContent(payload), false, nil
 }
@@ -2047,20 +2067,21 @@ type applyResult struct {
 	Skipped string `json:"skipped,omitempty"`
 }
 
-// buildRenameEdits plans the rewrites for renaming `name` to `newName`.
-// Confidence policy: declared sites win when any are present
-// (precision opt-in via poly-lsp-mcp.yaml bindings or schemas), otherwise
-// lexical hits as best effort. Aliasing safety: per-site on-disk text
-// must equal name; mismatches are skipped so aliasing bindings don't
-// substitute the wrong token.
-func (s *Server) buildRenameEdits(name, newName string) []resolvedEdit {
+// buildRenameEdits plans the rewrites for renaming `name` to `newName`. Returns the
+// edits to apply plus the lexical CANDIDATES that were NOT actioned (guessed sites
+// held back unless applyCandidates is set — see chooseRenameSites). Aliasing safety:
+// per-site on-disk text must equal name; mismatches are skipped so aliasing bindings
+// don't substitute the wrong token.
+func (s *Server) buildRenameEdits(name, newName string, applyCandidates bool) ([]resolvedEdit, []symbols.Site) {
 	idx := s.getIndex()
 	if idx == nil {
-		return nil
+		return nil, nil
 	}
-	sites := chooseRenameSites(idx.Lookup(name))
-	if len(sites) == 0 {
-		return nil
+	action, cands := chooseRenameSites(idx.Lookup(name))
+	sites := action
+	if applyCandidates {
+		sites = append(append([]symbols.Site(nil), action...), cands...)
+		cands = nil // actioned, so not reported as outstanding candidates
 	}
 	fileCache := map[string][]byte{}
 	out := make([]resolvedEdit, 0, len(sites))
@@ -2078,10 +2099,16 @@ func (s *Server) buildRenameEdits(name, newName string) []resolvedEdit {
 			NewText: newName,
 		})
 	}
-	return out
+	return out, cands
 }
 
-func chooseRenameSites(all []symbols.Site) []symbols.Site {
+// chooseRenameSites partitions Lookup results into the sites a rename should ACTION
+// by default vs the lexical guesses it should only RECOMMEND. When any authoritative
+// site exists (declared @derived/binding or a child-LSP result), those are actioned
+// and the lexical name-matches are returned as candidates — a guess that needs
+// explicit intent (applyCandidates) before it's touched. With no authoritative site
+// (e.g. a single-language lexical rename), the lexical sites ARE the rename.
+func chooseRenameSites(all []symbols.Site) (action, candidates []symbols.Site) {
 	var declared, lexical []symbols.Site
 	for _, s := range all {
 		if s.Confidence >= symbols.ConfidenceDeclared {
@@ -2091,9 +2118,9 @@ func chooseRenameSites(all []symbols.Site) []symbols.Site {
 		}
 	}
 	if len(declared) > 0 {
-		return declared
+		return declared, lexical
 	}
-	return lexical
+	return lexical, nil
 }
 
 func siteTextMatches(site symbols.Site, name string, cache map[string][]byte) bool {

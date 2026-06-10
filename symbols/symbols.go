@@ -395,19 +395,12 @@ var defaultExtractors = map[string]Extractor{
 	// literals and comments stop polluting the index. Keywords are
 	// kept for builtin types (int64, string, etc.) which the grammar
 	// reports as type_identifier nodes.
-	// Wrapped so huma/gat `OperationID: "x"` string literals are indexed as the
-	// codegen SOURCE of a generated API name (the gat GraphQL field, OpenAPI
-	// operationId). Without this a cross-language rename can't reach the Go
-	// registration and reverts on the next codegen run.
-	"go": newGoSchemaAnchorExtractor(
-		mustTreeSitterExtractor(golang.GetLanguage(), goIdentifierQuery, keywordSet(
-			"string", "int", "int8", "int16", "int32", "int64",
-			"uint", "uint8", "uint16", "uint32", "uint64", "byte", "rune",
-			"float32", "float64", "bool", "any", "error",
-			"true", "false", "nil", "iota",
-		)),
-		golang.GetLanguage(),
-	),
+	"go": mustTreeSitterExtractor(golang.GetLanguage(), goIdentifierQuery, keywordSet(
+		"string", "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64", "byte", "rune",
+		"float32", "float64", "bool", "any", "error",
+		"true", "false", "nil", "iota",
+	)),
 	// TypeScript (and .tsx) via tsx grammar. The keyword filter is
 	// shorter than the lexical set because tree-sitter already drops
 	// `function`/`return`/`export`/etc. as non-identifier nodes — we

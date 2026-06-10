@@ -337,19 +337,21 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		} else {
 			s.setIndex(idx)
 			log.Printf("mcp initialize: indexed %d names from %s", len(idx.Names()), s.getRoot())
-			if len(s.bindings) > 0 || len(s.schemas) > 0 {
-				resolver := bindings.NewResolver(s.getRoot())
-				if len(s.bindings) > 0 {
-					n, err := resolver.Apply(idx, s.bindings)
-					if err != nil {
-						log.Printf("mcp initialize: some bindings failed validation: %v", err)
-					}
-					log.Printf("mcp initialize: applied %d declared binding site(s)", n)
+			resolver := bindings.NewResolver(s.getRoot())
+			if len(s.bindings) > 0 {
+				n, err := resolver.Apply(idx, s.bindings)
+				if err != nil {
+					log.Printf("mcp initialize: some bindings failed validation: %v", err)
 				}
-				if len(s.schemas) > 0 {
-					n := resolver.ApplySchemas(idx, s.schemas)
-					log.Printf("mcp initialize: applied %d schema-anchored site(s)", n)
-				}
+				log.Printf("mcp initialize: applied %d declared binding site(s)", n)
+			}
+			if len(s.schemas) > 0 {
+				n := resolver.ApplySchemas(idx, s.schemas)
+				log.Printf("mcp initialize: applied %d schema-anchored site(s)", n)
+			}
+			// Tier-3 auto: gat @derived(operationId) edges → declared Go-source bindings.
+			if n := resolver.ApplyDerived(idx); n > 0 {
+				log.Printf("mcp initialize: applied %d @derived source binding(s)", n)
 			}
 			s.startManagerIfPresent(idx)
 			s.kickGitPrewarm()

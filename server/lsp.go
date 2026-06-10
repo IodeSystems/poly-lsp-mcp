@@ -117,19 +117,21 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 			// bindings (Tier 3). Failures in any single binding/schema
 			// are logged but don't abort initialization — the lexical
 			// index is still useful on its own.
-			if len(s.bindings) > 0 || len(s.schemas) > 0 {
-				resolver := bindings.NewResolver(root)
-				if len(s.bindings) > 0 {
-					n, err := resolver.Apply(idx, s.bindings)
-					if err != nil {
-						log.Printf("initialize: some bindings failed validation: %v", err)
-					}
-					log.Printf("initialize: applied %d declared binding site(s)", n)
+			resolver := bindings.NewResolver(root)
+			if len(s.bindings) > 0 {
+				n, err := resolver.Apply(idx, s.bindings)
+				if err != nil {
+					log.Printf("initialize: some bindings failed validation: %v", err)
 				}
-				if len(s.schemas) > 0 {
-					n := resolver.ApplySchemas(idx, s.schemas)
-					log.Printf("initialize: applied %d schema-anchored site(s)", n)
-				}
+				log.Printf("initialize: applied %d declared binding site(s)", n)
+			}
+			if len(s.schemas) > 0 {
+				n := resolver.ApplySchemas(idx, s.schemas)
+				log.Printf("initialize: applied %d schema-anchored site(s)", n)
+			}
+			// Tier-3 auto: gat @derived(operationId) edges → declared Go-source bindings.
+			if n := resolver.ApplyDerived(idx); n > 0 {
+				log.Printf("initialize: applied %d @derived source binding(s)", n)
 			}
 		}
 	} else {

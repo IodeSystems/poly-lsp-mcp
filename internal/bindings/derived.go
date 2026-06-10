@@ -19,7 +19,7 @@ import (
 // (the generator stated them), the authoritative replacement for guessing the
 // field↔OperationID mapping by replicating gat's naming rule. Returns the count of
 // declared sites added.
-func (r *Resolver) ApplyDerived(idx *symbols.Index) int {
+func (r *Resolver) ApplyDerived(idx *symbols.Index) []DerivRoot {
 	// 1. operationIds the SDL declares as derivation sources.
 	want := map[string]bool{}
 	walkFiles(r.root, func(path string, data []byte) {
@@ -31,11 +31,11 @@ func (r *Resolver) ApplyDerived(idx *symbols.Index) int {
 		}
 	})
 	if len(want) == 0 {
-		return 0
+		return nil
 	}
 
 	// 2. find the Go OperationID literal for each + register it as a declared site.
-	added := 0
+	var roots []DerivRoot
 	walkFiles(r.root, func(path string, data []byte) {
 		if !hasSuffix(path, ".go") {
 			return
@@ -45,10 +45,12 @@ func (r *Resolver) ApplyDerived(idx *symbols.Index) int {
 				continue
 			}
 			idx.InsertDeclared(h.value, path, "go", h.line, h.col)
-			added++
+			roots = append(roots, DerivRoot{Name: h.value, Kind: "gat-operation", Source: symbols.Site{
+				File: path, Line: h.line, Col: h.col, Language: "go", Confidence: symbols.ConfidenceDeclared,
+			}})
 		}
 	})
-	return added
+	return roots
 }
 
 var derivedRe = regexp.MustCompile(`@derived\(operationId:\s*"([^"]+)"\)`)

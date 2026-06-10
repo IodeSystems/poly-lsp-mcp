@@ -18,7 +18,7 @@ import (
 //
 // Columns are keyed by bare name (the form queries and db: tags use); same-named
 // columns across tables share a key — a known limitation of the name-keyed index.
-func (r *Resolver) ApplyDerivedSQL(idx *symbols.Index) int {
+func (r *Resolver) ApplyDerivedSQL(idx *symbols.Index) []DerivRoot {
 	// 1. table.column edges the sqlc generator declared.
 	want := map[string]bool{}
 	walkFiles(r.root, func(path string, data []byte) {
@@ -30,14 +30,14 @@ func (r *Resolver) ApplyDerivedSQL(idx *symbols.Index) int {
 		}
 	})
 	if len(want) == 0 {
-		return 0
+		return nil
 	}
 
 	// 2. fold the migrations → each column's current defining site.
 	sc := migrations.Fold(r.root)
 
 	// 3. register the migration site of every derived-from column as declared.
-	added := 0
+	var roots []DerivRoot
 	for tc := range want {
 		tbl, col, ok := strings.Cut(tc, ".")
 		if !ok {
@@ -50,12 +50,15 @@ func (r *Resolver) ApplyDerivedSQL(idx *symbols.Index) int {
 		for _, c := range t.Columns {
 			if c.Name == col && c.DefinedAt.File != "" {
 				idx.InsertDeclared(c.Name, c.DefinedAt.File, "sql", c.DefinedAt.Line, c.DefinedAt.Col)
-				added++
+				roots = append(roots, DerivRoot{Name: c.Name, Kind: "sqlc-column", Source: symbols.Site{
+					File: c.DefinedAt.File, Line: c.DefinedAt.Line, Col: c.DefinedAt.Col,
+					Language: "sql", Confidence: symbols.ConfidenceDeclared,
+				}})
 				break
 			}
 		}
 	}
-	return added
+	return roots
 }
 
 var derivedTagRe = regexp.MustCompile(`derived:"([^"]+)"`)

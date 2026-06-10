@@ -67,6 +67,13 @@ type Server struct {
 	indexMu sync.RWMutex
 	index   *symbols.Index
 
+	// derivRoots maps a symbol name → the @derived sources registered for it
+	// (gat operation / sqlc column). node_refactor consults this to detect when
+	// a rename touches a derivation graph and must resolve a mode (the variance
+	// model) rather than acting blindly. Rebuilt on every index build.
+	derivMu    sync.RWMutex
+	derivRoots map[string][]bindings.DerivRoot
+
 	// parseCache is shared across all Build calls on this server so
 	// refresh() and refresh(workspace_root=…) only re-parse files
 	// whose bytes actually changed. See symbols.ParseCache.
@@ -349,14 +356,19 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 				n := resolver.ApplySchemas(idx, s.schemas)
 				log.Printf("mcp initialize: applied %d schema-anchored site(s)", n)
 			}
-			// Tier-3 auto: gat @derived(operationId) edges → declared Go-source bindings.
-			if n := resolver.ApplyDerived(idx); n > 0 {
-				log.Printf("mcp initialize: applied %d @derived source binding(s)", n)
+			// Tier-3 auto: gat @derived(operationId) + sqlc derived:"table.column"
+			// edges → declared source bindings, and the derivation-root registry the
+			// variance model reads.
+			var derivRoots []bindings.DerivRoot
+			if roots := resolver.ApplyDerived(idx); len(roots) > 0 {
+				derivRoots = append(derivRoots, roots...)
+				log.Printf("mcp initialize: applied %d @derived source binding(s)", len(roots))
 			}
-			// Tier-3 auto: sqlc derived:"table.column" tags → declared migration-column bindings.
-			if n := resolver.ApplyDerivedSQL(idx); n > 0 {
-				log.Printf("mcp initialize: applied %d sqlc @derived column binding(s)", n)
+			if roots := resolver.ApplyDerivedSQL(idx); len(roots) > 0 {
+				derivRoots = append(derivRoots, roots...)
+				log.Printf("mcp initialize: applied %d sqlc @derived column binding(s)", len(roots))
 			}
+			s.setDerivRoots(derivRoots)
 			s.startManagerIfPresent(idx)
 			s.kickGitPrewarm()
 		}
@@ -499,6 +511,24 @@ func (s *Server) getIndex() *symbols.Index {
 	s.indexMu.RLock()
 	defer s.indexMu.RUnlock()
 	return s.index
+}
+
+func (s *Server) setDerivRoots(roots []bindings.DerivRoot) {
+	m := make(map[string][]bindings.DerivRoot, len(roots))
+	for _, r := range roots {
+		m[r.Name] = append(m[r.Name], r)
+	}
+	s.derivMu.Lock()
+	s.derivRoots = m
+	s.derivMu.Unlock()
+}
+
+// getDerivRoots returns the @derived sources registered for name (nil if name is
+// not a derivation root). More than one root = fan-in (ambiguous source).
+func (s *Server) getDerivRoots(name string) []bindings.DerivRoot {
+	s.derivMu.RLock()
+	defer s.derivMu.RUnlock()
+	return s.derivRoots[name]
 }
 
 // getRoot returns the current workspace root.

@@ -27,8 +27,8 @@ func TestApplyDerivedSQL(t *testing.T) {
 		"package db\ntype Account struct {\n\tDisplayName string `db:\"display_name\" derived:\"account.display_name\" json:\"display_name\"`\n}\n")
 
 	idx := symbols.NewIndex()
-	if n := NewResolver(root).ApplyDerivedSQL(idx); n != 1 {
-		t.Fatalf("ApplyDerivedSQL added %d, want 1", n)
+	if roots := NewResolver(root).ApplyDerivedSQL(idx); len(roots) != 1 {
+		t.Fatalf("ApplyDerivedSQL added %d roots, want 1", len(roots))
 	}
 	var ok bool
 	for _, s := range idx.Lookup("display_name") {

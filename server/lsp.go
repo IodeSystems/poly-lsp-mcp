@@ -130,12 +130,12 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 				log.Printf("initialize: applied %d schema-anchored site(s)", n)
 			}
 			// Tier-3 auto: gat @derived(operationId) edges → declared Go-source bindings.
-			if n := resolver.ApplyDerived(idx); n > 0 {
-				log.Printf("initialize: applied %d @derived source binding(s)", n)
+			if roots := resolver.ApplyDerived(idx); len(roots) > 0 {
+				log.Printf("initialize: applied %d @derived source binding(s)", len(roots))
 			}
 			// Tier-3 auto: sqlc derived:"table.column" tags → declared migration-column bindings.
-			if n := resolver.ApplyDerivedSQL(idx); n > 0 {
-				log.Printf("initialize: applied %d sqlc @derived column binding(s)", n)
+			if roots := resolver.ApplyDerivedSQL(idx); len(roots) > 0 {
+				log.Printf("initialize: applied %d sqlc @derived column binding(s)", len(roots))
 			}
 		}
 	} else {

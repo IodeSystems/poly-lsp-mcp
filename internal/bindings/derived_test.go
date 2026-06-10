@@ -21,8 +21,8 @@ func TestApplyDerived(t *testing.T) {
 	mk("main.go", "package main\nvar _ = Op{OperationID: \"doThing\", Path: \"/x\"}\n")
 
 	idx := symbols.NewIndex()
-	if n := NewResolver(root).ApplyDerived(idx); n != 1 {
-		t.Fatalf("ApplyDerived added %d sites, want 1", n)
+	if roots := NewResolver(root).ApplyDerived(idx); len(roots) != 1 {
+		t.Fatalf("ApplyDerived added %d roots, want 1", len(roots))
 	}
 	var goDecl *symbols.Site
 	for i, s := range idx.Lookup("doThing") {

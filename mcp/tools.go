@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -199,7 +200,8 @@ func registerTools() map[string]Tool {
     "kind":            {"type": "string", "enum": ["rename"], "description": "Legacy shape. Prefer refactor:{rename: X}."},
     "newName":         {"type": "string", "description": "Required when kind='rename'."},
     "includeComments": {"type": "boolean", "description": "Rename word-boundary mentions in comments / prose / non-indexed file types too. Default false."},
-    "applyCandidates": {"type": "boolean", "description": "Also rename the lexical name-match sites that are cross-namespace GUESSES. Default false: those sites are returned under 'candidates' (recommendations) and NOT touched — review them, then re-run with applyCandidates:true. Authoritative sites (declared @derived/binding, child-LSP) are always renamed."}
+    "applyCandidates": {"type": "boolean", "description": "Also rename the lexical name-match sites that are cross-namespace GUESSES. Default false: those sites are returned under 'candidates' (recommendations) and NOT touched — review them, then re-run with applyCandidates:true. Authoritative sites (declared @derived/binding, child-LSP) are always renamed."},
+    "resolution": {"type": "object", "description": "Resolves the variance when the target is a @derived source (a derivation-graph node — gat operation / sqlc column). Without it, such a rename is NOT applied and returns variance:true with the modes to choose from. mode='underlying' cascades the rename to the source + all references (the only automated mode); projection/mapping/hide are recognized but manual. target='file:line' picks one source when fan-in is ambiguous.", "properties": {"mode": {"type": "string", "enum": ["underlying", "projection", "mapping", "hide"]}, "target": {"type": "string"}}}
   },
   "required": ["file", "startLine", "startCol", "endLine", "endCol"]
 }`),
@@ -1509,6 +1511,13 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 		// guesses across namespaces (otherwise they're returned as candidates,
 		// not touched). Explicit intent to act on a guess.
 		ApplyCandidates bool `json:"applyCandidates"`
+		// Resolution resolves the variance when the rename target is a @derived
+		// source (a derivation graph node): mode ∈ underlying|projection|mapping|hide,
+		// target picks one source when fan-in is ambiguous. Absent → fail-closed.
+		Resolution struct {
+			Mode   string `json:"mode"`
+			Target string `json:"target"`
+		} `json:"resolution"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -1539,7 +1548,7 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 	}
 	signatureOps := ops.Params != nil || ops.Return != ""
 	if !signatureOps {
-		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.diagnosticOptions)
+		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.Resolution.Mode, p.Resolution.Target, p.diagnosticOptions)
 	}
 	return s.refactorSignature(p.rangeArgs, ops, p.IncludeComments, p.diagnosticOptions)
 }
@@ -1615,7 +1624,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 	if ops.Rename != "" && ops.Rename != oldName {
 		nameRangeArgs := nameRangeAfterSignature(a, postSig, out)
-		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, diagnosticOptions{})
+		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, "", "", diagnosticOptions{})
 		if renameErr != nil {
 			return renameContent, renameIsErr, renameErr
 		}
@@ -1836,7 +1845,7 @@ func byteOffsetToLineColPos(content []byte, offset int) (int, int) {
 	return line, col
 }
 
-func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, applyCandidates bool, opts diagnosticOptions) ([]Content, bool, error) {
+func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, applyCandidates bool, mode, target string, opts diagnosticOptions) ([]Content, bool, error) {
 	idx := s.getIndex()
 	if idx == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
@@ -1852,6 +1861,24 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	}
 	if name == "" {
 		return nil, true, errors.New("range is empty; pass the identifier's nameStart/nameEnd range")
+	}
+
+	// Variance model: when name is a @derived source (a derivation-graph node), a
+	// rename is mode-ambiguous and is NOT applied until resolution.mode says how.
+	if roots := s.getDerivRoots(name); len(roots) > 0 {
+		switch mode {
+		case "":
+			return s.varianceResponse(name, roots), false, nil
+		case "underlying":
+			if len(roots) > 1 && target == "" {
+				return s.varianceResponse(name, roots), false, nil // fan-in: pick a source
+			}
+			applyCandidates = true // cascade: rename the source + every reference
+		case "projection", "mapping", "hide":
+			return s.modeNotAutomatedResponse(name, mode, roots), false, nil
+		default:
+			return nil, true, fmt.Errorf("unknown resolution mode %q (use underlying|projection|mapping|hide)", mode)
+		}
 	}
 
 	resolved, candidates := s.buildRenameEdits(name, newName, applyCandidates)
@@ -2271,6 +2298,49 @@ func jsonContent(value any) []Content {
 		return []Content{{Type: "text", Text: fmt.Sprintf("internal: %v", err)}}
 	}
 	return []Content{{Type: "text", Text: string(raw)}}
+}
+
+// varianceResponse is the fail-closed result for renaming a @derived source without a
+// resolution mode: nothing is applied; the caller gets the source(s) and the modes to
+// choose from. Re-run with resolution:{mode,target} to act.
+func (s *Server) varianceResponse(name string, roots []bindings.DerivRoot) []Content {
+	root := s.getRoot()
+	srcs := make([]map[string]any, 0, len(roots))
+	for _, r := range roots {
+		srcs = append(srcs, map[string]any{
+			"kind": r.Kind, "file": relPath(r.Source.File, root), "line": r.Source.Line, "col": r.Source.Col,
+		})
+	}
+	howto := "re-run with resolution:{mode:'underlying'} to cascade the rename to the source + all references."
+	if len(roots) > 1 {
+		howto = fmt.Sprintf("fan-in: %d sources share this name — re-run with resolution:{mode:'underlying', target:'<file:line>'} to pick one.", len(roots))
+	}
+	return jsonContent(map[string]any{
+		"variance": true,
+		"applied":  false,
+		"name":     name,
+		"reason":   "this symbol is a @derived source (a derivation-graph node); a rename is mode-ambiguous and was NOT applied.",
+		"sources":  srcs,
+		"modes": []map[string]any{
+			{"mode": "underlying", "automated": true, "effect": "rename the source and cascade every reference; the generated/derived layers regenerate."},
+			{"mode": "projection", "automated": false, "effect": "rename only a specific projection/alias, leaving the source (manual)."},
+			{"mode": "mapping", "automated": false, "effect": "keep the source name; add an alias so the derived name changes (manual)."},
+			{"mode": "hide", "automated": false, "effect": "on delete: drop from a view / json tag instead of dropping the source (manual)."},
+		},
+		"howToProceed": howto,
+	})
+}
+
+// modeNotAutomatedResponse handles a recognized-but-manual resolution mode.
+func (s *Server) modeNotAutomatedResponse(name, mode string, roots []bindings.DerivRoot) []Content {
+	return jsonContent(map[string]any{
+		"variance": true,
+		"applied":  false,
+		"name":     name,
+		"mode":     mode,
+		"reason":   "mode '" + mode + "' is recognized but not automated; only 'underlying' (cascade rename of the source) applies automatically.",
+		"howToProceed": "apply '" + mode + "' by hand (alias / view / tag edit), or use resolution:{mode:'underlying'} to cascade.",
+	})
 }
 
 func relPath(abs, root string) string {

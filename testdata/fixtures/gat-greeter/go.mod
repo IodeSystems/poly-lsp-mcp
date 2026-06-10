@@ -30,4 +30,4 @@ require (
 	nhooyr.io/websocket v1.8.17 // indirect
 )
 
-replace github.com/iodesystems/gwag => ../../../../gwag
+replace github.com/iodesystems/gwag => ../../../../../libs/gwag

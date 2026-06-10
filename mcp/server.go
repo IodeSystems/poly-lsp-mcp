@@ -353,6 +353,10 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 			if n := resolver.ApplyDerived(idx); n > 0 {
 				log.Printf("mcp initialize: applied %d @derived source binding(s)", n)
 			}
+			// Tier-3 auto: sqlc derived:"table.column" tags → declared migration-column bindings.
+			if n := resolver.ApplyDerivedSQL(idx); n > 0 {
+				log.Printf("mcp initialize: applied %d sqlc @derived column binding(s)", n)
+			}
 			s.startManagerIfPresent(idx)
 			s.kickGitPrewarm()
 		}

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"log"
 	"net/url"
@@ -120,6 +121,17 @@ const (
 	defaultReferenceLimit  = 15
 	defaultContextLines    = 3
 	maxRangeTextChars      = 256
+
+	// maxDiagnosticMessageChars bounds a single diagnostic message so a
+	// few verbose ones can't dominate the payload (clampMessage).
+	maxDiagnosticMessageChars = 400
+
+	// maxDiagnosticsBytes is the total serialized-JSON budget for the
+	// editDiagnostics payload, enforced by capBytes so a response can
+	// never exceed the MCP tool-result token cap. Generous for the
+	// common case; only pathological floods (e.g. editing a module
+	// outside the workspace root) hit it.
+	maxDiagnosticsBytes = 16384
 )
 
 func (o diagnosticOptions) diagnosticLimit() int {
@@ -416,7 +428,7 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 			addDiagnostics(uri, snapshot[uri])
 		}
 	}
-	return out
+	return out.capBytes(maxDiagnosticsBytes)
 }
 
 // storeGenSnapshot captures the current gen for every URI present in
@@ -450,7 +462,7 @@ func (s *Server) enrichDiagnostic(uri string, d multiplex.Diagnostic, content []
 		Severity:  severityLabel(d.Severity),
 		Code:      d.Code,
 		Source:    d.Source,
-		Message:   d.Message,
+		Message:   clampMessage(d.Message),
 		StartLine: d.Range.Start.Line + 1,
 		StartCol:  d.Range.Start.Character + 1,
 		EndLine:   d.Range.End.Line + 1,
@@ -719,3 +731,46 @@ func uriToPath(rawURI string) string {
 	return u.Path
 }
 
+// clampMessage truncates an over-long diagnostic message so a handful
+// of verbose ones (gopls' multi-line "not in your workspace" hint, for
+// instance) can't blow the tool-result token budget. Rune-safe; marks
+// the cut with an ellipsis.
+func clampMessage(s string) string {
+	r := []rune(s)
+	if len(r) <= maxDiagnosticMessageChars {
+		return s
+	}
+	return string(r[:maxDiagnosticMessageChars]) + "…"
+}
+
+// jsonLen returns the marshaled byte length of v, or 0 if it can't be
+// marshaled (treated as "fits" — never the cause of a drop).
+func jsonLen(v any) int {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return len(b)
+}
+
+// capBytes enforces a total serialized-size budget on the payload so a
+// response can never exceed the MCP tool-result token cap. Pass 1 strips
+// enrichment (text / context / enclosing node / references) from the
+// tail until the JSON fits; pass 2, only if still over, drops whole
+// items from the tail and counts them in DroppedDiagnostics. Core fields
+// (file, severity, message, position) always survive — the agent still
+// learns what broke and where.
+func (ed editDiagnostics) capBytes(budget int) editDiagnostics {
+	for i := len(ed.Items) - 1; i >= 0 && jsonLen(ed) > budget; i-- {
+		ed.Items[i].Text = ""
+		ed.Items[i].Context = nil
+		ed.Items[i].EnclosingNode = nil
+		ed.Items[i].References = nil
+		ed.Items[i].Truncated = nil
+	}
+	for len(ed.Items) > 0 && jsonLen(ed) > budget {
+		ed.Items = ed.Items[:len(ed.Items)-1]
+		ed.DroppedDiagnostics++
+	}
+	return ed
+}

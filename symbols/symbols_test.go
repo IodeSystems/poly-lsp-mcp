@@ -1,6 +1,7 @@
 package symbols
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -208,5 +209,33 @@ func TestSkipDirsObeyed(t *testing.T) {
 				t.Fatalf("indexed file under .git: %s", s.File)
 			}
 		}
+	}
+}
+
+// TestLookupExistingEvictsMissingFiles proves the self-healing path:
+// sites pointing at a file that no longer exists on disk are dropped
+// from the result and permanently evicted from the index (a plain
+// Lookup afterward no longer sees them). Covers lexical and declared
+// stores, since an external git mv / checkout orphans both.
+func TestLookupExistingEvictsMissingFiles(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live.go")
+	if err := os.WriteFile(live, []byte("package p\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(dir, "gone.go") // never created on disk
+
+	idx := NewIndex()
+	idx.addHits(live, "go", []Hit{{Name: "Shared", Line: 1, Col: 1}})
+	idx.addHits(gone, "go", []Hit{{Name: "Shared", Line: 2, Col: 1}})
+	idx.InsertDeclared("Shared", gone, "go", 3, 1)
+
+	got := idx.LookupExisting("Shared")
+	if len(got) != 1 || got[0].File != live {
+		t.Fatalf("LookupExisting = %+v, want one site in %s", got, live)
+	}
+	// Eviction persists: a plain Lookup no longer sees the gone file.
+	if got := idx.Lookup("Shared"); len(got) != 1 || got[0].File != live {
+		t.Errorf("post-evict Lookup = %+v, want one site in %s", got, live)
 	}
 }

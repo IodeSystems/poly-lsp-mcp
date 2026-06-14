@@ -22,8 +22,8 @@ import (
 
 	"time"
 
-	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
 	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
@@ -129,6 +129,20 @@ type Server struct {
 	gitPrewarmDoneMu sync.Mutex
 	gitPrewarmDone   chan struct{}
 
+	// fileWatch controls the post-initialize filesystem watcher that
+	// keeps the symbol index in sync with on-disk changes made outside
+	// the tool's own edits (git checkout / mv, another editor). Default
+	// true; no-op if the watcher fails to start.
+	fileWatch bool
+
+	watcherMu sync.Mutex
+	watcher   io.Closer
+
+	// fileWatchDoneMu guards fileWatchDone — same dance as
+	// gitPrewarmDone; closed when the watcher goroutine exits.
+	fileWatchDoneMu sync.Mutex
+	fileWatchDone   chan struct{}
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }
@@ -147,6 +161,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		openDocs:      map[string]int32{},
 		proactiveOpen: true,
 		gitPrewarm:    true,
+		fileWatch:     true,
 	}
 	s.tools = registerTools()
 	s.resources = registerResources()
@@ -191,6 +206,15 @@ func (s *Server) WaitForProactiveOpen(ctx context.Context) error {
 // later switch-time saving.
 func (s *Server) SetGitPrewarm(enabled bool) {
 	s.gitPrewarm = enabled
+}
+
+// SetFileWatch toggles the post-initialize filesystem watcher that
+// keeps the symbol index in sync with on-disk changes made outside the
+// tool's own edits (git checkout / mv, another editor). Default true.
+// Disable in tests that want deterministic index state, or in huge
+// trees where the watch-descriptor cost isn't worth it.
+func (s *Server) SetFileWatch(enabled bool) {
+	s.fileWatch = enabled
 }
 
 // WaitForGitPrewarm blocks until the most recent ancestor-branch
@@ -250,6 +274,7 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	dec := json.NewDecoder(in)
 	s.maybeLoadCache()
 	defer s.maybeSaveCache()
+	defer s.stopFileWatch()
 	for {
 		var msg jsonrpc.Message
 		if err := dec.Decode(&msg); err != nil {
@@ -325,6 +350,7 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 		s.shutdown = true
 		s.stateMu.Unlock()
 		s.stopManagerIfPresent()
+		s.stopFileWatch()
 		s.reply(req, json.RawMessage("null"))
 	default:
 		if req.IsNotification() {
@@ -371,6 +397,7 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 			s.setDerivRoots(derivRoots)
 			s.startManagerIfPresent(idx)
 			s.kickGitPrewarm()
+			s.kickFileWatch()
 		}
 	} else {
 		log.Print("mcp initialize: no workspace root configured; tools will return errors")

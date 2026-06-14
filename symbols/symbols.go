@@ -149,6 +149,72 @@ func (i *Index) Lookup(name string) []Site {
 	return out
 }
 
+// fileExists reports whether path is present on disk.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// LookupExisting is Lookup with a self-healing pass: any returned site
+// whose File no longer exists on disk is dropped from the result AND
+// evicted from the index. The index is built once at startup and only
+// updated per-file on edits the tool performs itself, so a file removed
+// by an outside process (git checkout, git mv, another editor) otherwise
+// leaves orphan sites that surface as dead paths — the headless MCP
+// server has no filesystem watcher to catch the removal. Stat-ing at
+// query time keeps node_references / rename honest without one.
+func (i *Index) LookupExisting(name string) []Site {
+	all := i.Lookup(name) // a fresh copy — safe to compact in place
+	live := all[:0]
+	var dead []string
+	seen := map[string]bool{}
+	for _, s := range all {
+		if fileExists(s.File) {
+			live = append(live, s)
+			continue
+		}
+		if !seen[s.File] {
+			seen[s.File] = true
+			dead = append(dead, s.File)
+		}
+	}
+	if len(dead) > 0 {
+		i.RemoveFiles(dead)
+	}
+	return live
+}
+
+// RemoveFiles evicts every site (lexical, declared, comment) whose File
+// is in files, across all names — the multi-store, multi-name companion
+// to clearFileLocked. Used to reconcile the index when files disappear
+// from disk outside the tool's edit path.
+func (i *Index) RemoveFiles(files []string) {
+	if len(files) == 0 {
+		return
+	}
+	gone := make(map[string]bool, len(files))
+	for _, f := range files {
+		gone[f] = true
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, store := range []map[string][]Site{i.sites, i.declaredSites, i.commentSites} {
+		for name, list := range store {
+			kept := make([]Site, 0, len(list))
+			for _, s := range list {
+				if !gone[s.File] {
+					kept = append(kept, s)
+				}
+			}
+			if len(kept) == 0 {
+				delete(store, name)
+			} else {
+				store[name] = kept
+			}
+		}
+	}
+}
+
 // InsertDeclared registers a declared binding site. Idempotent: a
 // second call with the same (name, file, line, col) is a no-op so
 // callers that union multiple sources (user bindings + schemas) don't

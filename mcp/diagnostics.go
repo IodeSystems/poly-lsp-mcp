@@ -492,7 +492,7 @@ func (s *Server) enrichDiagnostic(uri string, d multiplex.Diagnostic, content []
 	// would dump unrelated lexical hits.
 	if idx := s.getIndex(); idx != nil {
 		if name := identifierFromRange(item.Text); name != "" {
-			sites := idx.Lookup(name)
+			sites := idx.LookupExisting(name)
 			refs := make([]siteJSON, 0, len(sites))
 			refLimit := opts.referenceLimit()
 			dropped := 0

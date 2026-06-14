@@ -835,7 +835,7 @@ func handleNodeReferences(s *Server, args json.RawMessage) ([]Content, bool, err
 	}
 
 	var hits []siteJSON
-	for _, site := range idx.Lookup(name) {
+	for _, site := range idx.LookupExisting(name) {
 		hits = append(hits, siteJSON{
 			Name:       name,
 			File:       relPath(site.File, s.getRoot()),
@@ -2104,7 +2104,7 @@ func (s *Server) buildRenameEdits(name, newName string, applyCandidates bool) ([
 	if idx == nil {
 		return nil, nil
 	}
-	action, cands := chooseRenameSites(idx.Lookup(name))
+	action, cands := chooseRenameSites(idx.LookupExisting(name))
 	sites := action
 	if applyCandidates {
 		sites = append(append([]symbols.Site(nil), action...), cands...)

@@ -1093,15 +1093,30 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 		reason = "lineLength"
 	}
 
-	// Hint sentence — what the agent should do next.
+	// Hint sentence — what the agent should do next. Spell out ALL the
+	// alternatives, because the common failure is blind chunk-by-chunk
+	// paging: an agent reads one ~2k-char slice, sees "continue", reads
+	// the next, and burns a tool call (a whole turn) per slice to read
+	// one file. Lead with the two ways to AVOID paging — widen in one
+	// call, or target with search — and only then offer to keep paging.
+	pageSize := endLine - startLine + 1
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	morePages := (totalLines - endLine + pageSize - 1) / pageSize
 	var hint strings.Builder
 	switch reason {
 	case "auto":
-		fmt.Fprintf(&hint, "Returned %d/%d lines (auto-cap at ~%d chars). Pass lineLimit to widen, or call again with startLine=%d to continue.",
-			endLine-startLine+1, totalLines, defaultReadCharBudget, endLine+1)
+		fmt.Fprintf(&hint, "Returned lines %d-%d of %d (auto-capped at ~%d chars; ~%d more read(s) to page the rest). "+
+			"Avoid paging chunk-by-chunk: re-read with lineLimit=%d to get the whole file in ONE call, "+
+			"or use the search tool (pattern=<regex>, contextLines=3) to jump straight to the code you need. "+
+			"To keep paging anyway, call again with startLine=%d.",
+			startLine, endLine, totalLines, defaultReadCharBudget, morePages, totalLines, endLine+1)
 	case "lineLimit":
-		fmt.Fprintf(&hint, "Returned %d/%d lines (lineLimit=%d). Call again with startLine=%d to continue.",
-			endLine-startLine+1, totalLines, lineLimit, endLine+1)
+		fmt.Fprintf(&hint, "Returned lines %d-%d of %d (lineLimit=%d; ~%d more read(s) to finish). "+
+			"Re-read with lineLimit=%d for the whole file in one call, or use the search tool (pattern=<regex>) to target a section, "+
+			"or call again with startLine=%d to continue.",
+			startLine, endLine, totalLines, lineLimit, morePages, totalLines, endLine+1)
 	case "lineLength":
 		fmt.Fprintf(&hint, "Lines truncated to %d chars (max source line was %d chars). Pass a larger lineLength to keep full lines.",
 			lineLength, maxLineLen)

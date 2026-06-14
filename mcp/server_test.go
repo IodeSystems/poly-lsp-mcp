@@ -1152,6 +1152,50 @@ func TestNodeReadLinePreview(t *testing.T) {
 	})
 }
 
+// TestNodeReadAutoCapHintGuidesWidening: when a whole-file read hits the
+// auto char-cap, the hint must steer the agent to the EFFICIENT options
+// (widen with lineLimit=<totalLines>, or target with search) rather than
+// only "continue" — otherwise the agent pages chunk-by-chunk, one tool
+// call per slice, burning turns to read a single file.
+func TestNodeReadAutoCapHintGuidesWidening(t *testing.T) {
+	dir := t.TempDir()
+	var body strings.Builder
+	for i := 1; i <= 400; i++ {
+		fmt.Fprintf(&body, "line %d of the source file\n", i) // well over the ~2k cap
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(body.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_read", map[string]any{"file": "big.txt"})
+	if r.IsError {
+		t.Fatalf("errored: %+v", r.Content)
+	}
+	var payload struct {
+		Truncated       bool   `json:"truncated"`
+		TruncatedReason string `json:"truncatedReason"`
+		TotalLines      int    `json:"totalLines"`
+		Hint            string `json:"hint"`
+	}
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	if !payload.Truncated || payload.TruncatedReason != "auto" {
+		t.Fatalf("expected auto-cap truncation; got %+v", payload)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("lineLimit=%d", payload.TotalLines), // widen to the whole file
+		"search tool",                                   // target instead of read-all
+		"startLine=",                                    // paging fallback still offered
+	} {
+		if !strings.Contains(payload.Hint, want) {
+			t.Errorf("auto-cap hint missing %q; got: %s", want, payload.Hint)
+		}
+	}
+}
+
 // TestNodeEditCreateFile exercises the {file, newText} no-range
 // shape against a path that doesn't exist yet.
 func TestNodeEditCreateFile(t *testing.T) {

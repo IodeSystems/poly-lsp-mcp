@@ -1258,6 +1258,39 @@ func TestNodeEditOverwriteFile(t *testing.T) {
 	}
 }
 
+// TestNodeEditEmptyNewTextWholeFileOverwriteIsError guards against the
+// destructive-empty-overwrite failure mode: {file, newText:""} (or
+// newText absent) with no range must be REJECTED rather than
+// truncating the file to zero bytes. This was observed in practice —
+// an unrecognized field name resolved to an empty newText and
+// silently blanked a file.
+func TestNodeEditEmptyNewTextWholeFileOverwriteIsError(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("keep me\n"), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	cases := []map[string]any{
+		{"file": "a.txt", "newText": ""},
+		{"file": "a.txt"}, // newText absent entirely
+	}
+	for _, c := range cases {
+		r := s.callTool("node_edit", c)
+		if !r.IsError {
+			t.Errorf("expected isError for %+v (empty whole-file overwrite), got %+v", c, r)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, "a.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "keep me\n" {
+			t.Errorf("file was modified despite rejected empty overwrite: %q", got)
+		}
+	}
+}
+
 // TestNodeEditDiff exercises the {file, diff} shape on a multi-hunk
 // unified diff.
 func TestNodeEditDiff(t *testing.T) {
@@ -1300,6 +1333,47 @@ func TestNodeEditDiffContextMismatchIsError(t *testing.T) {
 	})
 	if !r.IsError {
 		t.Errorf("expected isError on context mismatch, got %+v", r)
+	}
+}
+
+// TestNodeEditDiffAmbiguousContextIsGuidedError: a diff hunk whose
+// context matches 2+ locations must NOT apply (no guessing), must
+// leave the file untouched, and must return an actionable error —
+// every matching line number, plus a steer toward re-issuing as a
+// precise range edit (startLine/endLine), the shape an LLM gets right
+// without header line-arithmetic.
+func TestNodeEditDiffAmbiguousContextIsGuidedError(t *testing.T) {
+	dir := t.TempDir()
+	orig := "same\nfiller\nsame\nfiller\nsame\n"
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte(orig), 0o644)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// Header claims line 99 — doesn't disambiguate any of the 3 real
+	// "same" matches (lines 1, 3, 5).
+	diff := "@@ -99,1 +99,1 @@\n-same\n+CHANGED\n"
+	r := s.callTool("node_edit", map[string]any{
+		"file": "a.txt",
+		"diff": diff,
+	})
+	if !r.IsError {
+		t.Fatalf("expected isError on ambiguous context, got %+v", r)
+	}
+	msg := r.Content[0].Text
+	for _, want := range []string{"1", "3", "5", "startLine", "endLine"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected error to mention %q, got: %s", want, msg)
+		}
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != orig {
+		t.Errorf("file modified despite ambiguous/rejected diff: got %q, want %q", got, orig)
 	}
 }
 

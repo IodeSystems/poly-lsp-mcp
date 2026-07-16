@@ -121,15 +121,15 @@ func registerTools() map[string]Tool {
 			Name: "node_edit",
 			Description: "Atomically edit a file. Three input shapes (pick one): " +
 				"{file, startLine, startCol, endLine, endCol, newText} → replace that range with newText (same convention as node_read). " +
-				"{file, newText} → create or overwrite the whole file (replaces write_file; parent dirs auto-created). " +
-				"{file, diff} → apply a unified-diff patch (one tool call for non-contiguous multi-region edits; strict context matching). " +
+				"{file, newText} → create or overwrite the whole file (replaces write_file; parent dirs auto-created); newText must be non-empty — this shape REJECTS an empty/absent newText rather than blanking the file (use node_delete to remove content or the whole file). " +
+				"{file, diff} → apply a unified-diff patch (one tool call for non-contiguous multi-region edits; context lines are matched fuzzily — hunk header line numbers are a hint, not a hard requirement — but ambiguous or missing context still errors). " +
 				"Writes are atomic and the response includes LSP diagnostics from any child language server.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "file":      {"type": "string"},
-    "newText":   {"type": "string", "description": "New contents. With range: replaces that span. Without range: whole-file create-or-overwrite."},
-    "diff":      {"type": "string", "description": "Unified-diff patch. Mutually exclusive with newText/range."},
+    "newText":   {"type": "string", "description": "New contents. With range: replaces that span. Without range: whole-file create-or-overwrite — must be non-empty, or the call is rejected."},
+    "diff":      {"type": "string", "description": "Unified-diff patch. Mutually exclusive with newText/range. Context lines are located fuzzily; hunk header numbers are a hint."},
     "startLine": {"type": "integer", "minimum": 1},
     "startCol":  {"type": "integer", "minimum": 1},
     "endLine":   {"type": "integer", "minimum": 1},
@@ -1195,8 +1195,19 @@ func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
 			EndLine: *p.EndLine, EndCol: *p.EndCol,
 		}, p.NewText, p.diagnosticOptions)
 	default:
-		// {file, newText} no range → create-or-overwrite. newText
-		// can be empty (writes an empty file).
+		// {file, newText} no range → whole-file create-or-overwrite.
+		// Empty/absent newText is REJECTED: there's no legitimate
+		// agent reason to blank a file via node_edit (node_delete
+		// exists for range removal, and node_delete{file} removes the
+		// file outright). This guards the failure mode that destroyed
+		// a file in practice: an unrecognized field name resolved to
+		// an empty newText, which silently truncated the file to
+		// zero bytes.
+		if p.NewText == "" {
+			return nil, true, fmt.Errorf(
+				"node_edit whole-file overwrite with empty newText would erase %s; pass non-empty newText, or use node_delete for range removal",
+				p.File)
+		}
 		return s.applyWholeFileWrite(p.File, p.NewText, p.diagnosticOptions)
 	}
 }
@@ -2349,11 +2360,11 @@ func (s *Server) varianceResponse(name string, roots []bindings.DerivRoot) []Con
 // modeNotAutomatedResponse handles a recognized-but-manual resolution mode.
 func (s *Server) modeNotAutomatedResponse(name, mode string, roots []bindings.DerivRoot) []Content {
 	return jsonContent(map[string]any{
-		"variance": true,
-		"applied":  false,
-		"name":     name,
-		"mode":     mode,
-		"reason":   "mode '" + mode + "' is recognized but not automated; only 'underlying' (cascade rename of the source) applies automatically.",
+		"variance":     true,
+		"applied":      false,
+		"name":         name,
+		"mode":         mode,
+		"reason":       "mode '" + mode + "' is recognized but not automated; only 'underlying' (cascade rename of the source) applies automatically.",
 		"howToProceed": "apply '" + mode + "' by hand (alias / view / tag edit), or use resolution:{mode:'underlying'} to cascade.",
 	})
 }

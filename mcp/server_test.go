@@ -235,11 +235,11 @@ func TestToolsListAdvertisesEightToolSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
-		"structure":       false,
-		"node_references": false,
-		"node_read":       false,
-		"node_edit":       false,
-		"node_delete":     false,
+		"structure":        false,
+		"node_references":  false,
+		"node_read":        false,
+		"node_edit":        false,
+		"node_delete":      false,
 		"node_refactor":    false,
 		"search":           false,
 		"node_rename_file": false,
@@ -266,20 +266,67 @@ func TestToolsListAdvertisesEightToolSurface(t *testing.T) {
 
 // ---- structure ----
 
-type structureEntryWire struct {
-	Kind          string               `json:"kind"`
-	Path          string               `json:"path"`
-	Type          string               `json:"type"`
-	Name          string               `json:"name"`
-	StartLine     int                  `json:"startLine"`
-	StartCol      int                  `json:"startCol"`
-	EndLine       int                  `json:"endLine"`
-	EndCol        int                  `json:"endCol"`
-	NameStartLine int                  `json:"nameStartLine"`
-	NameStartCol  int                  `json:"nameStartCol"`
-	NameEndLine   int                  `json:"nameEndLine"`
-	NameEndCol    int                  `json:"nameEndCol"`
-	Children      []structureEntryWire `json:"children"`
+// wireEntry is the polymorphic structure / grouped-match shape: a
+// directory carries `dir` + `/`, a file carries `file` + `#`.
+// Truncation metadata rides on the root object.
+type wireEntry struct {
+	Dir   string      `json:"dir"`
+	File  string      `json:"file"`
+	Lang  string      `json:"lang"`
+	Slash []wireEntry `json:"/"`
+	Hash  []wireSym   `json:"#"`
+
+	Truncated       bool   `json:"truncated"`
+	TruncatedReason string `json:"truncatedReason"`
+	TotalNodes      int    `json:"totalNodes"`
+	ShownNodes      int    `json:"shownNodes"`
+	NodeLimit       int    `json:"nodeLimit"`
+	Hint            string `json:"hint"`
+}
+
+// wireSym is one symbol / grouped hit: {"sym":…, "class":…, "@":[a,b]}.
+type wireSym struct {
+	Sym   string `json:"sym"`
+	Class string `json:"class"`
+	At    []int  `json:"@"`
+}
+
+// findFile walks a dir tree for the first file whose basename == base.
+func findFile(e wireEntry, base string) *wireEntry {
+	if e.File != "" && filepath.Base(e.File) == base {
+		out := e
+		return &out
+	}
+	for i := range e.Slash {
+		if f := findFile(e.Slash[i], base); f != nil {
+			return f
+		}
+	}
+	return nil
+}
+
+// findSym returns the symbol with the given dotted sym, or nil.
+func findSym(f wireEntry, sym string) *wireSym {
+	for i := range f.Hash {
+		if f.Hash[i].Sym == sym {
+			return &f.Hash[i]
+		}
+	}
+	return nil
+}
+
+// anySym reports whether any file anywhere in the tree carries a symbol
+// with the given dotted sym.
+func anySym(e wireEntry, sym string) bool {
+	if findSym(e, sym) != nil {
+		return true
+	}
+	for _, c := range e.Slash {
+		if anySym(c, sym) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestStructureWorkspaceListsTopLevelEntries(t *testing.T) {
@@ -293,28 +340,22 @@ func TestStructureWorkspaceListsTopLevelEntries(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("structure errored: %+v", r.Content)
 	}
-	var entry structureEntryWire
+	var entry wireEntry
 	if err := json.Unmarshal([]byte(r.Content[0].Text), &entry); err != nil {
 		t.Fatal(err)
 	}
-	if entry.Kind != "directory" {
-		t.Errorf("kind = %q, want directory", entry.Kind)
+	if entry.Dir == "" {
+		t.Errorf("root should be a dir shape, got %+v", entry)
 	}
-	if len(entry.Children) == 0 {
+	if len(entry.Slash) == 0 {
 		t.Fatal("empty workspace listing")
 	}
-	hasMain := false
-	for _, c := range entry.Children {
-		if c.Name == "main.go" && c.Kind == "file" {
-			hasMain = true
-		}
-	}
-	if !hasMain {
-		t.Errorf("main.go missing from workspace listing: %+v", entry.Children)
+	if findFile(entry, "main.go") == nil {
+		t.Errorf("main.go missing from workspace listing: %+v", entry.Slash)
 	}
 }
 
-func TestStructureFileReturnsAstOutlineWithBothRanges(t *testing.T) {
+func TestStructureFileReturnsFlatSymbolsWithClassAndRange(t *testing.T) {
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
@@ -325,36 +366,25 @@ func TestStructureFileReturnsAstOutlineWithBothRanges(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("structure errored: %+v", r.Content)
 	}
-	var entry structureEntryWire
+	var entry wireEntry
 	if err := json.Unmarshal([]byte(r.Content[0].Text), &entry); err != nil {
 		t.Fatal(err)
 	}
-	if entry.Kind != "file" {
-		t.Errorf("kind = %q, want file", entry.Kind)
+	if entry.File == "" {
+		t.Errorf("root should be a file shape, got %+v", entry)
 	}
-	var greet *structureEntryWire
-	for i := range entry.Children {
-		if entry.Children[i].Name == "GreetUser" {
-			greet = &entry.Children[i]
-			break
-		}
-	}
+	greet := findSym(entry, "GreetUser")
 	if greet == nil {
-		t.Fatal("GreetUser missing from structure")
+		t.Fatalf("GreetUser missing from structure: %+v", entry.Hash)
 	}
-	if greet.Kind != "node" {
-		t.Errorf("GreetUser kind = %q, want node", greet.Kind)
+	if greet.Class != "func" {
+		t.Errorf("GreetUser class = %q, want func", greet.Class)
 	}
-	if greet.Type != "function_declaration" {
-		t.Errorf("GreetUser type = %q, want function_declaration", greet.Type)
+	if len(greet.At) != 2 || greet.At[0] < 1 || greet.At[1] < greet.At[0] {
+		t.Errorf("GreetUser @ malformed: %+v", greet.At)
 	}
-	// Both ranges must be populated and the name range must sit
-	// inside the declaration range.
-	if greet.StartLine < 1 || greet.EndLine < greet.StartLine {
-		t.Errorf("GreetUser decl range malformed: %+v", greet)
-	}
-	if greet.NameStartLine < greet.StartLine || greet.NameEndLine > greet.EndLine {
-		t.Errorf("GreetUser nameRange not inside declaration range: %+v", greet)
+	if typ := findSym(entry, "UserID"); typ == nil || typ.Class != "type" {
+		t.Errorf("UserID should be class type, got %+v", typ)
 	}
 }
 
@@ -373,23 +403,20 @@ func TestStructureFileWithoutTreeSitterGrammar(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("README structure errored: %+v", r.Content)
 	}
-	var entry structureEntryWire
+	var entry wireEntry
 	json.Unmarshal([]byte(r.Content[0].Text), &entry)
-	if entry.Kind != "file" {
-		t.Errorf("kind = %q, want file", entry.Kind)
+	if entry.File == "" {
+		t.Errorf("root should be a file shape, got %+v", entry)
 	}
-	if len(entry.Children) != 1 {
-		t.Fatalf("got %d children, want 1 text node: %+v", len(entry.Children), entry.Children)
+	if len(entry.Hash) != 1 {
+		t.Fatalf("got %d symbols, want 1 text symbol: %+v", len(entry.Hash), entry.Hash)
 	}
-	textNode := entry.Children[0]
-	if textNode.Kind != "node" || textNode.Type != "text" {
-		t.Errorf("text fallback shape wrong: %+v", textNode)
+	tn := entry.Hash[0]
+	if tn.Class != "text" || tn.Sym != "" {
+		t.Errorf("text fallback shape wrong: %+v", tn)
 	}
-	if textNode.StartLine != 1 || textNode.StartCol != 1 {
-		t.Errorf("text node should start at 1:1, got %d:%d", textNode.StartLine, textNode.StartCol)
-	}
-	if textNode.EndLine < textNode.StartLine {
-		t.Errorf("text node range malformed: %+v", textNode)
+	if len(tn.At) != 2 || tn.At[0] != 1 || tn.At[1] < 1 {
+		t.Errorf("text symbol @ malformed: %+v", tn.At)
 	}
 }
 
@@ -411,24 +438,20 @@ func TestStructureUnknownExtensionReturnsTextNode(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("structure errored: %+v", r.Content)
 	}
-	var entry structureEntryWire
+	var entry wireEntry
 	json.Unmarshal([]byte(r.Content[0].Text), &entry)
-	if len(entry.Children) != 1 || entry.Children[0].Type != "text" {
-		t.Errorf("expected one text node for Dockerfile, got %+v", entry.Children)
+	if len(entry.Hash) != 1 || entry.Hash[0].Class != "text" {
+		t.Errorf("expected one text symbol for Dockerfile, got %+v", entry.Hash)
 	}
-	// Agent reads + edits via node_read / node_edit using that range.
-	tn := entry.Children[0]
-	rd := s.callTool("node_read", map[string]any{
-		"file":      "Dockerfile",
-		"startLine": tn.StartLine, "startCol": tn.StartCol,
-		"endLine": tn.EndLine, "endCol": tn.EndCol,
-	})
+	// Agent reads the whole file via the node address "<file>#" (empty
+	// sym addresses the whole file).
+	rd := s.callTool("node_read", map[string]any{"node": "Dockerfile#"})
 	var payload struct {
 		Text string `json:"text"`
 	}
 	json.Unmarshal([]byte(rd.Content[0].Text), &payload)
 	if payload.Text != "FROM golang:1.26\nCOPY . /app\n" {
-		t.Errorf("text node read returned %q, want full Dockerfile body", payload.Text)
+		t.Errorf("whole-file node_read returned %q, want full Dockerfile body", payload.Text)
 	}
 }
 
@@ -461,23 +484,10 @@ func TestStructureGrepMatchesIdentifier(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("structure grep errored: %+v", r.Content)
 	}
-	var got structureEntryWire
+	var got wireEntry
 	json.Unmarshal([]byte(r.Content[0].Text), &got)
-	// Walk the result tree looking for a node named UserID.
-	var visit func(e structureEntryWire) bool
-	visit = func(e structureEntryWire) bool {
-		if e.Kind == "node" && e.Name == "UserID" {
-			return true
-		}
-		for _, c := range e.Children {
-			if visit(c) {
-				return true
-			}
-		}
-		return false
-	}
-	if !visit(got) {
-		t.Errorf("grep=UserID didn't surface a matching node; tree=%+v", got)
+	if !anySym(got, "UserID") {
+		t.Errorf("grep=UserID didn't surface a matching symbol; tree=%+v", got)
 	}
 }
 
@@ -496,20 +506,9 @@ func TestStructureGrepMatchesFileBasename(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("errored: %+v", r.Content)
 	}
-	var got structureEntryWire
+	var got wireEntry
 	json.Unmarshal([]byte(r.Content[0].Text), &got)
-	var hits int
-	var visit func(e structureEntryWire)
-	visit = func(e structureEntryWire) {
-		if e.Kind == "file" && e.Name == "main.go" {
-			hits++
-		}
-		for _, c := range e.Children {
-			visit(c)
-		}
-	}
-	visit(got)
-	if hits == 0 {
+	if findFile(got, "main.go") == nil {
 		t.Errorf("expected main.go in pruned tree; got %+v", got)
 	}
 }
@@ -529,10 +528,10 @@ func TestStructureGrepNoMatchReturnsEmpty(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("errored: %+v", r.Content)
 	}
-	var got structureEntryWire
+	var got wireEntry
 	json.Unmarshal([]byte(r.Content[0].Text), &got)
-	if len(got.Children) != 0 {
-		t.Errorf("expected no children when grep matches nothing; got %+v", got.Children)
+	if len(got.Slash) != 0 {
+		t.Errorf("expected no children when grep matches nothing; got %+v", got.Slash)
 	}
 }
 
@@ -641,7 +640,7 @@ func TestStructureUnderLimitNoTruncation(t *testing.T) {
 
 	r := s.callTool("structure", map[string]any{"path": "."})
 	var payload struct {
-		Truncated bool `json:"truncated"`
+		Truncated bool   `json:"truncated"`
 		Hint      string `json:"hint"`
 	}
 	json.Unmarshal([]byte(r.Content[0].Text), &payload)
@@ -679,27 +678,42 @@ func TestSearchFindsAcrossFiles(t *testing.T) {
 		t.Fatalf("search errored: %+v", r.Content)
 	}
 	var payload struct {
-		TotalMatches int `json:"totalMatches"`
-		Matches      []struct {
-			File        string `json:"file"`
-			Line        int    `json:"line"`
-			Col         int    `json:"col"`
-			MatchEndCol int    `json:"matchEndCol"`
-			Text        string `json:"text"`
-		} `json:"matches"`
+		TotalMatches int             `json:"totalMatches"`
+		Matches      []wireFileMatch `json:"matches"`
 	}
 	json.Unmarshal([]byte(r.Content[0].Text), &payload)
 	if payload.TotalMatches != 3 {
 		t.Errorf("totalMatches = %d, want 3", payload.TotalMatches)
 	}
 	for _, m := range payload.Matches {
-		if m.Col < 1 || m.MatchEndCol <= m.Col {
-			t.Errorf("bad position: %+v", m)
-		}
-		if !strings.Contains(m.Text, "TODO") {
-			t.Errorf("text %q missing TODO", m.Text)
+		for _, h := range m.Hash {
+			if h.Class != "match" {
+				t.Errorf("hit class = %q, want match", h.Class)
+			}
+			if h.Col < 1 {
+				t.Errorf("bad col: %+v", h)
+			}
+			if !strings.Contains(h.Text, "TODO") {
+				t.Errorf("text %q missing TODO", h.Text)
+			}
 		}
 	}
+}
+
+// wireFileMatch is the grouped search / references shape:
+// {"file":…, "lang":…, "#":[ {sym,class,@,col,text,before,after} ]}.
+type wireFileMatch struct {
+	File string `json:"file"`
+	Lang string `json:"lang"`
+	Hash []struct {
+		Sym    string   `json:"sym"`
+		Class  string   `json:"class"`
+		At     []int    `json:"@"`
+		Col    int      `json:"col"`
+		Text   string   `json:"text"`
+		Before []string `json:"before"`
+		After  []string `json:"after"`
+	} `json:"#"`
 }
 
 // TestSearchGlobFilter scopes the walk by basename pattern.
@@ -726,13 +740,11 @@ func TestSearchGlobFilter(t *testing.T) {
 		t.Fatalf("errored: %+v", r.Content)
 	}
 	var payload struct {
-		TotalMatches int `json:"totalMatches"`
-		Matches      []struct {
-			File string `json:"file"`
-		} `json:"matches"`
+		TotalMatches int             `json:"totalMatches"`
+		Matches      []wireFileMatch `json:"matches"`
 	}
 	json.Unmarshal([]byte(r.Content[0].Text), &payload)
-	if payload.TotalMatches != 1 || payload.Matches[0].File != "a.go" {
+	if payload.TotalMatches != 1 || len(payload.Matches) != 1 || payload.Matches[0].File != "a.go" {
 		t.Errorf("glob didn't restrict to *.go: %+v", payload)
 	}
 }
@@ -788,18 +800,15 @@ func TestSearchContextLines(t *testing.T) {
 		t.Fatalf("errored: %+v", r.Content)
 	}
 	var payload struct {
-		Matches []struct {
-			Before []string `json:"before"`
-			After  []string `json:"after"`
-		} `json:"matches"`
+		Matches []wireFileMatch `json:"matches"`
 	}
 	json.Unmarshal([]byte(r.Content[0].Text), &payload)
-	if len(payload.Matches) != 1 {
+	if len(payload.Matches) != 1 || len(payload.Matches[0].Hash) != 1 {
 		t.Fatalf("want 1 match, got %+v", payload.Matches)
 	}
-	m := payload.Matches[0]
-	if len(m.Before) != 2 || len(m.After) != 2 {
-		t.Errorf("Before/After = %+v / %+v", m.Before, m.After)
+	h := payload.Matches[0].Hash[0]
+	if len(h.Before) != 2 || len(h.After) != 2 {
+		t.Errorf("Before/After = %+v / %+v", h.Before, h.After)
 	}
 }
 
@@ -838,40 +847,26 @@ func TestNodeReferencesByIdentifierRange(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	// First: structure(main.go) → find UserID's nameRange.
-	sr := s.callTool("structure", map[string]any{"path": "main.go"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var userID *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "UserID" {
-			userID = &f.Children[i]
-			break
-		}
-	}
-	if userID == nil {
-		t.Fatal("UserID not in main.go structure")
-	}
-
-	r := s.callTool("node_references", map[string]any{
-		"file":      "main.go",
-		"startLine": userID.NameStartLine,
-		"startCol":  userID.NameStartCol,
-		"endLine":   userID.NameEndLine,
-		"endCol":    userID.NameEndCol,
-	})
+	// Address the identifier directly via the node "<file>#<sym>".
+	r := s.callTool("node_references", map[string]any{"node": "main.go#UserID"})
 	if r.IsError {
 		t.Fatalf("node_references errored: %+v", r.Content)
 	}
-	var hits []siteJSON
-	json.Unmarshal([]byte(r.Content[0].Text), &hits)
-	if len(hits) < 5 {
-		t.Errorf("got %d UserID refs, want >= 5 across polyglot", len(hits))
+	var payload struct {
+		Matches []wireFileMatch `json:"matches"`
 	}
-	for _, h := range hits {
-		if h.Name != "UserID" {
-			t.Errorf("hit name = %q, want UserID", h.Name)
+	json.Unmarshal([]byte(r.Content[0].Text), &payload)
+	total := 0
+	for _, m := range payload.Matches {
+		for _, h := range m.Hash {
+			total++
+			if h.Sym != "UserID" {
+				t.Errorf("hit sym = %q, want UserID", h.Sym)
+			}
 		}
+	}
+	if total < 5 {
+		t.Errorf("got %d UserID refs, want >= 5 across polyglot", total)
 	}
 }
 
@@ -902,78 +897,43 @@ func TestNodeReferencesIncludesAtRefMarker(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	// Find TsHelper's range in types.ts to seed node_references.
-	sr := s.callTool("structure", map[string]any{"path": "types.ts"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var tsHelper *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "TsHelper" {
-			tsHelper = &f.Children[i]
-			break
-		}
-	}
-	if tsHelper == nil {
-		t.Fatal("TsHelper not in types.ts structure")
-	}
-
-	r := s.callTool("node_references", map[string]any{
-		"file":      "types.ts",
-		"startLine": tsHelper.NameStartLine,
-		"startCol":  tsHelper.NameStartCol,
-		"endLine":   tsHelper.NameEndLine,
-		"endCol":    tsHelper.NameEndCol,
-	})
+	// Reference confidence is carried in each hit's `class`.
+	r := s.callTool("node_references", map[string]any{"node": "types.ts#TsHelper"})
 	if r.IsError {
 		t.Fatalf("node_references TsHelper errored: %+v", r.Content)
 	}
-	var hits []siteJSON
-	json.Unmarshal([]byte(r.Content[0].Text), &hits)
-	var sawCommentGo bool
-	for _, h := range hits {
-		if h.File == "main.go" && h.Confidence == "comment" {
-			sawCommentGo = true
-		}
-	}
-	if !sawCommentGo {
-		t.Errorf("expected comment-confidence hit in main.go for TsHelper (from @see); hits=%+v", hits)
+	if !refHasClassInFile(r.Content[0].Text, "main.go", "comment") {
+		t.Errorf("expected comment-confidence hit in main.go for TsHelper (from @see); got %s", r.Content[0].Text)
 	}
 
-	// SharedType: only in main.go via @ref + in types.ts as the
-	// declaration. The @ref site must show up as declared.
-	sr2 := s.callTool("structure", map[string]any{"path": "types.ts"})
-	json.Unmarshal([]byte(sr2.Content[0].Text), &f)
-	var shared *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "SharedType" {
-			shared = &f.Children[i]
-			break
-		}
-	}
-	if shared == nil {
-		t.Fatal("SharedType not in types.ts structure")
-	}
-	r2 := s.callTool("node_references", map[string]any{
-		"file":      "types.ts",
-		"startLine": shared.NameStartLine,
-		"startCol":  shared.NameStartCol,
-		"endLine":   shared.NameEndLine,
-		"endCol":    shared.NameEndCol,
-	})
+	// SharedType: the @ref site in main.go must show up as declared.
+	r2 := s.callTool("node_references", map[string]any{"node": "types.ts#SharedType"})
 	if r2.IsError {
 		t.Fatalf("node_references SharedType errored: %+v", r2.Content)
 	}
-	var hits2 []siteJSON
-	json.Unmarshal([]byte(r2.Content[0].Text), &hits2)
-	var sawDeclaredGo bool
-	for _, h := range hits2 {
-		if h.File == "main.go" && h.Confidence == "declared" {
-			sawDeclaredGo = true
+	if !refHasClassInFile(r2.Content[0].Text, "main.go", "declared") {
+		t.Errorf("expected declared-confidence hit in main.go for SharedType (from @ref); got %s", r2.Content[0].Text)
+	}
+}
+
+// refHasClassInFile reports whether a grouped node_references payload has
+// a hit in the given file basename with the given class (confidence).
+func refHasClassInFile(payloadJSON, fileBase, class string) bool {
+	var payload struct {
+		Matches []wireFileMatch `json:"matches"`
+	}
+	json.Unmarshal([]byte(payloadJSON), &payload)
+	for _, m := range payload.Matches {
+		if filepath.Base(m.File) != fileBase {
+			continue
+		}
+		for _, h := range m.Hash {
+			if h.Class == class {
+				return true
+			}
 		}
 	}
-	if !sawDeclaredGo {
-		t.Errorf("expected declared-confidence hit in main.go for SharedType (from @ref); hits=%+v", hits2)
-	}
+	return false
 }
 
 func TestNodeReferencesEmptyRangeIsError(t *testing.T) {
@@ -1187,8 +1147,8 @@ func TestNodeReadAutoCapHintGuidesWidening(t *testing.T) {
 	}
 	for _, want := range []string{
 		fmt.Sprintf("lineLimit=%d", payload.TotalLines), // widen to the whole file
-		"search tool",                                   // target instead of read-all
-		"startLine=",                                    // paging fallback still offered
+		"search tool", // target instead of read-all
+		"startLine=",  // paging fallback still offered
 	} {
 		if !strings.Contains(payload.Hint, want) {
 			t.Errorf("auto-cap hint missing %q; got: %s", want, payload.Hint)
@@ -1582,26 +1542,18 @@ func TestNodeEditRewritesFileAtomicallyAndRefreshesIndex(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	// Sanity: Original is in the index (via structure → references roundtrip).
+	// Sanity: Original is in the structure.
 	sr := s.callTool("structure", map[string]any{"path": "main.go"})
-	var f structureEntryWire
+	var f wireEntry
 	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var orig *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "Original" {
-			orig = &f.Children[i]
-		}
-	}
-	if orig == nil {
+	if findSym(f, "Original") == nil {
 		t.Fatal("Original missing from initial structure")
 	}
 
-	// Rewrite the function — note rangeArgs uses the DECL range,
-	// not nameRange, for whole-node edits.
+	// Rewrite the function via node addressing — the node resolves to
+	// the whole DECL range for node_edit.
 	r := s.callTool("node_edit", map[string]any{
-		"file":      "main.go",
-		"startLine": orig.StartLine, "startCol": orig.StartCol,
-		"endLine": orig.EndLine, "endCol": orig.EndCol,
+		"node":    "main.go#Original",
 		"newText": "func Updated() {}",
 	})
 	if r.IsError {
@@ -1625,12 +1577,8 @@ func TestNodeEditRewritesFileAtomicallyAndRefreshesIndex(t *testing.T) {
 	// Index auto-refreshed: structure now shows Updated, not Original.
 	sr = s.callTool("structure", map[string]any{"path": "main.go"})
 	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	names := map[string]bool{}
-	for _, c := range f.Children {
-		names[c.Name] = true
-	}
-	if !names["Updated"] || names["Original"] {
-		t.Errorf("structure after edit didn't refresh: %+v", names)
+	if findSym(f, "Updated") == nil || findSym(f, "Original") != nil {
+		t.Errorf("structure after edit didn't refresh: %+v", f.Hash)
 	}
 
 	// No multiplex manager attached in this session: the response
@@ -1774,24 +1722,8 @@ func TestNodeRefactorRenameAcrossLanguages(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	// Get UserID's nameRange via structure.
-	sr := s.callTool("structure", map[string]any{"path": "main.go"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var typ *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "UserID" {
-			typ = &f.Children[i]
-		}
-	}
-	if typ == nil {
-		t.Fatal("UserID not in structure")
-	}
-
 	r := s.callTool("node_refactor", map[string]any{
-		"file":      "main.go",
-		"startLine": typ.NameStartLine, "startCol": typ.NameStartCol,
-		"endLine": typ.NameEndLine, "endCol": typ.NameEndCol,
+		"node":    "main.go#UserID",
 		"kind":    "rename",
 		"newName": "PersonID",
 	})
@@ -1851,24 +1783,8 @@ func TestNodeRefactorNestedShapeRenameIsEquivalent(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	sr := s.callTool("structure", map[string]any{"path": "main.go"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var typ *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "UserID" {
-			typ = &f.Children[i]
-			break
-		}
-	}
-	if typ == nil {
-		t.Fatal("UserID missing from structure")
-	}
-
 	r := s.callTool("node_refactor", map[string]any{
-		"file":      "main.go",
-		"startLine": typ.NameStartLine, "startCol": typ.NameStartCol,
-		"endLine": typ.NameEndLine, "endCol": typ.NameEndCol,
+		"node": "main.go#UserID",
 		"refactor": map[string]any{
 			"rename": "PersonID",
 		},
@@ -1932,24 +1848,8 @@ func TestNodeRefactorSignatureChangeParams(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	sr := s.callTool("structure", map[string]any{"path": "main.go"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var fn *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "Greet" {
-			fn = &f.Children[i]
-			break
-		}
-	}
-	if fn == nil {
-		t.Fatal("Greet missing from structure")
-	}
-
 	r := s.callTool("node_refactor", map[string]any{
-		"file":      "main.go",
-		"startLine": fn.NameStartLine, "startCol": fn.NameStartCol,
-		"endLine": fn.NameEndLine, "endCol": fn.NameEndCol,
+		"node": "main.go#Greet",
 		"refactor": map[string]any{
 			"params": []map[string]any{
 				{"name": "name", "type": "string"},
@@ -2302,23 +2202,8 @@ func TestNodeRefactorRenameDefaultSkipsComments(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	sr := s.callTool("structure", map[string]any{"path": "main.go"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var typ *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "UserID" {
-			typ = &f.Children[i]
-		}
-	}
-	if typ == nil {
-		t.Fatal("UserID not in structure")
-	}
-
 	r := s.callTool("node_refactor", map[string]any{
-		"file":      "main.go",
-		"startLine": typ.NameStartLine, "startCol": typ.NameStartCol,
-		"endLine": typ.NameEndLine, "endCol": typ.NameEndCol,
+		"node":    "main.go#UserID",
 		"kind":    "rename",
 		"newName": "PersonID",
 	})
@@ -2358,25 +2243,8 @@ func TestNodeRefactorRenameIncludeCommentsTouchesComments(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	sr := s.callTool("structure", map[string]any{"path": "main.go"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var typ *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "UserID" {
-			typ = &f.Children[i]
-		}
-	}
-	if typ == nil {
-		t.Fatal("UserID not in structure")
-	}
-
 	r := s.callTool("node_refactor", map[string]any{
-		"file":            "main.go",
-		"startLine":       typ.NameStartLine,
-		"startCol":        typ.NameStartCol,
-		"endLine":         typ.NameEndLine,
-		"endCol":          typ.NameEndCol,
+		"node":            "main.go#UserID",
 		"kind":            "rename",
 		"newName":         "PersonID",
 		"includeComments": true,
@@ -2424,22 +2292,8 @@ func TestNodeRefactorRenameIncludeCommentsDedupesWithDeclaredSites(t *testing.T)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	sr := s.callTool("structure", map[string]any{"path": "main.go"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var typ *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "UserID" {
-			typ = &f.Children[i]
-		}
-	}
-
 	r := s.callTool("node_refactor", map[string]any{
-		"file":            "main.go",
-		"startLine":       typ.NameStartLine,
-		"startCol":        typ.NameStartCol,
-		"endLine":         typ.NameEndLine,
-		"endCol":          typ.NameEndCol,
+		"node":            "main.go#UserID",
 		"kind":            "rename",
 		"newName":         "PersonID",
 		"includeComments": true,

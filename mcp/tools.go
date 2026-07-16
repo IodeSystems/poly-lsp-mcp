@@ -57,12 +57,18 @@ func registerTools() map[string]Tool {
 	return map[string]Tool{
 		"structure": {
 			Name: "structure",
-			Description: "Hierarchical tour of a workspace, directory, or file. " +
-				"`path` (default: workspace root) is workspace-relative or absolute. " +
-				"`depth` (default 1; 32 when `grep` is set) controls descent — directories at workspace level, AST nodes at file level. " +
-				"`grep` is an optional regex matched against each entry's name (file basename, directory name, or code identifier); subtrees without a match are pruned. Use it for symbol/file-name search; use the `search` tool for full-text content search. " +
-				"`nodeLimit` (default 250) caps how many entries return. When the cap fires, the response sets `truncated: true` + `truncatedReason: \"auto\" | \"nodeLimit\"` + `totalNodes` + `hint` so the agent knows how much was clipped and how to widen. " +
-				"Each `node` entry has both `range` (the whole declaration — pass to node_read/edit/delete) and `nameStart/End*` fields (the identifier — pass to node_references and node_refactor). " +
+			Description: "Hierarchical tour of a workspace, directory, or file. Output is one of three JSON object shapes; the KEY is both the type discriminator AND the address, and \"/\" \"#\" ARE the path separators:\n" +
+				"  directory: {\"dir\":\"src\", \"/\":[ …child dir/file objects… ]}\n" +
+				"  file:      {\"file\":\"src/app.go\", \"lang\":\"go\", \"#\":[ …symbols… ]}\n" +
+				"  symbol:    {\"sym\":\"Server.Start\", \"class\":\"method\", \"@\":[22,35]}\n" +
+				"A symbol's FULL ADDRESS is the file's `file` value + \"#\" + the symbol's `sym` value, e.g. \"src/app.go#Server.Start\" — pass that as the `node` arg on node_read/edit/delete/references/refactor.\n" +
+				"`sym` is the dotted path RELATIVE to the file; nesting is encoded in the dots (Server.Start = method Start of type Server), NOT in nested arrays — a file's `#` is a FLAT, source-ordered list of ALL symbols. Same-named same-class siblings and anonymous members get a 1-based `[n]` suffix (init[1], init[2], Server.[1]); a bare name is the first/only one.\n" +
+				"`class` is a normalized kind: func, method, type, struct, interface, class, const, var, field, enum, ctor, module, import (files with no grammar get one whole-file `text` symbol with sym \"\").\n" +
+				"`@` is [startLine, endLine] of the declaration (1-based).\n" +
+				"`path` (default: workspace root) is workspace-relative or absolute; the root shape matches the path (dir→dir, file→file).\n" +
+				"`depth` (default 1; 32 when `grep` is set) = directory levels for a dir, and max dot-count for a file's symbols (depth 1 = top-level only/no dots; depth 2 = one nesting level).\n" +
+				"`grep` is an optional regex matched against `sym` (and dir/file basenames); subtrees without a match are pruned, and files expand to their symbols. Use it for symbol/file-name search; use `search` for full-text content search.\n" +
+				"`nodeLimit` (default 250) caps how many entries return. When it fires the response adds `truncated:true` + `truncatedReason:\"auto\"|\"nodeLimit\"` + `totalNodes` + `hint`.\n" +
 				"Tree-sitter grammars: go / typescript / tsx / python / sql.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
@@ -78,34 +84,38 @@ func registerTools() map[string]Tool {
 		},
 		"node_references": {
 			Name: "node_references",
-			Description: "Return every workspace position where the identifier at (file, range) is referenced. " +
-				"Range must cover just the identifier (use `nameStartLine` / `nameStartCol` from structure(file)). " +
+			Description: "Return every workspace position where an identifier is referenced. " +
+				"Address it EITHER with `node`=\"<file>#<sym>\" (from structure; resolves to the identifier automatically) OR with an explicit {file, startLine, startCol, endLine, endCol} range covering just the identifier. The two forms are mutually exclusive. " +
+				"Output is grouped by file, reusing the file shape: {\"matches\":[ {\"file\":\"src/app.go\",\"lang\":\"go\",\"#\":[ {\"sym\":\"Start\",\"class\":\"declared\",\"@\":[22,22]}, … ]}, … ]}. Each hit's `class` is its confidence (declared / lexical / comment / lsp) and `@` is [line, line]. " +
 				"Output combines lexical hits, declared bindings, and schema-anchored sites — the same union node_refactor would touch on rename.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
+    "node":      {"type": "string", "description": "Node address \"<file>#<sym>\" (alternative to file+range)."},
     "file":      {"type": "string"},
     "startLine": {"type": "integer", "minimum": 1},
     "startCol":  {"type": "integer", "minimum": 1},
     "endLine":   {"type": "integer", "minimum": 1},
     "endCol":    {"type": "integer", "minimum": 1}
   },
-  "required": ["file", "startLine", "startCol", "endLine", "endCol"]
+  "required": []
 }`),
 			Handler: handleNodeReferences,
 		},
 		"node_read": {
 			Name: "node_read",
-			Description: "Read a file. Only `file` is required; every other field is optional and dispatches the shape: " +
+			Description: "Read a file. Only `file` (or `node`) is required; every other field is optional and dispatches the shape: " +
 				"no args → whole file, auto-capped at ~2k chars (returns `truncated: true` plus `totalChars` / `totalLines` / `maxLineLength` when the cap kicks in so the agent knows the full size). " +
+				"`node`=\"<file>#<sym>\" reads exactly that symbol's whole declaration (resolved from structure; alternative to file+range, mutually exclusive with an explicit range). " +
 				"`startLine` (default 1) starts reading at that line; `lineLimit` (default: auto — enough lines to fit ~2k chars) caps how many lines come back; `lineLength` (default: unbounded) truncates each line at that many chars (handy for files with huge lines like minified JS). " +
-				"`startLine, startCol, endLine, endCol` together engage byte-precise slicing (matches structure's range output). " +
+				"`startLine, startCol, endLine, endCol` together engage byte-precise slicing. " +
 				"When any cap fires, the response includes the full source's `totalChars`, `totalLines`, `maxLineLength` so the agent can decide whether to widen and re-call. " +
 				"Replaces read_file / cat / sed -n.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "file":       {"type": "string"},
+    "node":       {"type": "string", "description": "Node address \"<file>#<sym>\": read that symbol's whole declaration."},
     "startLine":  {"type": "integer", "minimum": 1, "description": "Where to start reading. Default 1."},
     "lineLimit":  {"type": "integer", "minimum": 1, "description": "Max lines returned. Default: enough to fit ~2k chars."},
     "lineLength": {"type": "integer", "minimum": 1, "description": "Truncate each line at this many chars. Default: keep full lines."},
@@ -113,55 +123,59 @@ func registerTools() map[string]Tool {
     "endLine":    {"type": "integer", "minimum": 1},
     "endCol":     {"type": "integer", "minimum": 1}
   },
-  "required": ["file"]
+  "required": []
 }`),
 			Handler: handleNodeRead,
 		},
 		"node_edit": {
 			Name: "node_edit",
-			Description: "Atomically edit a file. Three input shapes (pick one): " +
-				"{file, startLine, startCol, endLine, endCol, newText} → replace that range with newText (same convention as node_read). " +
+			Description: "Atomically edit a file. Input shapes (pick one): " +
+				"{node:\"<file>#<sym>\", newText} → replace that symbol's whole declaration with newText (address from structure). " +
+				"{file, startLine, startCol, endLine, endCol, newText} → replace that range with newText. " +
 				"{file, newText} → create or overwrite the whole file (replaces write_file; parent dirs auto-created); newText must be non-empty — this shape REJECTS an empty/absent newText rather than blanking the file (use node_delete to remove content or the whole file). " +
 				"{file, diff} → apply a unified-diff patch (one tool call for non-contiguous multi-region edits; context lines are matched fuzzily — hunk header line numbers are a hint, not a hard requirement — but ambiguous or missing context still errors). " +
-				"Writes are atomic and the response includes LSP diagnostics from any child language server.",
+				"`node` is mutually exclusive with an explicit range and with diff. Writes are atomic and the response includes LSP diagnostics from any child language server.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "file":      {"type": "string"},
-    "newText":   {"type": "string", "description": "New contents. With range: replaces that span. Without range: whole-file create-or-overwrite — must be non-empty, or the call is rejected."},
-    "diff":      {"type": "string", "description": "Unified-diff patch. Mutually exclusive with newText/range. Context lines are located fuzzily; hunk header numbers are a hint."},
+    "node":      {"type": "string", "description": "Node address \"<file>#<sym>\": replace that symbol's whole declaration with newText."},
+    "newText":   {"type": "string", "description": "New contents. With range/node: replaces that span. Without either: whole-file create-or-overwrite — must be non-empty, or the call is rejected."},
+    "diff":      {"type": "string", "description": "Unified-diff patch. Mutually exclusive with newText/range/node. Context lines are located fuzzily; hunk header numbers are a hint."},
     "startLine": {"type": "integer", "minimum": 1},
     "startCol":  {"type": "integer", "minimum": 1},
     "endLine":   {"type": "integer", "minimum": 1},
     "endCol":    {"type": "integer", "minimum": 1}
   },
-  "required": ["file"]
+  "required": []
 }`),
 			Handler: handleNodeEdit,
 		},
 		"node_delete": {
 			Name: "node_delete",
-			Description: "Delete text or a whole file. Two input shapes (pick one): " +
-				"{file, startLine, startCol, endLine, endCol} → atomically remove the text in that range (file stays, just shorter). Equivalent to node_edit{newText:''} but states intent. " +
+			Description: "Delete text or a whole file. Input shapes (pick one): " +
+				"{node:\"<file>#<sym>\"} → excise that symbol's whole declaration (file stays, just shorter; address from structure). " +
+				"{file, startLine, startCol, endLine, endCol} → atomically remove the text in that range. Equivalent to node_edit{newText:''} but states intent. " +
 				"{file} → delete the whole file from disk. Operator-grade destructive — the file is removed and its slice dropped from the symbol index, no temp + Rename undo. " +
-				"Range deletion is exact: surrounding whitespace / blank lines are not adjusted; use a wider range or follow up with node_edit if you want them trimmed.",
+				"Range/node deletion is exact: surrounding whitespace / blank lines are not adjusted; use a wider range or follow up with node_edit if you want them trimmed.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "file":      {"type": "string"},
+    "node":      {"type": "string", "description": "Node address \"<file>#<sym>\": excise that symbol's whole declaration."},
     "startLine": {"type": "integer", "minimum": 1},
     "startCol":  {"type": "integer", "minimum": 1},
     "endLine":   {"type": "integer", "minimum": 1},
     "endCol":    {"type": "integer", "minimum": 1}
   },
-  "required": ["file"]
+  "required": []
 }`),
 			Handler: handleNodeDelete,
 		},
 		"node_refactor": {
 			Name: "node_refactor",
 			Description: "Composable cross-language refactor. " +
-				"Point `range` at an identifier (use structure's `nameStart*` / `nameEnd*` fields). " +
+				"Address the target identifier EITHER with `node`=\"<file>#<sym>\" (from structure; resolves to the identifier automatically) OR with an explicit {file, startLine, startCol, endLine, endCol} range on the identifier — mutually exclusive. " +
 				"`refactor` is an object selecting one or more ops to apply in a single call: " +
 				"`rename` (workspace-wide rename across declared bindings, schema-anchored sites, and lexical hits — with per-site on-disk text verification so aliasing bindings can't substitute the wrong token); " +
 				"`params` (rebuild the function's parameter list — go / typescript / python; callers across the workspace get their arg lists rewritten best-effort, padded with language-appropriate zero values on growth, truncated on shrink, spread/splat callers reported as skipped); " +
@@ -172,6 +186,7 @@ func registerTools() map[string]Tool {
 			InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
+    "node":      {"type": "string", "description": "Node address \"<file>#<sym>\" (alternative to file+range)."},
     "file":      {"type": "string"},
     "startLine": {"type": "integer", "minimum": 1},
     "startCol":  {"type": "integer", "minimum": 1},
@@ -203,7 +218,7 @@ func registerTools() map[string]Tool {
     "applyCandidates": {"type": "boolean", "description": "Also rename the lexical name-match sites that are cross-namespace GUESSES. Default false: those sites are returned under 'candidates' (recommendations) and NOT touched — review them, then re-run with applyCandidates:true. Authoritative sites (declared @derived/binding, child-LSP) are always renamed."},
     "resolution": {"type": "object", "description": "Resolves the variance when the target is a @derived source (a derivation-graph node — gat operation / sqlc column). Without it, such a rename is NOT applied and returns variance:true with the modes to choose from. mode='underlying' cascades the rename to the source + all references (the only automated mode); projection/mapping/hide are recognized but manual. target='file:line' picks one source when fan-in is ambiguous.", "properties": {"mode": {"type": "string", "enum": ["underlying", "projection", "mapping", "hide"]}, "target": {"type": "string"}}}
   },
-  "required": ["file", "startLine", "startCol", "endLine", "endCol"]
+  "required": []
 }`),
 			Handler: handleNodeRefactor,
 		},
@@ -215,7 +230,7 @@ func registerTools() map[string]Tool {
 				"`glob` (filepath.Match pattern over file basenames, e.g. `*.go`) filters which files get scanned. " +
 				"`limit` (default 100) caps hits; overflow surfaces as `droppedMatches`. " +
 				"`contextLines` (default 0) returns N lines before AND after each match for previewing. " +
-				"Each hit returns `{file, line, col, matchEndCol, text}` (text is the whole matched line). " +
+				"Matches are grouped by file, reusing the structure file shape: {\"matches\":[ {\"file\":…,\"lang\":…,\"#\":[ {\"sym\":\"<enclosing symbol or empty>\",\"class\":\"match\",\"@\":[line,line],\"col\":N,\"text\":\"<matched line>\"}, … ]}, … ]}. `sym` names the enclosing symbol when one is resolvable (so you can node_read it via \"<file>#<sym>\"); `class` is always \"match\". " +
 				"Use this for full-text search — comment hunting, finding stringly-typed magic values, etc. " +
 				"For symbol/file-NAME search use structure(grep=…) instead — it's tree-sitter aware. " +
 				"Binary files, the standard noise dirs (.git / node_modules / vendor / __pycache__ / dist / build), and files > 1 MiB are skipped silently.",
@@ -281,28 +296,6 @@ func (a rangeArgs) validate() error {
 
 // -------------------------------------------------------------- structure
 
-// structureEntry is the unified tree node the structure tool emits.
-// `kind` distinguishes filesystem entries from AST nodes:
-//
-//	"directory" — a directory on disk
-//	"file"      — a regular file
-//	"node"      — a tree-sitter named child inside a file
-type structureEntry struct {
-	Kind          string           `json:"kind"`
-	Path          string           `json:"path,omitempty"`
-	Type          string           `json:"type,omitempty"`
-	Name          string           `json:"name,omitempty"`
-	StartLine     int              `json:"startLine,omitempty"`
-	StartCol      int              `json:"startCol,omitempty"`
-	EndLine       int              `json:"endLine,omitempty"`
-	EndCol        int              `json:"endCol,omitempty"`
-	NameStartLine int              `json:"nameStartLine,omitempty"`
-	NameStartCol  int              `json:"nameStartCol,omitempty"`
-	NameEndLine   int              `json:"nameEndLine,omitempty"`
-	NameEndCol    int              `json:"nameEndCol,omitempty"`
-	Children      []structureEntry `json:"children,omitempty"`
-}
-
 // -------------------------------------------------------------- search
 
 func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
@@ -351,30 +344,47 @@ func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		return nil, true, err
 	}
 
-	type wireHit struct {
-		File        string   `json:"file"`
-		Line        int      `json:"line"`
-		Col         int      `json:"col"`
-		MatchEndCol int      `json:"matchEndCol"`
-		Text        string   `json:"text"`
-		Before      []string `json:"before,omitempty"`
-		After       []string `json:"after,omitempty"`
-	}
-	out := make([]wireHit, 0, len(hits))
+	// Group hits by file into the shared file shape. Each text hit
+	// becomes a sym entry with class "match": `sym` carries the
+	// enclosing symbol path when resolvable (for navigation), `@` is
+	// the hit's [line, line], and `text` is the matched line.
+	var order []string
+	byFile := map[string][]any{}
+	fileLang := map[string]string{}
+	symCache := map[string][]symbols.Symbol{}
 	for _, h := range hits {
-		out = append(out, wireHit{
-			File:        relPath(h.File, s.getRoot()),
-			Line:        h.Line,
-			Col:         h.Col,
-			MatchEndCol: h.MatchEndCol,
-			Text:        h.Text,
-			Before:      h.Before,
-			After:       h.After,
-		})
+		rel := relPath(h.File, s.getRoot())
+		if _, ok := byFile[rel]; !ok {
+			order = append(order, rel)
+			fileLang[rel] = s.languageForFile(h.File)
+		}
+		m := map[string]any{
+			"sym":   s.enclosingSymPath(h.File, h.Line, symCache),
+			"class": "match",
+			"@":     []int{h.Line, h.Line},
+			"col":   h.Col,
+			"text":  h.Text,
+		}
+		if len(h.Before) > 0 {
+			m["before"] = h.Before
+		}
+		if len(h.After) > 0 {
+			m["after"] = h.After
+		}
+		byFile[rel] = append(byFile[rel], m)
+	}
+	matches := make([]any, 0, len(order))
+	for _, f := range order {
+		fm := map[string]any{"file": f}
+		if fileLang[f] != "" {
+			fm["lang"] = fileLang[f]
+		}
+		fm["#"] = byFile[f]
+		matches = append(matches, fm)
 	}
 	payload := map[string]any{
-		"totalMatches": len(out),
-		"matches":      out,
+		"totalMatches": len(hits),
+		"matches":      matches,
 	}
 	if dropped > 0 {
 		payload["droppedMatches"] = dropped
@@ -387,408 +397,6 @@ func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
 // responses contained without forcing the agent to think about
 // pagination on every call — most files and dirs are smaller.
 const defaultStructureNodeLimit = 250
-
-func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
-	var p struct {
-		Path      string `json:"path"`
-		Depth     *int   `json:"depth"`
-		Grep      string `json:"grep"`
-		NodeLimit *int   `json:"nodeLimit"`
-	}
-	if len(args) > 0 && string(args) != "null" {
-		if err := json.Unmarshal(args, &p); err != nil {
-			return nil, true, fmt.Errorf("bad arguments: %w", err)
-		}
-	}
-	var grepRe *regexp.Regexp
-	if p.Grep != "" {
-		re, err := regexp.Compile(p.Grep)
-		if err != nil {
-			return nil, true, fmt.Errorf("invalid grep regex: %w", err)
-		}
-		grepRe = re
-	}
-	// Default depth: 1 for a plain "show me this level" call; 32 when
-	// grep is set (the agent wants a search, not a listing). Caller
-	// can override either way.
-	depth := 1
-	if grepRe != nil {
-		depth = 32
-	}
-	if p.Depth != nil {
-		depth = *p.Depth
-		if depth < 0 {
-			return nil, true, fmt.Errorf("depth must be >= 0")
-		}
-	}
-	if p.Path == "" {
-		p.Path = "."
-	}
-	autoNodeCap := p.NodeLimit == nil
-	nodeLimit := defaultStructureNodeLimit
-	if p.NodeLimit != nil {
-		if *p.NodeLimit < 1 {
-			return nil, true, fmt.Errorf("nodeLimit must be >= 1")
-		}
-		nodeLimit = *p.NodeLimit
-	}
-
-	abs := s.resolveFileArg(p.Path)
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, true, fmt.Errorf("stat %s: %w", p.Path, err)
-	}
-
-	var entry structureEntry
-	if info.IsDir() {
-		if grepRe != nil {
-			// grep mode: expand files into their AST nodes so a
-			// regex over identifiers can hit them. The plain
-			// directory walker stops at filenames.
-			entry = s.structureForDirExpanded(abs, s.getRoot(), depth)
-		} else {
-			entry, _ = structureForDir(abs, s.getRoot(), depth)
-		}
-		if grepRe != nil {
-			pruned, ok := pruneStructure(entry, grepRe)
-			if !ok {
-				return jsonContent(emptyDirEntry(entry)), false, nil
-			}
-			entry = pruned
-		}
-	} else {
-		entry, err = structureForFile(abs, s.languageForFile(abs), s.getRoot(), depth)
-		if err != nil {
-			return nil, true, err
-		}
-		if grepRe != nil {
-			pruned, ok := pruneStructure(entry, grepRe)
-			if !ok {
-				return jsonContent(emptyDirEntry(entry)), false, nil
-			}
-			entry = pruned
-		}
-	}
-
-	totalNodes := countStructureNodes(entry)
-	if totalNodes <= nodeLimit {
-		return jsonContent(entry), false, nil
-	}
-	// Tree exceeded the limit. Clip in DFS order so the early
-	// branches stay intact, and emit truncation metadata so the
-	// agent knows what got cut and how to drill in.
-	clipped := clipStructure(entry, nodeLimit)
-	payload := map[string]any{
-		"kind":            clipped.Kind,
-		"path":            clipped.Path,
-		"type":            clipped.Type,
-		"name":            clipped.Name,
-		"startLine":       clipped.StartLine,
-		"startCol":        clipped.StartCol,
-		"endLine":         clipped.EndLine,
-		"endCol":          clipped.EndCol,
-		"nameStartLine":   clipped.NameStartLine,
-		"nameStartCol":    clipped.NameStartCol,
-		"nameEndLine":     clipped.NameEndLine,
-		"nameEndCol":      clipped.NameEndCol,
-		"children":        clipped.Children,
-		"truncated":       true,
-		"truncatedReason": chooseStructureReason(autoNodeCap),
-		"totalNodes":      totalNodes,
-		"shownNodes":      countStructureNodes(clipped),
-		"nodeLimit":       nodeLimit,
-		"hint":            structureHint(autoNodeCap, nodeLimit, totalNodes, grepRe != nil),
-	}
-	// Drop zero-valued fields to keep the payload tidy — they'd be
-	// emitted as 0 / "" by map serialization but the JSON tags use
-	// omitempty when going through the struct path.
-	tidyStructureMap(payload)
-	return jsonContent(payload), false, nil
-}
-
-// countStructureNodes counts entries in a tree (root + every
-// descendant). Used to gate truncation and to report shownNodes.
-func countStructureNodes(e structureEntry) int {
-	count := 1
-	for _, c := range e.Children {
-		count += countStructureNodes(c)
-	}
-	return count
-}
-
-// clipStructure returns a copy of e truncated to at most limit
-// entries (counting root). Walks DFS so early branches stay intact;
-// once the budget is exhausted, remaining siblings + descendants are
-// dropped. The original tree is not mutated.
-func clipStructure(e structureEntry, limit int) structureEntry {
-	budget := limit
-	out, _ := clipStructureWithBudget(e, &budget)
-	return out
-}
-
-func clipStructureWithBudget(e structureEntry, budget *int) (structureEntry, bool) {
-	if *budget <= 0 {
-		return structureEntry{}, false
-	}
-	*budget--
-	out := e
-	out.Children = nil
-	for _, c := range e.Children {
-		if *budget <= 0 {
-			break
-		}
-		sub, ok := clipStructureWithBudget(c, budget)
-		if !ok {
-			break
-		}
-		out.Children = append(out.Children, sub)
-	}
-	return out, true
-}
-
-func chooseStructureReason(autoCap bool) string {
-	if autoCap {
-		return "auto"
-	}
-	return "nodeLimit"
-}
-
-func structureHint(autoCap bool, limit, total int, grep bool) string {
-	if autoCap {
-		if grep {
-			return fmt.Sprintf("Auto-capped at %d/%d nodes. Narrow the regex or pass a larger nodeLimit.", limit, total)
-		}
-		return fmt.Sprintf("Auto-capped at %d/%d nodes. Use a deeper path, set grep to filter, or pass a larger nodeLimit.", limit, total)
-	}
-	return fmt.Sprintf("Trimmed to %d/%d nodes (your nodeLimit). Widen nodeLimit or narrow the path to see more.", limit, total)
-}
-
-// tidyStructureMap drops zero-valued ints / strings from a wire
-// payload so the response doesn't carry `startLine: 0` etc. on a
-// directory entry. Mirrors the omitempty annotations on
-// structureEntry.
-func tidyStructureMap(m map[string]any) {
-	for k, v := range m {
-		switch t := v.(type) {
-		case int:
-			if t == 0 {
-				delete(m, k)
-			}
-		case string:
-			if t == "" {
-				delete(m, k)
-			}
-		case []structureEntry:
-			if len(t) == 0 {
-				delete(m, k)
-			}
-		}
-	}
-}
-
-// structureForDirExpanded is the grep-mode variant of structureForDir:
-// recurses into subdirectories AND expands every file's AST nodes
-// (cap depth at a sensible bound to avoid runaway). Used only when
-// `grep` is set on the structure call.
-func (s *Server) structureForDirExpanded(abs, root string, depth int) structureEntry {
-	entry := structureEntry{
-		Kind: "directory",
-		Path: relPath(abs, root),
-		Name: filepath.Base(abs),
-	}
-	if depth <= 0 {
-		return entry
-	}
-	dirEntries, err := os.ReadDir(abs)
-	if err != nil {
-		return entry
-	}
-	for _, de := range dirEntries {
-		name := de.Name()
-		if skipStructureDir(name) {
-			continue
-		}
-		childAbs := filepath.Join(abs, name)
-		if de.IsDir() {
-			child := s.structureForDirExpanded(childAbs, root, depth-1)
-			entry.Children = append(entry.Children, child)
-			continue
-		}
-		// Files: pull their AST nodes (one level deep is plenty —
-		// agents grep for top-level decls, not nested locals).
-		fileEntry, err := structureForFile(childAbs, s.languageForFile(childAbs), root, 1)
-		if err != nil {
-			// Fall back to a name-only file entry on parse failure
-			// so grep on the basename still works.
-			fileEntry = structureEntry{
-				Kind: "file",
-				Path: relPath(childAbs, root),
-				Name: name,
-			}
-		}
-		entry.Children = append(entry.Children, fileEntry)
-	}
-	sort.Slice(entry.Children, func(i, j int) bool {
-		return entry.Children[i].Path < entry.Children[j].Path
-	})
-	return entry
-}
-
-// pruneStructure walks the tree and keeps only entries whose own
-// `name` matches re, OR whose descendants contain a match. Returns
-// (pruned-entry, true) when something survives, (zero, false) when
-// nothing in the subtree matched.
-//
-// File / directory leaves match on their basename; AST node leaves
-// match on their identifier. Directories without surviving children
-// are dropped; files without surviving AST children but matching
-// basename keep their child list intact (the agent often wants the
-// node ranges when they grep for a filename).
-func pruneStructure(e structureEntry, re *regexp.Regexp) (structureEntry, bool) {
-	selfMatch := re.MatchString(e.Name)
-
-	var kept []structureEntry
-	for _, c := range e.Children {
-		if k, ok := pruneStructure(c, re); ok {
-			kept = append(kept, k)
-		}
-	}
-
-	if selfMatch {
-		// File / node with matching name: keep all original children
-		// so the agent can drill in without a second call. Dir with
-		// matching name: keep only matching children — there's no
-		// "drill in" value-add for unrelated siblings.
-		switch e.Kind {
-		case "file", "node":
-			return e, true
-		case "directory":
-			out := e
-			out.Children = kept
-			return out, true
-		}
-	}
-	if len(kept) > 0 {
-		out := e
-		out.Children = kept
-		return out, true
-	}
-	return structureEntry{}, false
-}
-
-// emptyDirEntry returns a stripped-down version of e with no children
-// — used when grep filtered everything out. Preserves Kind / Path /
-// Name so the caller knows what they asked about.
-func emptyDirEntry(e structureEntry) structureEntry {
-	return structureEntry{
-		Kind: e.Kind,
-		Path: e.Path,
-		Name: e.Name,
-	}
-}
-
-func structureForDir(abs, root string, depth int) (structureEntry, bool) {
-	entry := structureEntry{
-		Kind: "directory",
-		Path: relPath(abs, root),
-		Name: filepath.Base(abs),
-	}
-	if depth <= 0 {
-		return entry, false
-	}
-	dirEntries, err := os.ReadDir(abs)
-	if err != nil {
-		return entry, false
-	}
-	for _, de := range dirEntries {
-		name := de.Name()
-		if skipStructureDir(name) {
-			continue
-		}
-		childAbs := filepath.Join(abs, name)
-		if de.IsDir() {
-			child, _ := structureForDir(childAbs, root, depth-1)
-			entry.Children = append(entry.Children, child)
-		} else {
-			entry.Children = append(entry.Children, structureEntry{
-				Kind: "file",
-				Path: relPath(childAbs, root),
-				Name: name,
-			})
-		}
-	}
-	sort.Slice(entry.Children, func(i, j int) bool {
-		return entry.Children[i].Path < entry.Children[j].Path
-	})
-	return entry, true
-}
-
-// skipStructureDir mirrors symbols.Build's allow-list: never descend
-// into .git / node_modules / vendor / __pycache__ etc.
-func skipStructureDir(name string) bool {
-	switch name {
-	case ".git", "node_modules", "vendor", "__pycache__", "dist", "build", ".idea", ".vscode", ".poly-lsp-mcp":
-		return true
-	}
-	return false
-}
-
-func structureForFile(abs, lang, root string, depth int) (structureEntry, error) {
-	entry := structureEntry{
-		Kind: "file",
-		Path: relPath(abs, root),
-		Name: filepath.Base(abs),
-	}
-	if depth <= 0 {
-		return entry, nil
-	}
-
-	content, err := os.ReadFile(abs)
-	if err != nil {
-		return entry, fmt.Errorf("read %s: %w", abs, err)
-	}
-
-	// For files we have a tree-sitter grammar for, return named child
-	// nodes (declarations, types, classes, etc.).
-	if lang != "" && symbols.LanguageByName(lang) != nil {
-		nodes, err := symbols.StructureNodes(lang, content)
-		if err != nil {
-			return entry, err
-		}
-		for _, n := range nodes {
-			entry.Children = append(entry.Children, structureEntry{
-				Kind:          "node",
-				Type:          n.Type,
-				Name:          n.Name,
-				StartLine:     n.StartLine,
-				StartCol:      n.StartCol,
-				EndLine:       n.EndLine,
-				EndCol:        n.EndCol,
-				NameStartLine: n.NameStartLine,
-				NameStartCol:  n.NameStartCol,
-				NameEndLine:   n.NameEndLine,
-				NameEndCol:    n.NameEndCol,
-			})
-		}
-		return entry, nil
-	}
-
-	// Otherwise — language uses the lexical extractor only (yaml /
-	// json / markdown) or has no registered language at all (Dockerfile,
-	// TOML, HCL, .env, …). Either way, return a single "text" node
-	// covering the whole file so agents can node_read / node_edit /
-	// node_delete it like any other range.
-	endLine, endCol := contentEndPosition(content)
-	entry.Children = []structureEntry{{
-		Kind:      "node",
-		Type:      "text",
-		StartLine: 1,
-		StartCol:  1,
-		EndLine:   endLine,
-		EndCol:    endCol,
-	}}
-	return entry, nil
-}
 
 // contentEndPosition returns the 1-based (line, col) position one past
 // the last byte of content. For "abc\n" the end is (2, 1); for "abc"
@@ -810,8 +418,23 @@ func contentEndPosition(content []byte) (int, int) {
 
 func handleNodeReferences(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var a rangeArgs
+	var wrap struct {
+		Node string `json:"node"`
+	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	_ = json.Unmarshal(args, &wrap)
+	// node addressing resolves to the identifier (name) range.
+	if wrap.Node != "" {
+		if a.StartLine != 0 || a.StartCol != 0 || a.EndLine != 0 || a.EndCol != 0 {
+			return nil, true, errors.New("pass either node or an explicit range, not both")
+		}
+		rn, err := s.resolveNodeAddr(wrap.Node)
+		if err != nil {
+			return nil, true, err
+		}
+		a = rn.nameRange
 	}
 	if err := a.validate(); err != nil {
 		return nil, true, err
@@ -831,21 +454,21 @@ func handleNodeReferences(s *Server, args json.RawMessage) ([]Content, bool, err
 		return nil, true, err
 	}
 	if name == "" {
-		return nil, true, errors.New("range is empty; pass the identifier's nameStart/nameEnd range")
+		return nil, true, errors.New("range is empty; pass the identifier's name range (or a node address)")
 	}
 
-	var hits []siteJSON
+	var items []matchItem
 	for _, site := range idx.LookupExisting(name) {
-		hits = append(hits, siteJSON{
-			Name:       name,
-			File:       relPath(site.File, s.getRoot()),
-			Line:       site.Line,
-			Col:        site.Col,
-			Language:   site.Language,
-			Confidence: confidenceLabel(site.Confidence),
+		rel := relPath(site.File, s.getRoot())
+		items = append(items, matchItem{
+			file:  rel,
+			lang:  site.Language,
+			sym:   name,
+			class: confidenceLabel(site.Confidence),
+			at:    [2]int{site.Line, site.Line},
 		})
 	}
-	return jsonContent(hits), false, nil
+	return jsonContent(groupedMatches(items)), false, nil
 }
 
 // siteJSON is the wire shape of one site in tool output. Files are
@@ -869,6 +492,10 @@ type siteJSON struct {
 // were set; sensible defaults fill the rest.
 type nodeReadArgs struct {
 	File string `json:"file"`
+
+	// Node address ("<file>#<sym>") — an alternative to file+range.
+	// Resolves to the symbol's whole declaration range.
+	Node string `json:"node,omitempty"`
 
 	// Line-based reading. StartLine alone (or no args at all) is the
 	// common case; LineLimit / LineLength tune the size budget.
@@ -899,6 +526,19 @@ func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var a nodeReadArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	// Node address → whole-declaration byte-precise range.
+	if a.Node != "" {
+		if a.StartLine != nil || a.StartCol != nil || a.EndLine != nil || a.EndCol != nil {
+			return nil, true, errors.New("pass either node or an explicit range, not both")
+		}
+		rn, err := s.resolveNodeAddr(a.Node)
+		if err != nil {
+			return nil, true, err
+		}
+		d := rn.declRange
+		a.File = d.File
+		a.StartLine, a.StartCol, a.EndLine, a.EndCol = &d.StartLine, &d.StartCol, &d.EndLine, &d.EndCol
 	}
 	if a.File == "" {
 		return nil, true, errors.New("file is required")
@@ -1158,6 +798,10 @@ type nodeEditArgs struct {
 	NewText string `json:"newText"`
 	Diff    string `json:"diff"`
 
+	// Node address ("<file>#<sym>") — selects the symbol's whole
+	// declaration range as the span to replace with newText.
+	Node string `json:"node,omitempty"`
+
 	// Range form (existing).
 	StartLine *int `json:"startLine,omitempty"`
 	StartCol  *int `json:"startCol,omitempty"`
@@ -1172,12 +816,30 @@ func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
-	if p.File == "" {
-		return nil, true, errors.New("file is required")
-	}
 
 	hasRange := p.StartLine != nil || p.StartCol != nil || p.EndLine != nil || p.EndCol != nil
 	hasDiff := p.Diff != ""
+
+	// Node address → selects the declaration range for a newText
+	// replace (diff mode is unaffected; a node is mutually exclusive
+	// with an explicit range and with diff).
+	if p.Node != "" {
+		if hasRange {
+			return nil, true, errors.New("pass either node or an explicit range, not both")
+		}
+		if hasDiff {
+			return nil, true, errors.New("cannot combine node with diff")
+		}
+		rn, err := s.resolveNodeAddr(p.Node)
+		if err != nil {
+			return nil, true, err
+		}
+		return s.applyRangeRewrite(rn.declRange, p.NewText, p.diagnosticOptions)
+	}
+
+	if p.File == "" {
+		return nil, true, errors.New("file is required")
+	}
 	switch {
 	case hasDiff && hasRange:
 		return nil, true, errors.New("cannot combine diff with range form")
@@ -1216,6 +878,7 @@ func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
 // node_delete. Same pattern as node_edit / node_read.
 type nodeDeleteArgs struct {
 	File      string `json:"file"`
+	Node      string `json:"node,omitempty"`
 	StartLine *int   `json:"startLine,omitempty"`
 	StartCol  *int   `json:"startCol,omitempty"`
 	EndLine   *int   `json:"endLine,omitempty"`
@@ -1228,10 +891,22 @@ func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) 
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
+	hasRange := p.StartLine != nil || p.StartCol != nil || p.EndLine != nil || p.EndCol != nil
+	// Node address → remove the symbol's whole declaration range (the
+	// file stays; the declaration is excised).
+	if p.Node != "" {
+		if hasRange {
+			return nil, true, errors.New("pass either node or an explicit range, not both")
+		}
+		rn, err := s.resolveNodeAddr(p.Node)
+		if err != nil {
+			return nil, true, err
+		}
+		return s.applyRangeRewrite(rn.declRange, "", p.diagnosticOptions)
+	}
 	if p.File == "" {
 		return nil, true, errors.New("file is required")
 	}
-	hasRange := p.StartLine != nil || p.StartCol != nil || p.EndLine != nil || p.EndCol != nil
 	if hasRange {
 		if p.StartLine == nil || p.StartCol == nil || p.EndLine == nil || p.EndCol == nil {
 			return nil, true, errors.New("range form requires all of startLine, startCol, endLine, endCol")
@@ -1544,9 +1219,22 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 			Mode   string `json:"mode"`
 			Target string `json:"target"`
 		} `json:"resolution"`
+		// Node address ("<file>#<sym>") — resolves to the symbol's
+		// identifier range (what a refactor pins on).
+		Node string `json:"node"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
+	}
+	if p.Node != "" {
+		if p.rangeArgs.StartLine != 0 || p.rangeArgs.StartCol != 0 || p.rangeArgs.EndLine != 0 || p.rangeArgs.EndCol != 0 {
+			return nil, true, errors.New("pass either node or an explicit range, not both")
+		}
+		rn, err := s.resolveNodeAddr(p.Node)
+		if err != nil {
+			return nil, true, err
+		}
+		p.rangeArgs = rn.nameRange
 	}
 	if err := p.rangeArgs.validate(); err != nil {
 		return nil, true, err
@@ -2319,7 +2007,10 @@ type bindingSummary struct {
 }
 
 func jsonContent(value any) []Content {
-	raw, err := json.MarshalIndent(value, "", "  ")
+	// Compact (not indented): this output is consumed by an LLM, which parses
+	// compact JSON fine — indentation is pure token waste, and the terse
+	// structure/search shapes exist precisely to minimize tokens.
+	raw, err := json.Marshal(value)
 	if err != nil {
 		return []Content{{Type: "text", Text: fmt.Sprintf("internal: %v", err)}}
 	}

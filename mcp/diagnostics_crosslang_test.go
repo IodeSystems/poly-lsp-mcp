@@ -113,45 +113,29 @@ func TestCrossLanguageDiagnosticOnGeneratedStub(t *testing.T) {
 	// types.go and greeter.proto. node_references on HelloResponse
 	// from types.go (the declaration site) should return BOTH the Go
 	// declaration AND the proto's @ref-anchored site.
-	sr := sess.callTool("structure", map[string]any{"path": "types.go"})
-	var f structureEntryWire
-	json.Unmarshal([]byte(sr.Content[0].Text), &f)
-	var helloResp *structureEntryWire
-	for i := range f.Children {
-		if f.Children[i].Name == "HelloResponse" {
-			helloResp = &f.Children[i]
-			break
-		}
+	refsResp := sess.callTool("node_references", map[string]any{"node": "types.go#HelloResponse"})
+	var refPayload struct {
+		Matches []wireFileMatch `json:"matches"`
 	}
-	if helloResp == nil {
-		t.Fatal("HelloResponse not in types.go structure")
-	}
-	refsResp := sess.callTool("node_references", map[string]any{
-		"file":      "types.go",
-		"startLine": helloResp.NameStartLine,
-		"startCol":  helloResp.NameStartCol,
-		"endLine":   helloResp.NameEndLine,
-		"endCol":    helloResp.NameEndCol,
-	})
-	var refs []siteJSON
-	json.Unmarshal([]byte(refsResp.Content[0].Text), &refs)
+	json.Unmarshal([]byte(refsResp.Content[0].Text), &refPayload)
 	var sawGoDecl, sawProtoRef bool
-	for _, r := range refs {
-		base := filepath.Base(r.File)
-		switch base {
+	for _, m := range refPayload.Matches {
+		switch filepath.Base(m.File) {
 		case "types.go":
 			sawGoDecl = true
 		case "greeter.proto":
-			if r.Confidence == "declared" {
-				sawProtoRef = true
+			for _, h := range m.Hash {
+				if h.Class == "declared" {
+					sawProtoRef = true
+				}
 			}
 		}
 	}
 	if !sawGoDecl {
-		t.Errorf("expected node_references hit in types.go; refs=%+v", refs)
+		t.Errorf("expected node_references hit in types.go; refs=%s", refsResp.Content[0].Text)
 	}
 	if !sawProtoRef {
-		t.Errorf("expected @ref-anchored declared site in greeter.proto; refs=%+v", refs)
+		t.Errorf("expected @ref-anchored declared site in greeter.proto; refs=%s", refsResp.Content[0].Text)
 	}
 
 	// Replace the whole main.go body with one that references a field

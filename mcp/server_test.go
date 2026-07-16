@@ -217,7 +217,7 @@ func TestEOFWithoutShutdownReturnsSentinel(t *testing.T) {
 
 // ---- tools/list ----
 
-func TestToolsListAdvertisesEightToolSurface(t *testing.T) {
+func TestToolsListAdvertisesNineToolSurface(t *testing.T) {
 	s := startSession(t, "")
 	defer s.close()
 	s.request("initialize", map[string]any{})
@@ -243,6 +243,7 @@ func TestToolsListAdvertisesEightToolSurface(t *testing.T) {
 		"node_refactor":    false,
 		"search":           false,
 		"node_rename_file": false,
+		"node_query":       false,
 	}
 	for _, tool := range got.Tools {
 		if _, ok := want[tool.Name]; ok {

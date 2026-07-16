@@ -34,7 +34,7 @@ type Tool struct {
 	Handler     func(s *Server, args json.RawMessage) ([]Content, bool, error)
 }
 
-// registerTools returns the 6-tool surface poly-lsp-mcp exposes. Each tool
+// registerTools returns the 9-tool surface poly-lsp-mcp exposes. Each tool
 // does one job; there is no preview-vs-apply duplication and no
 // substring-vs-exact ambiguity. The surface mirrors how an LLM
 // actually thinks about code:
@@ -263,6 +263,30 @@ func registerTools() map[string]Tool {
   "required": ["from", "to"]
 }`),
 			Handler: handleNodeRenameFile,
+		},
+		"node_query": {
+			Name: "node_query",
+			Description: "Find symbols with a CSS-like selector over the AST symbol model. A QUERY layer on top of \"<file>#<sym>\" addressing: it FINDS matching symbols; to ACT on one, concatenate a match's `file` + \"#\" + a symbol's `sym` (e.g. \"src/app.go#Server.Start\") and pass it as `node:` to node_read / node_edit / node_delete / node_references / node_refactor.\n" +
+				"Output is the SAME grouped-by-file shape as search / node_references: {\"matches\":[ {\"file\":…,\"lang\":…,\"#\":[ {\"sym\":…,\"class\":…,\"@\":[start,end]}, … ]}, … ]} plus `totalMatches` (and `truncated`+`limit` if the limit fired).\n" +
+				"Selector grammar (CSS → AST):\n" +
+				"  • TYPE selector = a symbol `class`, matched EXACTLY: func, method, type, struct, interface, class, const, var, field, enum, ctor, module, import. `*` = any class. Note a struct's class is `struct` (not `type`), an interface's is `interface`, etc. — pick the class the symbol actually has (see structure output).\n" +
+				"  • [name …] ATTRIBUTE matches the symbol's LEAF name (last dotted segment); a dotted value is also matched against the full `sym`. Operators: [name=Start] exact, [name^=Test] prefix, [name$=Handler] suffix, [name*=User] contains.\n" +
+				"  • DESCENDANT (space): `struct method` = a method anywhere under a struct (dotted-path ancestor match).\n" +
+				"  • CHILD (>): `struct[name=Server] > field` = a DIRECT field of Server (exactly one dot deeper; the field's parent path == Server's sym).\n" +
+				"  • :has(<selector>) matches a symbol that CONTAINS a descendant SYMBOL matching the inner selector. NOTE: the symbol model is declaration-oriented — it indexes declared symbols (types, methods, fields, imports…), NOT call-sites or free identifiers. So :has ranges over descendant SYMBOLS only; e.g. `type:has(field[name=addr])` = a type that declares a field `addr`, and `class:has(method[name^=test])` = a class with a test-prefixed method. `func:has(call)` is NOT supported (no call class in the model).\n" +
+				"  • COMMA = union: `func, method` = every func or method.\n" +
+				"Examples: `method[name=Start]` · `struct[name=Server] > field` · `func[name^=Test]` · `import[name*=internal]` · `struct:has(field[name$=ID])` (a struct declaring a field whose name ends in ID).\n" +
+				"`path` (default: workspace root) scopes the search to a dir or a single file. `limit` (default 200) caps matches. A malformed selector returns a guided error (no results).",
+			InputSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "select": {"type": "string", "description": "CSS-like selector, e.g. \"method[name=Start]\", \"type[name=Server] > field\", \"func[name^=Test]\"."},
+    "path":   {"type": "string", "description": "Dir or file to search. Workspace-relative or absolute. Default: workspace root."},
+    "limit":  {"type": "integer", "minimum": 1, "description": "Max matches returned. Default 200."}
+  },
+  "required": ["select"]
+}`),
+			Handler: handleNodeQuery,
 		},
 	}
 }

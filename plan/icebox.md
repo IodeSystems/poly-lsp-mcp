@@ -5,6 +5,23 @@ graph-selector design record this used to hold.
 
 ---
 
+## Wall-clock budget — DON'T make it the primary (it breaks determinism)
+
+The work budget (spend units) truncates DETERMINISTICALLY — the whole point of
+the `ordered()` walk: same query + same index → same partial, every run. A
+wall-clock budget ("stop after 2s") reintroduces exactly the coin-flip that
+work removed: the same query returns different results run-to-run and
+box-to-box, depending on timing. So wall-clock must NOT replace the work
+budget.
+
+Where it COULD earn a place: a secondary SAFETY timeout to kill a genuinely
+runaway query (a pathological case the work budget's 5M cap doesn't catch in
+reasonable time). If added, it must be clearly labelled a nondeterministic
+safety net, distinct from the deterministic work budget — the result note says
+"stopped on a time limit (results vary run-to-run), not the work budget." Only
+build if a real query is observed hanging under the work-budget cap; the work
+budget already bounds time indirectly (200k units ≈ bounded wall-clock).
+
 ## `return` as a node — the remaining trivia sibling
 
 Shipped `annotation` and `comment` as first-class child nodes (decorators,

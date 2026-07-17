@@ -95,6 +95,29 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+◐ **Adoption measurement — the existential question, now instrumented.**
+`llm-bench/` (own nested module, uses `agentkit` — `mcpmgr` spawns the server,
+`agent.Session` drives the model on llm.iodesystems.com) poses relationship-
+shaped code-nav tasks with BOTH the graph tools AND a strong grep/read/list
+baseline present, and tallies **reach-rate** — the fraction of tasks that call
+`node_query` at all. Compiles + the server binary spawns (verified); NOT yet
+run (needs `AGENTKIT_API_KEY` + network). **next**:
+  - ◻ **Run the `asis` baseline.** Reach-rate high → adoption isn't the wall,
+    engine work is justified. Low → the icebox's "0 calls / 8 runs" reproduces
+    and everything below is premature.
+  - ◻ **A/B the description (`--variant pattern`).** Tests the hypothesis that
+    models copy PATTERNS, not specs: the shipped `node_query` desc is spec-first
+    (grammar + FOOTGUNS, RECIPES buried last — `modern.go:65`); the variant
+    leads with intent-labeled recipes. `pattern` >> `asis` → rewrite the shipped
+    description, re-measure, done cheaply.
+  - ◻ **Then judge correctness** (LLM-judge over each task's `want`) + `--runs`
+    for variance. v1 scores answers by hand.
+**This gates further engine investment**: keep building the engine once
+adoption says agents reach for the graph at all — pause if it says they don't.
+**blocking decision (USER owns)**: if both variants stay low, the tool loses on
+merit at point-of-use and the roadmap reorders around discovery/triggering, not
+features.
+
 ◻ **Cost visibility + planning share an estimator.**
   - ◻ **Cardinality-order a descendant chain.** `A B` evaluates left-to-right;
     if B is far rarer than A, start from B and check ancestors. Needs the same
@@ -163,11 +186,14 @@ per edge, with `conf: lsp|lexical` on every row. **next**:
 declaration. True for gopls; unverified for tsserver/pylsp.
 
 ◻ **Node model — loose ends found this session.**
-  - ❓ **TS edges double-count.** `Widget::in.type` = 4 on a fixture with 2
-    real uses; the doubling is per-USE and TS-specific (Go is clean), so it is
-    an index/site-dup in the TS path, NOT the position axis (which split the 4
-    into 2 param + 2 return cleanly). Independent bug; find where a TS type site
-    enters the index twice.
+  - ✅ **TS `::in.type` double-count — NOT reproducible; the ❓ was stale.**
+    Verified across interface / class / generic / export / .tsx / union /
+    cross-file: `Widget::in.type` counts each occurrence ONCE, split cleanly by
+    the position axis (param/return/field), with value refs (`new Widget()`) out
+    of `.type`. The index emits 4 DISTINCT positions for 1 decl + 3 uses (no
+    site dup); the old "4 on 2 uses" was fixed en route (likely the span-
+    containment attribution that stopped name-only double-attribution). Pinned
+    by `TestTSInTypeNoDoubleCount` so a real dup can't creep back.
   - ◻ **`return`/`var` slot NODES** (icebox): the position AXIS ships, but a
     `return`-type usage lands on the func (its far end), and `> return` as a
     node does not exist. Adding `return`/`var` slot nodes needs COLUMN precision

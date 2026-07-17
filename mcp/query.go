@@ -86,7 +86,8 @@ type treeNode struct {
 	// Generated: `*` never matches one and walks never enter one — only
 	// naming ::in/::out does (the CSS pseudo-element contract).
 	refDir  string      // "in" | "out"
-	refKind string      // "call" | "type" | "import" | ""
+	refKind string      // "call" | "type" | "import" | ""  (the KIND axis)
+	refPos  string      // "return" | "param" | "field" | "var" | ""  (the POSITION axis)
 	refConf string      // refLexical (name-keyed guess) | refLSP (a child LSP settled it)
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
 
@@ -1207,7 +1208,17 @@ func parseFragmentSpec(text string) (*grepSpec, error) {
 
 func validRefClass(c string) bool {
 	switch c {
-	case "call", "type", "import":
+	case "call", "type", "import": // the KIND axis
+		return true
+	}
+	return refClassIsPosition(c)
+}
+
+// refClassIsPosition reports whether a ref class names the POSITION axis
+// (where the occurrence sits) rather than the kind axis (what it is).
+func refClassIsPosition(c string) bool {
+	switch c {
+	case "return", "param", "field", "var":
 		return true
 	}
 	return false
@@ -1901,9 +1912,13 @@ SPEC
          #id spans both axes and adds the "<file>#<sym>" address; it is never a regex.
   CONF   every edge row carries conf: "lsp" = a child LSP resolved it; "lexical" = name-keyed
          (scope-filtered). A lexical row with several to:/from: is a CANDIDATE LIST, not a fact.
-  EDGES  ::in / ::out, kind class .call/.type/.import (bare = any). Attached to the INNERMOST
-         enclosing symbol: X::out = X's own, X ::out = nested symbols' too. {m,n} = edges
-         crossed, {1,} = transitive. * NEVER matches an edge. Address = site ("file@line").
+  EDGES  ::in / ::out, on TWO orthogonal class axes (bare = any): KIND .call/.type/.import
+         (what it is) and POSITION .return/.param/.field/.var (where it sits). They compose:
+         #'S'::in.return.type = S used as a return type, .param.type = as a param type. The
+         ref IS the occurrence (its address is the site); its far end (via >) is the SOURCE
+         symbol — #'S'::in.return.type > * :parents(func). Attached to the INNERMOST enclosing
+         symbol: X::out = X's own, X ::out = nested symbols' too. {m,n} = edges crossed, {1,} =
+         transitive. * NEVER matches an edge. Address = site ("file@line").
   ::grep('flags pattern')  matched lines as nodes. -i -w -E -F -v -A<n> -B<n> -C<n>; literal
          unless -E. :contains('…') is the boolean form over the node's BODY.
   ::comment  the doc block above a decl, contiguous lines joined, a GENERATED node (invisible
@@ -2523,8 +2538,15 @@ func (e *engine) positionalMatch(n *treeNode, comp *selCompound) bool {
 		if n.class != "ref" || n.refDir != comp.refDir {
 			return false
 		}
+		// Each class filters ITS axis: call/type/import test the kind,
+		// return/param/field/var test the position. So .return.type ANDs
+		// across axes, while a bare .type matches any position.
 		for _, c := range comp.refClasses {
-			if n.refKind != c {
+			if refClassIsPosition(c) {
+				if n.refPos != c {
+					return false
+				}
+			} else if n.refKind != c {
 				return false
 			}
 		}
@@ -2783,7 +2805,8 @@ func (e *engine) upstream(tips map[*treeNode]bool) map[*treeNode]bool {
 type refSite struct {
 	name      string
 	line, col int
-	kind      string // "call" | "type" | "import" | ""
+	kind      string // "call" | "type" | "import" | ""   (WHAT it is)
+	pos       string // "return" | "param" | "field" | "var" | ""  (WHERE it sits)
 	encl      string // dotted sym path of the innermost enclosing symbol
 }
 
@@ -2835,7 +2858,7 @@ func (e *engine) buildOutRefs(n *treeNode) {
 		// settles whatever is still ambiguous (see precision.go).
 		far, conf := e.refineFar(far, n.abs, site.line, site.col)
 		n.refsOut = append(n.refsOut, &treeNode{
-			class: "ref", refDir: "out", refKind: site.kind, refConf: conf,
+			class: "ref", refDir: "out", refKind: site.kind, refPos: site.pos, refConf: conf,
 			leaf: site.name, full: site.name,
 			file: n.file, abs: n.abs, at: [2]int{site.line, site.line},
 			parent: n, depth: n.depth + 1, refFar: far,
@@ -2907,7 +2930,7 @@ func (e *engine) buildInRefs(n *treeNode) {
 			continue // the LSP says this site refers to a different decl
 		}
 		n.refsIn = append(n.refsIn, &treeNode{
-			class: "ref", refDir: "in", refKind: hit.kind, refConf: conf,
+			class: "ref", refDir: "in", refKind: hit.kind, refPos: hit.pos, refConf: conf,
 			leaf: n.leaf, full: n.leaf,
 			file: rel, abs: fnode.abs, at: [2]int{hit.line, hit.line},
 			parent: n, depth: n.depth + 1, refFar: []*treeNode{src},
@@ -3018,9 +3041,10 @@ func (e *engine) fileSites(rel string) []refSite {
 		for i, s := range out {
 			positions[i] = [2]int{s.line, s.col}
 		}
-		kinds := symbols.SiteKinds(e.s.languageForFile(fnode.abs), content, positions)
+		classes := symbols.SiteKinds(e.s.languageForFile(fnode.abs), content, positions)
 		for i := range out {
-			out[i].kind = kinds[i]
+			out[i].kind = classes[i].Kind
+			out[i].pos = classes[i].Pos
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {

@@ -192,6 +192,9 @@ func describeNode(n *treeNode) string {
 	switch n.class {
 	case "ref":
 		t := "::" + n.refDir
+		if n.refPos != "" {
+			t += "." + n.refPos
+		}
 		if n.refKind != "" {
 			t += "." + n.refKind
 		}

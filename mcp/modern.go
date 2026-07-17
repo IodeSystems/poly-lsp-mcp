@@ -194,6 +194,9 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 			// spelling, and the far end is keyed by direction so the row
 			// reads as the fact it states.
 			cls := "::" + n.refDir
+			if n.refPos != "" {
+				cls += "." + n.refPos
+			}
 			if n.refKind != "" {
 				cls += "." + n.refKind
 			}

@@ -20,11 +20,20 @@ import (
 // Anything semantic (Go's implicit interface satisfaction, aliasing)
 // belongs to a child-LSP precision pass, not here.
 
+// SiteClass is a reference site on two ORTHOGONAL axes: Kind is WHAT the
+// reference is (call/type/import), Pos is WHERE the occurrence sits
+// (return/param/field/var). They compose in the selector as
+// ::in.return.type — position filters any kind, not just type.
+type SiteClass struct {
+	Kind string
+	Pos  string
+}
+
 // SiteKinds classifies many (line, col) positions in one parse. Input
 // positions are 1-based (the Site convention); unknown languages or
-// unparseable content classify everything as "".
-func SiteKinds(language string, content []byte, positions [][2]int) []string {
-	out := make([]string, len(positions))
+// unparseable content classify everything as the zero SiteClass.
+func SiteKinds(language string, content []byte, positions [][2]int) []SiteClass {
+	out := make([]SiteClass, len(positions))
 	lang := LanguageByName(language)
 	if lang == nil {
 		return out
@@ -43,9 +52,41 @@ func SiteKinds(language string, content []byte, positions [][2]int) []string {
 		if n == nil {
 			continue
 		}
-		out[i] = classifySiteNode(language, n)
+		out[i] = SiteClass{Kind: classifySiteNode(language, n), Pos: sitePosition(n)}
 	}
 	return out
+}
+
+// sitePosition walks up from the occurrence to the syntactic slot it
+// sits in — return / param / field / var — orthogonal to its kind. The
+// slot is decided by the nearest enclosing context; a return type is
+// recognised by the occurrence lying in a function's result /
+// return_type field (Go / TS / Python respectively). "" when the
+// occurrence is in no distinguished slot (a body expression).
+func sitePosition(n *sitter.Node) string {
+	for cur := n; cur != nil; cur = cur.Parent() {
+		switch cur.Type() {
+		case "parameter_declaration", "variadic_parameter_declaration", // go
+			"required_parameter", "optional_parameter", // ts
+			"typed_parameter", "typed_default_parameter", "default_parameter": // py
+			return "param"
+		case "field_declaration", // go struct field
+			"public_field_definition", "property_signature": // ts
+			return "field"
+		case "var_spec", "const_spec", "short_var_declaration": // go
+			return "var"
+		}
+		// A return type is the occurrence lying in the function's result
+		// (Go) or return_type (TS/Python) field. Checked at every level so
+		// a pointer/generic wrapper between the type and the field is fine.
+		if r := cur.ChildByFieldName("result"); r != nil && nodeContainsNode(r, n) {
+			return "return"
+		}
+		if r := cur.ChildByFieldName("return_type"); r != nil && nodeContainsNode(r, n) {
+			return "return"
+		}
+	}
+	return ""
 }
 
 // classifySiteNode walks up from the identifier node, nearest context

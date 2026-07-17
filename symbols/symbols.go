@@ -120,6 +120,16 @@ func (i *Index) Generation() uint64 {
 	return i.gen
 }
 
+// Cardinality is the O(1) count of distinct lexical names — a broad
+// proxy for "how many symbols" when a query planner needs to know an
+// element is NOT selective without walking the tree for an exact class
+// count.
+func (i *Index) Cardinality() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return len(i.sites)
+}
+
 // NameFreq is an O(1) a-priori estimate of how often a name occurs — the
 // raw site tally across the three stores, no per-position dedup (Lookup's
 // job). It is the cheap selectivity signal the query-cost estimator and

@@ -241,6 +241,11 @@ type engine struct {
 	// nodes as the full scan.
 	noPushdown bool
 
+	// noPlan disables the descendant-chain reorder (planReorder). Only the
+	// equivalence test sets it, to prove the reorder returns the same
+	// nodes as the forward evaluation.
+	noPlan bool
+
 	// The child-LSP precision pass (see precision.go). lspLeft is the
 	// per-query round-trip budget; asked/resolved report what the answer
 	// is actually made of, so a partly-lexical graph says so instead of
@@ -2134,6 +2139,178 @@ func (s *Server) classCounts() map[string]int {
 	return counts
 }
 
+// reorderFactor: only reorder a chain when the tip's a-priori
+// cardinality is at least this many times smaller than the leading
+// element's — a clear win, not a coin-flip, given both paths still walk
+// the tree to seed.
+const reorderFactor = 4
+
+// planReorder evaluates a top-level pure-descendant chain from its RAREST
+// end. The result of `C0 C1 … Cn` is the Cn matches whose ancestors match
+// C0 ⊃ … ⊃ C(n-1) in order; the forward evaluator collects C0 and
+// descends, which is expensive when C0 is broad. When the tip Cn is far
+// rarer (by the commit-2 est), this collects Cn and checks the ancestor
+// SUBSEQUENCE instead — the same set, seeded from the selective end. The
+// pushdown is this idea for a leading ref; this is the containment form.
+//
+// Returns (result, true) only for an eligible, clearly-winning chain;
+// otherwise the caller runs the forward evaluation unchanged.
+func (e *engine) planReorder(cx selComplex) (map[*treeNode]bool, bool) {
+	if e.noPlan || cx.rel != relTop || len(cx.elems) < 2 {
+		return nil, false
+	}
+	for i := range cx.elems {
+		if !plainDescendantElem(&cx.elems[i], i) {
+			return nil, false
+		}
+	}
+	last := cx.elems[len(cx.elems)-1].comp
+	// The tip must be exact-name-anchored so it can be seeded from the
+	// INDEX — that is the whole win: load only the files that contain the
+	// name, never the whole workspace the forward collect would walk.
+	tip, ok := exactBareName(last)
+	if !ok {
+		return nil, false
+	}
+	idx := e.s.getIndex()
+	if idx == nil {
+		return nil, false
+	}
+	// O(1) decision — deliberately NOT estCard/classCounts, which would
+	// trigger the very full-symbol walk the seed is trying to avoid. A
+	// rare tip against a broad leading element is the clear win.
+	firstEst, fok := e.estCardCheap(cx.elems[0].comp)
+	if !fok || idx.NameFreq(tip)*reorderFactor >= firstEst {
+		return nil, false
+	}
+
+	leading := make([]*selCompound, len(cx.elems)-1)
+	for i := range leading {
+		leading[i] = cx.elems[i].comp
+	}
+	out := map[*treeNode]bool{}
+	for _, n := range e.declsNamed(tip) {
+		if e.positionalMatch(n, last) && e.ancestorSubseq(n, leading) {
+			out[n] = true
+		}
+	}
+	return out, true
+}
+
+// declsNamed returns every declaration whose leaf is `name`, seeded from
+// the INDEX: only the files the index records an occurrence of `name` in
+// are loaded and walked, never the whole workspace. Complete, because a
+// declaration's own name is always an indexed occurrence, so its file is
+// always in the set.
+func (e *engine) declsNamed(name string) []*treeNode {
+	idx := e.s.getIndex()
+	if idx == nil {
+		return nil
+	}
+	files := map[string]bool{}
+	for _, s := range idx.LookupExisting(name) {
+		files[relPath(s.File, e.s.getRoot())] = true
+	}
+	var out []*treeNode
+	for rel := range files {
+		f := e.fileByRel[rel]
+		if f == nil {
+			continue
+		}
+		var walk func(n *treeNode)
+		walk = func(n *treeNode) {
+			if n.sym != "" && n.leaf == name {
+				out = append(out, n)
+			}
+			for _, c := range e.kids(n) {
+				walk(c)
+			}
+		}
+		walk(f)
+	}
+	return out
+}
+
+// estCardCheap is the O(1) planner estimate — NameFreq for an exact name,
+// or the index's distinct-name count as a broad proxy for a bare class.
+// Never classCounts: the planner runs on every query and must not force
+// the full-symbol walk that the exact tally needs.
+func (e *engine) estCardCheap(c *selCompound) (int, bool) {
+	if c == nil || c.isRef || c.isFrag || c.isComment {
+		return 0, false
+	}
+	idx := e.s.getIndex()
+	if idx == nil {
+		return 0, false
+	}
+	for _, a := range c.attrs {
+		if a.op == selExact && a.axis != attrPath {
+			return idx.NameFreq(a.value), true // name — checked before anyType
+		}
+	}
+	if c.anyType {
+		return 0, false // bare * — no cheap estimate
+	}
+	if c.class != "" {
+		return idx.Cardinality(), true // broad: not selective, no walk
+	}
+	return 0, false
+}
+
+// exactBareName returns the single exact bare-leaf name a compound pins,
+// if any — a plain identifier (no '.'/'#') declsNamed can resolve fully.
+func exactBareName(c *selCompound) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	for _, a := range c.attrs {
+		if a.op == selExact && a.axis != attrPath && !strings.ContainsAny(a.value, ".#") {
+			return a.value, true
+		}
+	}
+	return "", false
+}
+
+// plainDescendantElem reports whether an element is a plain positional
+// compound joined by descendant containment — the only shape the reorder
+// is sound for. It excludes anything the ancestor-subsequence check
+// cannot faithfully replay: edges/fragments/comments, groups, `{m,n}`,
+// child `>` (a direct-parent constraint, not a subsequence), `*`, :root,
+// `&`, and any pseudo/claim/:first — those carry evaluation order or a
+// re-root the forward path expresses and this rewrite would not.
+func plainDescendantElem(el *selElem, i int) bool {
+	if el.group != nil || el.comp == nil || el.min != 1 || el.max != 1 {
+		return false
+	}
+	if i > 0 && el.comb != selDescendant {
+		return false
+	}
+	c := el.comp
+	if c.isRef || c.isFrag || c.isComment || c.root || c.selfRef {
+		return false
+	}
+	if len(c.pseudos) > 0 || len(c.positionClaims) > 0 || c.ordSel != 0 {
+		return false
+	}
+	// Needs something to match on. `#ctx` is anyType (no explicit tag) but
+	// its name attr qualifies; a bare `*` (anyType, no attr) does not.
+	return c.class != "" || len(c.attrs) > 0
+}
+
+// ancestorSubseq reports whether comps appear, in order, as a subsequence
+// of n's ancestor chain — comps[last] matching the closest qualifying
+// ancestor, comps[0] the highest. Greedy bottom-up, the standard
+// subsequence match: correct whenever a valid chain exists.
+func (e *engine) ancestorSubseq(n *treeNode, comps []*selCompound) bool {
+	i := len(comps) - 1
+	for p := n.parent; p != nil && i >= 0; p = p.parent {
+		if e.positionalMatch(p, comps[i]) {
+			i--
+		}
+	}
+	return i < 0
+}
+
 // splitExplain strips a leading ":explain" query MODE. It is a mode, not
 // a pseudo — kept out of the grammar so it can never nest inside a
 // selector. Returns the remaining selector and whether explain was asked.
@@ -2206,21 +2383,34 @@ func (e *engine) estElem(el *selElem) string {
 	if el.comp == nil {
 		return "?"
 	}
-	c := el.comp
+	if n, ok := e.estCard(el.comp); ok {
+		return commaInt(n)
+	}
+	return "?"
+}
+
+// estCard is a compound's a-priori cardinality from the commit-2 tallies
+// — an exact name filter reads NameFreq (O(1)), a bare class reads
+// classCounts. ok=false when there is no cheap estimate (an edge, `*`, a
+// pseudo-only compound) — the caller must not reorder on an unknown.
+func (e *engine) estCard(c *selCompound) (int, bool) {
+	if c == nil || c.isRef || c.isFrag || c.isComment {
+		return 0, false
+	}
 	if idx := e.s.getIndex(); idx != nil {
 		for _, a := range c.attrs {
 			if a.op == selExact && a.axis != attrPath {
-				return commaInt(idx.NameFreq(a.value))
+				return idx.NameFreq(a.value), true // name — before anyType
 			}
 		}
 	}
-	switch {
-	case c.isRef, c.isFrag, c.isComment, c.anyType:
-		return "?"
-	case c.class != "":
-		return commaInt(e.s.classCounts()[c.class])
+	if c.anyType {
+		return 0, false // bare * — no cheap estimate
 	}
-	return "?"
+	if c.class != "" {
+		return e.s.classCounts()[c.class], true
+	}
+	return 0, false
 }
 
 // costTrace renders the selector as a per-element cost breakdown, marking
@@ -2353,6 +2543,15 @@ func (e *engine) evalComplex(cx selComplex, anchor *treeNode, relaxSubject bool)
 		// inners, and :root-led complexes inside relative lists (":root
 		// re-anchors" is the one exception to the assumed '&' start).
 		anchor = e.project
+	}
+	// Cardinality-order a pure-descendant chain: seed from the rarer end
+	// when the est says it clearly wins. Never in the relaxed (∀-domain)
+	// pass — that one is compared against the strict pass and must walk
+	// the same shape.
+	if !relaxSubject {
+		if out, ok := e.planReorder(cx); ok {
+			return out
+		}
 	}
 	min0, max0 := cx.rel.rng()
 	start := map[*treeNode]bool{anchor: true}

@@ -431,42 +431,66 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 	}
 }
 
+// BuildIndex builds the symbol index for the workspace root and runs
+// the binding passes over it: Tier-2 declared, Tier-3 schema-anchored,
+// and the Tier-3 @derived/sqlc auto-bindings that feed the
+// derivation-root registry the variance model reads.
+//
+// Every entry point that queries the workspace must come through here.
+// Reference edges (::in/::out) resolve through s.index, so a caller
+// that builds the tree WITHOUT this gets a tree that answers
+// containment queries normally and silently reports no references at
+// all — the failure looks like an empty result, not an error.
+func (s *Server) BuildIndex() error {
+	root := s.getRoot()
+	if root == "" {
+		return errors.New("no workspace root configured")
+	}
+	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache))
+	if err != nil {
+		return fmt.Errorf("index build failed for %s: %w", root, err)
+	}
+	s.setIndex(idx)
+	log.Printf("index: indexed %d names from %s", len(idx.Names()), root)
+
+	resolver := bindings.NewResolver(root)
+	if len(s.bindings) > 0 {
+		n, err := resolver.Apply(idx, s.bindings)
+		if err != nil {
+			log.Printf("index: some bindings failed validation: %v", err)
+		}
+		log.Printf("index: applied %d declared binding site(s)", n)
+	}
+	if len(s.schemas) > 0 {
+		n := resolver.ApplySchemas(idx, s.schemas)
+		log.Printf("index: applied %d schema-anchored site(s)", n)
+	}
+	// Tier-3 auto: gat @derived(operationId) + sqlc derived:"table.column"
+	// edges → declared source bindings, and the derivation-root registry the
+	// variance model reads.
+	var derivRoots []bindings.DerivRoot
+	if roots := resolver.ApplyDerived(idx); len(roots) > 0 {
+		derivRoots = append(derivRoots, roots...)
+		log.Printf("index: applied %d @derived source binding(s)", len(roots))
+	}
+	if roots := resolver.ApplyDerivedSQL(idx); len(roots) > 0 {
+		derivRoots = append(derivRoots, roots...)
+		log.Printf("index: applied %d sqlc @derived column binding(s)", len(roots))
+	}
+	s.setDerivRoots(derivRoots)
+	return nil
+}
+
 // handleInitialize builds the symbol index for s.getRoot(), applies any
 // Tier-2 and Tier-3 bindings, and advertises tool capability.
 func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	if s.getRoot() != "" {
-		idx, err := symbols.Build(s.getRoot(), s.registry, symbols.WithCache(s.parseCache))
-		if err != nil {
-			log.Printf("mcp initialize: index build failed for %s: %v", s.getRoot(), err)
+		if err := s.BuildIndex(); err != nil {
+			log.Printf("mcp initialize: %v", err)
 		} else {
-			s.setIndex(idx)
-			log.Printf("mcp initialize: indexed %d names from %s", len(idx.Names()), s.getRoot())
-			resolver := bindings.NewResolver(s.getRoot())
-			if len(s.bindings) > 0 {
-				n, err := resolver.Apply(idx, s.bindings)
-				if err != nil {
-					log.Printf("mcp initialize: some bindings failed validation: %v", err)
-				}
-				log.Printf("mcp initialize: applied %d declared binding site(s)", n)
-			}
-			if len(s.schemas) > 0 {
-				n := resolver.ApplySchemas(idx, s.schemas)
-				log.Printf("mcp initialize: applied %d schema-anchored site(s)", n)
-			}
-			// Tier-3 auto: gat @derived(operationId) + sqlc derived:"table.column"
-			// edges → declared source bindings, and the derivation-root registry the
-			// variance model reads.
-			var derivRoots []bindings.DerivRoot
-			if roots := resolver.ApplyDerived(idx); len(roots) > 0 {
-				derivRoots = append(derivRoots, roots...)
-				log.Printf("mcp initialize: applied %d @derived source binding(s)", len(roots))
-			}
-			if roots := resolver.ApplyDerivedSQL(idx); len(roots) > 0 {
-				derivRoots = append(derivRoots, roots...)
-				log.Printf("mcp initialize: applied %d sqlc @derived column binding(s)", len(roots))
-			}
-			s.setDerivRoots(derivRoots)
-			s.startManagerIfPresent(idx)
+			// Server-lifecycle only: a one-shot query needs none of
+			// these, so they stay out of BuildIndex.
+			s.startManagerIfPresent(s.getIndex())
 			s.kickGitPrewarm()
 			s.kickFileWatch()
 		}

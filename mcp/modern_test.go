@@ -341,8 +341,8 @@ func TestModernQueryGuidedParseError(t *testing.T) {
 	defer s.close()
 
 	msg := queryErr(t, s, map[string]any{"selector": "func:bogus(x)"})
-	if !strings.Contains(msg, "unknown pseudo-class") || !strings.Contains(msg, "Selector grammar") {
-		t.Errorf("expected a guided grammar dump; got %q", msg)
+	if !strings.Contains(msg, "unknown pseudo-class") || !strings.Contains(msg, "TASK → QUERY") {
+		t.Errorf("expected a guided usage dump; got %q", msg)
 	}
 	// The deep grammar (attribute ops) is taught by the error, not the
 	// every-turn description.

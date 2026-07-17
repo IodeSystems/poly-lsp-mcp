@@ -52,7 +52,7 @@ func TestSelectorQuestionMarkReturnsGrammar(t *testing.T) {
 	if r.IsError {
 		t.Fatalf(`selector "?" should return the grammar, got error: %s`, r.Content[0].Text)
 	}
-	for _, want := range []string{"Selector grammar", "TYPES", "MOVE", ":parents"} {
+	for _, want := range []string{"TASK → QUERY", "COMPOSING", "SPEC", ":parents"} {
 		if !strings.Contains(r.Content[0].Text, want) {
 			t.Errorf("grammar missing %q", want)
 		}
@@ -71,7 +71,7 @@ func TestMalformedSelectorStillGetsGrammar(t *testing.T) {
 	if !r.IsError {
 		t.Fatal("malformed selector should error")
 	}
-	if !strings.Contains(r.Content[0].Text, "Selector grammar") {
+	if !strings.Contains(r.Content[0].Text, "TASK → QUERY") {
 		t.Errorf("malformed syntax should still get the grammar, got: %s", r.Content[0].Text)
 	}
 }

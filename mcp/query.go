@@ -622,6 +622,8 @@ func normalizeSelector(s string) string {
 				b = append(b, rs[i:j]...) // an id or class keeps its word
 			case word == "has" && next == '(':
 				fix(1, "any")
+			case normalizeAliases[word] != "" && next == '(':
+				fix(1, normalizeAliases[word])
 			case selPseudoParenName(word) && next == '(':
 				fix(1, word)
 			case selPseudoElemName(word):
@@ -646,6 +648,9 @@ func selPseudoParenName(w string) bool {
 	}
 	return false
 }
+
+// normalizeAliases maps near-miss pseudo spellings to the real one.
+var normalizeAliases = map[string]string{"parent": "parents"}
 
 func selPseudoElemName(w string) bool {
 	switch w {
@@ -1636,55 +1641,57 @@ func dotIsNotAClassErr(name string) error {
 		name, strings.Join(selectorTypeList(), " "), name)
 }
 
-const selectorGrammarHelp = `Selector grammar (CSS over the unified node tree; references are pseudo-element NODES).
+const selectorGrammarHelp = `How to USE the selector (spec tables at the bottom).
 
-A node's TYPE is a bare tag, like CSS's div/span — a fixed set you cannot
-invent. Anything the workspace NAMES — a dir, a file, a symbol — is an #id. So
-the cache/ directory is #cache, never "cache". A class after a tag scopes it to
-a LANGUAGE: file.go, func.ts. The reference graph is reified as generated edge
-nodes (::in / ::out): '*' never matches one and walks never enter one — you
-cross an edge only by naming it.
+WORK IN SMALL STEPS. Run a cheap query, take an ADDRESS from matches[].node, feed it to the
+next query or to node_read/node_edit. Two simple queries beat one clever one — every nesting
+level is a chance to lose a paren. If you are 3 parens deep, split the query.
 
-  TYPES  project dir file
-         func method type struct interface class const var field enum ctor module import argument
-         * = any type (never an edge).
-  TREE   project#<root-name> > dir#<relpath> > file#<relpath> > <symbols, dotted-nested> > argument#<param>
-         :root is a pseudo-class matching the single project node (as CSS's :root matches <html>).
-  ID     #bare  (charset [A-Za-z_][A-Za-z0-9_.-]*)  or  #'anything else'  (spaces, slashes, …). Quote instead of escaping; there is no backslash escape.
-         A symbol answers to its leaf name, its dotted path, and its full "<file>#<sym>". An EDGE answers to its far end's ids.
-  ATTR   [name=X] exact  [name^=X] prefix  [name$=X] suffix  [name*=X] contains.  #id is sugar for [name=id].
-  EDGES  ::in = references pointing HERE.  ::out = what this node's own body points at.  Kind as class:
-         ::out.call  ::in.type  ::out.import  — bare matches every kind (incl. unclassified).
-         Attached to the INNERMOST enclosing symbol: X::out = X's own edges (as CSS #a::before),
-         X ::out = nested symbols' too (as #a ::before). The far end is the edge's only child:
-         #'A'::out.call > #'B' = A calls B. An edge's address is its SITE ("file@line") — node_read /
-         node_edit touch the call site. ::out.call{1,16} = crossing 1..16 call edges; {1,} = transitive.
-         Qualified refs to EXTERNAL packages resolve to the file's IMPORT node (named for the package —
-         alias honored, /vN skipped): import#huma::in.call = every huma call in that file.
-  FRAG   ::grep('flags pattern') — every MATCHED LINE of the host's own source, as a node: address =
-         "file@line", rows carry the text (+ -A/-B/-C context, clipped to the host's span). Flags:
-         -i -w -E -F -v -A<n> -B<n> -C<n>; literal substring unless -E. Works on edges too — the host
-         line is the SITE: import#huma::in.call::grep('-E (Get|Post)\(') = routes registered on huma.
-         :contains('text') is the boolean form (filter, no minting; same flags minus context).
-  MOVE   :parents(sel) — tip := the ROOTS of sel with a path down/out to the tip: everything upstream,
-         containment ancestors ∪ incoming-reference sources, transitive. Bare = :parents(*).
-         *:parents:empty = only :root — everything else has something upstream.
-  CLAIM  a BARE :any / :all / :empty judges the set at its position, deciding the node under test:
-         func:where(::in:empty) = dead code. After :parents it closes the excursion (*:parents:empty).
-         Parenthesized :where/:any/:all/:empty(sel) take a RELATIVE selector (CSS nesting): a leading
-         pseudo/::element binds to the node itself; a leading tag/*/#id means a descendant
-         (file:any(func#test)); '>' = child; :root re-anchors; an explicit & is the node under test.
-  SELF   :not(sel) / :is(sel) test the NODE ITSELF, exactly as CSS: func:not(#main):not([name^=Test]),
-         file > :is(func, method). (Contrast :where/:any — the :has family — whose sel is RELATIVE.)
-  ORDER  :first / :last — pick from this position's matches, per anchor, in document order.
-  REP    {m,n} REPEATS an element or (group), child-joined: func{2} = func > func; (a b){2} = a b > a b.
-         {m,} = unbounded, cycle-safe. Zero reps make the element vanish: "> *{0,2} > b" = b within 1..3 levels.
-  COMB   space = descendant   '>' = direct child
-  COMMA  union: "func, method"
-Examples: #cache > file = files directly in cache/  |  :root > * = ONLY top level  |  file.go = Go files
-          #'store.go#Save'::in.call = the calls to Save (rows carry from:)  |  ::in.call{1,} > * = every transitive caller
-          #'main'::out.call > * = what main calls  |  func:where(::out.call:empty) = calls nothing
-          method:where(::out #'parseAttr') = methods whose body mentions it  |  file > func:first = each file's first func`
+TASK → QUERY
+  what is here?               :root > *            then descend:  #web > *
+  find something by name      #Save                anywhere;  #'store.go#Save' pins one
+  what is in a file           #'store.go' func     (or *, method, struct, …)
+  who calls X                 #'store.go#Save'::in.call          rows carry from: + a file@line site
+  what does X call            #'store.go#Save'::out.call > *
+  everything that reaches X   #'X'::in.call{1,} > *
+  is X used at all            #'X'::in             (0 matches = unused)
+  dead code                   func:not(#main):not(#init):not([name^=Test]):where(::in:empty)
+  find TODOs / any text       func::grep('-w TODO')              each row IS the line, editable
+  uses of a dependency        import#huma::in.call               externals resolve to the import node
+  endpoints on a dependency   import#huma::in.call::grep('-E (Register|Get|Post)\(')
+  where a type is USED        #'T'::in.type        imports: ::in.import.  There is NO .implements kind.
+  only one language           file.go   func.ts
+
+COMPOSING — one hop at a time, left to right:
+  1. anchor on something NAMED:   #'store.go#Save'      names are #ids, never bare words
+  2. cross ONE edge:              ::in.call             ::in = toward me, ::out = away from me
+  3. land on the far node:        > *                   the far end is the edge's child
+  4. filter what you landed on:   > func[name^=Test]
+  A claim decides the ANCHOR, not the landing: func:where(::in:empty) returns funcs, judged
+  by their edges. To go deeper, STOP — run the query, then start the next one from its rows.
+
+SPEC
+  TAGS   project dir file func method type struct interface class const var field enum ctor
+         module import argument, * — fixed; you cannot invent one. Language class: file.go.
+  ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
+         answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
+  ATTR   [name=X] [name^=X] [name$=X] [name*=X].  #id ≡ [name=id].
+  EDGES  ::in / ::out, kind class .call/.type/.import (bare = any). Attached to the INNERMOST
+         enclosing symbol: X::out = X's own, X ::out = nested symbols' too. {m,n} = edges
+         crossed, {1,} = transitive. * NEVER matches an edge. Address = site ("file@line").
+  ::grep('flags pattern')  matched lines as nodes. -i -w -E -F -v -A<n> -B<n> -C<n>; literal
+         unless -E. :contains('…') is the boolean form (no context flags).
+  :parents(sel)  everything UPSTREAM of the tip (ancestors ∪ incoming refs, transitive) —
+         broader than callers. *:parents:empty = only :root.
+  CLAIMS bare :any/:all/:empty judge the set at their position (in :where, or after :parents)
+         and decide the node under test. Parenthesized :where/:any/:all/:empty(sel) are
+         RELATIVE (CSS-nesting): leading tag = descendant, leading ::/pseudo = the node, '>' =
+         child, & = the node, :root re-anchors.
+  SELF   :not(sel)/:is(sel) test the node ITSELF (CSS): func:not(#main), file > :is(func,method).
+  ORDER  :first/:last — this position's matches, per anchor, document order.
+  REP    {m,n} repeats an element or (group), child-joined: func{2} = func>func; within 1..3
+         levels = "> *{0,2} > x". {m,} unbounded (safe: cycle-guarded + work budget).
+  COMB   space = descendant, '>' = child, ',' = union.`
 
 // ----------------------------------------------------------- evaluation
 //

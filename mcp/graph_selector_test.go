@@ -463,6 +463,7 @@ func TestMissingColonsAreRepaired(t *testing.T) {
 		`#'main.go#C'in.call`:        `#'main.go#C'::in.call`,
 		`#'main.go#C':in.call`:       `#'main.go#C'::in.call`,
 		`func:where(out.call:empty)`: `func:where(::out.call:empty)`,
+		`#'main.go#C':parent(func)`:  `#'main.go#C':parents(func)`,
 	} {
 		a := query(t, s, map[string]any{"selector": sel, "limit": 50})
 		b := query(t, s, map[string]any{"selector": same, "limit": 50})

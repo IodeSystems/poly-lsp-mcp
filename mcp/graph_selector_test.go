@@ -770,6 +770,37 @@ func TestAttrRegexIsTheOrOperator(t *testing.T) {
 	}
 }
 
+// A `~=` regex may contain a char class, and its `]` must not be read
+// as the attribute's closing bracket. func[name~=^[A-Z]] — exported Go
+// funcs — is the canonical case and must not need quoting.
+func TestRegexAttrAllowsCharClassBrackets(t *testing.T) {
+	s := startGraph(t)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// The fixture's funcs are a mix; ^[A-Z] selects the exported ones,
+	// and the quoted form must agree with the unquoted one exactly.
+	bare := query(t, s, map[string]any{"selector": `func[name~=^[A-Z]]`, "limit": 50})
+	quoted := query(t, s, map[string]any{"selector": `func[name~='^[A-Z]']`, "limit": 50})
+	if bare.TotalMatches == 0 {
+		t.Fatal("func[name~=^[A-Z]] matched nothing — the ] closed the attribute early")
+	}
+	if bare.TotalMatches != quoted.TotalMatches {
+		t.Errorf("bracket regex must read the same quoted or not: bare=%d quoted=%d",
+			bare.TotalMatches, quoted.TotalMatches)
+	}
+	for _, n := range nodes(bare) {
+		leaf := n
+		if i := strings.LastIndex(n, "#"); i >= 0 {
+			leaf = n[i+1:]
+		}
+		if leaf != "" && !(leaf[0] >= 'A' && leaf[0] <= 'Z') {
+			t.Errorf("^[A-Z] matched a non-exported name: %s", n)
+		}
+	}
+}
+
 // A literal op with a `|` in it is an alternation attempt: it looks for
 // the literal "a|b", finds nothing, and a wrapping :not() then excludes
 // nothing and hands back the WHOLE set — measured at 820/820 funcs

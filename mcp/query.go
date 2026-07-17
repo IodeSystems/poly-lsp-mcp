@@ -1386,7 +1386,7 @@ func (p *modSelParser) parseAttr() (selAttr, error) {
 	default:
 		return a, p.errf("one of = ^= $= *=")
 	}
-	value, quoted := p.readAttrValue()
+	value, quoted := p.readAttrValue(a.op == selRegex)
 	a.value = value
 	if a.op == selRegex {
 		re, err := regexp.Compile(a.value)
@@ -1701,7 +1701,13 @@ func selOpSpelling(op selOp) string {
 // readAttrValue returns the value and whether it was QUOTED. Quoting is
 // the literal escape — [path*='a|b'] means the caller wants a real '|',
 // so the alternation guard must not fire on it.
-func (p *modSelParser) readAttrValue() (string, bool) {
+//
+// regex makes the reader bracket-aware: `]` inside a char class
+// ([name~=^[A-Z]]) is part of the pattern, not the attribute terminator,
+// so a `]`-bearing regex needs no quoting. Depth-counting also passes
+// POSIX classes ([[:alpha:]]); an escaped `\]` or `]` as a class's first
+// member is the rare case that still wants quotes.
+func (p *modSelParser) readAttrValue(regex bool) (string, bool) {
 	if c := p.peek(); c == '"' || c == '\'' {
 		quote := c
 		p.i++
@@ -1716,7 +1722,19 @@ func (p *modSelParser) readAttrValue() (string, bool) {
 		return v, true
 	}
 	start := p.i
-	for !p.eof() && p.s[p.i] != ']' {
+	depth := 0
+	for !p.eof() {
+		c := p.s[p.i]
+		if c == ']' && depth == 0 {
+			break // the attribute's closing bracket
+		}
+		if regex {
+			if c == '[' {
+				depth++
+			} else if c == ']' {
+				depth--
+			}
+		}
 		p.i++
 	}
 	return strings.TrimSpace(string(p.s[start:p.i])), false

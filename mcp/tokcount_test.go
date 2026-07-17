@@ -42,7 +42,12 @@ import (
 // documented in prose, and prose is demonstrably not what the model copies —
 // examples are. If that example doesn't move their usage, delete it AND the
 // features' prose, and take ~90 tokens back.
-const modernTokenBudget = 1000
+// 1000 → 1080 for the graph half: :parents / :where / :any / :all / :empty
+// replaced the three zero-use pseudos, and the extra tokens are almost all
+// RECIPES keyed to an address ("you have store.go#Save — now what"), the one
+// form measured to move usage (took :references 0 → opening move). If the
+// recipes don't move :parents usage, cut them and take the tokens back.
+const modernTokenBudget = 1080
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

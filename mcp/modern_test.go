@@ -193,68 +193,69 @@ func TestModernQueryArgumentNodes(t *testing.T) {
 
 // ---------------------------------------------------------- pseudo-classes
 
-func TestModernQueryHasParent(t *testing.T) {
+func TestModernQueryAncestorChain(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	// The canonical example: every function in one file, named by
-	// BASENAME (not relpath) — both are legitimate ids.
-	q := query(t, s, map[string]any{"selector": `func:has_parent(#"some_file.ts")`})
+	// Containment is the chain itself (the :has_parent replacement):
+	// every function in one file, named by BASENAME (not relpath) —
+	// both are legitimate ids.
+	q := query(t, s, map[string]any{"selector": `#"some_file.ts" func`})
 	if !hasNode(q, "web/some_file.ts#topLevel") {
 		t.Errorf("expected topLevel; got %v", nodes(q))
 	}
 	for _, n := range nodes(q) {
 		if !strings.HasPrefix(n, "web/some_file.ts#") {
-			t.Errorf("has_parent leaked outside the file: %q", n)
+			t.Errorf("chain leaked outside the file: %q", n)
 		}
 	}
 
-	// :has_parent reaches ANY depth — a method nested in a class is
-	// still "in" the file.
-	q = query(t, s, map[string]any{"selector": `method:has_parent(#"web/some_file.ts")`})
+	// The descendant combinator reaches ANY depth — a method nested in
+	// a class is still "in" the file.
+	q = query(t, s, map[string]any{"selector": `#"web/some_file.ts" method`})
 	if !hasNode(q, "web/some_file.ts#UserService.getUser") {
-		t.Errorf("has_parent should reach into the class; got %v", nodes(q))
+		t.Errorf("descendant should reach into the class; got %v", nodes(q))
 	}
-}
-
-func TestModernQueryHasParentDirectOnlyViaDepth(t *testing.T) {
-	s, _ := startModern(t)
-	defer s.close()
-
-	// :depth(1,1) on the INNER compound narrows "any ancestor" to "the
-	// direct parent": getUser's direct parent is the class, not the file.
-	q := query(t, s, map[string]any{"selector": `method:has_parent(file:depth(1,1))`})
+	// '>' narrows to the direct parent: getUser's direct parent is the
+	// class, not the file.
+	q = query(t, s, map[string]any{"selector": `file > method`})
 	if hasNode(q, "web/some_file.ts#UserService.getUser") {
 		t.Errorf("getUser's direct parent is the class, not the file; got %v", nodes(q))
 	}
-	q = query(t, s, map[string]any{"selector": `method:has_parent(class:depth(1,1))`})
+	q = query(t, s, map[string]any{"selector": `class > method`})
 	if !hasNode(q, "web/some_file.ts#UserService.getUser") {
 		t.Errorf("getUser's direct parent IS the class; got %v", nodes(q))
 	}
 }
 
-func TestModernQueryHas(t *testing.T) {
+func TestModernQueryAny(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	// A func declaring an argument named `retries`.
-	q := query(t, s, map[string]any{"selector": "method:has(argument#retries)"})
+	// The :has replacement — ∃ a descendant. A method declaring an
+	// argument named `retries`.
+	q := query(t, s, map[string]any{"selector": "method:any(argument#retries)"})
 	if !hasNode(q, "main.go#Server.Start") || q.TotalMatches != 1 {
 		t.Errorf("expected only Server.Start; got %v", nodes(q))
 	}
-	// A file that has a class descendant.
-	q = query(t, s, map[string]any{"selector": "file:has(class)"})
+	// A file with a class descendant.
+	q = query(t, s, map[string]any{"selector": "file:any(class)"})
 	if !hasNode(q, "web/some_file.ts") {
 		t.Errorf("expected the ts file; got %v", nodes(q))
 	}
+	// Leading '>' narrows the relative selector to children.
+	q = query(t, s, map[string]any{"selector": "file:any(> method)"})
+	if hasNode(q, "web/some_file.ts") {
+		t.Errorf("getUser is not a DIRECT child of the file; got %v", nodes(q))
+	}
 }
 
-func TestModernQueryReferences(t *testing.T) {
+func TestModernQueryParents(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	// Reverse lookup: what references Start? CallsStart does.
-	q := query(t, s, map[string]any{"selector": `*:references(#"main.go#Server.Start")`, "limit": 50})
+	// Reverse lookup, inverted into a move: who calls Start?
+	q := query(t, s, map[string]any{"selector": `#"main.go#Server.Start":parents(*)`, "limit": 50})
 	if !hasNode(q, "main.go#CallsStart") {
 		t.Errorf("expected CallsStart among referrers; got %v", nodes(q))
 	}
@@ -611,7 +612,7 @@ func TestModernNodeReadBySelector(t *testing.T) {
 	defer s.close()
 
 	// node also accepts a full selector, as long as it's unambiguous.
-	r := s.callTool("node_read", map[string]any{"node": "method:has(argument#retries)"})
+	r := s.callTool("node_read", map[string]any{"node": "method:any(argument#retries)"})
 	if r.IsError {
 		t.Fatalf("errored: %s", r.Content[0].Text)
 	}

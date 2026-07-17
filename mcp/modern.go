@@ -65,19 +65,20 @@ const modernNodeQueryDescription = `Projectional editor over ONE node tree, quer
 TYPES are bare tags (CSS elements; fixed set): project dir file func method type struct interface class const var field enum ctor module import argument, or *.
 Workspace NAMES are #ids, never tags: dir cache/ = #cache. No classes; "." unused.
 Ids: #bare or #'quoted'. A symbol answers to its name, dotted path, or '<file>#<sym>'; a dir/file to basename or relpath.
-space=descendant, >=child, comma=union.
+space=descendant, >=child, comma=union. Combinators walk DOWN through containment.
 :root — the workspace root.
-:has(sel)/:has_parent(sel) — a descendant/an ancestor matches sel. :references(sel) — calls it.
+:parents(sel) — the ONE move that leaves the tree: tip becomes the nodes matching sel that REFERENCE it, and the chain continues from there. {m,n} hops; {1,} = transitive closure.
+:where/:any/:all/:empty(sel) — filter/∃/∀/∄: do paths of sel connect to this node. sel is relative: descendants by default, '>' children, or lead with :parents(...) to ask about referrers.
 :contains('text') — the node's OWN source, not its children's.
 :depth(m,n) — m..n levels from the previous target (0=itself), else from :root; overrides the combinator.
 Examples: file = EVERY file, nested included. #cache > file = files directly in dir cache/. :root > * = ONLY top level.
-From an address (matches[].node, e.g. store.go#Save) — *:references(#'store.go#Save') = every caller, WITHOUT reading files. func:has_parent(#'store.go') = every func in it.
-All at once: dir#'cache' func:has(argument#ctx):references(#'store.go#Save') = funcs under cache/ that take a ctx arg and call Save.
+From an address (matches[].node, e.g. store.go#Save) — #'store.go#Save':parents(*) = every caller, WITHOUT reading files. #'store.go' func = every func in it.
+More: #'Save':parents(func){1,} = all transitive callers. func:any(:parents(#'main')) = what main calls. func:empty(:parents(*)) = dead code.
 grep: flags+pattern over each match's own source, e.g. "-i -A2 derp". -i -w -E -F -v -n -A/-B/-C<n>; literal unless -E. Nodes with no hit drop out.
 limit default 20; offset pages. selector "?" returns the grammar.`
 
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
-	`"selector":{"type":"string","description":"e.g. func:has_parent(#'app.go')"},` +
+	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save':parents(*)"},` +
 	`"grep":{"type":"string","description":"grep flags + pattern, e.g. \"-i -A2 derp\""},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."}},` +

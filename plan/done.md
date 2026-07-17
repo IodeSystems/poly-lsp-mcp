@@ -3,6 +3,36 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Child-LSP precision pass (DONE 2026-07-17)
+
+- [x] **`refConf` is live**: every edge row carries `conf: "lsp" | "lexical"`.
+  It was a dead placeholder — declared, hardcoded to "lexical", never read.
+- [x] **Ask only when unsure, narrow never invent** (`mcp/precision.go`). An
+  edge with ONE candidate is not a guess and costs nothing; only an ambiguous
+  one (>1 far end after the scope fix — avg 2.58) buys a
+  `textDocument/definition` round-trip. The reply PICKS from the candidates
+  lexical already found: if it points outside the modelled tree (stdlib,
+  vendor, generated) the lexical candidates stand, so the pass can never add
+  an edge no one reviewed.
+  - `::out`: narrows the far-end list to the one really referenced.
+  - `::in`: the far end is never in doubt — whether the SITE refers to the
+    target is. A definition landing elsewhere is conclusive ("it is that one"
+    means "it is not this one"), so the coincidental edge is dropped.
+- [x] **Capped and loud**: `defaultLSPResolveCap` = 200 round-trips/query
+  (`SetLSPResolveCap` for tests), 2s each. Past the cap the rest stay lexical
+  and the result's `edges` note says how many were settled and that the
+  remainder are CANDIDATES. Same contract as the work budget.
+- [x] **Degrades to lexical everywhere**: no manager (the `query` CLI), a
+  tree-sitter-only language, a timeout, a dead child, an unparseable reply.
+  Precision is an upgrade, never a dependency.
+- [x] **Verified against real gopls** on a two-package `Save` collision that
+  lexical scope cannot settle: `Run::out.call` narrowed from
+  [cache.Save, store.Save] to store.Save with conf=lsp; `cache.Save::in.call`
+  went 1 → 0 (that edge was main.go's call to store.Save, matched on the
+  name); `store.Save::in.call` kept its real caller. The e2e tests needed a
+  manager-bearing session — `startSessionFull` has no manager, so a precision
+  test built on it passes by testing nothing.
+
 ## Query CLI, deterministic truncation, name/path axes (DONE 2026-07-17)
 
 - [x] **`poly-lsp-mcp query [flags] <selector>`** — compiles + evaluates one
@@ -32,6 +62,7 @@
   CALLED), `[path]` = the workspace-relative file path (where it LIVES), `#id`
   unchanged and still pins addresses. **BREAKING**; the `#id ≡ [name=id]` law
   no longer holds for addresses and the grammar help says so.
+
 - [x] **The index is inverted ONCE per query (`sitesByFile`).** `fileSites(rel)`
   answered "the sites in ONE file" by sweeping EVERY name and EVERY site in the
   workspace and discarding everything outside that file — a whole-workspace

@@ -83,6 +83,7 @@ type queryResult struct {
 	Returned     int    `json:"returned"`
 	Truncated    bool   `json:"truncated"`
 	Note         string `json:"note"`
+	Edges        string `json:"edges"`
 	Matches      []struct {
 		Node   string   `json:"node"`
 		Class  string   `json:"type"`
@@ -93,6 +94,7 @@ type queryResult struct {
 		After  []string `json:"after"`
 		From   []string `json:"from"`
 		To     []string `json:"to"`
+		Conf   string   `json:"conf"`
 	} `json:"matches"`
 }
 

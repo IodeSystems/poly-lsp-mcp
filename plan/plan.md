@@ -54,11 +54,25 @@ opt-in:
 **Assumption made**: `:parents` wants incoming edges only — that is what the
 old code filtered for, and the split now hard-codes it.
 
-❓ **The edges are name coincidences, not references** (pre-existing, known,
-and now the biggest correctness gap — see "Known caveats" below). Worth
-raising to a scheduled slice: the cost work removed the excuse for not
-fixing it, and every transitive query (`::in.call{1,}`, the headline feature)
-compounds the noise per hop.
+◐ **Edges: from coincidence toward reference.** Two of three steps done
+(→ done.md): lexical scope killed 99% of far ends (a local is not visible
+outside its function), and the child-LSP pass now settles what remains,
+per edge, with `conf: lsp|lexical` on every row. **next**:
+  - ◻ **The CLI is lexical-only, by choice.** `bin/dev query` has no manager
+    (a one-shot gopls spawn is seconds); its tree renderer does NOT show conf,
+    so CLI edge output looks identical to a resolved one. Either render conf
+    or say "lexical" in the footer — today it is the one place an ambiguous
+    edge can still read as a fact.
+  - ◻ **Transitive queries still compound.** `::in.call{1,}` crosses many
+    edges; each hop past the 200-cap is lexical again. The cap is per QUERY,
+    so a deep walk spends it on hop 1. **blocking decision**: per-hop caps? a
+    "precise-only" mode that refuses to cross a lexical edge? Doing nothing
+    means the marquee feature stays the least trustworthy.
+  - ◻ **`::in` on a common name is O(sites) round-trips** (#New = 93). Under
+    the cap, but a warm-gopls session pays it per query — the LSP answer is
+    not cached across queries.
+**Assumption made**: `textDocument/definition`'s first location is the
+declaration. True for gopls; unverified for tsserver/pylsp.
 
 ◻ **Query CLI + determinism** — shipped this pass, see done.md:
 `poly-lsp-mcp query [flags] <selector>` + `bin/dev` launcher; deterministic

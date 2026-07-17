@@ -85,7 +85,7 @@ type treeNode struct {
 	// naming ::in/::out does (the CSS pseudo-element contract).
 	refDir  string      // "in" | "out"
 	refKind string      // "call" | "type" | "import" | ""
-	refConf string      // "lexical" today; "lsp" when a child LSP resolves it
+	refConf string      // refLexical (name-keyed guess) | refLSP (a child LSP settled it)
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
 
 	// The node's generated ref children, materialized lazily and kept OUT
@@ -229,6 +229,14 @@ type engine struct {
 	// query (see sitesByFile). nil until first asked.
 	rawSites map[string][]rawSite
 
+	// The child-LSP precision pass (see precision.go). lspLeft is the
+	// per-query round-trip budget; asked/resolved report what the answer
+	// is actually made of, so a partly-lexical graph says so instead of
+	// passing itself off as resolved.
+	lspLeft     int
+	lspAsked    int
+	lspResolved int
+
 	// fragCache: minted ::grep fragments per host per pattern, so the
 	// same host+pattern yields the SAME nodes across a query (set
 	// semantics need identity).
@@ -362,6 +370,10 @@ func (s *Server) buildTree() (*engine, error) {
 	e.workLeft = s.queryWorkBudget
 	if e.workLeft <= 0 {
 		e.workLeft = defaultQueryWorkBudget
+	}
+	e.lspLeft = s.lspResolveCap
+	if e.lspLeft <= 0 {
+		e.lspLeft = defaultLSPResolveCap
 	}
 	e.walkDir(root, project)
 	return e, nil
@@ -1821,6 +1833,8 @@ SPEC
          AND  is just two attrs — [path*=ma][path*=in] — CSS conjoins a compound.
          Non-test funcs: func:not([path~=test|smoke]).
          #id spans both axes and adds the "<file>#<sym>" address; it is never a regex.
+  CONF   every edge row carries conf: "lsp" = a child LSP resolved it; "lexical" = name-keyed
+         (scope-filtered). A lexical row with several to:/from: is a CANDIDATE LIST, not a fact.
   EDGES  ::in / ::out, kind class .call/.type/.import (bare = any). Attached to the INNERMOST
          enclosing symbol: X::out = X's own, X ::out = nested symbols' too. {m,n} = edges
          crossed, {1,} = transitive. * NEVER matches an edge. Address = site ("file@line").
@@ -2616,8 +2630,11 @@ func (e *engine) buildOutRefs(n *treeNode) {
 		if len(far) == 0 {
 			continue
 		}
+		// Lexical scope narrowed the name-keyed candidates; a child LSP
+		// settles whatever is still ambiguous (see precision.go).
+		far, conf := e.refineFar(far, n.abs, site.line, site.col)
 		n.refsOut = append(n.refsOut, &treeNode{
-			class: "ref", refDir: "out", refKind: site.kind, refConf: "lexical",
+			class: "ref", refDir: "out", refKind: site.kind, refConf: conf,
 			leaf: site.name, full: site.name,
 			file: n.file, abs: n.abs, at: [2]int{site.line, site.line},
 			parent: n, depth: n.depth + 1, refFar: far,
@@ -2647,6 +2664,11 @@ func (e *engine) buildInRefs(n *treeNode) {
 	// that can reference it are inside its own function. Every other
 	// occurrence of the name is a coincidence, not a caller.
 	owner, isLocal := localOwner(n)
+
+	// Sites are offered because the NAME matches. If n is the only thing
+	// answering to that name there is nothing to settle; otherwise a
+	// site may belong to one of the others, and only an LSP can say.
+	ambiguous := len(e.declsOf(n.leaf)) > 1
 
 	for _, site := range idx.LookupExisting(n.leaf) {
 		rel := relPath(site.File, e.s.getRoot())
@@ -2679,8 +2701,12 @@ func (e *engine) buildInRefs(n *treeNode) {
 			continue
 		}
 		fnode := e.fileByRel[rel]
+		keep, conf := e.refineIn(n, fnode.abs, hit.line, hit.col, ambiguous)
+		if !keep {
+			continue // the LSP says this site refers to a different decl
+		}
 		n.refsIn = append(n.refsIn, &treeNode{
-			class: "ref", refDir: "in", refKind: hit.kind, refConf: "lexical",
+			class: "ref", refDir: "in", refKind: hit.kind, refConf: conf,
 			leaf: n.leaf, full: n.leaf,
 			file: rel, abs: fnode.abs, at: [2]int{hit.line, hit.line},
 			parent: n, depth: n.depth + 1, refFar: []*treeNode{src},

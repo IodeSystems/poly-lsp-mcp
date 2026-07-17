@@ -121,6 +121,10 @@ type Server struct {
 	// See engine.spend — tripping it is loud, never silent.
 	queryWorkBudget int
 
+	// lspResolveCap bounds child-LSP round-trips per query (see
+	// precision.go). 0 = defaultLSPResolveCap.
+	lspResolveCap int
+
 	// proactiveOpenDoneMu guards proactiveOpenDone. The channel is
 	// (re)created at the start of each proactive walk and closed when
 	// it finishes. WaitForProactiveOpen reads it under the lock so a
@@ -267,6 +271,15 @@ func (s *Server) WaitForProactiveOpen(ctx context.Context) error {
 // monstrous workspaces in either direction.
 func (s *Server) SetQueryWorkBudget(n int) {
 	s.queryWorkBudget = n
+}
+
+// SetLSPResolveCap bounds how many child-LSP round-trips ONE query may
+// spend settling ambiguous reference edges (default 200; see
+// precision.go). 0 restores the default. Past the cap the remaining
+// edges stay lexical and the result says so — same contract as the work
+// budget: partial, flagged, never silent. Mainly for tests.
+func (s *Server) SetLSPResolveCap(n int) {
+	s.lspResolveCap = n
 }
 
 // SetGitPrewarm toggles the post-initialize ancestor-branch walk

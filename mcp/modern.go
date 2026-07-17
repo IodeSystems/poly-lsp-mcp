@@ -198,6 +198,11 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 				cls += "." + n.refKind
 			}
 			m["type"] = cls
+			// What settled this edge. A caller acting on "who calls Save"
+			// needs to know whether a language server said so or a name
+			// matched — and "lexical" with several far ends is a list of
+			// CANDIDATES, not a fact.
+			m["conf"] = n.refConf
 			far := make([]string, 0, len(n.refFar))
 			for _, f := range n.refFar {
 				far = append(far, f.addr())
@@ -234,6 +239,11 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	}
 	if end < total || offset > 0 {
 		payload["note"] = fmt.Sprintf("%d of %d shown; raise limit or use offset", len(paged), total)
+	}
+	// Say what the edges are made of. An ambiguous lexical edge lists
+	// CANDIDATES; silence here would let a name match read as a fact.
+	if note := e.precisionNote(); note != "" {
+		payload["edges"] = note
 	}
 	// The work budget tripping is the OTHER partial-result path — same
 	// contract: flag it and name the fix, never trim quietly.

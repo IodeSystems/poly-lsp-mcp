@@ -20,7 +20,9 @@ import (
 //     one / the first (bare `init` == `init[1]`).
 //   - Class — normalized kind from the controlled vocabulary: func,
 //     method, type, struct, interface, class, const, var, field, enum,
-//     ctor, module, import.
+//     ctor, module, import, argument. An `argument` is a parameter
+//     DECLARATION, nested under its callable ("Server.Start.ctx");
+//     call-site arguments are not indexed.
 //   - Decl* — the whole declaration range (1-based, end-exclusive).
 //     node_read / node_edit / node_delete address this.
 //   - Name* — just the identifier range. node_references / node_refactor
@@ -134,7 +136,11 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 				Sym:   full,
 				Class: in.class,
 			}
-			sym.DeclStartLine, sym.DeclStartCol, sym.DeclEndLine, sym.DeclEndCol = nodeLineCols(decl)
+			// declLineCols, not nodeLineCols: a declaration OWNS its doc
+			// comment. Arguments (below) deliberately keep the raw span —
+			// reaching up from a parameter would swallow the enclosing
+			// function's comment.
+			sym.DeclStartLine, sym.DeclStartCol, sym.DeclEndLine, sym.DeclEndCol = declLineCols(decl)
 			if in.nameNode != nil {
 				sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = nodeLineCols(in.nameNode)
 			} else {
@@ -142,6 +148,15 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 				sym.NameEndLine, sym.NameEndCol = sym.DeclEndLine, sym.DeclEndCol
 			}
 			out = append(out, sym)
+
+			// Parameter DECLARATIONS become addressable `.argument`
+			// children of their func/method/ctor. Emitted here rather
+			// than through the classify/gather walk because params are
+			// not "symbols at this level" — they hang off the owning
+			// node's `parameters` field, and routing them through
+			// gather would force branch=true on every func (which would
+			// then also drag in body-local declarations).
+			appendParamSymbols(language, in.node, full, in.class, content, &out)
 
 			if in.branch {
 				visit(in.node, full, in.class)
@@ -154,6 +169,189 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 
 func groupKey(parentOverride, name, class string) string {
 	return parentOverride + "\x00" + name + "\x00" + class
+}
+
+// ------------------------------------------------------- .argument nodes
+
+// paramInfo is one parameter DECLARATION resolved out of a grammar's
+// parameter list: the name to render (empty = anonymous, e.g. Go's
+// unnamed `func f(int)` or TS's destructured `{a, b}: Props`), the
+// identifier node answering rename/references, and the node whose span
+// is the argument's declaration range.
+type paramInfo struct {
+	name     string
+	nameNode *sitter.Node
+	decl     *sitter.Node
+}
+
+// classTakesParams gates which symbol classes get `.argument`
+// children. Only callables declare a parameter list; a const bound to
+// an arrow function is class const/var (not func), and is deliberately
+// left alone — the node model stays declaration-oriented and keyed on
+// the class vocabulary.
+func classTakesParams(class string) bool {
+	switch class {
+	case "func", "method", "ctor":
+		return true
+	}
+	return false
+}
+
+// appendParamSymbols emits one Class:"argument" Symbol per parameter
+// declaration of a callable node, as a dotted child of the owner's sym
+// path ("Server.Start.ctx"). Cardinality/anonymity is rendered by the
+// same renderSegment the rest of the index uses, so duplicate-named or
+// unnamed params disambiguate identically ("[1]", "x[2]", …).
+//
+// Call-site arguments are deliberately NOT indexed: this model is
+// declaration-oriented like every other symbol class.
+func appendParamSymbols(lang string, node *sitter.Node, owner, class string, content []byte, out *[]Symbol) {
+	if !classTakesParams(class) {
+		return
+	}
+	// Go's method receiver lives on a separate `receiver` field, so
+	// keying on `parameters` naturally excludes it.
+	params := node.ChildByFieldName("parameters")
+	if params == nil {
+		return
+	}
+
+	var infos []paramInfo
+	cnt := int(params.NamedChildCount())
+	for i := 0; i < cnt; i++ {
+		infos = append(infos, paramInfos(lang, params.NamedChild(i), content)...)
+	}
+	if len(infos) == 0 {
+		return
+	}
+
+	counts := map[string]int{}
+	for _, in := range infos {
+		counts[in.name]++
+	}
+	seen := map[string]int{}
+	for _, in := range infos {
+		seen[in.name]++
+		seg := renderSegment(in.name, seen[in.name], counts[in.name])
+		sym := Symbol{Sym: owner + "." + seg, Class: "argument"}
+		sym.DeclStartLine, sym.DeclStartCol, sym.DeclEndLine, sym.DeclEndCol = nodeLineCols(in.decl)
+		nameNode := in.nameNode
+		if nameNode == nil {
+			nameNode = in.decl
+		}
+		sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = nodeLineCols(nameNode)
+		*out = append(*out, sym)
+	}
+}
+
+// paramInfos resolves one node from a parameter list into zero or more
+// parameter declarations. Language-dispatched, mirroring classify /
+// refinedClass. "typescript" covers .tsx too: both extensions map to
+// the `typescript` language name, which LanguageByName backs with the
+// tsx grammar — so there is one codepath, not two.
+func paramInfos(lang string, p *sitter.Node, content []byte) []paramInfo {
+	switch lang {
+	case "go":
+		return goParamInfos(p, content)
+	case "typescript":
+		return tsParamInfos(p, content)
+	case "python":
+		return pyParamInfos(p, content)
+	}
+	return nil
+}
+
+// goParamInfos handles Go's parameter_declaration /
+// variadic_parameter_declaration.
+func goParamInfos(p *sitter.Node, content []byte) []paramInfo {
+	switch p.Type() {
+	case "parameter_declaration", "variadic_parameter_declaration":
+	default:
+		return nil
+	}
+	var names []*sitter.Node
+	for i := 0; i < int(p.ChildCount()); i++ {
+		if p.FieldNameForChild(i) == "name" {
+			names = append(names, p.Child(i))
+		}
+	}
+	switch len(names) {
+	case 0:
+		// Unnamed param (`func f(int)`) — anonymous; the whole
+		// declaration is the span.
+		return []paramInfo{{decl: p}}
+	case 1:
+		// One name: span is name+type together.
+		return []paramInfo{{name: names[0].Content(content), nameNode: names[0], decl: p}}
+	default:
+		// `a, b int` is ONE declaration carrying several names. Each
+		// gets its own node, spanned by its identifier — using the
+		// shared declaration span for both would make siblings overlap.
+		out := make([]paramInfo, 0, len(names))
+		for _, n := range names {
+			out = append(out, paramInfo{name: n.Content(content), nameNode: n, decl: n})
+		}
+		return out
+	}
+}
+
+// tsParamInfos handles TypeScript/TSX's required_parameter /
+// optional_parameter, whose `pattern` field carries the binding.
+func tsParamInfos(p *sitter.Node, content []byte) []paramInfo {
+	switch p.Type() {
+	case "required_parameter", "optional_parameter":
+	default:
+		return nil
+	}
+	pat := p.ChildByFieldName("pattern")
+	if pat == nil {
+		return []paramInfo{{decl: p}}
+	}
+	switch pat.Type() {
+	case "identifier", "shorthand_property_identifier_pattern":
+		return []paramInfo{{name: pat.Content(content), nameNode: pat, decl: p}}
+	case "rest_pattern":
+		if id := firstNamedChildOfType(pat, "identifier"); id != nil {
+			return []paramInfo{{name: id.Content(content), nameNode: id, decl: p}}
+		}
+	}
+	// Destructuring patterns ({a, b}: Props) bind no single name —
+	// anonymous, addressable positionally via "[n]".
+	return []paramInfo{{decl: p}}
+}
+
+// pyParamInfos handles Python's parameter forms. `self` is a real
+// parameter declaration and is indexed as one.
+func pyParamInfos(p *sitter.Node, content []byte) []paramInfo {
+	switch p.Type() {
+	case "identifier":
+		return []paramInfo{{name: p.Content(content), nameNode: p, decl: p}}
+	case "typed_parameter", "default_parameter", "typed_default_parameter":
+		if n := p.ChildByFieldName("name"); n != nil {
+			return []paramInfo{{name: n.Content(content), nameNode: n, decl: p}}
+		}
+		// typed_parameter exposes its identifier positionally rather
+		// than via a `name` field.
+		if id := firstNamedChildOfType(p, "identifier"); id != nil {
+			return []paramInfo{{name: id.Content(content), nameNode: id, decl: p}}
+		}
+		return []paramInfo{{decl: p}}
+	case "list_splat_pattern", "dictionary_splat_pattern":
+		if id := firstNamedChildOfType(p, "identifier"); id != nil {
+			return []paramInfo{{name: id.Content(content), nameNode: id, decl: p}}
+		}
+	}
+	return nil
+}
+
+// firstNamedChildOfType returns n's first named child of type t, or nil.
+func firstNamedChildOfType(n *sitter.Node, t string) *sitter.Node {
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		if c := n.NamedChild(i); c.Type() == t {
+			return c
+		}
+	}
+	return nil
 }
 
 // renderSegment renders one path segment. Anonymous nodes (empty name)
@@ -173,6 +371,41 @@ func nodeLineCols(n *sitter.Node) (startLine, startCol, endLine, endCol int) {
 	sp := n.StartPoint()
 	ep := n.EndPoint()
 	return int(sp.Row) + 1, int(sp.Column) + 1, int(ep.Row) + 1, int(ep.Column) + 1
+}
+
+// declLineCols is nodeLineCols extended UPWARD over the declaration's doc
+// comment — the contiguous run of comment lines directly above it, no blank
+// line between.
+//
+// tree-sitter models comments as SIBLINGS of the declaration, not children, so
+// the raw node span stops at `func`. A doc comment is part of the declaration
+// in every sense that matters here:
+//
+//   - node_read returned the function WITHOUT its documentation.
+//   - node_edit replaces the span, so rewriting a function left its old comment
+//     stranded above the new body — silently describing code that no longer
+//     exists.
+//   - delete excised the function and orphaned its comment.
+//   - :contains('TODO') missed TODOs written where people actually write them.
+//
+// A blank line ends the block: that is the language-level convention for "this
+// comment belongs to the next thing" in Go and TS alike. Python needs nothing —
+// its docstrings live inside the body, already in the span.
+func declLineCols(n *sitter.Node) (startLine, startCol, endLine, endCol int) {
+	startLine, startCol, endLine, endCol = nodeLineCols(n)
+	for cur := n; ; {
+		prev := cur.PrevSibling()
+		if prev == nil || prev.Type() != "comment" {
+			break
+		}
+		pStart, pCol, pEnd, _ := nodeLineCols(prev)
+		if pEnd+1 != startLine { // blank line (or same line) → not a doc comment
+			break
+		}
+		startLine, startCol = pStart, pCol
+		cur = prev
+	}
+	return startLine, startCol, endLine, endCol
 }
 
 // classify assigns a role to a node given its type and its parent's

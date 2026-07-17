@@ -73,6 +73,10 @@ func (s *Server) QueryText(selector string, limit, offset int, w io.Writer) erro
 	return renderQueryTree(w, paged, total, offset, end, e.workExceeded)
 }
 
+// maxFarEnds caps how many far ends one ref row spells out before it
+// starts counting them instead.
+const maxFarEnds = 3
+
 // queryGroup is one file's worth of matches. self is the group's own
 // node when the container itself matched (a `file.go` selector matches
 // the file node) — the header already states it, so it never also
@@ -95,6 +99,14 @@ func groupKey(n *treeNode) string {
 
 func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, workExceeded bool) error {
 	if total == 0 {
+		// A bare "no matches" would claim the selector's answer IS none.
+		// When the budget killed the walk, that is not what happened and
+		// not what we know — say which one this is.
+		if workExceeded {
+			fmt.Fprintln(w, "no matches — but evaluation stopped at the work budget FIRST,")
+			fmt.Fprintln(w, "so this is NOT an answer: the walk never finished.")
+			return writeBudgetAdvice(w)
+		}
 		_, err := fmt.Fprintln(w, "no matches")
 		return err
 	}
@@ -138,14 +150,22 @@ func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, wor
 	}
 	fmt.Fprintln(tw)
 	fmt.Fprintln(tw, summarize(groups, total, offset, end))
+	if err := tw.Flush(); err != nil {
+		return err
+	}
 	if workExceeded {
 		// Same contract as node_query: a budget-trimmed result says so
 		// and names the fix. Never trim quietly.
-		fmt.Fprintln(tw, "warning: evaluation stopped at the work budget — results may be INCOMPLETE.")
-		fmt.Fprintln(tw, "  Narrow the traversal: a kind class (::in.call), a filtered inner")
-		fmt.Fprintln(tw, "  (:parents(func)), bounded hops ({1,3}), or a tighter scope.")
+		fmt.Fprintln(w, "warning: evaluation stopped at the work budget — results are INCOMPLETE.")
+		return writeBudgetAdvice(w)
 	}
-	return tw.Flush()
+	return nil
+}
+
+func writeBudgetAdvice(w io.Writer) error {
+	_, err := fmt.Fprintln(w, "  Narrow the traversal: a kind class (::in.call), a filtered inner\n"+
+		"  (:parents(func)), bounded hops ({1,3}), or a tighter scope.")
+	return err
 }
 
 // isContainerOf reports whether n is the node its own group is named
@@ -182,6 +202,14 @@ func describeNode(n *treeNode) string {
 		far := make([]string, 0, len(n.refFar))
 		for _, f := range n.refFar {
 			far = append(far, f.addr())
+		}
+		// Edges are name-keyed via the lexical index, so a common name
+		// can carry dozens of far ends — enough to bury the rest of the
+		// output. Show a few and SAY how many were held back; a silent
+		// "…" would read as if that were the whole edge.
+		if len(far) > maxFarEnds {
+			held := len(far) - maxFarEnds
+			far = append(far[:maxFarEnds:maxFarEnds], fmt.Sprintf("(+%d more)", held))
 		}
 		return fmt.Sprintf("%s %s %s", t, arrow, strings.Join(far, ", "))
 	case "fragment":

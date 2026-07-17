@@ -2,9 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
@@ -19,9 +21,15 @@ func main() {
 
 	// Subcommand dispatch. Default (no subcommand) runs the LSP server.
 	// `poly-lsp-mcp mcp [flags]` runs the MCP server.
+	// `poly-lsp-mcp query [flags] <selector>` runs one selector and prints it.
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 		runMCP()
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "query" {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+		runQuery()
 		return
 	}
 	runLSP()
@@ -87,6 +95,55 @@ func runMCP() {
 	srv.SetManager(multiplex.NewManager(reg))
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// runQuery compiles and evaluates one selector against the workspace
+// and prints the matches. It is the human-facing door to the same
+// engine node_query serves: no JSON-RPC, no child LSPs, no warm index
+// — buildTree walks the workspace and parses only the files the
+// selector actually descends into.
+func runQuery() {
+	configPath := flag.String("config", "poly-lsp-mcp.yaml", "language registry config file")
+	rootPath := flag.String("root", ".", "workspace root directory to query")
+	limit := flag.Int("limit", 0, "max matches to print (0 = all)")
+	offset := flag.Int("offset", 0, "skip this many matches")
+	budget := flag.Int("budget", 0, "query work budget (0 = engine default, 200000); raise it when a ::in/::out selector reports it stopped early")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: poly-lsp-mcp query [flags] <selector>\n\n")
+		fmt.Fprintf(os.Stderr, "Evaluate a node selector and print the matches, grouped by file.\n")
+		fmt.Fprintf(os.Stderr, "Pass '?' as the selector for the full selector grammar.\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  poly-lsp-mcp query ':root > *'\n")
+		fmt.Fprintf(os.Stderr, "  poly-lsp-mcp query --root ../other 'file.go func'\n")
+		fmt.Fprintf(os.Stderr, "  poly-lsp-mcp query '?'\n")
+	}
+	flag.Parse()
+
+	// The selector is one argument, but an unquoted one arrives as
+	// several — rejoin rather than silently querying only argv[0].
+	selector := strings.Join(flag.Args(), " ")
+	if strings.TrimSpace(selector) == "" {
+		flag.Usage()
+		os.Exit(2)
+	}
+
+	cfg, reg := loadConfigOrDie(*configPath)
+	root, err := filepath.Abs(*rootPath)
+	if err != nil {
+		log.Fatalf("root: %v", err)
+	}
+
+	// No SetManager / no Serve: a query is read-only and touches
+	// neither child LSPs nor the persisted index.
+	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+	if *budget > 0 {
+		srv.SetQueryWorkBudget(*budget)
+	}
+	if err := srv.QueryText(selector, *limit, *offset, os.Stdout); err != nil {
+		log.Fatalf("query: %v", err)
 	}
 }
 

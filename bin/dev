@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# poly-lsp-mcp dev launcher — builds the binary on demand for the host
+# OS/arch and runs it. Every subcommand of the real binary works here:
+#
+#   ./bin/dev query ':root > *'          evaluate a selector, print the tree
+#   ./bin/dev query '?'                  print the selector grammar
+#   ./bin/dev query --root ../other 'file.go func'
+#   BUILD=true ./bin/dev query '...'     force a rebuild before running
+#
+# A per-arch binary is cached at bin/poly-lsp-mcp-<os>-<arch>, so the same
+# launcher works across machines and architectures. It is rebuilt
+# automatically when it is missing, when any Go source is newer than it,
+# or when BUILD=true.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! command -v go >/dev/null 2>&1; then
+  echo "dev: Go toolchain not found on PATH" >&2
+  exit 1
+fi
+
+goos="$(go env GOOS)"
+goarch="$(go env GOARCH)"
+bin="$root/bin/poly-lsp-mcp-${goos}-${goarch}"
+
+needs_build=false
+if [[ "${BUILD:-}" == "true" ]]; then
+  needs_build=true
+elif [[ ! -x "$bin" ]]; then
+  needs_build=true
+elif [[ -n "$(find "$root" -name '*.go' -not -path '*/bin/*' -newer "$bin" -print -quit 2>/dev/null)" ]]; then
+  needs_build=true
+fi
+
+if [[ "$needs_build" == "true" ]]; then
+  echo "dev: building ${goos}/${goarch}..." >&2
+  ( cd "$root" && go build -o "$bin" . )
+fi
+
+exec "$bin" "$@"

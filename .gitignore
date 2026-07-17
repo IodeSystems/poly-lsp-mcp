@@ -1,6 +1,8 @@
 /poly-lsp-mcp
 /embed
 /dist/
+# bin/dev is the tracked launcher; the per-arch binaries it builds are not.
+/bin/poly-lsp-mcp-*
 *.test
 *.out
 .idea/

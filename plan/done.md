@@ -3,6 +3,21 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## A-priori cost tallies — :explain commit 2 (DONE 2026-07-17)
+
+- [x] The estimator's free cardinality sources. `Index.NameFreq(name)`: O(1) raw
+  site tally across the three stores — the selectivity signal (rare name narrows
+  hard). `Server.classCounts()`: symbols-per-class, but the class lives in the
+  TREE not the index, so it is a one-time full-symbol walk MEMOIZED against a new
+  `Index.gen` mutation counter (bumped under every write lock, read via
+  `Generation()`) — recomputed only when the index changes, never spends the
+  query budget. Design correction vs the plan: `outDegree`/fan-out was NOT
+  built — the index has no edges — deferred to commit 3 where a consumer can
+  validate it. `Index.gen` doubles as the memo key for the future inversion-floor
+  cache. Tested: counts match the actual `func`/`struct` queries, same instance
+  within a generation, fresh after a mutation. Commit 3 (`:explain` prefix + est
+  column + `>x` floors) consumes these.
+
 ## Budget-blow cost trace — :explain commit 1 (DONE 2026-07-17)
 
 - [x] A budget blow renders the selector as a per-element cost breakdown with

@@ -125,15 +125,14 @@ the element under eval via a stack pushed/popped in `evalElems` (query.go:2138)
     frame attribution (slice-index, ~free); CLI blow shows per-element cost +
     `← budget ran out here`, node_query carries a `cost` array. No grammar
     change. Shipped; 2 and 3 remain.
-  - ◻ **2. `symbols.Index` tallies** — `classCount` (bare-class estCand) +
-    `outDegree` avg (::out fan-out), built at index time, O(1) read = the
-    a-priori `est` source. Crux of `>x`: O(1) tallies + `len(sites[name])`
-    NEVER degrade; only per-query SCANS (`sitesByFile`, `declsOf`,
-    transitive-hop projection) do. **risk**: derived state — invalidate on
-    Refresh/RemoveFiles/clearFileLocked (symbols.go:362/191/377), the SAME
-    hazard the inversion-floor move names above. Land lazy+memoized-per-index-
-    generation first (zero staleness risk); promote to incremental only if
-    `:explain` latency shows.
+  - ✅ **2. a-priori cost tallies** → done.md. `Index.NameFreq` (O(1) raw site
+    tally = selectivity) + `Server.classCounts` (bare-class, memoized against
+    the new `Index.gen` mutation counter — the class lives in the TREE not the
+    index, so it is a lazy full-symbol walk, zero staleness risk). Design note
+    corrected: `outDegree`/fan-out was NOT built — the index has no edges, so
+    fan-out is deferred to commit 3's propagation (or a proxy) where it has a
+    consumer to validate against. `Index.gen` is also the memo key the
+    inversion-floor cache will reuse.
   - ◻ **3. `:explain` prefix + est column + `>x` floors.** Prefix stripped at
     BOTH entry points (QueryText query_text.go:27 + handleModernNodeQuery) via
     one shared `splitExplain` — a query MODE, not a pseudo, kept out of the

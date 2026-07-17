@@ -11,13 +11,18 @@
   Leaf = last id (#route), plus a virtual-FQN alias as written (#'app.route')
   via Symbol.Alias → nodeIDs. TS decorators lift to the export_statement
   wrapper; Go directive/doc COMMENTS (no AST node) stay with :annotated.
-- [x] **`comment` node**: the doc block above a decl, contiguous comment lines
-  JOINED into one child (Go emits one node per `//` line — this rejoins them).
-  `#'f' > comment` is the whole block; `func:not(:any(comment))` = undocumented
-  (grep-free); `comment:contains('TODO')`. Contiguity required — a comment
-  separated by a blank line is not the doc. Works Go/TS/Python.
-- Both synthesized like `.argument` nodes (which already existed — `::arg` was
-  never needed). `return` as a node is the remaining sibling → icebox.
+- [x] **`::comment` pseudo-element**: the doc block above a decl, contiguous
+  comment lines JOINED into one node (Go emits one per `//` line — rejoined).
+  GENERATED on demand from the symbol's stored span (Symbol.Comment* →
+  treeNode.commentAt), so it is invisible to `*` and the containment walk, like
+  ::grep — verified `#'f' > *` returns args, never the comment.
+  `func:not(:any(::comment))` = undocumented (grep-free);
+  `::comment:contains('TODO')`; address = file@line. Contiguity required (a
+  blank-separated comment is not the doc). Works Go/TS/Python. (First built as
+  a tag `comment`, then converted to `::comment` — a doc block is trivia, not a
+  member, so `*` should not surface it.)
+- `annotation` stays a real tag (a decorator IS a member you enumerate);
+  `argument` too (never needed `::arg`). `return` as a node → icebox.
 
 ## :annotated + bracket-aware regex — power queries (DONE 2026-07-17)
 

@@ -6,11 +6,12 @@ import (
 	"testing"
 )
 
-// A declaration's doc comment is a `comment` CHILD node — the contiguous
-// comment run above the decl, joined into ONE span. Go emits a comment
-// node per `//` line, so the join is the whole point: `#'f' > comment`
-// is the block, not its first line. Contiguity is required, so a comment
-// separated from the decl by a blank line is NOT its doc.
+// A declaration's doc comment is the `::comment` pseudo-element — the
+// contiguous comment run above the decl, joined into one node, GENERATED
+// on demand and invisible to `*` (like ::grep). Go emits a comment node
+// per `//` line, so the join is the point: ::comment is the block, not
+// its first line. Contiguity is required — a comment separated from the
+// decl by a blank line is not its doc.
 func writeCommentFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -29,7 +30,7 @@ func writeCommentFixture(t *testing.T) string {
 
 // Foo does the first thing.
 // It has a second line.
-func Foo() {}
+func Foo(x int) {}
 
 func Bare() {}
 
@@ -54,58 +55,75 @@ def nodoc():
 	return dir
 }
 
-func TestCommentNodeJoinsAndAttaches(t *testing.T) {
+func TestCommentPseudoElementJoinsAndAttaches(t *testing.T) {
 	s := newQueryServer(t, writeCommentFixture(t))
 
-	// The two Go doc lines join into one node spanning both (3-4).
-	foo := annNodeSet(t, s, `#'d.go#Foo' > comment`)
-	if len(foo) != 1 {
-		t.Fatalf("Foo should have exactly one joined comment child; got %v", foo)
-	}
+	// The two Go doc lines join into one node spanning both (3-4),
+	// addressed at the block's first line.
 	e, _ := s.buildTree()
-	list, _ := parseModernSelector(`#'d.go#Foo' > comment`)
-	for _, r := range e.evaluate(list) {
-		if r.at[0] != 3 || r.at[1] != 4 {
-			t.Errorf("Foo's comment should span lines 3-4 (both doc lines joined); got %v", r.at)
-		}
+	list, _ := parseModernSelector(`#'d.go#Foo'::comment`)
+	rows := e.evaluate(list)
+	if len(rows) != 1 {
+		t.Fatalf("Foo should have one joined ::comment; got %d", len(rows))
+	}
+	if rows[0].at[0] != 3 || rows[0].at[1] != 4 {
+		t.Errorf("Foo's comment should span lines 3-4 (both doc lines joined); got %v", rows[0].at)
+	}
+	if rows[0].addr() != "d.go@3" {
+		t.Errorf("a generated comment addresses its first line; got %s", rows[0].addr())
 	}
 
 	// TS /** */ and Python # blocks each attach to their function.
-	if got := annNodeSet(t, s, `#'w.ts#render' > comment`); len(got) != 1 {
+	if got := annNodeSet(t, s, `#'w.ts#render'::comment`); len(got) != 1 {
 		t.Errorf("TS render should have a doc comment; got %v", got)
 	}
-	if got := annNodeSet(t, s, `#'p.py#load' > comment`); len(got) != 1 {
+	if got := annNodeSet(t, s, `#'p.py#load'::comment`); len(got) != 1 {
 		t.Errorf("Python load should have a doc comment; got %v", got)
 	}
 
 	// Documented vs not — the structural, grep-free spelling.
-	documented := annNodeSet(t, s, `func:any(comment)`)
-	if len(documented) != 3 { // Foo, render, load
-		t.Errorf("expected 3 documented funcs (Foo, render, load); got %v", documented)
+	if got := annNodeSet(t, s, `func:any(::comment)`); len(got) != 3 { // Foo, render, load
+		t.Errorf("expected 3 documented funcs; got %v", got)
 	}
-
-	// Contiguity: Gap's comment is separated by a blank line, so Gap is
-	// NOT documented — a floating comment is not a doc block.
 	undoc := map[string]bool{}
-	for _, n := range annNodeSet(t, s, `func:not(:any(comment))`) {
+	for _, n := range annNodeSet(t, s, `func:not(:any(::comment))`) {
 		undoc[n] = true
 	}
 	if !undoc["d.go#Gap"] {
 		t.Error("Gap's comment is detached by a blank line; Gap must read as undocumented")
 	}
 	if !undoc["d.go#Bare"] {
-		t.Error("Bare has no comment at all; must read as undocumented")
+		t.Error("Bare has no comment; must read as undocumented")
 	}
 	if undoc["d.go#Foo"] {
-		t.Error("Foo IS documented; must not appear in the undocumented set")
+		t.Error("Foo IS documented; must not be in the undocumented set")
 	}
 }
 
-// The joined comment is grep-able as one unit: a marker on the second
-// doc line is found via the single comment node.
-func TestCommentNodeIsGrepableAsOneBlock(t *testing.T) {
+// The pseudo-element contract: ::comment is GENERATED, so `*` and the
+// containment walk never see it. Foo has both a doc comment and an
+// argument; `> *` must return the argument and NOT the comment.
+func TestCommentIsInvisibleToStar(t *testing.T) {
 	s := newQueryServer(t, writeCommentFixture(t))
-	if got := annNodeSet(t, s, `comment:contains('second line')`); len(got) != 1 {
+	for _, n := range annNodeSet(t, s, `#'d.go#Foo' > *`) {
+		if n == "d.go@3" || n == "d.go#Foo.comment" {
+			t.Errorf("::comment leaked into `> *`: %s — a pseudo-element must be invisible", n)
+		}
+	}
+	// It IS reachable by naming it.
+	if got := annNodeSet(t, s, `#'d.go#Foo'::comment`); len(got) != 1 {
+		t.Errorf("::comment must be reachable when named; got %v", got)
+	}
+	// And it is no longer a tag: `> comment` matches nothing.
+	if got := annNodeSet(t, s, `#'d.go#Foo' > comment`); len(got) != 0 {
+		t.Errorf("comment is a pseudo-element now, not a tag; `> comment` got %v", got)
+	}
+}
+
+// The joined comment is grep-able as one unit.
+func TestCommentGrepableAsOneBlock(t *testing.T) {
+	s := newQueryServer(t, writeCommentFixture(t))
+	if got := annNodeSet(t, s, `::comment:contains('second line')`); len(got) != 1 {
 		t.Errorf("the joined comment should match text on its second line; got %v", got)
 	}
 }

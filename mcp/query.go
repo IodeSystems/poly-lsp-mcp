@@ -51,7 +51,8 @@ type treeNode struct {
 	class string // "project"|"dir"|"file"|<symbol class>|"argument"|"annotation"
 	leaf  string
 	full  string
-	alias string // extra id (an annotation's own name, e.g. app.route)
+	alias    string // extra id (an annotation's own name, e.g. app.route)
+	commentAt [2]int // joined doc-comment span above this symbol (0 = none); ::comment reads it
 
 	file string // workspace-relative file path ("" for project/dir)
 	sym  string // dotted sym path ("" for project/dir/file)
@@ -125,7 +126,7 @@ func (n *treeNode) addr() string {
 		return n.full
 	case "dir", "file":
 		return n.file
-	case "ref", "fragment":
+	case "ref", "fragment", "comment":
 		return fmt.Sprintf("%s@%d", n.file, n.at[0])
 	}
 	if n.sym == "" {
@@ -155,8 +156,8 @@ func (n *treeNode) nodeIDs() []string {
 			ids = append(ids, f.nodeIDs()...)
 		}
 		return ids
-	case "fragment":
-		return nil // a fragment IS its line; the pattern is the filter
+	case "fragment", "comment":
+		return nil // generated source region: no name to match by #id
 	}
 	ids := []string{n.leaf, n.full, n.file + "#" + n.sym}
 	if n.alias != "" {
@@ -252,6 +253,9 @@ type engine struct {
 	// semantics need identity).
 	fragCache map[*treeNode]map[string][]*treeNode
 
+	// commentCache: the generated ::comment node per host (see commentOf).
+	commentCache map[*treeNode]*treeNode
+
 	// selfSetCache: full-workspace match sets for :not/:is chain inners,
 	// keyed by the inner AST's backing array.
 	selfSetCache map[string]map[*treeNode]bool
@@ -323,12 +327,13 @@ func (e *engine) loadFileSymbols(f *treeNode) {
 			}
 		}
 		n := &treeNode{
-			class:   sym.Class,
-			leaf:    lastSeg(sym.Sym),
-			full:    sym.Sym,
-			alias:   sym.Alias,
-			file:    f.file,
-			sym:     sym.Sym,
+			class:     sym.Class,
+			leaf:      lastSeg(sym.Sym),
+			full:      sym.Sym,
+			alias:     sym.Alias,
+			commentAt: [2]int{sym.CommentStartLine, sym.CommentEndLine},
+			file:      f.file,
+			sym:       sym.Sym,
 			at:      [2]int{sym.DeclStartLine, sym.DeclEndLine},
 			parent:  parent,
 			depth:   parent.depth + 1,
@@ -545,6 +550,12 @@ type selCompound struct {
 	isFrag   bool
 	fragSpec *grepSpec
 	fragRaw  string // the verbatim argument — the memo key
+
+	// isComment marks a `::comment` pseudo-element — the joined doc block
+	// above a symbol, generated from the symbol's stored span. Same
+	// contract as ::grep: invisible to `*`, address = file@line, a
+	// generated node — never a tree child.
+	isComment bool
 
 	// langClass scopes a real-node compound to one language: file.go,
 	// func.ts. Languages are a closed vocabulary (the registry), which
@@ -781,7 +792,7 @@ var normalizeAliases = map[string]string{"parent": "parents"}
 
 func selPseudoElemName(w string) bool {
 	switch w {
-	case "in", "out", "grep", "ref":
+	case "in", "out", "grep", "ref", "comment":
 		return true
 	}
 	return false
@@ -1015,10 +1026,12 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 		comp.refDir = name
 	case "grep":
 		return p.parseFragmentElement()
+	case "comment":
+		return p.parseCommentElement()
 	case "ref":
 		return comp, fmt.Errorf("the reference elements are named by DIRECTION: ::in (who points here) and ::out (what this points at) — e.g. ::out.call, ::in.type")
 	default:
-		return comp, fmt.Errorf("unknown pseudo-element ::%s — ::in / ::out (reference edges) and ::grep('pattern') (matched lines) exist", name)
+		return comp, fmt.Errorf("unknown pseudo-element ::%s — ::in / ::out (edges), ::grep('pattern') (matched lines), ::comment (doc block) exist", name)
 	}
 	comp.isRef = true
 	comp.class = "ref"
@@ -1055,6 +1068,28 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 			if err := p.parsePseudo(&comp); err != nil {
 				return comp, err
 			}
+		default:
+			return comp, nil
+		}
+	}
+}
+
+// parseCommentElement parses ::comment — no argument (it IS the doc
+// block), but it accepts trailing filter pseudos so ::comment:contains('TODO')
+// works. It has no kind/id/attr: a doc block has no name.
+func (p *modSelParser) parseCommentElement() (selCompound, error) {
+	comp := selCompound{isComment: true, class: "comment"}
+	for {
+		switch p.peek() {
+		case ':':
+			if p.peekIsPseudoElement() {
+				return comp, nil // chained: ::comment::grep would be a new element
+			}
+			if err := p.parsePseudo(&comp); err != nil {
+				return comp, err
+			}
+		case '.', '#', '[':
+			return comp, fmt.Errorf("::comment has no kind, id or attr — it IS the doc block; filter it with :contains('…')")
 		default:
 			return comp, nil
 		}
@@ -1764,7 +1799,7 @@ var selectorClasses = map[string]bool{
 	"func": true, "method": true, "type": true, "struct": true,
 	"interface": true, "class": true, "const": true, "var": true,
 	"field": true, "enum": true, "ctor": true, "module": true,
-	"import": true, "argument": true, "annotation": true, "comment": true,
+	"import": true, "argument": true, "annotation": true,
 	// NB: no "text" — that class is the legacy structure tool's
 	// whole-file fallback for grammar-less files, never emitted by
 	// FileSymbols. In this tree such a file is simply a .file node with
@@ -1852,11 +1887,9 @@ COMPOSING — one hop at a time, left to right:
 
 SPEC
   TAGS   project dir file func method type struct interface class const var field enum ctor
-         module import argument annotation comment, * — fixed; can't invent one. Lang class: file.go.
+         module import argument annotation, * — fixed; can't invent one. Lang class: file.go.
          annotation = a decorator (@route, py/ts) or struct-tag key (json, go), a CHILD of the
          symbol it marks. func:any(annotation#route). #route = leaf, #'app.route' = as written.
-         comment = the doc block above a decl, contiguous lines joined, a CHILD of the symbol.
-         func:not(:any(comment)) = undocumented. comment:contains('TODO').
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
   ATTR   [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES
@@ -1873,6 +1906,9 @@ SPEC
          crossed, {1,} = transitive. * NEVER matches an edge. Address = site ("file@line").
   ::grep('flags pattern')  matched lines as nodes. -i -w -E -F -v -A<n> -B<n> -C<n>; literal
          unless -E. :contains('…') is the boolean form over the node's BODY.
+  ::comment  the doc block above a decl, contiguous lines joined, a GENERATED node (invisible
+         to *). func:any(::comment) = documented; func:not(:any(::comment)) = undocumented;
+         ::comment:contains('TODO'). Address = file@line.
   :annotated('…')  boolean grep over the decorator/annotation/doc block ON the decl —
          the symbol CARRYING the mark, not the line. func:annotated('@app.route'),
          class:annotated('@Component'), func:annotated('-w Deprecated'). Same flags as :contains.
@@ -2189,6 +2225,9 @@ func (e *engine) evalInstance(tips map[*treeNode]bool, el *selElem, min, max int
 	if comp.isFrag {
 		return e.fragMatches(tips, comp, relaxed)
 	}
+	if comp.isComment {
+		return e.commentMatches(tips, comp, relaxed)
+	}
 	out := map[*treeNode]bool{}
 	for _, t := range ordered(tips) {
 		// A subject with a :parents move keeps its positional part even
@@ -2370,6 +2409,48 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 		})
 	}
 	return frags
+}
+
+// commentMatches returns each host's ::comment node — the joined doc
+// block above it — filtered by the compound's pseudos. Mirrors
+// fragMatches; the generated node is never a tree child, so `*` and the
+// containment walk never see it.
+func (e *engine) commentMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
+	out := map[*treeNode]bool{}
+	for _, h := range ordered(hosts) {
+		c := e.commentOf(h)
+		if c == nil {
+			continue
+		}
+		for n := range e.selectOrdered(map[*treeNode]bool{c: true}, comp, relaxed) {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// commentOf materializes (once) the doc-comment node for a host from its
+// stored span, or nil when the host has no attached doc. The node reads
+// its own source via nodeSource (its span), so :contains greps the block
+// and node_read returns it.
+func (e *engine) commentOf(h *treeNode) *treeNode {
+	if h.commentAt[0] == 0 {
+		return nil // no doc block (or a sourceless host)
+	}
+	if e.commentCache == nil {
+		e.commentCache = map[*treeNode]*treeNode{}
+	}
+	if c, ok := e.commentCache[h]; ok {
+		return c
+	}
+	c := &treeNode{
+		class: "comment",
+		file:  h.file, abs: h.abs, at: h.commentAt,
+		parent: h, depth: h.depth + 1,
+		fileOrd: h.fileOrd, symOrd: h.symOrd,
+	}
+	e.commentCache[h] = c
+	return c
 }
 
 // refHop crosses each ref to its far end(s) and takes the far ends'

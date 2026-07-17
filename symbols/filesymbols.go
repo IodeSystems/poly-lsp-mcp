@@ -43,6 +43,13 @@ type Symbol struct {
 
 	NameStartLine, NameStartCol int
 	NameEndLine, NameEndCol     int
+
+	// CommentStart/End span the joined doc-comment block above the
+	// declaration (0 = none). Carried as metadata, not a child symbol:
+	// ::comment generates the node on demand so it stays invisible to
+	// `*` and the containment walk.
+	CommentStartLine, CommentStartCol int
+	CommentEndLine, CommentEndCol     int
 }
 
 // symRole classifies a node during the FileSymbols walk.
@@ -154,6 +161,9 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 				sym.NameStartLine, sym.NameStartCol = sym.DeclStartLine, sym.DeclStartCol
 				sym.NameEndLine, sym.NameEndCol = sym.DeclEndLine, sym.DeclEndCol
 			}
+			// The doc block above the declaration, as METADATA — ::comment
+			// generates the node from it, so it stays out of the tree.
+			sym.CommentStartLine, sym.CommentStartCol, sym.CommentEndLine, sym.CommentEndCol = docCommentSpan(in.node)
 			out = append(out, sym)
 
 			// Parameter DECLARATIONS become addressable `.argument`
@@ -169,11 +179,6 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 			// children of the symbol they mark — the SYMBOL carrying the
 			// mark, addressable and composable, not a comment line.
 			appendAnnotationSymbols(language, in.node, full, in.class, content, &out)
-
-			// The doc comment above the declaration, contiguous lines
-			// joined into ONE `.comment` child (Go emits a comment node
-			// per line; this rejoins them).
-			appendCommentSymbol(in.node, full, &out)
 
 			if in.branch {
 				visit(in.node, full, in.class)
@@ -305,24 +310,23 @@ func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string
 	}
 }
 
-// appendCommentSymbol emits ONE Class:"comment" child holding the doc
-// comment attached to a declaration: the contiguous run of `comment`
-// sibling nodes immediately above it, joined into a single span. Go
-// parses each `//` line as its own comment node, so a three-line doc is
-// three siblings — this rejoins them so `#'f' > comment` is the whole
-// block, not its first line.
+// docCommentSpan returns the span of the doc comment attached to a
+// declaration: the contiguous run of `comment` sibling nodes immediately
+// above it, joined. Go parses each `//` line as its own comment node, so
+// a three-line doc is three siblings — this rejoins them into one span
+// so ::comment is the whole block, not its first line. Returns zeros
+// when there is no attached doc.
 //
 // Contiguity is required (each comment line directly above the next,
-// none separated from the declaration by a blank), so a floating
-// comment earlier in the file is not mistaken for the doc. Decorated
-// (Python) and exported (TS) declarations look above their wrapper.
-func appendCommentSymbol(node *sitter.Node, owner string, out *[]Symbol) {
+// none separated from the declaration by a blank), so a floating comment
+// earlier in the file is not mistaken for the doc. Decorated (Python)
+// and exported (TS) declarations look above their wrapper.
+func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int) {
 	anchor := node
 	if p := node.Parent(); p != nil && (p.Type() == "decorated_definition" || p.Type() == "export_statement") {
 		anchor = p
 	}
 	nextTop := int(anchor.StartPoint().Row) + 1 // 1-based line the block must butt against
-	var startLine, startCol, endLine, endCol int
 	found := false
 	for s := anchor.PrevNamedSibling(); s != nil && s.Type() == "comment"; s = s.PrevNamedSibling() {
 		sl, sc, el, ec := nodeLineCols(s)
@@ -336,13 +340,7 @@ func appendCommentSymbol(node *sitter.Node, owner string, out *[]Symbol) {
 		startLine, startCol = sl, sc
 		nextTop = sl
 	}
-	if !found {
-		return
-	}
-	sym := Symbol{Sym: owner + ".comment", Class: "comment"}
-	sym.DeclStartLine, sym.DeclStartCol, sym.DeclEndLine, sym.DeclEndCol = startLine, startCol, endLine, endCol
-	sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = startLine, startCol, endLine, endCol
-	*out = append(*out, sym)
+	return startLine, startCol, endLine, endCol
 }
 
 // annMark is one resolved annotation: the AST node for its span, the

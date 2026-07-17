@@ -2612,7 +2612,7 @@ func (e *engine) buildOutRefs(n *treeNode) {
 		if site.encl != n.sym {
 			continue
 		}
-		far := e.scopeDecls(e.declsOf(site.name), n.file)
+		far := e.scopeDecls(e.declsOf(site.name), n.file, site.encl)
 		if len(far) == 0 {
 			continue
 		}
@@ -2643,6 +2643,11 @@ func (e *engine) buildInRefs(n *treeNode) {
 	if idx == nil {
 		return
 	}
+	// The mirror of scopeDecls: if n is itself a LOCAL, the only sites
+	// that can reference it are inside its own function. Every other
+	// occurrence of the name is a coincidence, not a caller.
+	owner, isLocal := localOwner(n)
+
 	for _, site := range idx.LookupExisting(n.leaf) {
 		rel := relPath(site.File, e.s.getRoot())
 		// An import is file-scoped by language semantics: it is only
@@ -2650,6 +2655,9 @@ func (e *engine) buildInRefs(n *treeNode) {
 		// `import#huma::in.call` a per-file dependency-usage query
 		// instead of name-keyed noise.
 		if n.class == "import" && rel != n.file {
+			continue
+		}
+		if isLocal && rel != n.file {
 			continue
 		}
 		sites := e.fileSites(rel)
@@ -2662,6 +2670,9 @@ func (e *engine) buildInRefs(n *treeNode) {
 		}
 		if hit == nil {
 			continue // the declaration itself, or an unindexed file
+		}
+		if isLocal && !inScopeOf(hit.encl, owner) {
+			continue // same file, but a different function's body
 		}
 		src := e.nodeByAddr(rel, hit.encl)
 		if src == nil {
@@ -2794,15 +2805,53 @@ func (e *engine) fileSites(rel string) []refSite {
 	return out
 }
 
-// scopeDecls drops import-class decls that live in OTHER files: an
-// import is file-scoped, so `huma.Register(...)` resolves to THIS
-// file's `import#huma`, never a sibling's. Non-import decls pass
-// through untouched (still name-keyed across the workspace).
-func (e *engine) scopeDecls(decls []*treeNode, file string) []*treeNode {
+// localOwner reports the function-like symbol a decl is LOCAL to, if
+// any. Parameters (and anything else a language nests inside a function
+// body) hang off their function in the tree, so the tree already knows
+// this — it is lexical scope, not a heuristic.
+func localOwner(d *treeNode) (string, bool) {
+	for p := d.parent; p != nil; p = p.parent {
+		switch p.class {
+		case "func", "method", "ctor":
+			return p.sym, true
+		case "file", "dir", "project":
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// inScopeOf reports whether a site enclosed by `encl` can see a local
+// declared in `owner`. Equal means the same body; the prefix covers a
+// closure nested inside it, which CAN capture the local.
+func inScopeOf(encl, owner string) bool {
+	return encl == owner || strings.HasPrefix(encl, owner+".")
+}
+
+// scopeDecls drops decls that the site at (file, encl) cannot actually
+// see, keeping the name-keyed candidates the index offers honest.
+//
+//   - An import is file-scoped, so `huma.Register(...)` resolves to THIS
+//     file's `import#huma`, never a sibling's.
+//   - A LOCAL (a parameter, a closure's binding) is visible only from
+//     inside its own function. Name-keying without this made every
+//     function's `t` an edge to every OTHER function's `t`: measured
+//     across func::out, 1,250,227 of 1,263,196 far ends (99.0%) pointed
+//     at a local of some other function, 96% of them parameters. One
+//     edge claimed 492 far ends because 492 tests take a `t`.
+//
+// Everything else stays name-keyed across the workspace — that residue
+// is what a child-LSP pass is for.
+func (e *engine) scopeDecls(decls []*treeNode, file, encl string) []*treeNode {
 	out := decls[:0:0]
 	for _, d := range decls {
 		if d.class == "import" && d.file != file {
 			continue
+		}
+		if owner, ok := localOwner(d); ok {
+			if d.file != file || !inScopeOf(encl, owner) {
+				continue
+			}
 		}
 		out = append(out, d)
 	}

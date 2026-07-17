@@ -553,6 +553,76 @@ func TestTrippedBudgetIsReproducible(t *testing.T) {
 	}
 }
 
+// A LOCAL is only visible inside its own function. Edges are name-keyed
+// off the lexical index, so without a scope rule every function's `t`
+// became an edge to every OTHER function's `t`.
+//
+// The existing fixtures could not catch this: they are small enough that
+// no two functions share a local name. On a real workspace it dominated
+// the graph — 1,250,227 of func::out's 1,263,196 far ends (99.0%) pointed
+// at a local of another function, 96% of them parameters, and one edge
+// claimed 492 far ends because 492 tests take a `t`. Hence a fixture that
+// deliberately reuses a parameter name across functions and files.
+func TestLocalsDoNotEdgeToOtherFunctionsLocals(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module scoped\ngo 1.26\n")
+	// `v` is a parameter of all three, in two files. Three unrelated
+	// bindings that merely share a spelling.
+	write("a.go", `package scoped
+
+func Alpha(v string) string {
+	return v + "a"
+}
+
+func Beta(v string) string {
+	return v + "b"
+}
+`)
+	write("b.go", `package scoped
+
+func Gamma(v string) string {
+	return v + "g"
+}
+`)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// Alpha's use of `v` must resolve to Alpha's own `v` — never Beta's
+	// (same file) and never Gamma's (another file).
+	q := query(t, s, map[string]any{"selector": `#'a.go#Alpha'::out`, "limit": 50})
+	for _, m := range q.Matches {
+		for _, to := range m.To {
+			if strings.HasPrefix(to, "a.go#Beta") || strings.HasPrefix(to, "b.go#Gamma") {
+				t.Errorf("Alpha's local `v` edged to another function's local: %s\n"+
+					"a local is not visible outside its own body", to)
+			}
+		}
+	}
+
+	// The mirror: Beta's `v` is referenced only from inside Beta.
+	in := query(t, s, map[string]any{"selector": `#'a.go#Beta.v'::in`, "limit": 50})
+	for _, m := range in.Matches {
+		for _, from := range m.From {
+			if !strings.HasPrefix(from, "a.go#Beta") {
+				t.Errorf("Beta's local `v` claimed an incoming edge from %s — "+
+					"only Beta's own body can reference it", from)
+			}
+		}
+	}
+}
+
 // Asking for ONE direction must not build the other.
 //
 // buildRefs used to materialize both halves and let the caller filter,

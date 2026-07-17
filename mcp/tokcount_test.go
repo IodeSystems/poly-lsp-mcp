@@ -52,7 +52,10 @@ import (
 // position claims and the upstream :parents — a whole graph algebra whose
 // description is recipes-first by design. If edge usage doesn't move, the
 // recipes are the first thing to re-measure, not the first thing to cut.
-const modernTokenBudget = 1160
+// 1160 → 1050: the description compacted to surprises-and-footguns-first
+// (the FOOTGUNS block + recipes ARE the description; everything derivable
+// from CSS priors got cut — the priors are correct now, that's the point).
+const modernTokenBudget = 1050
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

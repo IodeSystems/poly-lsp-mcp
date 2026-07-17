@@ -62,15 +62,13 @@ func registerModernTools() map[string]Tool {
 // turn, so pretty-printing indentation is a per-turn tax for zero
 // information. Keep them dense.
 
-const modernNodeQueryDescription = `Projectional editor over ONE node tree, queried by CSS selector: project > dir > file > symbols (dotted-nested) > argument. Files are nodes; no separate filesystem API.
-TYPES are bare tags (fixed set): project dir file func method type struct interface class const var field enum ctor module import argument, or *. Workspace NAMES are #ids, never tags: dir cache/ = #cache. Ids: #bare or #'quoted'; a '<file>#<sym>' address is an id: #'store.go#Save'. A class scopes a tag to a LANGUAGE: file.go, func.ts.
-space=descendant, >=child, comma=union — containment, as CSS. {m,n} REPEATS an element or (group), child-joined: func{2} = func > func.
-REFERENCES are pseudo-element nodes on every symbol: ::in (who points here) / ::out (what its body points at); kind as class (.call/.type/.import, bare = any kind). X::out = X's own edges, X ::out includes nested symbols'. The far end is the edge's child — cross with '>'. {m,n} on the element = edges crossed; {1,} = transitive. '*' NEVER matches an edge, so containment queries never leak.
-:parents(sel) — everything UPSTREAM (ancestors + incoming references, transitive) matching sel. A BARE :any/:all/:empty judges the set at its position and decides the node under test (inside :where, or closing :parents). :where/:any/:all/:empty(sel) are relative, CSS-nesting style: a leading pseudo/::element binds to the node itself, a leading tag/#id means a descendant.
-::grep('-i -A2 derp') mints each MATCHED LINE of the host's own source as an addressable node (flags -i -w -E -F -v -A/-B/-C<n>; literal unless -E). Rows carry text/in; :contains is its boolean form.
-RECIPES (start from an address in matches[].node):
-#'store.go#Save'::in.call who calls Save (rows carry from:) | ::in.call{1,} > * every transitive caller | #'main'::out.call > * what main calls | func:not(#main):not(#init):not([name^=Test]):where(::in:empty) dead code | #'store.go' func funcs in that file | import#huma::in.call::grep('-E (Get|Post)\(') routes registered on a dependency | :root > * top-level tour. An edge's or fragment's address is its SITE (file@line): node_read/node_edit touch that line.
-limit default 20; offset pages. selector "?" returns the full grammar (:contains, groups, [name^=] …).`
+const modernNodeQueryDescription = `CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements. Files are nodes; no separate filesystem API.
+TAGS are a FIXED set: project dir file func method type struct interface class const var field enum ctor module import argument, *. Workspace NAMES are NEVER tags, always #ids: #cache, #'store.go#Save' (quote with '). Language as class: file.go. space=descendant >=child ,=union.
+GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive. External deps land on the import node: import#huma::in.call.
+::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E).
+FOOTGUNS: * NEVER matches ::edges or ::grep lines — name them or they're invisible. {m,n} elsewhere is regex REPETITION child-joined, NOT depth: func{2} = func>func, (a b){2} groups, within-3-levels = "> *{0,2} > x". :not/:is(sel) test the node ITSELF; :where/:any/:all/:empty(sel) test AROUND it (leading tag = a descendant, leading ::/pseudo = the node; bare :any/:all/:empty judge their position). :parents(sel) = ALL upstream (ancestors + incoming refs) — broader than callers. Edge/::grep addresses are file@line: node_read/node_edit hit that exact line.
+RECIPES: #'a.go#Save'::in.call callers | ::in.call{1,} > * transitive callers | #'main'::out.call > * callees | func:not(#main):not(#init):not([name^=Test]):where(::in:empty) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints | :root > * tour.
+limit 20; offset pages; selector "?" = the full grammar.`
 
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +

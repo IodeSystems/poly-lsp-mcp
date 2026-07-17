@@ -948,3 +948,24 @@ roots, language classes, :first/:last per anchor, repetition/groups/zero-rep,
 site addressing (node_read of an edge shows the call), 13 guided errors. Live
 on this repo: #'nodeLess'::in.call returns exactly its two call sites with
 from: carrying the callers.
+
+## Import edges — external dependencies enter the graph (shipped 2026-07-17)
+
+Found by the acceptance exercise "find all endpoints of a generic huma app":
+external symbols (huma.Register) have no decl in the workspace, so no edge
+existed. Fix, three parts:
+
+- **Import nodes are named for the PACKAGE**: alias honored (`import h "…"`
+  → #h), Go /vN major-version segments skipped ("…/huma/v2" → #huma) —
+  importBase in symbols/filesymbols.go. The import node is thereby the decl
+  that qualified references (`huma.Register`) resolve to.
+- **Import edges are FILE-scoped** (language semantics: an import only names
+  things in its own file): an import node is only ever the far end of its own
+  file's sites, both directions — `import#huma::in.call` is per-file
+  dependency usage, not name-keyed noise across files.
+- **The endpoint sweep is one call**: selector `import#huma::in.call` + grep
+  `-E (Register|Get|Post|…)\(` → every registration site with route/opID text
+  and an editable file@line address. Handlers stay graph-native:
+  `func:where(::in:contains('-E (huma|h)\.'))`. Both proven in
+  TestImportEdgesFindHumaEndpoints (two files, alias + vN, scoping asserted)
+  and live against a huma fixture app.

@@ -302,6 +302,108 @@ func TestEdgeAddressesAreSites(t *testing.T) {
 	}
 }
 
+// --------------------------------------------------------- import edges
+
+const humaMainSrc = `package main
+
+import (
+	"github.com/danielgtaylor/huma/v2"
+)
+
+func main() {
+	var api huma.API
+	huma.Register(api, huma.Operation{OperationID: "get-user"}, GetUser)
+	huma.Get(api, "/health", HealthCheck)
+}
+
+func GetUser(x int) {}
+
+func HealthCheck(x int) {}
+`
+
+const humaAdminSrc = `package main
+
+import (
+	h "github.com/danielgtaylor/huma/v2"
+)
+
+func registerAdmin() {
+	h.Post(nil, "/admin/reset", ResetAll)
+}
+
+func ResetAll(x int) {}
+`
+
+// The acceptance exercise this slice was built against: find every
+// endpoint of a generic huma app. External packages have no decl in the
+// workspace, so qualified references resolve to the file's IMPORT node
+// — which must therefore carry the PACKAGE name (vN skipped, alias
+// honored), and must only ever be the far end of its OWN file's sites.
+func TestImportEdgesFindHumaEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module app\ngo 1.26\n")
+	write("main.go", humaMainSrc)
+	write("admin.go", humaAdminSrc)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// The import node is named for the PACKAGE: huma, not v2 — and the
+	// alias wins when one is written.
+	q := query(t, s, map[string]any{"selector": `import`, "limit": 10})
+	wantNodes(t, q, "main.go#huma", "admin.go#h")
+
+	// THE endpoint query: every huma registration site, workspace-wide.
+	q = query(t, s, map[string]any{"selector": `import[name*=hum], import#h`, "limit": 10})
+	if q.TotalMatches != 2 {
+		t.Fatalf("expected both imports; got %v", nodes(q))
+	}
+	q = query(t, s, map[string]any{"selector": `#'main.go#huma'::in.call`, "limit": 10})
+	if q.TotalMatches != 2 {
+		t.Errorf("main.go registers 2 endpoints via huma; got %v", nodes(q))
+	}
+	// The alias resolves the same way, and edges are FILE-scoped: h's
+	// import sees only admin.go's site, huma's only main.go's.
+	q = query(t, s, map[string]any{"selector": `#'admin.go#h'::in.call`, "limit": 10})
+	if q.TotalMatches != 1 {
+		t.Errorf("admin.go registers 1 endpoint via h; got %v", nodes(q))
+	}
+	for _, m := range q.Matches {
+		if !strings.HasPrefix(m.Node, "admin.go@") {
+			t.Errorf("an import's edges must come from its own file; got %v", m.Node)
+		}
+	}
+
+	// grep over the edge SITES narrows to the registration verbs and
+	// carries the routes — the whole exercise in one call.
+	r := s.callTool("node_query", map[string]any{
+		"selector": `import::in.call`,
+		"grep":     `-E (Register|Get|Post)\(`,
+		"limit":    10,
+	})
+	if r.IsError {
+		t.Fatalf("errored: %s", r.Content[0].Text)
+	}
+	text := r.Content[0].Text
+	for _, want := range []string{"get-user", "/health", "/admin/reset"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("endpoint sweep missing %q in: %s", want, text)
+		}
+	}
+
+	// And the handlers, graph-native: funcs whose incoming reference
+	// SITE is a huma line (:contains on an edge tests the site text).
+	q = query(t, s, map[string]any{"selector": `func:where(::in:contains('-E (huma|h)\.'))`, "limit": 10})
+	wantNodes(t, q, "main.go#GetUser", "main.go#HealthCheck", "admin.go#ResetAll")
+}
+
 // --------------------------------------------------------- guided errors
 
 func TestRetiredSpellingsNameTheirReplacement(t *testing.T) {

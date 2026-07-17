@@ -3,6 +3,7 @@ package symbols
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -639,15 +640,26 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 	return "", nil
 }
 
-// importBase strips quotes and returns the last path segment of an
-// import/module string ("encoding/json" -> "json").
+// importBase strips quotes and returns the last MEANINGFUL path segment
+// of an import/module string: "encoding/json" -> "json", and Go major-
+// version suffixes are skipped ("github.com/…/huma/v2" -> "huma") —
+// that's the package the code actually says ("huma.Register"), and it's
+// what makes `import#huma` the decl node qualified references resolve to.
 func importBase(s string) string {
 	s = strings.Trim(s, "\"'`")
-	if i := strings.LastIndexAny(s, "/."); i >= 0 && i < len(s)-1 {
-		s = s[i+1:]
+	segs := strings.Split(s, "/")
+	i := len(segs) - 1
+	for i > 0 && goVersionSeg.MatchString(segs[i]) {
+		i--
+	}
+	s = segs[i]
+	if j := strings.LastIndexByte(s, '.'); j >= 0 && j < len(s)-1 {
+		s = s[j+1:]
 	}
 	return s
 }
+
+var goVersionSeg = regexp.MustCompile(`^v\d+$`)
 
 // parentOverride returns a synthetic parent-path segment for a symbol
 // whose logical owner isn't its tree parent. Today: Go methods, whose

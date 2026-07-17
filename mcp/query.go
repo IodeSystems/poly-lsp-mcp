@@ -1369,6 +1369,8 @@ cross an edge only by naming it.
          X ::out = nested symbols' too (as #a ::before). The far end is the edge's only child:
          #'A'::out.call > #'B' = A calls B. An edge's address is its SITE ("file@line") — node_read /
          node_edit touch the call site. ::out.call{1,16} = crossing 1..16 call edges; {1,} = transitive.
+         Qualified refs to EXTERNAL packages resolve to the file's IMPORT node (named for the package —
+         alias honored, /vN skipped): import#huma::in.call = every huma call in that file.
   MOVE   :parents(sel) — tip := the ROOTS of sel with a path down/out to the tip: everything upstream,
          containment ancestors ∪ incoming-reference sources, transitive. Bare = :parents(*).
          *:parents:empty = only :root — everything else has something upstream.
@@ -2005,7 +2007,7 @@ func (e *engine) buildRefs(n *treeNode) {
 		if site.encl != n.sym {
 			continue
 		}
-		far := e.declsOf(site.name)
+		far := e.scopeDecls(e.declsOf(site.name), n.file)
 		if len(far) == 0 {
 			continue
 		}
@@ -2028,6 +2030,13 @@ func (e *engine) buildRefs(n *treeNode) {
 	}
 	for _, site := range idx.LookupExisting(n.leaf) {
 		rel := relPath(site.File, e.s.getRoot())
+		// An import is file-scoped by language semantics: it is only
+		// ever the far end of sites in ITS OWN file. This is what makes
+		// `import#huma::in.call` a per-file dependency-usage query
+		// instead of name-keyed noise.
+		if n.class == "import" && rel != n.file {
+			continue
+		}
 		sites := e.fileSites(rel)
 		var hit *refSite
 		for i := range sites {
@@ -2106,6 +2115,21 @@ func (e *engine) fileSites(rel string) []refSite {
 		}
 		return out[i].col < out[j].col
 	})
+	return out
+}
+
+// scopeDecls drops import-class decls that live in OTHER files: an
+// import is file-scoped, so `huma.Register(...)` resolves to THIS
+// file's `import#huma`, never a sibling's. Non-import decls pass
+// through untouched (still name-keyed across the workspace).
+func (e *engine) scopeDecls(decls []*treeNode, file string) []*treeNode {
+	out := decls[:0:0]
+	for _, d := range decls {
+		if d.class == "import" && d.file != file {
+			continue
+		}
+		out = append(out, d)
+	}
 	return out
 }
 

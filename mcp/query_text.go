@@ -70,7 +70,11 @@ func (s *Server) QueryText(selector string, limit, offset int, w io.Writer) erro
 	}
 	paged := rows[offset:end]
 
-	return renderQueryTree(w, paged, total, offset, end, e.workExceeded)
+	var trace []string
+	if e.workExceeded {
+		trace = e.costTrace(list)
+	}
+	return renderQueryTree(w, paged, total, offset, end, e.workExceeded, trace)
 }
 
 // maxFarEnds caps how many far ends one ref row spells out before it
@@ -97,7 +101,7 @@ func groupKey(n *treeNode) string {
 	return n.file
 }
 
-func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, workExceeded bool) error {
+func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, workExceeded bool, trace []string) error {
 	if total == 0 {
 		// A bare "no matches" would claim the selector's answer IS none.
 		// When the budget killed the walk, that is not what happened and
@@ -105,7 +109,7 @@ func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, wor
 		if workExceeded {
 			fmt.Fprintln(w, "no matches — but evaluation stopped at the work budget FIRST,")
 			fmt.Fprintln(w, "so this is NOT an answer: the walk never finished.")
-			return writeBudgetAdvice(w)
+			return writeBudgetBlow(w, trace)
 		}
 		_, err := fmt.Fprintln(w, "no matches")
 		return err
@@ -157,12 +161,21 @@ func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, wor
 		// Same contract as node_query: a budget-trimmed result says so
 		// and names the fix. Never trim quietly.
 		fmt.Fprintln(w, "warning: evaluation stopped at the work budget — results are INCOMPLETE.")
-		return writeBudgetAdvice(w)
+		return writeBudgetBlow(w, trace)
 	}
 	return nil
 }
 
-func writeBudgetAdvice(w io.Writer) error {
+// writeBudgetBlow renders the per-element cost trace (pointing at the
+// element that ate the budget) then the narrow-it advice. The trace is
+// what turns the generic warning into something legible.
+func writeBudgetBlow(w io.Writer, trace []string) error {
+	if len(trace) > 0 {
+		fmt.Fprintln(w, "cost by element (units spent):")
+		for _, l := range trace {
+			fmt.Fprintln(w, l)
+		}
+	}
 	_, err := fmt.Fprintln(w, "  Narrow the traversal: a kind class (::in.call), a filtered inner\n"+
 		"  (:parents(func)), bounded hops ({1,3}), or a tighter scope.")
 	return err

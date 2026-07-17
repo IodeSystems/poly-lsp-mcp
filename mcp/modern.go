@@ -253,6 +253,9 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	if e.workExceeded {
 		payload["truncated"] = true
 		payload["note"] = "evaluation stopped at the work budget — results may be INCOMPLETE. Narrow the traversal: a kind class (::in.call), a filtered inner (:parents(func)), bounded hops ({1,3}), or a tighter scope"
+		// The per-element cost trace points at what ate the budget, so
+		// the model narrows the RIGHT element instead of guessing.
+		payload["cost"] = e.costTrace(list)
 	}
 	return jsonContent(payload), false, nil
 }

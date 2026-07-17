@@ -82,8 +82,9 @@ type queryResult struct {
 	TotalMatches int    `json:"totalMatches"`
 	Returned     int    `json:"returned"`
 	Truncated    bool   `json:"truncated"`
-	Note         string `json:"note"`
-	Edges        string `json:"edges"`
+	Note         string   `json:"note"`
+	Edges        string   `json:"edges"`
+	Cost         []string `json:"cost"`
 	Matches      []struct {
 		Node   string   `json:"node"`
 		Class  string   `json:"type"`

@@ -269,17 +269,41 @@ type engine struct {
 	// trips LOUDLY: partial results, flagged, with the repair recipe.
 	workLeft     int
 	workExceeded bool
+
+	// Cost trace (always-on, ~free): costStack is the element chain under
+	// evaluation. spend() increments the top FRAME's counter (a slice
+	// index, no map), and evalElems flushes each frame to elemCost on pop
+	// — so the hot path pays a single add, not a map write. blownElem is
+	// the element on top when the budget tripped. A budget blow renders
+	// the selector annotated with these, pointing at what ate the budget.
+	costStack []costFrame
+	elemCost  map[*selElem]int
+	blownElem *selElem
 }
 
 // spend charges n work units; false means the budget is gone and the
 // caller should stop expanding (results become partial + flagged).
+// costFrame bills one element's evaluation. Its spent counter is flushed
+// to elemCost when the frame pops (evalElems), so spend() only touches a
+// slice index.
+type costFrame struct {
+	el    *selElem
+	spent int
+}
+
 func (e *engine) spend(n int) bool {
+	if len(e.costStack) > 0 {
+		e.costStack[len(e.costStack)-1].spent += n
+	}
 	if e.workExceeded {
 		return false
 	}
 	e.workLeft -= n
 	if e.workLeft < 0 {
 		e.workExceeded = true
+		if len(e.costStack) > 0 {
+			e.blownElem = e.costStack[len(e.costStack)-1].el
+		}
 		return false
 	}
 	return true
@@ -397,7 +421,7 @@ func (s *Server) buildTree() (*engine, error) {
 		full:  filepath.Base(root),
 		abs:   root,
 	}
-	e := &engine{s: s, project: project, fileByRel: map[string]*treeNode{}}
+	e := &engine{s: s, project: project, fileByRel: map[string]*treeNode{}, elemCost: map[*selElem]int{}}
 	e.workLeft = s.queryWorkBudget
 	if e.workLeft <= 0 {
 		e.workLeft = defaultQueryWorkBudget
@@ -2071,6 +2095,108 @@ func (e *engine) evaluate(list selectorList) []*treeNode {
 	return ordered(e.evalList(list, e.project, false))
 }
 
+// costTrace renders the selector as a per-element cost breakdown, marking
+// the element the budget tripped on. Empty when nothing was billed (a
+// query that never touched the budget), so a caller can skip it.
+func (e *engine) costTrace(list selectorList) []string {
+	var lines []string
+	var walk func(elems []selElem, indent string)
+	walk = func(elems []selElem, indent string) {
+		for i := range elems {
+			el := &elems[i]
+			label := indent + renderElem(el)
+			mark := ""
+			if el == e.blownElem {
+				mark = "   ← budget ran out here"
+			}
+			lines = append(lines, fmt.Sprintf("  %-30s %10s%s", label, commaInt(e.elemCost[el]), mark))
+			if el.group != nil {
+				walk(el.group.elems, indent+"  ")
+			}
+		}
+	}
+	for ci := range list {
+		if len(list) > 1 {
+			lines = append(lines, fmt.Sprintf("  branch %d:", ci+1))
+		}
+		walk(list[ci].elems, "")
+	}
+	return lines
+}
+
+// renderElem spells one selector element compactly enough to point at
+// it in a cost trace — not a faithful round-trip, a recognizable label.
+func renderElem(el *selElem) string {
+	var b strings.Builder
+	switch {
+	case el.group != nil:
+		b.WriteString("( … )")
+	case el.comp == nil:
+		b.WriteString("?")
+	default:
+		c := el.comp
+		switch {
+		case c.isRef:
+			b.WriteString("::" + c.refDir)
+			for _, rc := range c.refClasses {
+				b.WriteString("." + rc)
+			}
+		case c.isFrag:
+			b.WriteString("::grep")
+		case c.isComment:
+			b.WriteString("::comment")
+		case c.root:
+			b.WriteString(":root")
+		case c.anyType:
+			b.WriteString("*")
+		default:
+			b.WriteString(c.class)
+			if c.langClass != "" {
+				b.WriteString("." + c.langClass)
+			}
+		}
+		for _, a := range c.attrs {
+			if a.axis == attrID && a.op == selExact {
+				b.WriteString("#" + a.value)
+				continue
+			}
+			axis := "name"
+			if a.axis == attrPath {
+				axis = "path"
+			}
+			b.WriteString("[" + axis + selOpSpelling(a.op) + a.value + "]")
+		}
+		if len(c.pseudos) > 0 {
+			b.WriteString(":…")
+		}
+	}
+	if el.min != 1 || el.max != 1 {
+		if el.max < 0 {
+			b.WriteString(fmt.Sprintf("{%d,}", el.min))
+		} else {
+			b.WriteString(fmt.Sprintf("{%d,%d}", el.min, el.max))
+		}
+	}
+	return b.String()
+}
+
+// commaInt formats with thousands separators — a cost of 158649 reads as
+// 158,649, which is the number the reader is comparing to the budget.
+func commaInt(n int) string {
+	s := strconv.Itoa(n)
+	if n < 0 {
+		return s
+	}
+	var out []byte
+	for i, d := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, d)
+	}
+	return string(out)
+}
+
 // evalList evaluates every complex in the union from `anchor` and
 // returns the merged tip set.
 //
@@ -2157,7 +2283,11 @@ func (e *engine) evalElems(elems []selElem, tips map[*treeNode]bool, min0, max0 
 		if i > 0 {
 			imin, imax = combRange(el.comb)
 		}
+		e.costStack = append(e.costStack, costFrame{el: el})
 		next := e.evalRepeat(tips, el, imin, imax, relaxed)
+		top := e.costStack[len(e.costStack)-1]
+		e.costStack = e.costStack[:len(e.costStack)-1]
+		e.elemCost[el] += top.spent
 		if el.min == 0 {
 			for t := range tips {
 				next[t] = true // the skip path: the element vanishes

@@ -93,6 +93,11 @@ type treeNode struct {
 	// `*` never see them.
 	refs       []*treeNode
 	refsLoaded bool
+
+	// Fragment nodes (class == "fragment") — a matched line of the
+	// host's own source, minted by ::grep. frag carries the match text
+	// plus any -A/-B/-C context, clipped to the host's span.
+	frag *grepHit
 }
 
 // addr renders the node's address — the exact string node_read /
@@ -106,7 +111,7 @@ func (n *treeNode) addr() string {
 		return n.full
 	case "dir", "file":
 		return n.file
-	case "ref":
+	case "ref", "fragment":
 		return fmt.Sprintf("%s@%d", n.file, n.at[0])
 	}
 	if n.sym == "" {
@@ -136,6 +141,8 @@ func (n *treeNode) nodeIDs() []string {
 			ids = append(ids, f.nodeIDs()...)
 		}
 		return ids
+	case "fragment":
+		return nil // a fragment IS its line; the pattern is the filter
 	}
 	return []string{n.leaf, n.full, n.file + "#" + n.sym}
 }
@@ -164,6 +171,11 @@ type engine struct {
 	siteCache   map[string][]refSite
 	declsByName map[string][]*treeNode
 	symCache    map[string][]symbols.Symbol
+
+	// fragCache: minted ::grep fragments per host per pattern, so the
+	// same host+pattern yields the SAME nodes across a query (set
+	// semantics need identity).
+	fragCache map[*treeNode]map[string][]*treeNode
 }
 
 // kids returns n's children, parsing a file's symbols on first use.
@@ -364,6 +376,16 @@ type selCompound struct {
 	isRef      bool
 	refDir     string // "in" | "out"
 	refClasses []string
+
+	// isFrag marks a `::grep('pattern')` pseudo-element — a generated
+	// node per MATCHED LINE of the host's own source (URL text-fragment
+	// prior, grep muscle memory). Same contract as edges: invisible to
+	// `*`, address = the site (file@line), node_read/node_edit touch
+	// the matched line. Replaces the grep tool-field outright;
+	// :contains is its boolean form.
+	isFrag   bool
+	fragSpec *grepSpec
+	fragRaw  string // the verbatim argument — the memo key
 
 	// langClass scopes a real-node compound to one language: file.go,
 	// func.ts. Languages are a closed vocabulary (the registry), which
@@ -660,8 +682,10 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 			// Standalone ::in/::out — implied universal host.
 			host := selCompound{anyType: true, implied: true}
 			cx.elems = append(cx.elems, selElem{comb: comb, comp: &host, min: 1, max: 1})
-			if err := p.appendRefElem(&cx); err != nil {
-				return cx, err
+			for p.peekIsPseudoElement() {
+				if err := p.appendRefElem(&cx); err != nil {
+					return cx, err
+				}
 			}
 		default:
 			comp, err := p.parseCompound()
@@ -675,8 +699,8 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 				}
 			}
 			cx.elems = append(cx.elems, el)
-			// A tight `X::out` — the ref binds to this compound.
-			if p.peekIsPseudoElement() {
+			// Tight-bound pseudo-elements chain: X::out::grep('…').
+			for p.peekIsPseudoElement() {
 				if err := p.appendRefElem(&cx); err != nil {
 					return cx, err
 				}
@@ -700,6 +724,9 @@ func (p *modSelParser) appendRefElem(cx *selComplex) error {
 	}
 	el := selElem{comb: selChild, comp: &comp, min: 1, max: 1}
 	if p.peek() == '{' {
+		if comp.isFrag {
+			return fmt.Errorf("::grep doesn't repeat — a fragment is a matched line, not an edge to cross")
+		}
 		if el.min, el.max, err = p.parseBraceRange(); err != nil {
 			return err
 		}
@@ -721,10 +748,12 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 	switch name {
 	case "in", "out":
 		comp.refDir = name
+	case "grep":
+		return p.parseFragmentElement()
 	case "ref":
 		return comp, fmt.Errorf("the reference elements are named by DIRECTION: ::in (who points here) and ::out (what this points at) — e.g. ::out.call, ::in.type")
 	default:
-		return comp, fmt.Errorf("unknown pseudo-element ::%s — the reference edges are ::in and ::out (kind as class: ::out.call, ::in.type, ::out.import)", name)
+		return comp, fmt.Errorf("unknown pseudo-element ::%s — ::in / ::out (reference edges) and ::grep('pattern') (matched lines) exist", name)
 	}
 	comp.isRef = true
 	comp.class = "ref"
@@ -755,7 +784,8 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 			comp.attrs = append(comp.attrs, a)
 		case ':':
 			if p.peekIsPseudoElement() {
-				return comp, fmt.Errorf("an ::in/::out has no pseudo-elements of its own; continue the chain instead (::out.call > #'target')")
+				// The caller chains it: X::out::grep('…') greps the SITE.
+				return comp, nil
 			}
 			if err := p.parsePseudo(&comp); err != nil {
 				return comp, err
@@ -764,6 +794,115 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 			return comp, nil
 		}
 	}
+}
+
+// parseFragmentElement parses ::grep('pattern') — leading grep flags
+// (INCLUDING -A/-B/-C context, attached: -A2) then the pattern verbatim,
+// exactly :contains's argument shape plus context.
+func (p *modSelParser) parseFragmentElement() (selCompound, error) {
+	var comp selCompound
+	comp.isFrag = true
+	comp.class = "fragment"
+	if p.peek() != '(' {
+		return comp, p.errf("'(' after ::grep, e.g. ::grep('-w TODO')")
+	}
+	p.i++
+	p.skipWS()
+	q := p.peek()
+	if q != '"' && q != '\'' {
+		return comp, p.errf("a quoted pattern, e.g. ::grep('-i -A2 derp')")
+	}
+	p.i++
+	start := p.i
+	for !p.eof() && p.s[p.i] != q {
+		p.i++
+	}
+	if p.eof() {
+		return comp, p.errf(fmt.Sprintf("a closing %c for ::grep", q))
+	}
+	text := string(p.s[start:p.i])
+	p.i++
+	p.skipWS()
+	if p.peek() != ')' {
+		return comp, p.errf("')' to close ::grep")
+	}
+	p.i++
+	g, err := parseFragmentSpec(text)
+	if err != nil {
+		return comp, fmt.Errorf("bad ::grep(%q): %w", text, err)
+	}
+	comp.fragSpec = g
+	comp.fragRaw = text
+	for {
+		if p.peekIsPseudoElement() {
+			return comp, fmt.Errorf("a ::grep fragment has no pseudo-elements of its own — it IS the matched line")
+		}
+		switch p.peek() {
+		case ':':
+			if err := p.parsePseudo(&comp); err != nil {
+				return comp, err
+			}
+		case '#', '[', '.':
+			return comp, fmt.Errorf("a ::grep fragment has no ids or classes — it IS the matched line; narrow with the pattern")
+		default:
+			return comp, nil
+		}
+	}
+}
+
+// parseFragmentSpec is parseContainsSpec plus context: leading boolean
+// flags AND attached -A<n>/-B<n>/-C<n>, then the rest VERBATIM as the
+// pattern (spaces and all — substring by default, -E for a regex).
+func parseFragmentSpec(text string) (*grepSpec, error) {
+	g := &grepSpec{}
+	rest := text
+	for {
+		trimmed := strings.TrimLeft(rest, " \t")
+		if len(trimmed) < 2 || trimmed[0] != '-' {
+			rest = trimmed
+			break
+		}
+		tok := trimmed
+		if i := strings.IndexAny(trimmed, " \t"); i >= 0 {
+			tok, rest = trimmed[:i], trimmed[i:]
+		} else {
+			rest = ""
+		}
+		bs := tok[1:]
+		for bi := 0; bi < len(bs); bi++ {
+			c := bs[bi]
+			if applyBoolFlag(g, c) {
+				continue
+			}
+			switch c {
+			case 'A', 'B', 'C':
+				num := bs[bi+1:]
+				bi = len(bs)
+				v, err := strconv.Atoi(num)
+				if err != nil || v < 0 {
+					return nil, fmt.Errorf("::grep: -%c needs a number attached (as in -%c2)", c, c)
+				}
+				switch c {
+				case 'A':
+					g.after = v
+				case 'B':
+					g.before = v
+				case 'C':
+					g.before, g.after = v, v
+				}
+			default:
+				return nil, unsupportedFlagErr(c)
+			}
+		}
+		if rest == "" {
+			break
+		}
+	}
+	g.pattern = rest
+	if err := g.finalize(); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 func validRefClass(c string) bool {
@@ -1043,6 +1182,8 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 		}
 		comp.positionClaims = append(comp.positionClaims, kind)
 		return nil
+	case "grep":
+		return fmt.Errorf(":grep is the pseudo-ELEMENT ::grep('-w TODO') — it mints the matched LINES as nodes; the boolean filter is :contains('…')")
 	case "has", "has_parent", "references":
 		return removedPseudoErr(name)
 	case "contains":
@@ -1371,6 +1512,11 @@ cross an edge only by naming it.
          node_edit touch the call site. ::out.call{1,16} = crossing 1..16 call edges; {1,} = transitive.
          Qualified refs to EXTERNAL packages resolve to the file's IMPORT node (named for the package —
          alias honored, /vN skipped): import#huma::in.call = every huma call in that file.
+  FRAG   ::grep('flags pattern') — every MATCHED LINE of the host's own source, as a node: address =
+         "file@line", rows carry the text (+ -A/-B/-C context, clipped to the host's span). Flags:
+         -i -w -E -F -v -A<n> -B<n> -C<n>; literal substring unless -E. Works on edges too — the host
+         line is the SITE: import#huma::in.call::grep('-E (Get|Post)\(') = routes registered on huma.
+         :contains('text') is the boolean form (filter, no minting; same flags minus context).
   MOVE   :parents(sel) — tip := the ROOTS of sel with a path down/out to the tip: everything upstream,
          containment ancestors ∪ incoming-reference sources, transitive. Bare = :parents(*).
          *:parents:empty = only :root — everything else has something upstream.
@@ -1596,6 +1742,9 @@ func (e *engine) evalInstance(tips map[*treeNode]bool, el *selElem, min, max int
 	if comp.isRef {
 		return e.refMatches(tips, comp, relaxed)
 	}
+	if comp.isFrag {
+		return e.fragMatches(tips, comp, relaxed)
+	}
 	out := map[*treeNode]bool{}
 	for t := range tips {
 		// A subject with a :parents move keeps its positional part even
@@ -1658,6 +1807,81 @@ func (e *engine) refMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed
 
 func refDirMatch(r *treeNode, comp *selCompound) bool {
 	return r.refDir == comp.refDir
+}
+
+// fragMatches mints (memoized) the matched-line fragments of each host.
+// Under ∀-relaxation the pattern is the tested property, so the domain
+// is EVERY line — :all(::grep(p)) = every line of the host matches p.
+func (e *engine) fragMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
+	out := map[*treeNode]bool{}
+	for h := range hosts {
+		cand := map[*treeNode]bool{}
+		for _, f := range e.fragmentsOf(h, comp, relaxed) {
+			cand[f] = true
+		}
+		for n := range e.selectOrdered(cand, comp, relaxed) {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*treeNode {
+	key := comp.fragRaw
+	if relaxed {
+		key = "\x00every-line"
+	}
+	if e.fragCache == nil {
+		e.fragCache = map[*treeNode]map[string][]*treeNode{}
+	}
+	byPat := e.fragCache[h]
+	if byPat == nil {
+		byPat = map[string][]*treeNode{}
+		e.fragCache[h] = byPat
+	}
+	if v, ok := byPat[key]; ok {
+		return v
+	}
+	frags := []*treeNode{}
+	defer func() { byPat[key] = frags }()
+	lines, startLine, ok := e.nodeSource(h)
+	if !ok {
+		return frags // project/dir (and other sourceless) hosts have no lines
+	}
+	g := comp.fragSpec
+	for i, l := range lines {
+		if !relaxed && !g.matchLine(l) {
+			continue
+		}
+		hit := &grepHit{Line: startLine + i, Text: l}
+		// Context is clipped to the host's own span — a fragment never
+		// leaks its neighbours' lines.
+		if g.before > 0 {
+			lo := i - g.before
+			if lo < 0 {
+				lo = 0
+			}
+			if lo < i {
+				hit.Before = append([]string(nil), lines[lo:i]...)
+			}
+		}
+		if g.after > 0 {
+			hi := i + 1 + g.after
+			if hi > len(lines) {
+				hi = len(lines)
+			}
+			if i+1 < hi {
+				hit.After = append([]string(nil), lines[i+1:hi]...)
+			}
+		}
+		frags = append(frags, &treeNode{
+			class: "fragment", leaf: strings.TrimSpace(l), full: strings.TrimSpace(l),
+			file: h.file, abs: h.abs, at: [2]int{hit.Line, hit.Line},
+			parent: h, depth: h.depth + 1, frag: hit,
+			fileOrd: h.fileOrd, symOrd: h.symOrd,
+		})
+	}
+	return frags
 }
 
 // refHop crosses each ref to its far end(s) and takes the far ends'
@@ -1733,9 +1957,9 @@ func (e *engine) positionalMatch(n *treeNode, comp *selCompound) bool {
 			}
 		}
 	} else {
-		// Generated ref nodes are pseudo-elements: `*` (and every real
-		// tag) never matches one — only ::in/::out does.
-		if n.class == "ref" {
+		// Generated nodes are pseudo-elements: `*` (and every real
+		// tag) never matches one — only naming ::in/::out/::grep does.
+		if n.class == "ref" || n.class == "fragment" {
 			return false
 		}
 		if !comp.anyType && n.class != comp.class {
@@ -2287,7 +2511,7 @@ func applyBoolFlag(g *grepSpec, c byte) bool {
 }
 
 func unsupportedFlagErr(c byte) error {
-	return fmt.Errorf("grep: unsupported flag %q — supported: -i -w -E -F -v -n -A<n> -B<n> -C<n>. The selector scopes the search, so -r and file arguments are never accepted", "-"+string(c))
+	return fmt.Errorf("unsupported flag %q — supported: -i -w -E -F -v -n, and -A<n>/-B<n>/-C<n> in ::grep. The selector scopes the search, so -r and file arguments are never accepted", "-"+string(c))
 }
 
 // finalize validates the mode combination and compiles the matcher.
@@ -2302,81 +2526,6 @@ func (g *grepSpec) finalize() error {
 		return fmt.Errorf("grep: a pattern is required (e.g. \"-i derp\")")
 	}
 	return g.compile()
-}
-
-// parseGrepSpec parses "-i -A2 derp" / "-E 'foo|bar'" — a bounded flag
-// set plus exactly one trailing pattern. Unsupported flags (notably -r
-// and bare file arguments) are REJECTED with a guided error: the
-// selector already does the scoping, so grep must never walk the
-// filesystem itself.
-func parseGrepSpec(s string) (*grepSpec, error) {
-	toks, err := tokenizeGrep(s)
-	if err != nil {
-		return nil, err
-	}
-	g := &grepSpec{}
-	var pattern *string
-	for i := 0; i < len(toks); i++ {
-		t := toks[i]
-		if t == "--" {
-			if i+1 < len(toks) {
-				v := toks[i+1]
-				pattern = &v
-				i++
-			}
-			continue
-		}
-		if len(t) < 2 || t[0] != '-' {
-			if pattern != nil {
-				return nil, fmt.Errorf("grep: unexpected extra argument %q — pass ONE pattern; the selector does the file scoping, grep never takes file arguments", t)
-			}
-			v := t
-			pattern = &v
-			continue
-		}
-		// A bundle of short flags: -i, -iw, -A2, -iA2 …
-		rest := t[1:]
-		for len(rest) > 0 {
-			c := rest[0]
-			rest = rest[1:]
-			if applyBoolFlag(g, c) {
-				continue
-			}
-			switch c {
-			case 'A', 'B', 'C':
-				num := rest
-				rest = ""
-				if num == "" {
-					if i+1 >= len(toks) {
-						return nil, fmt.Errorf("grep: -%c needs a number (e.g. -%c2)", c, c)
-					}
-					i++
-					num = toks[i]
-				}
-				v, err := strconv.Atoi(num)
-				if err != nil || v < 0 {
-					return nil, fmt.Errorf("grep: -%c needs a non-negative number, got %q", c, num)
-				}
-				switch c {
-				case 'A':
-					g.after = v
-				case 'B':
-					g.before = v
-				case 'C':
-					g.before, g.after = v, v
-				}
-			default:
-				return nil, unsupportedFlagErr(c)
-			}
-		}
-	}
-	if pattern != nil {
-		g.pattern = *pattern
-	}
-	if err := g.finalize(); err != nil {
-		return nil, err
-	}
-	return g, nil
 }
 
 // parseContainsSpec parses a :contains("…") argument: optional LEADING
@@ -2427,46 +2576,6 @@ func parseContainsSpec(text string) (*grepSpec, error) {
 	return g, nil
 }
 
-// tokenizeGrep splits on whitespace, honoring simple single/double
-// quoting for the pattern (as in "-E 'foo|bar'"). No backslash escapes
-// — same rule as the selector's ids.
-func tokenizeGrep(s string) ([]string, error) {
-	var out []string
-	var cur strings.Builder
-	var quote rune
-	started := false
-	flush := func() {
-		if started {
-			out = append(out, cur.String())
-			cur.Reset()
-			started = false
-		}
-	}
-	for _, c := range s {
-		switch {
-		case quote != 0:
-			if c == quote {
-				quote = 0
-				continue
-			}
-			cur.WriteRune(c)
-		case c == '\'' || c == '"':
-			quote = c
-			started = true
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
-			flush()
-		default:
-			cur.WriteRune(c)
-			started = true
-		}
-	}
-	if quote != 0 {
-		return nil, fmt.Errorf("grep: unbalanced quote")
-	}
-	flush()
-	return out, nil
-}
-
 // grepHit is one matched line plus its context, in the before/after
 // convention symbols.Search already uses.
 type grepHit struct {
@@ -2474,41 +2583,4 @@ type grepHit struct {
 	Text   string   `json:"text"`
 	Before []string `json:"before,omitempty"`
 	After  []string `json:"after,omitempty"`
-}
-
-// grepNode projects a node's own source through the matcher: every
-// matching line, with -A/-B/-C context. Context is clipped to the
-// node's own span — a node's hits never leak lines from its neighbours.
-func (e *engine) grepNode(n *treeNode, g *grepSpec) []grepHit {
-	lines, startLine, ok := e.nodeSource(n)
-	if !ok {
-		return nil
-	}
-	var out []grepHit
-	for i, l := range lines {
-		if !g.matchLine(l) {
-			continue
-		}
-		h := grepHit{Line: startLine + i, Text: l}
-		if g.before > 0 {
-			lo := i - g.before
-			if lo < 0 {
-				lo = 0
-			}
-			if lo < i {
-				h.Before = append([]string(nil), lines[lo:i]...)
-			}
-		}
-		if g.after > 0 {
-			hi := i + 1 + g.after
-			if hi > len(lines) {
-				hi = len(lines)
-			}
-			if i+1 < hi {
-				h.After = append([]string(nil), lines[i+1:hi]...)
-			}
-		}
-		out = append(out, h)
-	}
-	return out
 }

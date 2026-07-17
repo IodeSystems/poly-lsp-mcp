@@ -381,11 +381,10 @@ func TestImportEdgesFindHumaEndpoints(t *testing.T) {
 		}
 	}
 
-	// grep over the edge SITES narrows to the registration verbs and
-	// carries the routes — the whole exercise in one call.
+	// ::grep over the edge SITES narrows to the registration verbs and
+	// carries the routes — the whole exercise in one selector.
 	r := s.callTool("node_query", map[string]any{
-		"selector": `import::in.call`,
-		"grep":     `-E (Register|Get|Post)\(`,
+		"selector": `import::in.call::grep('-E (Register|Get|Post)\(')`,
 		"limit":    10,
 	})
 	if r.IsError {

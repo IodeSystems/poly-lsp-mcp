@@ -84,15 +84,15 @@ type queryResult struct {
 	Truncated    bool   `json:"truncated"`
 	Note         string `json:"note"`
 	Matches      []struct {
-		Node  string `json:"node"`
-		Class string `json:"type"`
-		At    []int  `json:"@"`
-		Hits  []struct {
-			Line   int      `json:"line"`
-			Text   string   `json:"text"`
-			Before []string `json:"before"`
-			After  []string `json:"after"`
-		} `json:"hits"`
+		Node   string   `json:"node"`
+		Class  string   `json:"type"`
+		At     []int    `json:"@"`
+		In     string   `json:"in"`
+		Text   string   `json:"text"`
+		Before []string `json:"before"`
+		After  []string `json:"after"`
+		From   []string `json:"from"`
+		To     []string `json:"to"`
 	} `json:"matches"`
 }
 
@@ -368,58 +368,62 @@ func TestModernQueryGuidedParseError(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------- grep
+// ---------------------------------------------------------- ::grep
 
-func TestModernQueryGrepReturnsHitsWithContext(t *testing.T) {
+func TestModernQueryGrepFragmentsWithContext(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	q := query(t, s, map[string]any{
-		"selector": "method#Start",
-		"grep":     "-A1 fmt.Println",
-	})
+	q := query(t, s, map[string]any{"selector": `method#Start::grep('-A1 fmt.Println')`})
 	if q.TotalMatches != 1 {
-		t.Fatalf("want 1 node, got %d (%v)", q.TotalMatches, nodes(q))
+		t.Fatalf("want 1 fragment, got %d (%v)", q.TotalMatches, nodes(q))
 	}
-	hits := q.Matches[0].Hits
-	if len(hits) != 1 {
-		t.Fatalf("want 1 hit, got %+v", hits)
+	m := q.Matches[0]
+	if m.Class != "::grep" || m.In != "main.go#Server.Start" {
+		t.Errorf("fragment row should carry its host; got %+v", m)
 	}
-	if !strings.Contains(hits[0].Text, "fmt.Println(ctx)") {
-		t.Errorf("hit text = %q", hits[0].Text)
+	if !strings.Contains(m.Text, "fmt.Println(ctx)") {
+		t.Errorf("fragment text = %q", m.Text)
 	}
-	// Line numbers are absolute file lines, so they line up with @.
-	if hits[0].Line < q.Matches[0].At[0] || hits[0].Line > q.Matches[0].At[1] {
-		t.Errorf("hit line %d outside node span %v", hits[0].Line, q.Matches[0].At)
+	// The address is the matched line itself.
+	if m.Node != fmt.Sprintf("main.go@%d", m.At[0]) {
+		t.Errorf("fragment address should be its site; got %q at %v", m.Node, m.At)
 	}
-	if len(hits[0].After) != 1 || !strings.Contains(hits[0].After[0], "return nil") {
-		t.Errorf("-A1 should carry one following line; got %+v", hits[0].After)
+	if len(m.After) != 1 || !strings.Contains(m.After[0], "return nil") {
+		t.Errorf("-A1 should carry one following line; got %+v", m.After)
 	}
 }
 
-func TestModernQueryGrepFiltersNonMatchingNodes(t *testing.T) {
+func TestModernQueryGrepFiltersAndClaims(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	q := query(t, s, map[string]any{"selector": "func", "grep": "-i PRINTLN", "limit": 50})
-	for _, n := range nodes(q) {
-		if strings.Contains(n, "init") {
-			t.Errorf("grep should filter out nodes with no hit; got %v", nodes(q))
+	// Hosts with no matching line yield no fragments.
+	q := query(t, s, map[string]any{"selector": `func::grep('-i PRINTLN')`, "limit": 50})
+	for _, m := range q.Matches {
+		if strings.Contains(m.In, "init") {
+			t.Errorf("init has no PRINTLN line; got %+v", nodes(q))
 		}
 	}
+	// The boolean form: :contains ≡ :where(::grep).
+	a := query(t, s, map[string]any{"selector": `method:contains('fmt.Println')`, "limit": 50})
+	b := query(t, s, map[string]any{"selector": `method:where(::grep('fmt.Println'))`, "limit": 50})
+	if strings.Join(nodes(a), "|") != strings.Join(nodes(b), "|") || len(nodes(a)) == 0 {
+		t.Errorf(":contains and :where(::grep) must agree; got %v vs %v", nodes(a), nodes(b))
+	}
 }
 
-func TestModernQueryGrepRejectsUnsupportedFlag(t *testing.T) {
+func TestModernQueryGrepFieldIsGone(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	msg := queryErr(t, s, map[string]any{"selector": "*", "grep": "-r derp"})
-	if !strings.Contains(msg, "-r") || !strings.Contains(msg, "selector") {
-		t.Errorf("expected a guided error naming -r and the selector's scoping role; got %q", msg)
+	msg := queryErr(t, s, map[string]any{"selector": "*", "grep": "derp"})
+	if !strings.Contains(msg, "::grep") {
+		t.Errorf("the retired grep field should point at ::grep; got %q", msg)
 	}
-	// A bare file argument is rejected for the same reason.
-	if msg := queryErr(t, s, map[string]any{"selector": "*", "grep": "derp main.go"}); !strings.Contains(msg, "extra argument") {
-		t.Errorf("expected extra-argument rejection; got %q", msg)
+	// Unsupported flags stay guided errors, now at parse time.
+	if msg := queryErr(t, s, map[string]any{"selector": `*::grep('-r derp')`}); !strings.Contains(msg, "-r") {
+		t.Errorf("expected a guided error naming -r; got %q", msg)
 	}
 }
 
@@ -428,12 +432,12 @@ func TestModernQueryGrepLiteralByDefaultRegexWithE(t *testing.T) {
 	defer s.close()
 
 	// Default is a LITERAL substring: regex metachars match nothing.
-	q := query(t, s, map[string]any{"selector": "method#Start", "grep": "fmt.P.intln"})
+	q := query(t, s, map[string]any{"selector": `method#Start::grep('fmt.P.intln')`})
 	if q.TotalMatches != 0 {
 		t.Errorf("default should be literal, not regex; got %v", nodes(q))
 	}
-	// -E opts into a regex.
-	q = query(t, s, map[string]any{"selector": "method#Start", "grep": "-E 'fmt.P.intln'"})
+	// -E opts into a regex; the pattern is verbatim after the flags.
+	q = query(t, s, map[string]any{"selector": `method#Start::grep('-E fmt.P.intln')`})
 	if q.TotalMatches != 1 {
 		t.Errorf("-E should match by regex; got %v", nodes(q))
 	}

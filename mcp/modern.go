@@ -67,14 +67,13 @@ TYPES are bare tags (fixed set): project dir file func method type struct interf
 space=descendant, >=child, comma=union — containment, as CSS. {m,n} REPEATS an element or (group), child-joined: func{2} = func > func.
 REFERENCES are pseudo-element nodes on every symbol: ::in (who points here) / ::out (what its body points at); kind as class (.call/.type/.import, bare = any kind). X::out = X's own edges, X ::out includes nested symbols'. The far end is the edge's child — cross with '>'. {m,n} on the element = edges crossed; {1,} = transitive. '*' NEVER matches an edge, so containment queries never leak.
 :parents(sel) — everything UPSTREAM (ancestors + incoming references, transitive) matching sel. A BARE :any/:all/:empty judges the set at its position and decides the node under test (inside :where, or closing :parents). :where/:any/:all/:empty(sel) are relative, CSS-nesting style: a leading pseudo/::element binds to the node itself, a leading tag/#id means a descendant.
+::grep('-i -A2 derp') mints each MATCHED LINE of the host's own source as an addressable node (flags -i -w -E -F -v -A/-B/-C<n>; literal unless -E). Rows carry text/in; :contains is its boolean form.
 RECIPES (start from an address in matches[].node):
-#'store.go#Save'::in.call who calls Save (rows carry from:) | ::in.call{1,} > * every transitive caller | #'main'::out.call > * what main calls | func:where(::in:empty) dead code | func:where(::out.call:empty) calls nothing | #'store.go' func funcs in that file | import#huma::in.call every use of an external dependency | :root > * top-level tour. An edge's address is its SITE (file@line): node_read/node_edit touch the call site.
-grep: flags+pattern over each match's own source, e.g. "-i -A2 derp". -i -w -E -F -v -n -A/-B/-C<n>; literal unless -E. Nodes with no hit drop out.
+#'store.go#Save'::in.call who calls Save (rows carry from:) | ::in.call{1,} > * every transitive caller | #'main'::out.call > * what main calls | func:where(::in:empty) dead code | #'store.go' func funcs in that file | import#huma::in.call::grep('-E (Get|Post)\(') routes registered on a dependency | func::grep('-w TODO') every TODO line per func | :root > * top-level tour. An edge's or fragment's address is its SITE (file@line): node_read/node_edit touch that line.
 limit default 20; offset pages. selector "?" returns the full grammar (:contains, groups, [name^=] …).`
 
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
-	`"grep":{"type":"string","description":"grep flags + pattern, e.g. \"-i -A2 derp\""},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."}},` +
 	`"required":["selector"]}`)
@@ -140,15 +139,12 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	if strings.TrimSpace(p.Selector) == "?" {
 		return []Content{{Type: "text", Text: selectorGrammarHelp}}, false, nil
 	}
+	if strings.TrimSpace(p.Grep) != "" {
+		return nil, true, errors.New("the grep field is gone — put the pattern IN the selector as a fragment: <sel>::grep('-i -A2 derp'). Same flags; every match is an addressable line")
+	}
 	list, err := parseModernSelector(p.Selector)
 	if err != nil {
 		return nil, true, err
-	}
-	var g *grepSpec
-	if strings.TrimSpace(p.Grep) != "" {
-		if g, err = parseGrepSpec(p.Grep); err != nil {
-			return nil, true, err
-		}
 	}
 	limit := defaultQueryLimit
 	if p.Limit != nil {
@@ -170,24 +166,7 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 		return nil, true, err
 	}
 
-	type row struct {
-		n    *treeNode
-		hits []grepHit
-	}
-	var rows []row
-	for _, n := range e.evaluate(list) {
-		r := row{n: n}
-		if g != nil {
-			// grep FILTERS as well as projects: a node with no hit is
-			// not a result (plain grep semantics, and it keeps the
-			// window pointed at what the caller actually asked about).
-			r.hits = e.grepNode(n, g)
-			if len(r.hits) == 0 {
-				continue
-			}
-		}
-		rows = append(rows, r)
-	}
+	rows := e.evaluate(list)
 
 	total := len(rows)
 	if offset > total {
@@ -200,38 +179,48 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	paged := rows[offset:end]
 
 	matches := make([]any, 0, len(paged))
-	for _, r := range paged {
+	for _, n := range paged {
 		// "type", not "class": the OUTPUT is the strongest teacher we have —
 		// it lands every turn, in front of the model, right where it decides
 		// what to write next. Labeling a tag "class" here while the grammar
 		// calls it a tag is precisely the mixed signal that had the model
 		// writing `.cache`. The result must model the language it wants back.
-		m := map[string]any{"node": r.n.addr(), "type": r.n.class}
+		m := map[string]any{"node": n.addr(), "type": n.class}
 		// project/dir nodes have no source span, so no "@".
-		if r.n.class != "project" && r.n.class != "dir" {
-			m["@"] = []int{r.n.at[0], r.n.at[1]}
+		if n.class != "project" && n.class != "dir" {
+			m["@"] = []int{n.at[0], n.at[1]}
 		}
-		// A ref row teaches the edge: its type IS the selector spelling,
-		// and the far end is keyed by direction so the row reads as the
-		// fact it states.
-		if r.n.class == "ref" {
-			cls := "::" + r.n.refDir
-			if r.n.refKind != "" {
-				cls += "." + r.n.refKind
+		switch n.class {
+		case "ref":
+			// A ref row teaches the edge: its type IS the selector
+			// spelling, and the far end is keyed by direction so the row
+			// reads as the fact it states.
+			cls := "::" + n.refDir
+			if n.refKind != "" {
+				cls += "." + n.refKind
 			}
 			m["type"] = cls
-			far := make([]string, 0, len(r.n.refFar))
-			for _, f := range r.n.refFar {
+			far := make([]string, 0, len(n.refFar))
+			for _, f := range n.refFar {
 				far = append(far, f.addr())
 			}
-			if r.n.refDir == "out" {
+			if n.refDir == "out" {
 				m["to"] = far
 			} else {
 				m["from"] = far
 			}
-		}
-		if len(r.hits) > 0 {
-			m["hits"] = r.hits
+		case "fragment":
+			// A fragment row IS its matched line: text (plus -A/-B/-C
+			// context) and the node it was found in.
+			m["type"] = "::grep"
+			m["in"] = n.parent.addr()
+			m["text"] = n.frag.Text
+			if len(n.frag.Before) > 0 {
+				m["before"] = n.frag.Before
+			}
+			if len(n.frag.After) > 0 {
+				m["after"] = n.frag.After
+			}
 		}
 		matches = append(matches, m)
 	}

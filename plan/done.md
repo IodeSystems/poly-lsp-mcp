@@ -3,6 +3,26 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## :annotated + bracket-aware regex — power queries (DONE 2026-07-17)
+
+- [x] **`:annotated('pat')`**: "who is annotated with X" had no answer — ::grep
+  gives the annotation LINE, :contains greps the body, neither names the SYMBOL
+  the decorator sits on (it is outside the decl's span). :annotated greps the
+  decorator/annotation/doc block ON a declaration and returns the decl. One
+  predicate spans languages: ABOVE the span for Python/TS decorators (stacked
+  included), INSIDE it for Go (doc comment folded into the decl). Verified
+  across Go/Python/TS; proven distinct from :contains.
+- [x] **`~=` bracket-aware**: a `]` inside a regex char class was read as the
+  attribute's closing bracket, so `func[name~=^[A-Z]]` (exported funcs)
+  compiled the truncated `^[A-Z` and errored. The value reader now balances
+  `[`/`]` for the regex op (POSIX classes too); quoting stays the escape for
+  `\]`.
+- These compose into sound (text/structure, no edge-guessing) power queries:
+  `func[name~=^[A-Z]]:not(:annotated('-E (//|/*)'))` = undocumented public API
+  (354 on this workspace); `func:annotated('@app.route')` = route handlers.
+- **Not shipped: `:recursive`** — lexically unsound (func Write calling
+  w.Write reads as recursive). → icebox: needs LSP call-target resolution.
+
 ## Leading-ref cardinality pushdown + containment attribution (DONE 2026-07-17)
 
 - [x] **Pushdown** (`pushdownLeadingRef`): a global leading ref filtered to one

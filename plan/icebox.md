@@ -5,6 +5,23 @@ graph-selector design record this used to hold.
 
 ---
 
+## `:recursive` and other EDGE-semantic predicates — need call-target precision
+
+Prototyped `:recursive` (a callable that directly calls itself: a self-edge in
+its own ::out.call). Removed unshipped: it is lexically UNSOUND for the common
+case. `func Write(w io.Writer)` calling `w.Write(body)` name-matches the local
+`func Write`, so a lexical self-edge appears and the func reads as recursive —
+and Write/Read/Close/String/Error (every io/fmt interface method) hit this. A
+boolean predicate cannot carry the lexical-vs-lsp caveat the edge rows do, so
+it would just be wrong.
+
+Ship only once the child-LSP precision pass resolves the self-call's target
+(then a self-edge is real). The same bar applies to any predicate built on
+edge SEMANTICS — "calls X", "reachable from X", cyclic/mutual recursion. Safe
+to build now (text/structure, no edge guessing): the shipped `:annotated`,
+`~=` regex, `:contains`, containment queries. Idea worth a slice: `:arity(m,n)`
+/ signature-size filters (count of `argument` children — structural, sound).
+
 ## Graph selectors — deferred remainder
 
 Slice 1 (the `:parents` move, hop ranges, `:where/:any/:all/:empty`) shipped

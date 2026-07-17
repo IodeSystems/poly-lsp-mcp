@@ -53,6 +53,9 @@ local. Stages 1–2 (content-addressed lib partitions, on-demand, evictable) are
 deferred design in icebox ("Ownership domains"). **Rule until then: nothing new
 may hard-code the single-root assumption deeper** — a node's `domain` (owned rw
 / vendored ro / external ro) is the axis that will gate mutation and budget.
+**Decided: crossing into libs is opt-IN** (`:with(libs)` / drill into a stub),
+the default stays workspace-bounded — revisit only if adoption data shows
+agents actually want the cross-lib answer unprompted.
 
 ## Current state
 
@@ -118,10 +121,10 @@ renders the annotated selector pointing at the element that ate the budget,
 replacing today's generic warning. Mechanism: `spend()` (query.go:275) bills
 the element under eval via a stack pushed/popped in `evalElems` (query.go:2138)
 — always-on, ~free. Three standalone commits, ORDERED:
-  - ◻ **1. Always-on trace + budget-blow renderer.** `spend`↔`evalElems`
-    attribution; `renderQueryTree` (query_text.go:156) + node_query blow paths
-    render `>N` actual per-element cost. No grammar change; makes every
-    existing blow legible. Independent — landable first.
+  - ✅ **1. Always-on trace + budget-blow renderer** → done.md. `spend`↔`evalElems`
+    frame attribution (slice-index, ~free); CLI blow shows per-element cost +
+    `← budget ran out here`, node_query carries a `cost` array. No grammar
+    change. Shipped; 2 and 3 remain.
   - ◻ **2. `symbols.Index` tallies** — `classCount` (bare-class estCand) +
     `outDegree` avg (::out fan-out), built at index time, O(1) read = the
     a-priori `est` source. Crux of `>x`: O(1) tallies + `len(sites[name])`

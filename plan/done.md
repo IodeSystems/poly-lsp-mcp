@@ -3,6 +3,17 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Budget-blow cost trace — :explain commit 1 (DONE 2026-07-17)
+
+- [x] A budget blow renders the selector as a per-element cost breakdown with
+  `← budget ran out here` on the culprit, replacing the generic warning; the CLI
+  prints it, node_query carries it as a `cost` array beside `truncated`. So the
+  reader narrows the RIGHT element. Always-on and ~free: `evalElems` pushes a
+  `costFrame` per element, `spend()` bumps the top frame's counter (slice index,
+  no map write), flushed to `elemCost` on pop; `blownElem` = top frame when
+  `workLeft` first goes negative. No grammar change. `:explain` commits 2 (index
+  tallies / a-priori est) and 3 (the `:explain` prefix + `>x` floors) still open.
+
 ## annotation + comment as first-class nodes (DONE 2026-07-17)
 
 - [x] **`annotation` node**: decorators (Python/TS) and struct-tag keys (Go)

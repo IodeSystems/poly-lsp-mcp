@@ -229,6 +229,11 @@ type engine struct {
 	// query (see sitesByFile). nil until first asked.
 	rawSites map[string][]rawSite
 
+	// noPushdown disables the leading-ref cardinality pushdown. Only the
+	// equivalence test sets it, to prove the fast path returns the same
+	// nodes as the full scan.
+	noPushdown bool
+
 	// The child-LSP precision pass (see precision.go). lspLeft is the
 	// per-query round-trip budget; asked/resolved report what the answer
 	// is actually made of, so a partly-lexical graph says so instead of
@@ -333,22 +338,36 @@ func (e *engine) loadFileSymbols(f *treeNode) {
 // nodeByAddr resolves a workspace-relative file path plus dotted sym
 // path back to its tree node (sym "" = the file node itself). This is
 // how a reference SITE re-enters the tree during a :parents move.
-func (e *engine) nodeByAddr(rel, sym string) *treeNode {
+// nodeByAddr resolves a (file, sym-path) to its tree node, disambiguating
+// colliding sym paths by which node's span contains `line` (0 = don't
+// care). module main and func main share the path "main"; the site's
+// line picks the one it lives in. A name match is kept as a fallback so a
+// zero or slightly-off span still resolves to something.
+func (e *engine) nodeByAddr(rel, sym string, line int) *treeNode {
 	f := e.fileByRel[rel]
 	if f == nil || sym == "" {
 		return f
 	}
 	var find func(n *treeNode) *treeNode
 	find = func(n *treeNode) *treeNode {
+		var fallback *treeNode
 		for _, c := range e.kids(n) {
 			if c.sym == sym {
-				return c
+				if line == 0 || (line >= c.at[0] && line <= c.at[1]) {
+					return c
+				}
+				if fallback == nil {
+					fallback = c
+				}
+				continue
 			}
 			if strings.HasPrefix(sym, c.sym+".") {
-				return find(c)
+				if r := find(c); r != nil {
+					return r
+				}
 			}
 		}
-		return nil
+		return fallback
 	}
 	return find(f)
 }
@@ -1865,6 +1884,72 @@ SPEC
 // The old evaluator matched right-to-left, one candidate node at a
 // time, which cannot express a mid-chain re-root at all.
 
+// pushdownLeadingRef derives the small candidate host set for a GLOBAL
+// leading ref that is filtered to one exact far-end name, so evalElems
+// can skip expanding the implied universal host to the whole workspace.
+//
+// The reduction is exact by a symmetry: an out-edge H→X is the SAME
+// underlying site as X's in-edge with far=H, so the hosts of `::out#X`
+// are precisely the far ends of X's IN edges, and the hosts of `::in#X`
+// the far ends of X's OUT edges. X has a handful of declarations with a
+// handful of sites, so this is cheap where the universal expansion is
+// O(workspace) (measured 6 hosts vs 4,206 for #Save).
+//
+// It returns a SUPERSET of the true hosts and refMatches re-filters
+// exactly, so the only correctness obligation is completeness — never
+// dropping a host that could match. That holds only when:
+//   - the expansion would be global (tips is exactly the project node),
+//     never a relative/nested `&`-anchored ref;
+//   - elem 0 is the synthesized universal host (pseudoOnly);
+//   - the far filter is ONE exact bare-leaf name, which declsOf resolves
+//     completely (it keys on the leaf, so a dotted #a.b or an address
+//     #'f#S' would resolve short — those keep the full scan).
+func (e *engine) pushdownLeadingRef(elems []selElem, tips map[*treeNode]bool) (map[*treeNode]bool, bool) {
+	if e.noPushdown || len(elems) < 2 || len(tips) != 1 || !tips[e.project] {
+		return nil, false
+	}
+	host := elems[0].comp
+	if host == nil || !host.pseudoOnly() {
+		return nil, false // elem 0 must be the implied universal host
+	}
+	ref := elems[1].comp
+	name, ok := refFarLeaf(ref)
+	if !ok {
+		return nil, false
+	}
+	opp := "out"
+	if ref.refDir == "out" {
+		opp = "in"
+	}
+	hosts := map[*treeNode]bool{}
+	for _, decl := range e.declsOf(name) {
+		for _, r := range e.refNodes(decl, opp) {
+			for _, f := range r.refFar {
+				hosts[f] = true
+			}
+		}
+	}
+	return hosts, true
+}
+
+// refFarLeaf returns the single bare-leaf name a ref's far end is pinned
+// to, and true only when that is the ref's ONLY id/name constraint. Kind
+// classes (.call), pseudos and combinators are left to refMatches — they
+// only ever narrow the superset further.
+func refFarLeaf(comp *selCompound) (string, bool) {
+	if comp == nil || !comp.isRef || len(comp.attrs) != 1 {
+		return "", false
+	}
+	a := comp.attrs[0]
+	if a.op != selExact || a.axis == attrPath {
+		return "", false // ^= *= ~= can't be index-resolved; path isn't a far name
+	}
+	if strings.ContainsAny(a.value, ".#") {
+		return "", false // dotted/address form: declsOf keys on the leaf
+	}
+	return a.value, true
+}
+
 // combRange is the depth range a combinator implies on the compound to
 // its right when that compound carries no :depth override.
 func combRange(c selComb) (min, max int) {
@@ -1985,8 +2070,19 @@ func (e *engine) evalComplex(cx selComplex, anchor *treeNode, relaxSubject bool)
 // with repeated instances child-joined. A {0,…} element simply vanishes
 // on the skip path — its combinator vanishes with it.
 func (e *engine) evalElems(elems []selElem, tips map[*treeNode]bool, min0, max0 int, relaxSubject bool) map[*treeNode]bool {
+	// Cardinality pushdown for a global leading ref filtered to an exact
+	// far-end name — `::in.call#'Save'`. Without it, the implied
+	// universal host expands to EVERY symbol and refMatches builds every
+	// edge before discarding all but the few whose far end is Save. The
+	// index already knows the handful of hosts that can match; start from
+	// them and the sweep never happens. See pushdownLeadingRef.
+	start := 0
+	if hosts, ok := e.pushdownLeadingRef(elems, tips); ok {
+		tips = hosts // candidate hosts replace the universal expansion
+		start = 1    // elem 0 (the implied universal host) is subsumed
+	}
 	last := len(elems) - 1
-	for i := range elems {
+	for i := start; i < len(elems); i++ {
 		el := &elems[i]
 		relaxed := relaxSubject && i == last
 		imin, imax := min0, max0
@@ -2623,7 +2719,12 @@ func (e *engine) refNodes(n *treeNode, dir string) []*treeNode {
 // names it mentions are.
 func (e *engine) buildOutRefs(n *treeNode) {
 	for _, site := range e.fileSites(n.file) {
-		if site.encl != n.sym {
+		// Attribution is by enclosing sym path AND span containment. The
+		// path alone is not unique — a `module main` (the package clause)
+		// and a `func main` share it — so a name-only check hands the
+		// same call site to both, double-counting the edge. The site
+		// physically sits in exactly one of them.
+		if site.encl != n.sym || site.line < n.at[0] || site.line > n.at[1] {
 			continue
 		}
 		far := e.scopeDecls(e.declsOf(site.name), n.file, site.encl)
@@ -2696,7 +2797,7 @@ func (e *engine) buildInRefs(n *treeNode) {
 		if isLocal && !inScopeOf(hit.encl, owner) {
 			continue // same file, but a different function's body
 		}
-		src := e.nodeByAddr(rel, hit.encl)
+		src := e.nodeByAddr(rel, hit.encl, hit.line)
 		if src == nil {
 			continue
 		}

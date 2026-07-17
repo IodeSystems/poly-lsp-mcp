@@ -3,6 +3,32 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Leading-ref cardinality pushdown + containment attribution (DONE 2026-07-17)
+
+- [x] **Pushdown** (`pushdownLeadingRef`): a global leading ref filtered to one
+  exact bare-leaf far name — `::in.call#'Save'` — no longer expands the implied
+  universal host to every symbol. Candidate hosts are the far ends of X's
+  OPPOSITE-direction edges (an out-edge H→X is the same site as X's in-edge
+  far=H), derived from X's handful of declarations. refMatches then runs
+  unchanged over the small host set, so output is identical by construction —
+  the fast path only skips hosts that provably cannot match. Fires only when
+  the expansion is global (tips is the project node), elem 0 is the synthesized
+  universal host, and the filter is one bare leaf declsOf resolves completely
+  (dotted/address ids keep the full scan). Measured 6 candidate hosts vs 4,206
+  for #Save; `::in.call#'New'` 158k → 86k work.
+- [x] **Containment attribution**: fixing the pushdown surfaced a real
+  double-count. Edges were attributed to a host by sym-path name alone
+  (`site.encl == n.sym`), but paths are not unique — a `module main` (the
+  package clause) and a `func main` share "main", so a call inside func main
+  was emitted by BOTH. buildOutRefs now also requires the site line within the
+  host's span, and nodeByAddr disambiguates colliding paths by containment.
+  On the real workspace this took `::out.call#'New'` from 84 (one edge doubled)
+  to 83. Tested with proven teeth: the guard reverted, the query returns 2.
+- [x] **Equivalence + non-regression gated** (`pushdown_test.go`): pushdown ==
+  full scan across ::in/::out, kinds, [name=], trailing combinator, empty, and
+  never costs more; anchored and non-universal forms are untouched; common dev
+  queries confirmed non-pathological at the default budget.
+
 ## Child-LSP precision pass (DONE 2026-07-17)
 
 - [x] **`refConf` is live**: every edge row carries `conf: "lsp" | "lexical"`.

@@ -54,6 +54,28 @@ opt-in:
 **Assumption made**: `:parents` wants incoming edges only — that is what the
 old code filtered for, and the split now hard-codes it.
 
+◐ **Query planning — leading-ref pushdown done, more possible.** A global
+leading ref filtered to an exact far name (`::in.call#'Save'`) used to expand
+the implied universal host to every symbol and build every edge before
+discarding all but the few whose far end is Save. Now the candidate hosts are
+derived from the index — the far ends of Save's opposite-direction edges — so
+the sweep never happens (measured 6 hosts vs 4,206 for #Save; equivalence and
+"never costs more" gated by test). Fixing this also surfaced and fixed a real
+double-count: edges were attributed by sym-path name alone, so a `module main`
+and a `func main` both claimed the same call site — now attribution requires
+span containment (→ done.md). **next**:
+  - ◻ **Cardinality-order a descendant chain.** `A B` still evaluates
+    left-to-right; if B is far rarer than A, starting from B (then checking
+    ancestors) is cheaper. Needs per-compound cardinality estimates from the
+    index. Bigger change; the ref pushdown was the measured 700× case.
+  - ◻ **The ~76k inversion floor is per-query.** Every edge query rebuilds
+    sitesByFile; on a 3× workspace even anchored edge queries approach the
+    budget. Cache the inversion in symbols.Index (invalidate on Refresh).
+**Common dev queries are NOT pathological**: at the default 200k budget, every
+query in the common set (callers/callees of X, dead funcs, non-test funcs,
+type members, transitive 2-hop) completes — the broad `::in.call` over the
+whole workspace is the ceiling at 159k.
+
 ◐ **Edges: from coincidence toward reference.** Two of three steps done
 (→ done.md): lexical scope killed 99% of far ends (a local is not visible
 outside its function), and the child-LSP pass now settles what remains,

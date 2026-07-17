@@ -1,5 +1,19 @@
 # poly-lsp-mcp — roadmap
 
+> Layout: this file = current state + active work + decisions. `icebox.md` =
+> designed-but-deferred, opt-in. Status marks: ◻ todo · ◐ in progress · ✅ done ·
+> ⏸ parked · ❓ blocked.
+>
+> **⚠ This file is stale (last touched 2026-05-31).** The MCP surface it
+> describes has since been replaced: 9 tools → 3 (node_query/node_read/
+> node_edit), selector classes → bare tags, and node_edit is now Edit-shaped
+> (oldText+newText compare-and-swap). Trust the code over this file until it is
+> pruned.
+>
+> **See `icebox.md` → "Graph selectors: CSS is a DAG, ours is a graph"** — the
+> designed successor to the current selector language (path sets, `:any`/`:all`/
+> `:empty`, group ranges, `:origin` inversion). Not built.
+
 Fused multi-language LSP server. Child LSPs handle in-language semantics,
 tree-sitter handles parsing and cross-language linkages, and a symbol index
 above the multiplex layer is what makes "fused" mean something. MCP comes

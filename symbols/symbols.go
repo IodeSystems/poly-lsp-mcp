@@ -106,10 +106,25 @@ type Index struct {
 	commentSites  map[string][]Site
 
 	// gen bumps on every mutation. Derived state (the query-cost
-	// estimator's tallies, later the inversion cache) memoizes against
+	// estimator's tallies, the inversion cache) memoizes against
 	// it: same gen → reuse, otherwise recompute. A no-op mutation may
 	// bump it too — a spurious recompute is cheap; stale tallies are not.
 	gen uint64
+
+	// invByFile caches the file → sites inversion (SitesByFile), keyed on
+	// invGen. Every edge query wants this shape; building it is O(all
+	// occurrences), so memoizing it here means the second edge query
+	// against an unchanged index pays nothing. nil until first asked.
+	invByFile map[string][]InvSite
+	invGen    uint64
+}
+
+// InvSite is one occurrence in the file → sites inversion: a name at a
+// position, before any per-file classification. Line/Col are 1-based.
+type InvSite struct {
+	Name string
+	Line int
+	Col  int
 }
 
 // Generation returns the index's mutation counter — the memo key for any
@@ -219,6 +234,99 @@ func (i *Index) LookupExisting(name string) []Site {
 	return live
 }
 
+// SitesByFile inverts the index — name → sites becomes file → sites, the
+// shape every edge query wants — and MEMOIZES the result on gen. The
+// build sweeps every occurrence once (O(total sites)) and stats each
+// unique file once for liveness, evicting any that vanished. Because it
+// is index-owned derived state (like the estimator tallies), the second
+// edge query against an unchanged index reuses it for free instead of
+// re-inverting; the engine used to rebuild this per query, which measured
+// as ~85% of an anchored edge query's work budget.
+//
+// Keys are ABSOLUTE file paths (the index's native form); the caller maps
+// to workspace-relative as it likes. The returned map is shared and must
+// be treated read-only — a mutation builds a fresh map under the next gen.
+func (i *Index) SitesByFile() map[string][]InvSite {
+	i.mu.RLock()
+	if i.invByFile != nil && i.invGen == i.gen {
+		m := i.invByFile
+		i.mu.RUnlock()
+		return m
+	}
+	i.mu.RUnlock()
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	// Re-check: another goroutine may have built it between the unlock
+	// and the relock.
+	if i.invByFile != nil && i.invGen == i.gen {
+		return i.invByFile
+	}
+	inv := i.buildInversionLocked()
+	// buildInversionLocked may have evicted vanished files, bumping gen;
+	// cache against the CURRENT (post-eviction) gen so the next call hits.
+	i.invByFile = inv
+	i.invGen = i.gen
+	return inv
+}
+
+// buildInversionLocked constructs the file → sites map, assuming the
+// write lock is held. It dedups by (file, line, col) — a position holds
+// exactly one name, so a name declared AND lexically seen at the same
+// spot counts once, matching Lookup — and drops (plus evicts) sites whose
+// file no longer exists, the self-heal LookupExisting does per query.
+func (i *Index) buildInversionLocked() map[string][]InvSite {
+	type pos struct {
+		file string
+		line int
+		col  int
+	}
+	seen := map[pos]bool{}
+	alive := map[string]bool{}
+	var dead []string
+	inv := map[string][]InvSite{}
+	add := func(name string, s Site) {
+		p := pos{s.File, s.Line, s.Col}
+		if seen[p] {
+			return
+		}
+		seen[p] = true
+		ok, known := alive[s.File]
+		if !known {
+			ok = fileExists(s.File)
+			alive[s.File] = ok
+			if !ok {
+				dead = append(dead, s.File)
+			}
+		}
+		if !ok {
+			return
+		}
+		inv[s.File] = append(inv[s.File], InvSite{Name: name, Line: s.Line, Col: s.Col})
+	}
+	// declared → lexical → comment, matching Lookup's precedence so the
+	// first-seen dedup keeps the same occurrence.
+	for name, sites := range i.declaredSites {
+		for _, s := range sites {
+			add(name, s)
+		}
+	}
+	for name, sites := range i.sites {
+		for _, s := range sites {
+			add(name, s)
+		}
+	}
+	for name, sites := range i.commentSites {
+		for _, s := range sites {
+			add(name, s)
+		}
+	}
+	if len(dead) > 0 {
+		i.removeFilesLocked(dead)
+	}
+	return inv
+}
+
 // RemoveFiles evicts every site (lexical, declared, comment) whose File
 // is in files, across all names — the multi-store, multi-name companion
 // to clearFileLocked. Used to reconcile the index when files disappear
@@ -227,13 +335,23 @@ func (i *Index) RemoveFiles(files []string) {
 	if len(files) == 0 {
 		return
 	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.removeFilesLocked(files)
+}
+
+// removeFilesLocked is RemoveFiles' body, assuming the write lock is
+// held. Split out so the inversion build — which already holds the lock
+// — can evict vanished files it discovers without re-locking.
+func (i *Index) removeFilesLocked(files []string) {
+	if len(files) == 0 {
+		return
+	}
 	gone := make(map[string]bool, len(files))
 	for _, f := range files {
 		gone[f] = true
 	}
-	i.mu.Lock()
 	i.gen++
-	defer i.mu.Unlock()
 	for _, store := range []map[string][]Site{i.sites, i.declaredSites, i.commentSites} {
 		for name, list := range store {
 			kept := make([]Site, 0, len(list))

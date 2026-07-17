@@ -522,9 +522,13 @@ func TestTrippedBudgetIsReproducible(t *testing.T) {
 		sel    string
 		budget int
 	}{
-		{`func::out`, 75},        // per-host walk in refMatches
+		// Budgets tuned to trip mid-TRAVERSAL. They used to be higher (75 /
+		// 100) and tripped during the per-query index inversion; that
+		// inversion is now index-owned and unbudgeted, so the trip point
+		// moved into the walk and the budgets came down to match.
+		{`func::out`, 50},        // per-host walk in refMatches
 		{`func:parents(*)`, 100}, // the :parents frontier
-		{`*:where(::out)`, 100},  // pseudo pipeline per subject
+		{`*:where(::out)`, 60},   // pseudo pipeline per subject
 	} {
 		t.Run(tc.sel, func(t *testing.T) {
 			s := startGraph(t)

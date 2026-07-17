@@ -233,9 +233,6 @@ type engine struct {
 	siteCache   map[string][]refSite
 	declsByName map[string][]*treeNode
 	symCache    map[string][]symbols.Symbol
-	// rawSites: the index inverted name→sites into file→sites, once per
-	// query (see sitesByFile). nil until first asked.
-	rawSites map[string][]rawSite
 
 	// noPushdown disables the leading-ref cardinality pushdown. Only the
 	// equivalence test sets it, to prove the fast path returns the same
@@ -3477,68 +3474,22 @@ func (e *engine) buildInRefs(n *treeNode) {
 	}
 }
 
-// rawSite is one indexed occurrence, before any per-file classification.
-type rawSite struct {
-	name string
-	line int
-	col  int
-}
-
-// sitesByFile inverts the index ONCE per query: the index maps name →
-// sites, and every consumer in here wants file → sites.
+// sitesByFile returns the index's file → sites inversion, keyed by
+// ABSOLUTE file path. The index owns and memoizes this on its generation
+// (symbols.Index.SitesByFile), so the FIRST edge query in a session builds
+// it and every later query against an unchanged index reuses it free.
 //
-// fileSites used to bridge that gap by sweeping EVERY name and EVERY
-// site in the workspace and discarding everything outside the one file
-// it was asked about — a whole-workspace sweep per file. Measured: 98%
-// of func#main::out.call's budget (461,594 of 470,490 units) was seven
-// sweeps of the same data, and each swept through LookupExisting, which
-// stats every occurrence's file — 52% of all CPU went to syscalls.
-//
-// One inversion answers every file, and one stat per FILE replaces one
-// per occurrence.
-func (e *engine) sitesByFile() map[string][]rawSite {
-	if e.rawSites != nil {
-		return e.rawSites
-	}
-	e.rawSites = map[string][]rawSite{}
+// It used to be rebuilt per query here — a whole-workspace sweep that
+// spent one budget unit per occurrence and measured as ~85% of an
+// anchored edge query's work. Moving it to index-owned derived state
+// (like the estimator tallies) drops that per-query floor to zero and
+// stops charging query budget for work that is not the query's.
+func (e *engine) sitesByFile() map[string][]symbols.InvSite {
 	idx := e.s.getIndex()
 	if idx == nil {
-		return e.rawSites
+		return nil
 	}
-	root := e.s.getRoot()
-	alive := map[string]bool{}
-	var dead []string
-	for _, name := range idx.Names() {
-		// Lookup, not LookupExisting: the liveness check is hoisted here
-		// so it costs one stat per file instead of one per occurrence.
-		for _, site := range idx.Lookup(name) {
-			if !e.spend(1) {
-				// Partial inversion — workExceeded already says the walk
-				// did not finish, so the caller is told, not misled.
-				return e.rawSites
-			}
-			ok, seen := alive[site.File]
-			if !seen {
-				_, err := os.Stat(site.File)
-				ok = err == nil
-				alive[site.File] = ok
-				if !ok {
-					dead = append(dead, site.File)
-				}
-			}
-			if !ok {
-				continue
-			}
-			rel := relPath(site.File, root)
-			e.rawSites[rel] = append(e.rawSites[rel], rawSite{name: name, line: site.Line, col: site.Col})
-		}
-	}
-	// Keep LookupExisting's self-healing: evict vanished files once for
-	// the whole query rather than once per name per call.
-	if len(dead) > 0 {
-		idx.RemoveFiles(dead)
-	}
-	return e.rawSites
+	return idx.SitesByFile()
 }
 
 // fileSites returns every classified non-declaration site in one file,
@@ -3562,15 +3513,15 @@ func (e *engine) fileSites(rel string) []refSite {
 	if e.symCache == nil {
 		e.symCache = map[string][]symbols.Symbol{}
 	}
-	// Only THIS file's occurrences, straight from the inversion — the
-	// symbol-dependent work below stays scoped to one file.
-	for _, raw := range e.sitesByFile()[rel] {
-		if e.isDeclSite(fnode.abs, raw.line, raw.col, raw.name, e.symCache) {
+	// Only THIS file's occurrences, straight from the inversion (abs-keyed)
+	// — the symbol-dependent work below stays scoped to one file.
+	for _, raw := range e.sitesByFile()[fnode.abs] {
+		if e.isDeclSite(fnode.abs, raw.Line, raw.Col, raw.Name, e.symCache) {
 			continue
 		}
 		out = append(out, refSite{
-			name: raw.name, line: raw.line, col: raw.col,
-			encl: e.s.enclosingSymPath(fnode.abs, raw.line, e.symCache),
+			name: raw.Name, line: raw.Line, col: raw.Col,
+			encl: e.s.enclosingSymPath(fnode.abs, raw.Line, e.symCache),
 		})
 	}
 	// Classify all of the file's sites in ONE parse.

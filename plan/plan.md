@@ -22,59 +22,86 @@ languages (lexical / declared / schema-anchored tiers). `poly-lsp-mcp mcp --root
   addressed as `<file>#<sym>`, queried by CSS selector. Legacy 9-tool surface
   behind `--legacy-tools`. Sandbox jail + read-only mode: commit `0fbeb02`.
 - Selector language: CSS containment + the graph as NODES. References are
-  reified edge pseudo-elements — `::in`/`::out`, kind as class
-  (.call/.type/.import), far end as child, site as address (file@line),
-  invisible to `*` (gates are opaque). `{m,n}` = regex repetition on
-  elements/(groups); edge hops on an edge element. `:parents(sel)` = the one
-  inverse (upstream roots). Bare `:any/:all/:empty` = position claims.
-  Language classes (file.go/func.ts), `:first`/`:last` per anchor. Shipped
-  2026-07-17 in three slices → done.md ("Graph selector language") for the
-  full design record; slice 3 ("references are NODES") is the shipped
-  language.
+  reified edge pseudo-elements — `::in`/`::out` on TWO orthogonal class axes,
+  KIND (.call/.type/.import) × POSITION (.return/.param/.field/.var), composed
+  CSS-style (`::in.return.type`); far end (via `>`) is the SOURCE symbol, the
+  ref IS the occurrence (address = site file@line), invisible to `*`. `{m,n}` =
+  regex repetition; edge hops on an edge element. `:parents(sel)` = the one
+  inverse. Bare `:any/:all/:empty` = position claims. Language classes
+  (file.go), `:first`/`:last` per anchor. Attribute axes: `[name]` (called) vs
+  `[path]` (lives), ops `= ^= $= *=` literal, `~=` regex (bracket-aware).
+  Shipped 2026-07-17 → done.md ("Graph selector language" + the per-feature
+  entries) for the full record.
+- Trivia/metadata as NODES (this session, → done.md): `annotation` (decorators
+  py/ts + struct-tag keys go, a CHILD of its symbol, leaf + virtual-FQN alias),
+  `::comment` (joined doc block, a GENERATED pseudo-element invisible to `*`),
+  `argument` (params). `:annotated('pat')`/`:contains('pat')` are the text
+  fallbacks (Go comment directives have no AST node).
 
 ## Active work
 
-✅ **Edge cost — fixed, → done.md.** The direction split + the once-per-query
-index inversion together took `func::out` from budget-dead to its full 24,590
-matches inside the 200k default, and `func#main::out.call > func` back to life.
-The budget is no longer the binding constraint on any query tried. Remaining,
-opt-in:
-  - ◻ **Nothing short-circuits.** `evaluate()` computes the FULL set and the
-    caller slices after, so `--limit 5` and `:first` pay for everything. Much
-    less urgent now that the sweep is gone, but it is why `:first` costs what
-    no-`:first` costs. Traversal is document-ordered, so a top-level early exit
-    at offset+limit is sound. **blocking decision**: it costs `totalMatches`
-    (you cannot report "of 24,590" without finishing) — node_query's result
-    shape and truncation contract would change.
-  - ◻ **Move the inversion into `symbols.Index`** (build it once per index, not
-    per query). Would drop the last fixed ~66k prefix off every edge query.
-    **risk**: it is derived state, so it needs invalidating on Refresh /
-    RemoveFiles / file-watch — the per-query version has no staleness surface,
-    which is why it was chosen first.
-**Assumption made**: `:parents` wants incoming edges only — that is what the
-old code filtered for, and the split now hard-codes it.
+**Shipped this session (all → done.md):** query CLI + `bin/dev`; deterministic
+truncation; `[path]` axis + de-leaked `[name]`; `~=` regex (bracket-aware);
+edge-cost fixes (direction split + once-per-query inversion → `func::out` fits
+the 200k default); child-LSP precision pass (`conf: lsp|lexical`); local-scope
+fix (99% far-end noise gone); leading-ref pushdown + containment attribution;
+`:annotated`; `annotation` node; `::comment` pseudo-element; `::in.return.type`
+position axis. Common dev queries are NOT pathological at the default budget.
 
-◐ **Query planning — leading-ref pushdown done, more possible.** A global
-leading ref filtered to an exact far name (`::in.call#'Save'`) used to expand
-the implied universal host to every symbol and build every edge before
-discarding all but the few whose far end is Save. Now the candidate hosts are
-derived from the index — the far ends of Save's opposite-direction edges — so
-the sweep never happens (measured 6 hosts vs 4,206 for #Save; equivalence and
-"never costs more" gated by test). Fixing this also surfaced and fixed a real
-double-count: edges were attributed by sym-path name alone, so a `module main`
-and a `func main` both claimed the same call site — now attribution requires
-span containment (→ done.md). **next**:
-  - ◻ **Cardinality-order a descendant chain.** `A B` still evaluates
-    left-to-right; if B is far rarer than A, starting from B (then checking
-    ancestors) is cheaper. Needs per-compound cardinality estimates from the
-    index. Bigger change; the ref pushdown was the measured 700× case.
+Open frontier:
+
+◻ **Cost visibility + planning share an estimator.**
+  - ◻ **Cardinality-order a descendant chain.** `A B` evaluates left-to-right;
+    if B is far rarer than A, start from B and check ancestors. Needs the same
+    per-compound estimate `:explain` renders (below). The ref pushdown was the
+    measured 700× case; this is the general form.
   - ◻ **The ~76k inversion floor is per-query.** Every edge query rebuilds
-    sitesByFile; on a 3× workspace even anchored edge queries approach the
-    budget. Cache the inversion in symbols.Index (invalidate on Refresh).
-**Common dev queries are NOT pathological**: at the default 200k budget, every
-query in the common set (callers/callees of X, dead funcs, non-test funcs,
-type members, transitive 2-hop) completes — the broad `::in.call` over the
-whole workspace is the ceiling at 159k.
+    `sitesByFile`; on a 3× workspace even anchored edge queries approach the
+    budget. Cache the inversion in `symbols.Index` (invalidate on Refresh) —
+    same derived-state hazard as the `:explain` tallies below.
+  - ◻ **Nothing short-circuits.** `evaluate()` computes the FULL set, then the
+    caller slices, so `--limit 5` / `:first` pay for everything. Traversal is
+    document-ordered so a top-level early exit at offset+limit is sound.
+    **blocking decision**: costs `totalMatches` (can't report "of 24,590"
+    without finishing) — node_query's result shape changes.
+
+◻ **`:explain` — cost-visible queries (design done this session, not started).**
+A query PREFIX (`:explain func#main ::out.call{1,}`) renders the selector as an
+annotated cost tree: a FREE a-priori `est` column (O(1) index tallies) + a
+MEASURED column that spends the eval budget getting exact per-element cost,
+degrading to `>x` LOWER BOUNDS once the budget trips ("full while we have
+budget, `>x` when we're out — no more work spent on precision we can't
+afford"). The SAME trace upgrades the plain budget-blow output: every blow
+renders the annotated selector pointing at the element that ate the budget,
+replacing today's generic warning. Mechanism: `spend()` (query.go:275) bills
+the element under eval via a stack pushed/popped in `evalElems` (query.go:2138)
+— always-on, ~free. Three standalone commits, ORDERED:
+  - ◻ **1. Always-on trace + budget-blow renderer.** `spend`↔`evalElems`
+    attribution; `renderQueryTree` (query_text.go:156) + node_query blow paths
+    render `>N` actual per-element cost. No grammar change; makes every
+    existing blow legible. Independent — landable first.
+  - ◻ **2. `symbols.Index` tallies** — `classCount` (bare-class estCand) +
+    `outDegree` avg (::out fan-out), built at index time, O(1) read = the
+    a-priori `est` source. Crux of `>x`: O(1) tallies + `len(sites[name])`
+    NEVER degrade; only per-query SCANS (`sitesByFile`, `declsOf`,
+    transitive-hop projection) do. **risk**: derived state — invalidate on
+    Refresh/RemoveFiles/clearFileLocked (symbols.go:362/191/377), the SAME
+    hazard the inversion-floor move names above. Land lazy+memoized-per-index-
+    generation first (zero staleness risk); promote to incremental only if
+    `:explain` latency shows.
+  - ◻ **3. `:explain` prefix + est column + `>x` floors.** Prefix stripped at
+    BOTH entry points (QueryText query_text.go:27 + handleModernNodeQuery) via
+    one shared `splitExplain` — a query MODE, not a pseudo, kept out of the
+    grammar so it can't nest. `>x` logic: on `workExceeded` the estimator
+    returns the materialized floor (`>lastFrontier` / `>sitesInverted`) instead
+    of scanning.
+**Shares the estimator with "Cardinality-order a descendant chain" above** —
+the per-compound cardinality `:explain` renders is the same number the planner
+needs to reorder a chain. Build once, both consume it.
+**blocking decision (USER owns)**: node_query's `:explain` returns a TRACE, not
+matches — a result-shape fork the tool contract must document.
+**Two agents**: claim a commit number before starting. 1 is independent; 2
+feeds 3's est column, so 3 waits on 2.
 
 ◐ **Edges: from coincidence toward reference.** Two of three steps done
 (→ done.md): lexical scope killed 99% of far ends (a local is not visible
@@ -96,11 +123,18 @@ per edge, with `conf: lsp|lexical` on every row. **next**:
 **Assumption made**: `textDocument/definition`'s first location is the
 declaration. True for gopls; unverified for tsserver/pylsp.
 
-◻ **Query CLI + determinism** — shipped this pass, see done.md:
-`poly-lsp-mcp query [flags] <selector>` + `bin/dev` launcher; deterministic
-truncation; `[path]` axis + de-leaked `[name]`. **next**: the budget call
-above. **risks**: `[name]` de-leak is BREAKING (`func[name*=test]` 508 → 1);
-`bin/dev` is untested on darwin/arm64.
+◻ **Node model — loose ends found this session.**
+  - ❓ **TS edges double-count.** `Widget::in.type` = 4 on a fixture with 2
+    real uses; the doubling is per-USE and TS-specific (Go is clean), so it is
+    an index/site-dup in the TS path, NOT the position axis (which split the 4
+    into 2 param + 2 return cleanly). Independent bug; find where a TS type site
+    enters the index twice.
+  - ◻ **`return`/`var` slot NODES** (icebox): the position AXIS ships, but a
+    `return`-type usage lands on the func (its far end), and `> return` as a
+    node does not exist. Adding `return`/`var` slot nodes needs COLUMN precision
+    in `treeNode.at` (param vs return share a signature line) — the infra step
+    the axis deliberately dodged. `::in.return.type` is the cheaper win that
+    covered the headline query.
 
 Next candidates are opt-in, in icebox.md — most valuable: adoption
 measurement (does bonsai USE ::in/::out unprompted?), then the child-LSP

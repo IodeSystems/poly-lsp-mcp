@@ -110,42 +110,23 @@ Open frontier:
     **blocking decision**: costs `totalMatches` (can't report "of 24,590"
     without finishing) — node_query's result shape changes.
 
-◻ **`:explain` — cost-visible queries (design done this session, not started).**
-A query PREFIX (`:explain func#main ::out.call{1,}`) renders the selector as an
-annotated cost tree: a FREE a-priori `est` column (O(1) index tallies) + a
-MEASURED column that spends the eval budget getting exact per-element cost,
-degrading to `>x` LOWER BOUNDS once the budget trips ("full while we have
-budget, `>x` when we're out — no more work spent on precision we can't
-afford"). The SAME trace upgrades the plain budget-blow output: every blow
-renders the annotated selector pointing at the element that ate the budget,
-replacing today's generic warning. Mechanism: `spend()` (query.go:275) bills
-the element under eval via a stack pushed/popped in `evalElems` (query.go:2138)
-— always-on, ~free. Three standalone commits, ORDERED:
-  - ✅ **1. Always-on trace + budget-blow renderer** → done.md. `spend`↔`evalElems`
-    frame attribution (slice-index, ~free); CLI blow shows per-element cost +
-    `← budget ran out here`, node_query carries a `cost` array. No grammar
-    change. Shipped; 2 and 3 remain.
-  - ✅ **2. a-priori cost tallies** → done.md. `Index.NameFreq` (O(1) raw site
-    tally = selectivity) + `Server.classCounts` (bare-class, memoized against
-    the new `Index.gen` mutation counter — the class lives in the TREE not the
-    index, so it is a lazy full-symbol walk, zero staleness risk). Design note
-    corrected: `outDegree`/fan-out was NOT built — the index has no edges, so
-    fan-out is deferred to commit 3's propagation (or a proxy) where it has a
-    consumer to validate against. `Index.gen` is also the memo key the
-    inversion-floor cache will reuse.
-  - ◻ **3. `:explain` prefix + est column + `>x` floors.** Prefix stripped at
-    BOTH entry points (QueryText query_text.go:27 + handleModernNodeQuery) via
-    one shared `splitExplain` — a query MODE, not a pseudo, kept out of the
-    grammar so it can't nest. `>x` logic: on `workExceeded` the estimator
-    returns the materialized floor (`>lastFrontier` / `>sitesInverted`) instead
-    of scanning.
-**Shares the estimator with "Cardinality-order a descendant chain" above** —
-the per-compound cardinality `:explain` renders is the same number the planner
-needs to reorder a chain. Build once, both consume it.
-**blocking decision (USER owns)**: node_query's `:explain` returns a TRACE, not
-matches — a result-shape fork the tool contract must document.
-**Two agents**: claim a commit number before starting. 1 is independent; 2
-feeds 3's est column, so 3 waits on 2.
+✅ **`:explain` — cost-visible queries, all 3 commits shipped → done.md.**
+`:explain <selector>` returns a cost tree: a-priori `est` (free, from the
+commit-2 tallies) beside `measured` work, with `>x` lower bounds on the element
+the budget tripped in and `—` for unreached elements. The always-on trace also
+upgrades every plain budget-blow to point at the culprit. node_query returns
+`{"explain": rows, "truncated"}` — a trace, not matches (the result-shape fork
+the plan flagged; resolved by making it a MODE, not a change to plain queries).
+**Open remainder**: the est column shows `?` for edges/`*` — the index has no
+fan-out. A fan-out estimate (from `::out` avg degree, or the pushdown's
+opposite-edge count) would fill those in; deferred until the descendant-chain
+planner (below) needs it, since they share the estimator.
+
+◻ **Cardinality-order a descendant chain** (moved up from the shared-estimator
+note): `A B` evaluates left-to-right; if B is far rarer than A, start from B.
+The per-element `est` `:explain` now renders is the number to reorder on —
+build the reorder on top of it. This is where the deferred fan-out estimate
+earns its consumer.
 
 ◐ **Edges: from coincidence toward reference.** Two of three steps done
 (→ done.md): lexical scope killed 99% of far ends (a local is not visible

@@ -3,6 +3,21 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## :explain cost tree — commit 3 (DONE 2026-07-17)
+
+- [x] `:explain <selector>` is a query MODE (a prefix stripped by one shared
+  `splitExplain` at both entry points — CLI + node_query — kept out of the
+  grammar so it can't nest). It runs the query, then returns a COST TREE not
+  matches: each element's a-priori `est` (an exact #name/[name=] reads
+  NameFreq, a bare class reads classCounts; edges/`*` are `?` — no fan-out in
+  the index) beside `measured` (the commit-1 trace), degrading to a `>x` LOWER
+  BOUND on the element the budget tripped in and `—` for elements never
+  reached. node_query returns `{"explain": rows, "truncated"}` — the
+  result-shape fork, resolved as a mode so plain queries are untouched. The
+  `est` estimator is the shared number the descendant-chain planner will
+  reorder on. Tested: splitExplain boundaries, est source, `>x`/`—` on a blow,
+  and node_query returning a trace not matches.
+
 ## A-priori cost tallies — :explain commit 2 (DONE 2026-07-17)
 
 - [x] The estimator's free cardinality sources. `Index.NameFreq(name)`: O(1) raw

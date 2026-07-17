@@ -161,11 +161,16 @@ only when a query needs an edge-tip reorder.
 (→ done.md): lexical scope killed 99% of far ends (a local is not visible
 outside its function), and the child-LSP pass now settles what remains,
 per edge, with `conf: lsp|lexical` on every row. **next**:
-  - ◻ **The CLI is lexical-only, by choice.** `bin/dev query` has no manager
-    (a one-shot gopls spawn is seconds); its tree renderer does NOT show conf,
-    so CLI edge output looks identical to a resolved one. Either render conf
-    or say "lexical" in the footer — today it is the one place an ambiguous
-    edge can still read as a fact.
+  - ✅ **The CLI is lexical-only, and now SAYS so.** `bin/dev query` has no
+    manager (a one-shot gopls spawn is seconds); its tree renders far ends with
+    no conf column. Fixed by a footer caveat that fires whenever a selector uses
+    `::in`/`::out` (`usesEdge`), on every path — match, traversal-to-symbols,
+    empty, or budget-blow: "edges are name-keyed (lexical) here … the MCP server
+    resolves via child LSPs (conf: lsp); `query` does not." Pinned by
+    `TestQueryTextLexicalEdgeCaveat`. A per-row conf column is the fuller fix
+    but needs the manager the CLI deliberately skips; the footer is the honest
+    minimum. (Live proof it's needed: `func#New::out.call` shows `engine.s,
+    modSelParser.s` — lexical collisions on the field name `s`.)
   - ◻ **Transitive queries still compound.** `::in.call{1,}` crosses many
     edges; each hop past the 200-cap is lexical again. The cap is per QUERY,
     so a deep walk spends it on hop 1. **blocking decision**: per-hop caps? a

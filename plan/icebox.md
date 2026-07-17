@@ -35,6 +35,38 @@ to build now (text/structure, no edge guessing): the shipped `:annotated`,
 `~=` regex, `:contains`, containment queries. Idea worth a slice: `:arity(m,n)`
 / signature-size filters (count of `argument` children — structural, sound).
 
+## Ownership domains — crossing into libraries (the North Star chasm)
+
+Precision resolves into dependencies by definition (gopls→stdlib,
+tsserver→`node_modules`, pylsp→`site-packages`), so the single-`.project`
+assumption is already leaking. Stage 0 (the honest external stub) is ACTIVE on
+the Edges slice in plan.md. Stages 1–2 are deferred design:
+
+- **Domain as a node property.** One root becomes a FOREST of domain roots:
+  `owned` (rw, file-watched, small, hot) + N × `lib:<module>@<version>` (ro,
+  immutable, large, cold). The tree SHAPE stays uniform — the `.project`-level
+  foresight in query.go pays off — nodes just gain `domain` + `mutable`.
+  `node_edit` refuses non-`owned` domains structurally; `[domain=…]` becomes a
+  selectable axis.
+- **Lazy, evictable partitions ("spin up/down").** A lib subtree materializes
+  only when a query OPTS IN to crossing (a `:with(libs)` scope, or drilling
+  into a stub), and is evictable under memory pressure. Content-addressed by
+  `module@version` → indexed once per MACHINE, reused across projects, never
+  re-indexed (released libs are immutable). This is what makes millions of LOC
+  tractable: the cost is paid once, globally, not per-project-per-query.
+- **Partition-aware budget.** The 200k budget assumes a bounded root; one
+  `::in.call` on `Write` across the stdlib enumerates every implementer in
+  every dep. So the DEFAULT stays "don't cross" (today's honest bounded
+  behavior); crossing is opt-in and separately budgeted per partition.
+- **Per-domain freshness.** `owned` invalidates per keystroke; `lib@version`
+  indexes are immutable and cache FOREVER. The invalidation surface the
+  inversion-floor / `:explain`-tally work builds must be domain-aware from the
+  start, or it re-scans immutable libs for nothing.
+
+Do NOT build until a query actually needs to cross (adoption-gated, like the
+rest). But the domain axis must be NAMED now so nothing hard-codes single-root
+deeper — see the North Star rule in plan.md.
+
 ## Graph selectors — deferred remainder
 
 Slice 1 (the `:parents` move, hop ranges, `:where/:any/:all/:empty`) shipped

@@ -12,6 +12,48 @@ child LSPs (gopls/tsserver/pylsp) over a tree-sitter symbol index that crosses
 languages (lexical / declared / schema-anchored tiers). `poly-lsp-mcp mcp --root
 <dir>` boots the MCP surface on the same index.
 
+## North Star — what "world-class" means for us
+
+The owned quadrant, empty of incumbents: a **live, no-build, multi-language,
+reference-aware, edit-capable code querier with a predictable, explainable cost
+model** — driven by an LLM agent, live, mid-task. Every priority is judged
+against holding THIS position, not against beating CodeQL at its own game.
+
+- **The consumer is a MODEL, not a security engineer** — that inverts the
+  weights. A grammar the model already knows (CSS). Loud, honest partiality
+  (`conf` labels, budget-blow-that-says-so, `:explain`, `>x` floors) as
+  HALLUCINATION-PREVENTION, not polish — a human supplies the skepticism a
+  model doesn't. Token-lean, composable output over rich reports.
+- **The unoccupied intersection:** {live + no-build} × {cross-file reference
+  edges with a precision LADDER} × {mutation} × {predictable cost}.
+  CodeQL/Glean/Kythe/Sourcegraph buy the reference graph with a
+  build/batch/per-language extractor and cannot rewrite; ast-grep/Comby/Semgrep
+  rewrite live but have NO cross-file graph. Nobody sits in the middle.
+- **The moat is the precision LADDER:** lexical → tree-sitter-scoped →
+  LSP-resolved, each LABELED. "Resolved or lexical, and it says which" is a
+  category property no interactive querier ships.
+
+Non-goals — forfeiting these is what KEEPS the quadrant:
+- **Dataflow / taint / points-to** (CodeQL's turf) needs the build+batch we
+  refuse. Explicit non-goal, not a gap.
+- **We do not out-scale Sourcegraph/Glean on multi-repo.** A single owned root
+  is home.
+
+**The known chasm — ownership domains.** The precision pass does not ASK to
+leave the workspace; it crosses by definition — gopls resolves into the stdlib,
+tsserver into `node_modules`, pylsp into `site-packages`. The moment it works,
+a `refFar` can land OUTSIDE the git root, where `fileByRel` has no node and the
+edge silently falls back to a false local match (the `Write`/`Read` collision
+the icebox flags). So the single-`.project` assumption is already leaking, and
+"lib linking" is not a feature to add but a boundary already being crossed.
+Bridge is staged — Stage 0 (owed NOW by the active Edges work): a resolved
+far end outside the root becomes an honest EXTERNAL STUB (`module@version#sym`,
+`domain: external`, read-only, `[not indexed]`) — nameable, never a false
+local. Stages 1–2 (content-addressed lib partitions, on-demand, evictable) are
+deferred design in icebox ("Ownership domains"). **Rule until then: nothing new
+may hard-code the single-root assumption deeper** — a node's `domain` (owned rw
+/ vendored ro / external ro) is the axis that will gate mutation and budget.
+
 ## Current state
 
 - Phases 0–6.1 (scaffold, multiplex, cross-language index + rename,
@@ -120,6 +162,14 @@ per edge, with `conf: lsp|lexical` on every row. **next**:
   - ◻ **`::in` on a common name is O(sites) round-trips** (#New = 93). Under
     the cap, but a warm-gopls session pays it per query — the LSP answer is
     not cached across queries.
+  - ❓ **A resolved far end OUTSIDE the root has no node today** (North Star
+    Stage 0). `fileByRel` only holds workspace files, so when definition lands
+    in the stdlib/`node_modules` the edge drops it or falls back to a false
+    local match. **verify FIRST**: what does `refineFar` (precision.go) do with
+    an out-of-root definition location right now? Then mint an EXTERNAL STUB
+    (`module@version#sym`, `domain: external`, ro) instead — the honest
+    boundary marker. Owed by this slice, not deferrable: precision CREATES
+    these the moment it resolves a library call.
 **Assumption made**: `textDocument/definition`'s first location is the
 declaration. True for gopls; unverified for tsserver/pylsp.
 

@@ -105,13 +105,23 @@ run (needs `AGENTKIT_API_KEY` + network). **next**:
   - ◻ **Run the `asis` baseline.** Reach-rate high → adoption isn't the wall,
     engine work is justified. Low → the icebox's "0 calls / 8 runs" reproduces
     and everything below is premature.
-  - ◻ **A/B the description (`--variant pattern`).** Tests the hypothesis that
-    models copy PATTERNS, not specs: the shipped `node_query` desc is spec-first
-    (grammar + FOOTGUNS, RECIPES buried last — `modern.go:65`); the variant
-    leads with intent-labeled recipes. `pattern` >> `asis` → rewrite the shipped
-    description, re-measure, done cheaply.
-  - ◻ **Then judge correctness** (LLM-judge over each task's `want`) + `--runs`
-    for variance. v1 scores answers by hand.
+  - ✅ **First A/B run (asis vs pattern vs inspired, 3 direct-question tasks,
+    n=1).** Reach-rate SATURATED — 3/3 for all three variants; even spec-first
+    `asis` gets node_query reached for (callers answered correctly). **Finding:
+    on direct relational questions the docs are NOT the wall** — which means the
+    icebox "0 calls / 8 runs" was the IN-FLOW case (model mid-task, grep
+    momentum, unprompted), not the wording. The direct-question set can't
+    measure the thing that matters; I measured the easy case. Only flicker:
+    `pattern` reached graph grep-free most often (weak, n=1).
+  - ◻ **Build the discriminating set: grep-TEMPTING, IN-FLOW tasks.** Embed the
+    question in a multi-step task where grep is the habitual default AND gives a
+    plausible-but-WRONG answer (name collisions — the lexical-vs-precise story).
+    That reproduces the 0-calls condition; only there can a description move
+    behavior. Metric shifts to "reached graph FIRST / grep-free" + correctness,
+    not binary reach (which saturates). Add `--runs` (single runs are noise).
+  - ◻ **Then judge correctness** (LLM-judge over each task's `want`).
+**Do NOT rewrite `modern.go`'s description yet** — the data doesn't support
+"docs are the wall" for obvious tasks, and the in-flow case is untested.
 **This gates further engine investment**: keep building the engine once
 adoption says agents reach for the graph at all — pause if it says they don't.
 **blocking decision (USER owns)**: if both variants stay low, the tool loses on
@@ -123,10 +133,20 @@ features.
     if B is far rarer than A, start from B and check ancestors. Needs the same
     per-compound estimate `:explain` renders (below). The ref pushdown was the
     measured 700× case; this is the general form.
-  - ◻ **The ~76k inversion floor is per-query.** Every edge query rebuilds
-    `sitesByFile`; on a 3× workspace even anchored edge queries approach the
-    budget. Cache the inversion in `symbols.Index` (invalidate on Refresh) —
-    same derived-state hazard as the `:explain` tallies below.
+  - ✅ **The ~76k inversion floor is gone from query budget.** `sitesByFile`
+    is now `symbols.Index.SitesByFile` — index-owned derived state, memoized on
+    `gen` (invalidates on Refresh), abs-keyed, liveness-evicting at build. An
+    edge query no longer charges the inversion to its budget: `func::in.call`
+    dropped 89,894 → 13,379 ops (−85%), `struct::in.type` 89,451 → 12,940.
+    **Measured caveat (measure-first paid off): the win is OPS, not wall** —
+    the inversion was 50ms of a 1.9s query; wall is unchanged because the real
+    bottleneck is the per-target far-end build (the O(sites) item below), which
+    this does not touch. Also note the 200k→10000ms default already relieved
+    the ops PRESSURE this item was written for; the value now is a lower ops
+    floor for `Nops` budgets + large workspaces, not a broad speedup. Tests:
+    `TestSitesByFile{EquivalenceAndMemo,EvictsVanishedFiles}`; determinism
+    budgets in `TestTrippedBudgetIsReproducible` retuned (trip moved into the
+    walk).
   - ◻ **Nothing short-circuits.** `evaluate()` computes the FULL set, then the
     caller slices, so `--limit 5` / `:first` pay for everything. Traversal is
     document-ordered so a top-level early exit at offset+limit is sound.

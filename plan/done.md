@@ -969,3 +969,32 @@ existed. Fix, three parts:
   `func:where(::in:contains('-E (huma|h)\.'))`. Both proven in
   TestImportEdgesFindHumaEndpoints (two files, alias + vN, scoping asserted)
   and live against a huma fixture app.
+
+## :not/:is, colon auto-repair, ~= guidance (shipped 2026-07-17)
+
+Driven by bonsai's hand-written dead-func detector
+(func:not(has(out.call)):not(#main):not([name~=Test])):
+
+- **:not(sel) / :is(sel)** — SELF-anchored, exactly CSS: the inner tests the
+  node itself (func:not(#main) = not named main), never a descendant. This
+  splits the inner conventions on purpose: :not/:is are the element-test
+  family (CSS :not), :where/:any/:all/:empty are the relative family (CSS
+  :has) — each name keeps its own prior. Single-compound inners test in
+  place; chained inners fall back to memoized global-set membership
+  (func:not(#web *)). :is fills mid-chain compound union (file > :is(func,
+  method)). :not(:any(::out.call)) ≡ :where(::out.call:empty), proven.
+- **Colon auto-repair** (normalizeSelector, pre-parse; the `.func` lesson
+  generalized): outside quotes/brackets and never after #/., `not(`/`any(`/…
+  gain their ':'; `in`/`out`/`grep`/`ref` gain their '::' (zero or one colon
+  repaired to two); `::any(` drops to one; and `has(` maps straight to
+  `:any(` — :has IS :any, so it now just works instead of lecturing.
+  Attachment semantics survive repair (X in.call → X ::in.call stays the
+  descendant form; the tight form is the host's own edges).
+- **[name~=X]** — guided error, not an alias: CSS ~= is word-list matching
+  and names aren't word lists; silently mapping to *= would be quietly
+  wrong, the worst kind. Error names ^=/*=/$=.
+- **The dead-code recipe is now the honest one**:
+  func:not(#main):not(#init):not([name^=Test]):where(::in:empty) — ∄
+  callers minus the roots the runtime calls for you. bonsai's exclusion
+  instinct was the insight; its direction (out vs in) was flipped — kept the
+  recipe prominent for exactly that reason.

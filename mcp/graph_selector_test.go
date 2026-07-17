@@ -403,6 +403,75 @@ func TestImportEdgesFindHumaEndpoints(t *testing.T) {
 	wantNodes(t, q, "main.go#GetUser", "main.go#HealthCheck", "admin.go#ResetAll")
 }
 
+// ---------------------------------------------------- :not / :is
+
+func TestNotAndIsAreSelfTests(t *testing.T) {
+	s := startGraph(t)
+	defer s.close()
+
+	// :not tests the node ITSELF (CSS-true): a leading #id is the node,
+	// never a descendant.
+	q := query(t, s, map[string]any{"selector": `#'main.go' > func:not(#C):not(#X)`, "limit": 50})
+	wantNodes(t, q, "main.go#B", "main.go#A", "main.go#Y", "main.go#UsesT")
+
+	// bonsai's dead-func detector, spelled: ∄ callers, minus the roots
+	// (an attr exclusion and an id exclusion, chained).
+	q = query(t, s, map[string]any{"selector": `func:not([name^=Use]):not(#useHelper):where(::in:empty)`, "limit": 50})
+	wantNodes(t, q, "main.go#A")
+
+	// :not of a pseudo-carrying compound ≡ the :empty claim.
+	a := query(t, s, map[string]any{"selector": `func:not(:any(::out.call))`, "limit": 50})
+	b := query(t, s, map[string]any{"selector": `func:where(::out.call:empty)`, "limit": 50})
+	if strings.Join(nodes(a), "|") != strings.Join(nodes(b), "|") || len(nodes(a)) == 0 {
+		t.Errorf(":not(:any(X)) must equal :where(X:empty); got %v vs %v", nodes(a), nodes(b))
+	}
+
+	// :is unions at the compound level, mid-chain.
+	q = query(t, s, map[string]any{"selector": `#'main.go' > :is(struct, var)`})
+	wantNodes(t, q, "main.go#T", "main.go#h")
+
+	// A chained inner falls back to global membership: funcs NOT under web/.
+	q = query(t, s, map[string]any{"selector": `func:not(#web *)`, "limit": 50})
+	for _, n := range nodes(q) {
+		if strings.HasPrefix(n, "web/") {
+			t.Errorf("web funcs should be excluded; got %v", nodes(q))
+		}
+	}
+	if !hasNode(q, "main.go#C") {
+		t.Errorf("go funcs should remain; got %v", nodes(q))
+	}
+}
+
+// ---------------------------------------------- colon auto-repair
+
+func TestMissingColonsAreRepaired(t *testing.T) {
+	s := startGraph(t)
+	defer s.close()
+
+	// bonsai's raw spelling shape, verbatim — has() maps to :any,
+	// out.call gets its two colons, not() its one. Funcs that make no
+	// calls, C excluded by id.
+	q := query(t, s, map[string]any{"selector": `func:not(has(out.call)):not(#C)`, "limit": 50})
+	wantNodes(t, q, "main.go#UsesT", "web/util.ts#tsHelper")
+
+	// Each repair also works alone, and equals the canonical spelling.
+	// NB: repairs are syntax-level only — CSS attachment semantics
+	// survive them, so the tight forms are the ones that mean "C's own
+	// edges" (X::in vs X ::in, as #a::before vs #a ::before).
+	for sel, same := range map[string]string{
+		`file:has(func)`:             `file:any(func)`,
+		`#'main.go#C'in.call`:        `#'main.go#C'::in.call`,
+		`#'main.go#C':in.call`:       `#'main.go#C'::in.call`,
+		`func:where(out.call:empty)`: `func:where(::out.call:empty)`,
+	} {
+		a := query(t, s, map[string]any{"selector": sel, "limit": 50})
+		b := query(t, s, map[string]any{"selector": same, "limit": 50})
+		if strings.Join(nodes(a), "|") != strings.Join(nodes(b), "|") || a.TotalMatches == 0 {
+			t.Errorf("%s should repair to %s; got %v vs %v", sel, same, nodes(a), nodes(b))
+		}
+	}
+}
+
 // --------------------------------------------------------- guided errors
 
 func TestRetiredSpellingsNameTheirReplacement(t *testing.T) {
@@ -410,8 +479,8 @@ func TestRetiredSpellingsNameTheirReplacement(t *testing.T) {
 	defer s.close()
 
 	for sel, want := range map[string]string{
-		`file:has(func)`:            ":any",
 		`func:has_parent(#'a.go')`:  `#'a.ts' func`,
+		`func[name~=Test]`:          "^=",
 		`*:references(#'C')`:        "::out",
 		`*:depth(0,0)`:              "{m,n}",
 		`func::ref.out`:             "::in",

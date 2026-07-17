@@ -176,6 +176,10 @@ type engine struct {
 	// same host+pattern yields the SAME nodes across a query (set
 	// semantics need identity).
 	fragCache map[*treeNode]map[string][]*treeNode
+
+	// selfSetCache: full-workspace match sets for :not/:is chain inners,
+	// keyed by the inner AST's backing array.
+	selfSetCache map[string]map[*treeNode]bool
 }
 
 // kids returns n's children, parsing a file's symbols on first use.
@@ -444,6 +448,8 @@ const (
 	pseudoAny                           // :any[(sel)]       — ∃ claim
 	pseudoAll                           // :all[(sel)]       — ∀ claim
 	pseudoEmpty                         // :empty[(sel)]     — ∄ claim
+	pseudoNot                           // :not(sel)         — the node ITSELF does not match (CSS-true)
+	pseudoIs                            // :is(sel)          — the node ITSELF matches (CSS-true)
 )
 
 func (k selPseudoKind) isMove() bool  { return k == pseudoParents }
@@ -522,8 +528,106 @@ type selectorList []selComplex
 
 // ----------------------------------------------------------- parser
 
+// normalizeSelector repairs the colon mistakes models actually make,
+// BEFORE parsing — the `.func` lesson generalized: accept what is
+// unambiguous, error only on what is actually wrong. Outside quotes and
+// [attr] brackets, and never after an id/class sigil:
+//
+//	has(x)  any(x)  not(x) …  → :any(x) :not(x) …   (missing ':';
+//	        :has IS our :any, so it maps instead of lecturing)
+//	out.call  in  :out  grep( → ::out.call ::in ::out ::grep(
+//	        (edge/fragment names take TWO colons — one or zero repaired)
+//	::any(x)                  → :any(x)             (one too many)
+func normalizeSelector(s string) string {
+	rs := []rune(s)
+	b := make([]rune, 0, len(rs)+8)
+	var quote rune
+	brackets := 0
+	for i := 0; i < len(rs); {
+		c := rs[i]
+		if quote != 0 {
+			b = append(b, c)
+			if c == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+		case '[':
+			brackets++
+		case ']':
+			if brackets > 0 {
+				brackets--
+			}
+		}
+		if brackets == 0 && isSelIdentStart(c) {
+			j := i
+			for j < len(rs) && isModIdentPart(rs[j]) {
+				j++
+			}
+			word := string(rs[i:j])
+			var next rune
+			if j < len(rs) {
+				next = rs[j]
+			}
+			colons := 0
+			for k := len(b) - 1; k >= 0 && b[k] == ':'; k-- {
+				colons++
+			}
+			var prev rune
+			if k := len(b) - colons - 1; k >= 0 {
+				prev = b[k]
+			}
+			fix := func(want int, name string) {
+				b = b[:len(b)-colons]
+				for range want {
+					b = append(b, ':')
+				}
+				b = append(b, []rune(name)...)
+			}
+			switch {
+			case prev == '#' || prev == '.':
+				b = append(b, rs[i:j]...) // an id or class keeps its word
+			case word == "has" && next == '(':
+				fix(1, "any")
+			case selPseudoParenName(word) && next == '(':
+				fix(1, word)
+			case selPseudoElemName(word):
+				fix(2, word)
+			default:
+				b = append(b, rs[i:j]...)
+			}
+			i = j
+			continue
+		}
+		b = append(b, c)
+		i++
+	}
+	return string(b)
+}
+
+func selPseudoParenName(w string) bool {
+	switch w {
+	case "not", "is", "where", "any", "all", "empty", "contains",
+		"parents", "depth", "has_parent", "references":
+		return true
+	}
+	return false
+}
+
+func selPseudoElemName(w string) bool {
+	switch w {
+	case "in", "out", "grep", "ref":
+		return true
+	}
+	return false
+}
+
 func parseModernSelector(input string) (selectorList, error) {
-	p := &modSelParser{s: []rune(input)}
+	p := &modSelParser{s: []rune(normalizeSelector(input))}
 	list, err := p.parseList()
 	if err != nil {
 		return nil, err
@@ -1110,6 +1214,8 @@ func (p *modSelParser) parseAttr() (selAttr, error) {
 		}
 		p.i++
 		a.op = selContains
+	case '~':
+		return a, fmt.Errorf("[name~=X] is CSS's space-separated word-list match, and names aren't word lists — use [name^=X] (prefix), [name*=X] (contains) or [name$=X] (suffix)")
 	default:
 		return a, p.errf("one of = ^= $= *=")
 	}
@@ -1181,6 +1287,20 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 			return nil
 		}
 		comp.positionClaims = append(comp.positionClaims, kind)
+		return nil
+	case "not", "is":
+		// SELF-anchored, exactly CSS: :not(#main) = not named main.
+		// (The relative inners belong to :where/:any/:all/:empty — the
+		// :has family; :not/:is are the element-test family.)
+		inner, err := p.parsePseudoArg(name, false)
+		if err != nil {
+			return err
+		}
+		kind := pseudoNot
+		if name == "is" {
+			kind = pseudoIs
+		}
+		comp.pseudos = append(comp.pseudos, selPseudo{kind: kind, inner: inner})
 		return nil
 	case "grep":
 		return fmt.Errorf(":grep is the pseudo-ELEMENT ::grep('-w TODO') — it mints the matched LINES as nodes; the boolean filter is :contains('…')")
@@ -1525,6 +1645,8 @@ cross an edge only by naming it.
          Parenthesized :where/:any/:all/:empty(sel) take a RELATIVE selector (CSS nesting): a leading
          pseudo/::element binds to the node itself; a leading tag/*/#id means a descendant
          (file:any(func#test)); '>' = child; :root re-anchors; an explicit & is the node under test.
+  SELF   :not(sel) / :is(sel) test the NODE ITSELF, exactly as CSS: func:not(#main):not([name^=Test]),
+         file > :is(func, method). (Contrast :where/:any — the :has family — whose sel is RELATIVE.)
   ORDER  :first / :last — pick from this position's matches, per anchor, in document order.
   REP    {m,n} REPEATS an element or (group), child-joined: func{2} = func > func; (a b){2} = a b > a b.
          {m,} = unbounded, cycle-safe. Zero reps make the element vanish: "> *{0,2} > b" = b within 1..3 levels.
@@ -1807,6 +1929,46 @@ func (e *engine) refMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed
 
 func refDirMatch(r *treeNode, comp *selCompound) bool {
 	return r.refDir == comp.refDir
+}
+
+// selfMatches is :not/:is's test — does the node ITSELF match the
+// selector, exactly CSS's reading (a leading tag/#id here is the node,
+// never a descendant). Single-compound inners test in place; a full
+// chain falls back to global-set membership, memoized per inner AST.
+func (e *engine) selfMatches(n *treeNode, list selectorList) bool {
+	for ci := range list {
+		cx := &list[ci]
+		if len(cx.elems) == 1 && cx.elems[0].comp != nil && cx.elems[0].group == nil {
+			comp := cx.elems[0].comp
+			if comp.root && n != e.project {
+				continue
+			}
+			if e.positionalMatch(n, comp) &&
+				len(e.applyPseudos(map[*treeNode]bool{n: true}, comp, false)) > 0 {
+				return true
+			}
+			continue
+		}
+		if e.globalComplexSet(cx)[n] {
+			return true
+		}
+	}
+	return false
+}
+
+// globalComplexSet memoizes a complex's full workspace match set —
+// :not/:is may test it once per candidate node.
+func (e *engine) globalComplexSet(cx *selComplex) map[*treeNode]bool {
+	key := fmt.Sprintf("%p", cx.elems)
+	if e.selfSetCache == nil {
+		e.selfSetCache = map[string]map[*treeNode]bool{}
+	}
+	if v, ok := e.selfSetCache[key]; ok {
+		return v
+	}
+	v := e.evalComplex(*cx, e.project, false)
+	e.selfSetCache[key] = v
+	return v
 }
 
 // fragMatches mints (memoized) the matched-line fragments of each host.
@@ -2095,6 +2257,10 @@ func (e *engine) pseudoHolds(n *treeNode, ps *selPseudo) bool {
 		return len(e.evalList(ps.inner, n, false)) > 0
 	case pseudoEmpty:
 		return len(e.evalList(ps.inner, n, false)) == 0
+	case pseudoNot:
+		return !e.selfMatches(n, ps.inner)
+	case pseudoIs:
+		return e.selfMatches(n, ps.inner)
 	case pseudoAll:
 		// ∀: everything the structure REACHES (domain: subject
 		// constraints relaxed) must also MATCH as written. The domain is

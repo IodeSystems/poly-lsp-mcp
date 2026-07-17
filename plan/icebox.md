@@ -14,10 +14,12 @@ labels itself nondeterministic ("vary run to run; use Nops for a reproducible
 cut"), distinct from the deterministic work-budget note. Both capped (5M ops /
 30s) so a runaway can't stall the server.
 
-Open decision (USER owns): the OMITTED default is still 200000 **ops**
-(deterministic) — a bare *provided* value is ms, but no-budget-given keeps the
-deterministic default. If the omitted default should also become a wall-clock
-time, that is a one-line change; left deterministic-by-default deliberately.
+Resolved: the OMITTED default is now **10000ms** (10s wall clock) — the user's
+call. buildTree applies it when no explicit server ops budget is set; a query
+that finishes under 10s stays deterministic, a 10s+ one trips with the
+nondeterministic label. `SetQueryWorkBudget` and an `Nops` arg both force the
+deterministic path. Trade: the old restrictive 200k-op default (truncated many
+broad edge queries) is gone; broad queries now complete.
 
 ## `return` as a node — the remaining trivia sibling
 

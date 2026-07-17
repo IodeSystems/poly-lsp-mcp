@@ -21,34 +21,26 @@ languages (lexical / declared / schema-anchored tiers). `poly-lsp-mcp mcp --root
   over one unified node tree (project > dir > file > symbols > argument),
   addressed as `<file>#<sym>`, queried by CSS selector. Legacy 9-tool surface
   behind `--legacy-tools`. Sandbox jail + read-only mode: commit `0fbeb02`.
-- Selector language: CSS containment + the graph half — `:parents(sel){m,n}`
-  move (refs-only re-root, legal anywhere in the chain) and
-  `:where/:any/:all/:empty` set operators. Shipped 2026-07-17 → done.md
-  ("Graph selector language — slice 1") for the full design record.
+- Selector language: CSS containment + the graph half. Two moves —
+  `:parents` (incoming) / `:references` (outgoing), bare or `(sel)`, `{m,n}`
+  hops, `{1,}` transitive — legal anywhere in the chain. Bare
+  `:any/:all/:empty` close a move postfix and collapse to the subject
+  (`func:parents:empty` = dead code); parenthesized forms test relative
+  selectors whose start is assumed `&` (CSS nesting rule; `:root`
+  re-anchors). `{m,n}` on a compound is the canonical depth range
+  (`:depth` = alias). Shipped 2026-07-17 in two slices → done.md ("Graph
+  selector language") for the design record and decisions.
 
-## Active work — graph selector language, remainder
+## Active work
 
-Slice 1 ✅ (move + hop ranges + quantifiers, old pseudos removed with guided
-errors, docs/budget updated, live-smoked on this repo). Remaining, in build
-order:
+None in flight. The graph selector language (both slices) ✅ → done.md.
+Next candidates are opt-in, in icebox.md — the most valuable is adoption
+measurement: does anything USE :parents/:references unprompted?
 
-- ◻ Group ranges on CONTAINMENT: `a *{m,n} b`, `a func{1,3} b` (b within m..n
-  hops of a, through nodes matching the group). Unifies `>` = `*{0}` and
-  space = `*{0,}` as non-primitives.
-  - **next**: extend the combinator parse to accept a compound + `{m,n}` as a
-    range-carrying group; route through the same walk collectMatches does.
-- ◻ Retire `:depth(m,n)` once group ranges land (it dissolves into
-  `*{m-1,n-1}`); guided error naming the spelling, same pattern as :has.
-- **risks**: `:where` ≡ `:any` at tip granularity (documented at pseudoHolds)
-  — only diverges if path-level filtering ships; unbounded `:parents{m,}`
-  with m>1 collects nodes at their shortest hop only (documented at
-  moveParents); referrers are name-keyed (lexical index), so same-named
-  symbols share referrers — unchanged from :references.
-- **blocking decisions**: none open. Edge model (refs-only re-root), operator
-  name (`parents`, counter-documented), and quantifier scoping (relative +
-  scope-binding) were resolved with the user 2026-07-17.
-- **optional extensions** (icebox): path-level :where over retained edges;
-  :parents adoption measurement.
+Known caveats (documented in code): `:where(sel)` ≡ `:any(sel)` at tip
+granularity (pseudoHolds); unbounded `{m,}` with m>1 collects nodes at their
+shortest hop (moveEdges); reference edges are name-keyed via the lexical
+index, so same-named symbols share edges.
 
 ## Non-goals (for now)
 

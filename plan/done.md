@@ -856,3 +856,45 @@ the one form measured to move usage).
   move; forced onto poly-lsp a model found 12/12 render paths vs bash's 10/12
   that "looked complete"; selector error rate 42% → 17% came entirely from
   output-side fixes.
+
+## Graph selector language — slice 2: the postfix algebra (shipped 2026-07-17)
+
+Same-day user-driven redesign of slice 1's operator surface. Decisions:
+
+- **Two directions, two honest names.** `:parents` = incoming (who points at
+  the tip), `:references` = outgoing (what the tip points at). Both bare
+  (= unfiltered) or `(sel)`, both `{m,n}` hops. "What main calls" is now one
+  move (`#'main':references(func)`), not a nested quantifier.
+- **Postfix pipeline on a compound.** A move opens an excursion (tips walk
+  the reference graph); parenthesized pseudos filter the current tips; a
+  BARE `:any/:all/:empty` CLOSES the excursion — it decides by the reached
+  set and collapses back to the subject. `func:parents:empty` = dead code,
+  the easy rewrite of the canonical `func:where(&:parents:empty)`. A bare
+  claim with no open move is a parse error naming the fix. Bare `:all`
+  compares the written walk against the unfiltered walk (∀, per excursion).
+- **The start of a relative inner is ASSUMED to be `&`** — the CSS nesting
+  rule, so the CSS prior is correct: a leading pseudo attaches to the node
+  under test (`:where(:parents:empty)`), a leading tag/*/#id means a
+  descendant, `>` a child; `:root` re-anchors globally (the one exception);
+  explicit `&` is always allowed. Slice 1's implicit scope-binding special
+  case dissolved into this uniform rule.
+- **`{m,n}` is THE range syntax** — move hops and compound depth share it.
+  `b{1,3}` = within 1..3 levels of the previous target, `{0}` = that target
+  itself (the self-reference trick: `method:where(:references(*) #'X'{0})` =
+  methods that mention X). Space ≡ `{1,}` and `>` ≡ `{1}` stay as CSS sugar;
+  `:depth(m,n)` stays as an accepted alias. The icebox's through-typed
+  containment ranges (`a func{1,3} b`) were DROPPED: no use case in a
+  containment tree, and moves already do through-filtering where it matters.
+- **Description is recipes-first** (user call: a few complex-but-common
+  traversals beat language-spec prose for quantized models); the spec lives
+  behind selector "?". 1059/1080 tokens.
+- **Outgoing edge** (`referencesOf`): built whole on first use — decl nodes
+  per name × non-decl sites of that name → src → targets. Name-keyed and
+  decl-excluded like the incoming edge; a node references its own arguments
+  and nested symbols when its body mentions them (filter with `(sel)`).
+
+Verified: graph_selector_test.go — outgoing single/filtered/transitive, bare
+claims incl. the `:any` complement, canonical `:where(&…)` ≡ bare-postfix
+equivalence, bare `:all` ≡ parenthesized `:all` agreement, `&`/claim parse
+rules, `{m,n}` ≡ `:depth` byte-equal results, `{0}` self trick. Live-smoked
+on this repo.

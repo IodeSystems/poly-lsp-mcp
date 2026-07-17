@@ -62,20 +62,14 @@ func registerModernTools() map[string]Tool {
 // information. Keep them dense.
 
 const modernNodeQueryDescription = `Projectional editor over ONE node tree, queried by CSS selector: project > dir > file > symbols (dotted-nested) > argument. Files are nodes; no separate filesystem API.
-TYPES are bare tags (CSS elements; fixed set): project dir file func method type struct interface class const var field enum ctor module import argument, or *.
-Workspace NAMES are #ids, never tags: dir cache/ = #cache. No classes; "." unused.
-Ids: #bare or #'quoted'. A symbol answers to its name, dotted path, or '<file>#<sym>'; a dir/file to basename or relpath.
-space=descendant, >=child, comma=union. Combinators walk DOWN through containment.
-:root — the workspace root.
-:parents(sel) — the ONE move that leaves the tree: tip becomes the nodes matching sel that REFERENCE it, and the chain continues from there. {m,n} hops; {1,} = transitive closure.
-:where/:any/:all/:empty(sel) — filter/∃/∀/∄: do paths of sel connect to this node. sel is relative: descendants by default, '>' children, or lead with :parents(...) to ask about referrers.
-:contains('text') — the node's OWN source, not its children's.
-:depth(m,n) — m..n levels from the previous target (0=itself), else from :root; overrides the combinator.
-Examples: file = EVERY file, nested included. #cache > file = files directly in dir cache/. :root > * = ONLY top level.
-From an address (matches[].node, e.g. store.go#Save) — #'store.go#Save':parents(*) = every caller, WITHOUT reading files. #'store.go' func = every func in it.
-More: #'Save':parents(func){1,} = all transitive callers. func:any(:parents(#'main')) = what main calls. func:empty(:parents(*)) = dead code.
+TYPES are bare tags (fixed set): project dir file func method type struct interface class const var field enum ctor module import argument, or *. Workspace NAMES are #ids, never tags: dir cache/ = #cache. Ids: #bare or #'quoted'; a '<file>#<sym>' address is an id: #'store.go#Save'.
+space=descendant, >=child, comma=union — containment, as CSS.
+Moves walk the REFERENCE graph from the current node: :parents = who points at it, :references = what it points at. (sel) constrains every hop; {m,n} hops, {1,} = transitive. The chain continues from the moved-to nodes.
+A BARE :any/:all/:empty closes the walk: ∃/∀/∄ over the reached set, keeping or killing the node that STARTED it. :where/:any/:all/:empty(sel) test a relative selector — its start is assumed to be & (this node), CSS-nesting style: a leading pseudo attaches to &, a leading tag/#id means a descendant.
+RECIPES (start from an address in matches[].node):
+#'store.go#Save':parents(*) who calls Save | :parents(func){1,} every transitive caller | #'main.go#main':references(func) what main calls | func:parents:empty dead code | func:references(func):empty calls nothing | #'store.go' func funcs in that file | #cache func:any(argument#ctx) funcs under cache/ taking a ctx arg | #'Save':parents(func) argument args of every caller | :root > * top-level tour.
 grep: flags+pattern over each match's own source, e.g. "-i -A2 derp". -i -w -E -F -v -n -A/-B/-C<n>; literal unless -E. Nodes with no hit drop out.
-limit default 20; offset pages. selector "?" returns the grammar.`
+limit default 20; offset pages. selector "?" returns the full grammar (:contains, {m,n} depth ranges, [name^=] …).`
 
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save':parents(*)"},` +

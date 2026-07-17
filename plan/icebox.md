@@ -5,22 +5,19 @@ graph-selector design record this used to hold.
 
 ---
 
-## Wall-clock budget — DON'T make it the primary (it breaks determinism)
+## Wall-clock budget — SHIPPED as ms/ops-suffixed, → done.md
 
-The work budget (spend units) truncates DETERMINISTICALLY — the whole point of
-the `ordered()` walk: same query + same index → same partial, every run. A
-wall-clock budget ("stop after 2s") reintroduces exactly the coin-flip that
-work removed: the same query returns different results run-to-run and
-box-to-box, depending on timing. So wall-clock must NOT replace the work
-budget.
+`budget` now carries a unit: `Nops` deterministic work units, `Nms` (and a bare
+number) wall clock. Ms is the intuitive default; ops is the reproducible
+opt-in. The determinism hazard is HANDLED, not ignored — a time-tripped result
+labels itself nondeterministic ("vary run to run; use Nops for a reproducible
+cut"), distinct from the deterministic work-budget note. Both capped (5M ops /
+30s) so a runaway can't stall the server.
 
-Where it COULD earn a place: a secondary SAFETY timeout to kill a genuinely
-runaway query (a pathological case the work budget's 5M cap doesn't catch in
-reasonable time). If added, it must be clearly labelled a nondeterministic
-safety net, distinct from the deterministic work budget — the result note says
-"stopped on a time limit (results vary run-to-run), not the work budget." Only
-build if a real query is observed hanging under the work-budget cap; the work
-budget already bounds time indirectly (200k units ≈ bounded wall-clock).
+Open decision (USER owns): the OMITTED default is still 200000 **ops**
+(deterministic) — a bare *provided* value is ms, but no-budget-given keeps the
+deterministic default. If the omitted default should also become a wall-clock
+time, that is a one-line change; left deterministic-by-default deliberately.
 
 ## `return` as a node — the remaining trivia sibling
 

@@ -64,7 +64,7 @@ func registerModernTools() map[string]Tool {
 
 const modernNodeQueryDescription = `CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements. Files are nodes; no separate filesystem API.
 TAGS are a FIXED set: project dir file func method type struct interface class const var field enum ctor module import argument, *. Workspace NAMES are NEVER tags, always #ids: #cache, #'store.go#Save' (quote with '). Language as class: file.go. space=descendant >=child ,=union.
-GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive. External deps land on the import node: import#huma::in.call.
+GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive.
 ::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E).
 FOOTGUNS: * NEVER matches ::edges or ::grep lines — name them or they're invisible. {m,n} elsewhere is regex REPETITION child-joined, NOT depth: func{2} = func>func, (a b){2} groups, within-3-levels = "> *{0,2} > x". :not/:is(sel) test the node ITSELF; :where/:any/:all/:empty(sel) test AROUND it (leading tag = a descendant, leading ::/pseudo = the node; bare :any/:all/:empty judge their position). :parents(sel) = ALL upstream (ancestors + incoming refs) — broader than callers. Edge/::grep addresses are file@line: node_read/node_edit hit that exact line.
 RECIPES: #'a.go#Save'::in.call callers | ::in.call{1,} > * transitive callers | #'main'::out.call > * callees | func:not(#main):not(#init):not([name^=Test]):where(::in:empty) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints | :root > * tour.
@@ -73,8 +73,15 @@ limit 20; offset pages; selector "?" = the full grammar.`
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
-	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."}},` +
+	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."},` +
+	`"budget":{"type":"integer","minimum":1,"description":"max work units, default 200000, max 5M"}},` +
 	`"required":["selector"]}`)
+
+// maxNodeQueryBudget caps a caller-supplied budget: the MCP server is
+// long-lived, so an unbounded budget would let one query stall every
+// other request. Narrowing is the intended fix; raising is the escape
+// hatch for a genuinely large query.
+const maxNodeQueryBudget = 5_000_000
 
 const modernNodeReadDescription = `Read a node whole. node = an address from node_query's matches[].node ("<file>#<sym>" or "<file>"), or a selector matching exactly one node (2+ errors and lists candidates).
 An addressed symbol is NEVER truncated: you get the complete declaration, byte-for-byte the span node_edit's newText replaces.
@@ -122,6 +129,7 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 		Grep     string `json:"grep"`
 		Limit    *int   `json:"limit"`
 		Offset   *int   `json:"offset"`
+		Budget   *int   `json:"budget"`
 	}
 	if len(args) > 0 && string(args) != "null" {
 		if err := json.Unmarshal(args, &p); err != nil {
@@ -163,6 +171,13 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	e, err := s.buildTree()
 	if err != nil {
 		return nil, true, err
+	}
+	if p.Budget != nil && *p.Budget > 0 {
+		b := *p.Budget
+		if b > maxNodeQueryBudget {
+			b = maxNodeQueryBudget
+		}
+		e.workLeft = b // per-query override of the default work budget
 	}
 
 	rows := e.evaluate(list)
@@ -263,7 +278,7 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	// contract: flag it and name the fix, never trim quietly.
 	if e.workExceeded {
 		payload["truncated"] = true
-		payload["note"] = "evaluation stopped at the work budget — results may be INCOMPLETE. Narrow the traversal: a kind class (::in.call), a filtered inner (:parents(func)), bounded hops ({1,3}), or a tighter scope"
+		payload["note"] = "evaluation stopped at the work budget — results may be INCOMPLETE. Two levers: (1) NARROW — cost[] names the element that ate the budget; add a kind class (::in.call), a filter (:parents(func)), or bounded hops ({1,3}) THERE. (2) RAISE — retry with a higher `budget` arg (max 5000000) if the query is genuinely large. Narrowing is usually right."
 		// The per-element cost trace points at what ate the budget, so
 		// the model narrows the RIGHT element instead of guessing.
 		payload["cost"] = e.costTrace(list)

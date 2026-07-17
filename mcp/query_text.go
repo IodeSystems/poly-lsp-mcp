@@ -82,8 +82,31 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 	if e.workExceeded {
 		trace = e.costTrace(list)
 	}
-	return renderQueryTree(w, paged, total, offset, end, e.workExceeded, e.timedOut, trace)
+	if err := renderQueryTree(w, paged, total, offset, end, e.workExceeded, e.timedOut, trace); err != nil {
+		return err
+	}
+	// The CLI spawns no child LSP, so every edge it crossed is name-keyed
+	// (lexical) — a far end may be a same-named symbol, not the resolved
+	// one. The tree renders far ends without a conf column, so without
+	// this line a lexical guess reads as a settled fact. Only the MCP
+	// server resolves (conf: lsp); say so whenever an edge was involved.
+	if usesEdge(selector) {
+		_, err := fmt.Fprint(w, lexicalEdgeNote)
+		return err
+	}
+	return nil
 }
+
+// usesEdge reports whether a selector references a graph edge — the only
+// case the lexical-edge caveat applies to. `::in`/`::out` are the sole
+// edge pseudo-elements; ::comment / ::grep are not edges.
+func usesEdge(selector string) bool {
+	return strings.Contains(selector, "::in") || strings.Contains(selector, "::out")
+}
+
+const lexicalEdgeNote = "\nnote: ::in/::out edges are name-keyed (lexical) here — a far end may be a\n" +
+	"same-named symbol, not the resolved one. The MCP server resolves via child\n" +
+	"LSPs and labels each edge (conf: lsp|lexical); `query` does not.\n"
 
 // maxFarEnds caps how many far ends one ref row spells out before it
 // starts counting them instead.

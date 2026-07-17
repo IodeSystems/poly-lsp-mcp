@@ -592,6 +592,7 @@ type selPseudoKind int
 
 const (
 	pseudoContains selPseudoKind = iota // :contains('text') — filter on own source
+	pseudoAnnotated                     // :annotated('text')— filter on the block ABOVE the decl
 	pseudoParents                       // :parents[(sel)]   — MOVE upstream (the one inverse)
 	pseudoWhere                         // :where(sel)       — filter: a path matches
 	pseudoAny                           // :any[(sel)]       — ∃ claim
@@ -762,7 +763,7 @@ func normalizeSelector(s string) string {
 
 func selPseudoParenName(w string) bool {
 	switch w {
-	case "not", "is", "where", "any", "all", "empty", "contains",
+	case "not", "is", "where", "any", "all", "empty", "contains", "annotated",
 		"parents", "depth", "has_parent", "references":
 		return true
 	}
@@ -1491,42 +1492,27 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 		return nil
 	case "grep":
 		return fmt.Errorf(":grep is the pseudo-ELEMENT ::grep('-w TODO') — it mints the matched LINES as nodes; the boolean filter is :contains('…')")
+	case "decorated", "tagged", "annotation":
+		return fmt.Errorf(":%s is spelled :annotated('pat') — it greps the decorator/annotation/doc block above the declaration", name)
 	case "has", "has_parent", "references":
 		return removedPseudoErr(name)
 	case "contains":
-		if p.peek() != '(' {
-			return p.errf("'(' after :contains")
-		}
-		p.i++
-		p.skipWS()
-		// Both quotes, ' preferred: the selector rides inside a JSON string, so
-		// :contains("x") costs an escaping layer that :contains('x') does not.
-		q := p.peek()
-		if q != '"' && q != '\'' {
-			return p.errf("a quoted string, e.g. :contains('TODO')")
-		}
-		p.i++
-		start := p.i
-		for !p.eof() && p.s[p.i] != q {
-			p.i++
-		}
-		if p.eof() {
-			return p.errf(fmt.Sprintf("a closing %c for :contains", q))
-		}
-		text := string(p.s[start:p.i])
-		p.i++
-		p.skipWS()
-		if p.peek() != ')' {
-			return p.errf("')' to close :contains")
-		}
-		p.i++
 		// Same grep-flag vocabulary, same matcher — :contains is just
-		// the boolean any-match projection of it.
-		g, err := parseContainsSpec(text)
+		// the boolean any-match projection of ::grep, over the body.
+		g, err := p.parseGrepPseudoSpec("contains")
 		if err != nil {
-			return fmt.Errorf("bad :contains(%q): %w", text, err)
+			return err
 		}
 		comp.pseudos = append(comp.pseudos, selPseudo{kind: pseudoContains, grep: g})
+		return nil
+	case "annotated":
+		// The same matcher, over the annotation/decorator/doc block
+		// ABOVE the declaration (see nodeAnnotated).
+		g, err := p.parseGrepPseudoSpec("annotated")
+		if err != nil {
+			return err
+		}
+		comp.pseudos = append(comp.pseudos, selPseudo{kind: pseudoAnnotated, grep: g})
 		return nil
 	case "depth":
 		return fmt.Errorf(":depth is gone — {m,n} REPEATS (regex semantics): func{2} = func > func; 'within 1..3 levels' = \"> *{0,2} > func\". Pass selector \"?\" for the grammar.")
@@ -1858,7 +1844,10 @@ SPEC
          enclosing symbol: X::out = X's own, X ::out = nested symbols' too. {m,n} = edges
          crossed, {1,} = transitive. * NEVER matches an edge. Address = site ("file@line").
   ::grep('flags pattern')  matched lines as nodes. -i -w -E -F -v -A<n> -B<n> -C<n>; literal
-         unless -E. :contains('…') is the boolean form (no context flags).
+         unless -E. :contains('…') is the boolean form over the node's BODY.
+  :annotated('…')  boolean grep over the decorator/annotation/doc block ON the decl —
+         the symbol CARRYING the mark, not the line. func:annotated('@app.route'),
+         class:annotated('@Component'), func:annotated('-w Deprecated'). Same flags as :contains.
   :parents(sel)  everything UPSTREAM of the tip (ancestors ∪ incoming refs, transitive) —
          broader than callers. *:parents:empty = only :root.
   CLAIMS bare :any/:all/:empty judge the set at their position (in :where, or after :parents)
@@ -2561,6 +2550,8 @@ func (e *engine) pseudoHolds(n *treeNode, ps *selPseudo) bool {
 	switch ps.kind {
 	case pseudoContains:
 		return e.nodeContains(n, ps.grep)
+	case pseudoAnnotated:
+		return e.nodeAnnotated(n, ps.grep)
 	case pseudoWhere, pseudoAny:
 		// :where and :any coincide while the set is tested tip-by-tip;
 		// :where is documented as the filter (subset flows on), :any as
@@ -3068,6 +3059,77 @@ func (e *engine) nodeContains(n *treeNode, g *grepSpec) bool {
 	return false
 }
 
+// annotatedScanLimit bounds how far above a declaration :annotated
+// looks. A blank line ends the block first in almost every case; this
+// only guards a pathological run of unbroken comment lines.
+const annotatedScanLimit = 64
+
+// nodeAnnotated is the :annotated predicate — it greps the contiguous
+// non-blank block IMMEDIATELY ABOVE the declaration, where decorators
+// (@app.route), annotations (@Deprecated), and attached doc comments
+// live. That block is OUTSIDE the node's own span, so :contains (which
+// greps the body) never sees it — hence a separate predicate. This is
+// what answers "who is annotated with X": the SYMBOL carrying the
+// annotation, not the comment line ::grep would return.
+//
+// The block is the leading trivia: walking up from the decl's first
+// line until a blank line. Stacked decorators have no blank between
+// them, and a doc comment attached to a decl has none either, so one
+// contiguous run captures both.
+func (e *engine) nodeAnnotated(n *treeNode, g *grepSpec) bool {
+	switch n.class {
+	case "project", "dir", "file":
+		return false // no declaration line to sit beneath annotations
+	}
+	content, err := os.ReadFile(n.abs)
+	if err != nil {
+		return false
+	}
+	all := splitNodeReadLines(content)
+	declIdx := n.at[0] - 1 // 0-based index of the decl's first line
+	if declIdx < 0 || declIdx > len(all) {
+		return false
+	}
+	// Above the span: decorators/annotations/doc a language leaves
+	// OUTSIDE the declaration (Python, TS). A blank line ends the block.
+	for i := declIdx - 1; i >= 0 && declIdx-i <= annotatedScanLimit; i-- {
+		if strings.TrimSpace(all[i]) == "" {
+			break
+		}
+		if g.matchLine(all[i]) {
+			return true
+		}
+	}
+	// Inside the span: some languages fold the doc comment INTO the
+	// declaration (Go attributes `// Deprecated:` to the func, so at[0]
+	// is the comment line). Scan the leading trivia until the real code.
+	for i := declIdx; i < len(all) && i-declIdx <= annotatedScanLimit; i++ {
+		if !isTriviaLine(all[i]) {
+			break // reached the declaration keyword — trivia is over
+		}
+		if g.matchLine(all[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTriviaLine reports whether a line is leading trivia — a decorator,
+// annotation, comment, or blank — rather than code. Prefix-based and
+// language-agnostic: it only decides where a declaration's annotation
+// block ends, not what the trivia means.
+func isTriviaLine(s string) bool {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return true
+	}
+	switch t[0] {
+	case '@', '#', '*': // decorator/annotation, hash comment, block-comment body
+		return true
+	}
+	return strings.HasPrefix(t, "//") || strings.HasPrefix(t, "/*")
+}
+
 // isDeclSite reports whether a lexical site IS a declaration — the identifier
 // occurrence at a symbol's own name position — rather than a use of it.
 //
@@ -3189,6 +3251,42 @@ func (g *grepSpec) finalize() error {
 //
 // Context flags (-A/-B/-C) are rejected: :contains is a yes/no
 // predicate, so there is nothing to give context to.
+// parseGrepPseudoSpec reads `('<pattern>')` for a boolean grep pseudo
+// (:contains, :annotated) and compiles it. Both quotes work, ' preferred
+// — the selector rides inside a JSON string, so "x" costs an escaping
+// layer 'x' does not.
+func (p *modSelParser) parseGrepPseudoSpec(name string) (*grepSpec, error) {
+	if p.peek() != '(' {
+		return nil, p.errf("'(' after :" + name)
+	}
+	p.i++
+	p.skipWS()
+	q := p.peek()
+	if q != '"' && q != '\'' {
+		return nil, p.errf("a quoted string, e.g. :" + name + "('TODO')")
+	}
+	p.i++
+	start := p.i
+	for !p.eof() && p.s[p.i] != q {
+		p.i++
+	}
+	if p.eof() {
+		return nil, p.errf(fmt.Sprintf("a closing %c for :%s", q, name))
+	}
+	text := string(p.s[start:p.i])
+	p.i++
+	p.skipWS()
+	if p.peek() != ')' {
+		return nil, p.errf("')' to close :" + name)
+	}
+	p.i++
+	g, err := parseContainsSpec(text)
+	if err != nil {
+		return nil, fmt.Errorf("bad :%s(%q): %w", name, text, err)
+	}
+	return g, nil
+}
+
 func parseContainsSpec(text string) (*grepSpec, error) {
 	g := &grepSpec{}
 	rest := text

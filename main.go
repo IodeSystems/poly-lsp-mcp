@@ -108,7 +108,7 @@ func runQuery() {
 	rootPath := flag.String("root", ".", "workspace root directory to query")
 	limit := flag.Int("limit", 0, "max matches to print (0 = all)")
 	offset := flag.Int("offset", 0, "skip this many matches")
-	budget := flag.String("budget", "", "query budget: Nms wall-clock (bare = ms) or Nops deterministic work units (default 200000ops). Raise when a query reports it stopped early.")
+	budget := flag.String("budget", "", "query budget: Nms wall-clock (bare = ms) or Nops deterministic work units (default 10000ms). Raise when a query reports it stopped early.")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: poly-lsp-mcp query [flags] <selector>\n\n")
 		fmt.Fprintf(os.Stderr, "Evaluate a node selector and print the matches, grouped by file.\n")

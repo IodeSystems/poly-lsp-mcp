@@ -74,7 +74,7 @@ var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."},` +
-	`"budget":{"type":["integer","string"],"description":"limit Nms (bare=ms) or Nops; def 200000ops"}},` +
+	`"budget":{"type":["integer","string"],"description":"limit Nms (bare=ms) or Nops; def 10000ms"}},` +
 	`"required":["selector"]}`)
 
 const modernNodeReadDescription = `Read a node whole. node = an address from node_query's matches[].node ("<file>#<sym>" or "<file>"), or a selector matching exactly one node (2+ errors and lists candidates).

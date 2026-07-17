@@ -341,7 +341,7 @@ func (e *engine) spend(n int) bool {
 	return true
 }
 
-const defaultQueryWorkBudget = 200_000
+const defaultBudgetMs = 10_000 // omitted-budget default: 10s wall clock
 
 // kids returns n's children, parsing a file's symbols on first use.
 // A ref node's children are its FAR END(s) — that is how a chain
@@ -454,9 +454,17 @@ func (s *Server) buildTree() (*engine, error) {
 		abs:   root,
 	}
 	e := &engine{s: s, project: project, fileByRel: map[string]*treeNode{}, elemCost: map[*selElem]int{}}
-	e.workLeft = s.queryWorkBudget
-	if e.workLeft <= 0 {
-		e.workLeft = defaultQueryWorkBudget
+	if s.queryWorkBudget > 0 {
+		// An explicit server-level ops budget (tests, --legacy paths):
+		// deterministic, no wall clock.
+		e.workLeft = s.queryWorkBudget
+	} else {
+		// Omitted default: a 10s wall-clock budget with the ops cap as a
+		// backstop. Most queries finish well under it (so stay
+		// deterministic); only a genuinely huge one hits the clock. A
+		// caller wanting reproducibility passes an Nops budget.
+		e.deadline = time.Now().Add(defaultBudgetMs * time.Millisecond)
+		e.workLeft = maxBudgetOps
 	}
 	e.lspLeft = s.lspResolveCap
 	if e.lspLeft <= 0 {
@@ -2374,6 +2382,7 @@ func (e *engine) setBudget(value int, unit string) {
 			value = maxBudgetOps
 		}
 		e.workLeft = value
+		e.deadline = time.Time{} // explicit ops → deterministic, drop the default wall clock
 		return
 	}
 	if value > maxBudgetMs {

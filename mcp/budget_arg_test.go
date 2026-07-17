@@ -49,6 +49,44 @@ func TestNodeQueryBudgetArgAndHint(t *testing.T) {
 	}
 }
 
+// The OMITTED default is a 10s wall clock — a fresh engine (no explicit
+// budget) carries a deadline, and an explicit ops budget clears it back
+// to deterministic.
+func TestOmittedDefaultIsWallClock(t *testing.T) {
+	s := newQueryServer(t, writeEstimatorFixture(t))
+
+	e, err := s.buildTree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.deadline.IsZero() {
+		t.Fatal("the omitted default must set a wall-clock deadline")
+	}
+	if d := time.Until(e.deadline); d < 8*time.Second || d > 11*time.Second {
+		t.Errorf("omitted default should be ~10s out; got %v", d)
+	}
+
+	// An explicit ops budget drops the wall clock — reproducible again.
+	e.setBudget(500, "ops")
+	if !e.deadline.IsZero() {
+		t.Error("an explicit ops budget must clear the default deadline")
+	}
+	if e.workLeft != 500 {
+		t.Errorf("ops budget should set workLeft=500; got %d", e.workLeft)
+	}
+
+	// An explicit server ops budget (SetQueryWorkBudget) also skips the
+	// default wall clock.
+	s.SetQueryWorkBudget(1234)
+	e2, _ := s.buildTree()
+	if !e2.deadline.IsZero() {
+		t.Error("an explicit server ops budget must not set a wall-clock default")
+	}
+	if e2.workLeft != 1234 {
+		t.Errorf("server ops budget should set workLeft=1234; got %d", e2.workLeft)
+	}
+}
+
 func TestParseBudgetSuffixes(t *testing.T) {
 	cases := []struct {
 		in    string

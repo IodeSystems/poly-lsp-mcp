@@ -3,6 +3,22 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## annotation + comment as first-class nodes (DONE 2026-07-17)
+
+- [x] **`annotation` node**: decorators (Python/TS) and struct-tag keys (Go)
+  are `.annotation` children of the symbol they mark — so "who is annotated
+  with X" is structural: `func:any(annotation#route)`, `#'T.Name' > annotation`.
+  Leaf = last id (#route), plus a virtual-FQN alias as written (#'app.route')
+  via Symbol.Alias → nodeIDs. TS decorators lift to the export_statement
+  wrapper; Go directive/doc COMMENTS (no AST node) stay with :annotated.
+- [x] **`comment` node**: the doc block above a decl, contiguous comment lines
+  JOINED into one child (Go emits one node per `//` line — this rejoins them).
+  `#'f' > comment` is the whole block; `func:not(:any(comment))` = undocumented
+  (grep-free); `comment:contains('TODO')`. Contiguity required — a comment
+  separated by a blank line is not the doc. Works Go/TS/Python.
+- Both synthesized like `.argument` nodes (which already existed — `::arg` was
+  never needed). `return` as a node is the remaining sibling → icebox.
+
 ## :annotated + bracket-aware regex — power queries (DONE 2026-07-17)
 
 - [x] **`:annotated('pat')`**: "who is annotated with X" had no answer — ::grep

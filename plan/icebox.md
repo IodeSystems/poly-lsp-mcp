@@ -5,6 +5,19 @@ graph-selector design record this used to hold.
 
 ---
 
+## `return` as a node — the remaining trivia sibling
+
+Shipped `annotation` and `comment` as first-class child nodes (decorators,
+struct tags, joined doc blocks). `return` is the natural third: the return
+TYPE as a `.return` child, so `func:any(return#error)` = funcs returning
+error, `method:any(return#'*Server')`, etc. Needs per-language extraction of
+the return type node (Go `result` field, TS `type_annotation` after params,
+Python `->` annotation) — a `returnType(lang, node)` mirroring the decorator
+helpers. Not built yet; `argument` already covers the params side.
+
+Also noted: `argument` is a plain tag node, NOT `::arg` — `func > argument`
+and `func:any(argument#ctx)` already work.
+
 ## `:recursive` and other EDGE-semantic predicates — need call-target precision
 
 Prototyped `:recursive` (a callable that directly calls itself: a self-edge in

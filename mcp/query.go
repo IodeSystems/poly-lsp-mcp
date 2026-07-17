@@ -1764,7 +1764,7 @@ var selectorClasses = map[string]bool{
 	"func": true, "method": true, "type": true, "struct": true,
 	"interface": true, "class": true, "const": true, "var": true,
 	"field": true, "enum": true, "ctor": true, "module": true,
-	"import": true, "argument": true, "annotation": true,
+	"import": true, "argument": true, "annotation": true, "comment": true,
 	// NB: no "text" — that class is the legacy structure tool's
 	// whole-file fallback for grammar-less files, never emitted by
 	// FileSymbols. In this tree such a file is simply a .file node with
@@ -1852,9 +1852,11 @@ COMPOSING — one hop at a time, left to right:
 
 SPEC
   TAGS   project dir file func method type struct interface class const var field enum ctor
-         module import argument annotation, * — fixed; you cannot invent one. Lang class: file.go.
+         module import argument annotation comment, * — fixed; can't invent one. Lang class: file.go.
          annotation = a decorator (@route, py/ts) or struct-tag key (json, go), a CHILD of the
          symbol it marks. func:any(annotation#route). #route = leaf, #'app.route' = as written.
+         comment = the doc block above a decl, contiguous lines joined, a CHILD of the symbol.
+         func:not(:any(comment)) = undocumented. comment:contains('TODO').
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
   ATTR   [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES

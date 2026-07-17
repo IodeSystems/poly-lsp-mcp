@@ -170,6 +170,11 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 			// mark, addressable and composable, not a comment line.
 			appendAnnotationSymbols(language, in.node, full, in.class, content, &out)
 
+			// The doc comment above the declaration, contiguous lines
+			// joined into ONE `.comment` child (Go emits a comment node
+			// per line; this rejoins them).
+			appendCommentSymbol(in.node, full, &out)
+
 			if in.branch {
 				visit(in.node, full, in.class)
 			}
@@ -298,6 +303,46 @@ func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string
 		sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = nodeLineCols(m.node)
 		*out = append(*out, sym)
 	}
+}
+
+// appendCommentSymbol emits ONE Class:"comment" child holding the doc
+// comment attached to a declaration: the contiguous run of `comment`
+// sibling nodes immediately above it, joined into a single span. Go
+// parses each `//` line as its own comment node, so a three-line doc is
+// three siblings — this rejoins them so `#'f' > comment` is the whole
+// block, not its first line.
+//
+// Contiguity is required (each comment line directly above the next,
+// none separated from the declaration by a blank), so a floating
+// comment earlier in the file is not mistaken for the doc. Decorated
+// (Python) and exported (TS) declarations look above their wrapper.
+func appendCommentSymbol(node *sitter.Node, owner string, out *[]Symbol) {
+	anchor := node
+	if p := node.Parent(); p != nil && (p.Type() == "decorated_definition" || p.Type() == "export_statement") {
+		anchor = p
+	}
+	nextTop := int(anchor.StartPoint().Row) + 1 // 1-based line the block must butt against
+	var startLine, startCol, endLine, endCol int
+	found := false
+	for s := anchor.PrevNamedSibling(); s != nil && s.Type() == "comment"; s = s.PrevNamedSibling() {
+		sl, sc, el, ec := nodeLineCols(s)
+		if el != nextTop-1 {
+			break // a blank line (or code) breaks the doc block
+		}
+		if !found {
+			endLine, endCol = el, ec
+			found = true
+		}
+		startLine, startCol = sl, sc
+		nextTop = sl
+	}
+	if !found {
+		return
+	}
+	sym := Symbol{Sym: owner + ".comment", Class: "comment"}
+	sym.DeclStartLine, sym.DeclStartCol, sym.DeclEndLine, sym.DeclEndCol = startLine, startCol, endLine, endCol
+	sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = startLine, startCol, endLine, endCol
+	*out = append(*out, sym)
 }
 
 // annMark is one resolved annotation: the AST node for its span, the

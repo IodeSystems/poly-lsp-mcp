@@ -29,3 +29,20 @@ parked here:
   :parents gets used unprompted — and if not, whether the description's
   recipes ("you have store.go#Save — now what") are the fix, per the
   2026-07-16 evidence in done.md.
+
+## Selector language — opt-in next steps (post slice 3)
+
+- **Child-LSP edge precision.** Edges are name-keyed (lexical); resolve a
+  site to its TRUE target via textDocument/definition when a child LSP
+  (gopls/tsserver) is running, stamping refConf "lsp" per edge. The refConf
+  field already exists on every edge node; no reshaping needed.
+- **More edge kinds.** .ptr / .read / .write / (ts) .implements — per-language
+  tree-sitter context. The class vocabulary is closed and validated, so new
+  kinds are additive.
+- **`:with(project.go)` — scoped views.** A prelude that installs a global
+  :root filtered to a language/subtree (user sketch, 2026-07-17; prior:
+  CSS @scope, SQL WITH). Language classes (file.go) cover the per-compound
+  case today; :with is query-wide state and needs its own design pass.
+- **More pseudo-elements, same contract.** ::doc / ::signature / ::body as
+  generated readable/editable sub-parts of a symbol — invisible to `*`,
+  addressable like edge sites.

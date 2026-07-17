@@ -21,26 +21,28 @@ languages (lexical / declared / schema-anchored tiers). `poly-lsp-mcp mcp --root
   over one unified node tree (project > dir > file > symbols > argument),
   addressed as `<file>#<sym>`, queried by CSS selector. Legacy 9-tool surface
   behind `--legacy-tools`. Sandbox jail + read-only mode: commit `0fbeb02`.
-- Selector language: CSS containment + the graph half. Two moves —
-  `:parents` (incoming) / `:references` (outgoing), bare or `(sel)`, `{m,n}`
-  hops, `{1,}` transitive — legal anywhere in the chain. Bare
-  `:any/:all/:empty` close a move postfix and collapse to the subject
-  (`func:parents:empty` = dead code); parenthesized forms test relative
-  selectors whose start is assumed `&` (CSS nesting rule; `:root`
-  re-anchors). `{m,n}` on a compound is the canonical depth range
-  (`:depth` = alias). Shipped 2026-07-17 in two slices → done.md ("Graph
-  selector language") for the design record and decisions.
+- Selector language: CSS containment + the graph as NODES. References are
+  reified edge pseudo-elements — `::in`/`::out`, kind as class
+  (.call/.type/.import), far end as child, site as address (file@line),
+  invisible to `*` (gates are opaque). `{m,n}` = regex repetition on
+  elements/(groups); edge hops on an edge element. `:parents(sel)` = the one
+  inverse (upstream roots). Bare `:any/:all/:empty` = position claims.
+  Language classes (file.go/func.ts), `:first`/`:last` per anchor. Shipped
+  2026-07-17 in three slices → done.md ("Graph selector language") for the
+  full design record; slice 3 ("references are NODES") is the shipped
+  language.
 
 ## Active work
 
-None in flight. The graph selector language (both slices) ✅ → done.md.
-Next candidates are opt-in, in icebox.md — the most valuable is adoption
-measurement: does anything USE :parents/:references unprompted?
+None in flight. The graph selector language (three slices) ✅ → done.md.
+Next candidates are opt-in, in icebox.md — most valuable: adoption
+measurement (does bonsai USE ::in/::out unprompted?), then the child-LSP
+edge-precision pass (refConf lexical → lsp).
 
-Known caveats (documented in code): `:where(sel)` ≡ `:any(sel)` at tip
-granularity (pseudoHolds); unbounded `{m,}` with m>1 collects nodes at their
-shortest hop (moveEdges); reference edges are name-keyed via the lexical
-index, so same-named symbols share edges.
+Known caveats (documented in code): edges are name-keyed via the lexical
+index, so same-named symbols share edges (the LSP pass is the fix);
+unbounded `{m,}` collects nodes at their shortest hop; `:where(sel)` ≡
+`:any(sel)` at tip granularity (pseudoHolds).
 
 ## Non-goals (for now)
 

@@ -32,6 +32,12 @@ type Symbol struct {
 	Sym   string
 	Class string
 
+	// Alias is an extra id the symbol answers to, beyond its leaf and
+	// its dotted Sym path. Used for an annotation's own name: an
+	// @app.route node lives at "handler.route" (a child of handler) but
+	// also answers to "app.route" — the decorator as written.
+	Alias string
+
 	DeclStartLine, DeclStartCol int
 	DeclEndLine, DeclEndCol     int
 
@@ -159,6 +165,11 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 			// then also drag in body-local declarations).
 			appendParamSymbols(language, in.node, full, in.class, content, &out)
 
+			// Decorators / annotations / struct tags become `.annotation`
+			// children of the symbol they mark — the SYMBOL carrying the
+			// mark, addressable and composable, not a comment line.
+			appendAnnotationSymbols(language, in.node, full, in.class, content, &out)
+
 			if in.branch {
 				visit(in.node, full, in.class)
 			}
@@ -243,6 +254,163 @@ func appendParamSymbols(lang string, node *sitter.Node, owner, class string, con
 		sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = nodeLineCols(nameNode)
 		*out = append(*out, sym)
 	}
+}
+
+// ------------------------------------------------------- .annotation nodes
+
+// appendAnnotationSymbols emits one Class:"annotation" child per
+// decorator (Python/TS) or struct-tag key (Go) attached to a symbol.
+// Like .argument nodes, these are synthesized rather than walked: the
+// decorator sits beside or within the declaration in the AST, and the
+// point is to hang it OFF the symbol it marks so `func:any(annotation#route)`
+// and `#'T.Name' > annotation` compose the way containment does.
+//
+// Each annotation answers to its LEAF (the last identifier: route,
+// requires_auth, Component, json) via its Sym path, and to its Alias
+// (the decorator as written: app.route) via the extra id.
+func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string, content []byte, out *[]Symbol) {
+	var marks []annMark
+	switch lang {
+	case "python":
+		marks = pythonDecorators(node, content)
+	case "typescript":
+		marks = tsDecorators(node, content)
+	case "go":
+		marks = goStructTags(node, class, content)
+	}
+	if len(marks) == 0 {
+		return
+	}
+	counts := map[string]int{}
+	for _, m := range marks {
+		counts[m.leaf]++
+	}
+	seen := map[string]int{}
+	for _, m := range marks {
+		seen[m.leaf]++
+		seg := renderSegment(m.leaf, seen[m.leaf], counts[m.leaf])
+		alias := m.fqn
+		if alias == m.leaf {
+			alias = "" // no separate fqn to record
+		}
+		sym := Symbol{Sym: owner + "." + seg, Class: "annotation", Alias: alias}
+		sym.DeclStartLine, sym.DeclStartCol, sym.DeclEndLine, sym.DeclEndCol = nodeLineCols(m.node)
+		sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = nodeLineCols(m.node)
+		*out = append(*out, sym)
+	}
+}
+
+// annMark is one resolved annotation: the AST node for its span, the
+// leaf name (#route matches this) and the fqn as written (app.route).
+type annMark struct {
+	node *sitter.Node
+	leaf string
+	fqn  string
+}
+
+func nodeSlice(n *sitter.Node, content []byte) string {
+	return string(content[n.StartByte():n.EndByte()])
+}
+
+// pythonDecorators collects the `decorator` siblings of a function/class
+// under a `decorated_definition`.
+func pythonDecorators(node *sitter.Node, content []byte) []annMark {
+	parent := node.Parent()
+	if parent == nil || parent.Type() != "decorated_definition" {
+		return nil
+	}
+	var out []annMark
+	cnt := int(parent.NamedChildCount())
+	for i := 0; i < cnt; i++ {
+		c := parent.NamedChild(i)
+		if c.Type() != "decorator" || c.NamedChildCount() == 0 {
+			continue
+		}
+		leaf, fqn := decoratorName(c.NamedChild(0), content, "call", "attribute", "attribute")
+		if leaf != "" {
+			out = append(out, annMark{c, leaf, fqn})
+		}
+	}
+	return out
+}
+
+// tsDecorators collects a symbol's `decorator` nodes. Fields and methods
+// carry them as direct children; an EXPORTED class has them lifted to a
+// sibling under the wrapping export_statement (like Python's
+// decorated_definition), so both the node and that wrapper are scanned.
+func tsDecorators(node *sitter.Node, content []byte) []annMark {
+	var out []annMark
+	collect := func(parent *sitter.Node) {
+		cnt := int(parent.NamedChildCount())
+		for i := 0; i < cnt; i++ {
+			c := parent.NamedChild(i)
+			if c.Type() != "decorator" || c.NamedChildCount() == 0 {
+				continue
+			}
+			leaf, fqn := decoratorName(c.NamedChild(0), content, "call_expression", "member_expression", "property")
+			if leaf != "" {
+				out = append(out, annMark{c, leaf, fqn})
+			}
+		}
+	}
+	collect(node)
+	if p := node.Parent(); p != nil && p.Type() == "export_statement" {
+		collect(p)
+	}
+	return out
+}
+
+// decoratorName resolves a decorator's expression to (leaf, fqn). It
+// unwraps a call (callType) to its function, then a member/attribute
+// access (memberType) to its last segment (via field memberField),
+// leaving a plain identifier as both leaf and fqn.
+func decoratorName(expr *sitter.Node, content []byte, callType, memberType, memberField string) (string, string) {
+	if expr == nil {
+		return "", ""
+	}
+	if expr.Type() == callType {
+		if f := expr.ChildByFieldName("function"); f != nil {
+			expr = f
+		}
+	}
+	fqn := nodeSlice(expr, content)
+	if expr.Type() == memberType {
+		if last := expr.ChildByFieldName(memberField); last != nil {
+			return nodeSlice(last, content), fqn
+		}
+		if i := strings.LastIndexByte(fqn, '.'); i >= 0 {
+			return fqn[i+1:], fqn
+		}
+	}
+	return fqn, fqn
+}
+
+var goTagKeyRe = regexp.MustCompile("([A-Za-z_][A-Za-z0-9_.-]*):\"")
+
+// goStructTags reads a field's raw-string struct tag and emits one
+// annotation per KEY (`json:"name" validate:"required"` → json, validate)
+// — Go's structured annotation. Directive comments (//go:generate,
+// // Deprecated:) have no AST node and stay with :annotated.
+func goStructTags(node *sitter.Node, class string, content []byte) []annMark {
+	if class != "field" {
+		return nil
+	}
+	var tag *sitter.Node
+	cnt := int(node.NamedChildCount())
+	for i := 0; i < cnt; i++ {
+		if c := node.NamedChild(i); c.Type() == "raw_string_literal" {
+			tag = c
+			break
+		}
+	}
+	if tag == nil {
+		return nil
+	}
+	var out []annMark
+	for _, m := range goTagKeyRe.FindAllStringSubmatch(nodeSlice(tag, content), -1) {
+		out = append(out, annMark{tag, m[1], m[1]})
+	}
+	return out
 }
 
 // paramInfos resolves one node from a parameter list into zero or more

@@ -48,9 +48,10 @@ import (
 //   - full — a symbol's dotted path, or a dir/file's workspace-relative
 //     path.
 type treeNode struct {
-	class string // "project"|"dir"|"file"|<symbol class>|"argument"
+	class string // "project"|"dir"|"file"|<symbol class>|"argument"|"annotation"
 	leaf  string
 	full  string
+	alias string // extra id (an annotation's own name, e.g. app.route)
 
 	file string // workspace-relative file path ("" for project/dir)
 	sym  string // dotted sym path ("" for project/dir/file)
@@ -157,7 +158,11 @@ func (n *treeNode) nodeIDs() []string {
 	case "fragment":
 		return nil // a fragment IS its line; the pattern is the filter
 	}
-	return []string{n.leaf, n.full, n.file + "#" + n.sym}
+	ids := []string{n.leaf, n.full, n.file + "#" + n.sym}
+	if n.alias != "" {
+		ids = append(ids, n.alias) // an annotation's own name (app.route)
+	}
+	return ids
 }
 
 // nameIDs is the `[name]` axis: what the node is CALLED. It is nodeIDs
@@ -321,6 +326,7 @@ func (e *engine) loadFileSymbols(f *treeNode) {
 			class:   sym.Class,
 			leaf:    lastSeg(sym.Sym),
 			full:    sym.Sym,
+			alias:   sym.Alias,
 			file:    f.file,
 			sym:     sym.Sym,
 			at:      [2]int{sym.DeclStartLine, sym.DeclEndLine},
@@ -1758,7 +1764,7 @@ var selectorClasses = map[string]bool{
 	"func": true, "method": true, "type": true, "struct": true,
 	"interface": true, "class": true, "const": true, "var": true,
 	"field": true, "enum": true, "ctor": true, "module": true,
-	"import": true, "argument": true,
+	"import": true, "argument": true, "annotation": true,
 	// NB: no "text" — that class is the legacy structure tool's
 	// whole-file fallback for grammar-less files, never emitted by
 	// FileSymbols. In this tree such a file is simply a .file node with
@@ -1846,7 +1852,9 @@ COMPOSING — one hop at a time, left to right:
 
 SPEC
   TAGS   project dir file func method type struct interface class const var field enum ctor
-         module import argument, * — fixed; you cannot invent one. Language class: file.go.
+         module import argument annotation, * — fixed; you cannot invent one. Lang class: file.go.
+         annotation = a decorator (@route, py/ts) or struct-tag key (json, go), a CHILD of the
+         symbol it marks. func:any(annotation#route). #route = leaf, #'app.route' = as written.
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
   ATTR   [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES

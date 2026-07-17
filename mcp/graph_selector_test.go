@@ -472,6 +472,35 @@ func TestMissingColonsAreRepaired(t *testing.T) {
 	}
 }
 
+// --------------------------------------------------------- work budget
+
+// Unbounded traversals ({1,}, :parents) are termination-safe (visited
+// sets), so the guard is a query-wide WORK budget, not a hop cap — a
+// hop cap bounds the wrong axis (breadth is the cost) and silently
+// under-reports. Tripping the budget must be LOUD: partial results,
+// truncated flag, repair recipe in the note.
+func TestWorkBudgetTripsLoudly(t *testing.T) {
+	s := startGraph(t)
+	defer s.close()
+	s.srv.SetQueryWorkBudget(25)
+
+	r := s.callTool("node_query", map[string]any{"selector": `func:where(::in:empty)`, "limit": 50})
+	if r.IsError {
+		t.Fatalf("a tripped budget is a partial RESULT, not an error: %s", r.Content[0].Text)
+	}
+	text := r.Content[0].Text
+	if !strings.Contains(text, `"truncated":true`) || !strings.Contains(text, "work budget") {
+		t.Errorf("tripped budget must be loudly flagged; got: %s", text)
+	}
+
+	// The default budget doesn't trip on a normal workspace.
+	s.srv.SetQueryWorkBudget(0)
+	q := query(t, s, map[string]any{"selector": `func:where(::in:empty)`, "limit": 50})
+	if q.Truncated {
+		t.Errorf("default budget should not trip here; got note %q", q.Note)
+	}
+}
+
 // --------------------------------------------------------- guided errors
 
 func TestRetiredSpellingsNameTheirReplacement(t *testing.T) {

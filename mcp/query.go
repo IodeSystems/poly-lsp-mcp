@@ -180,7 +180,32 @@ type engine struct {
 	// selfSetCache: full-workspace match sets for :not/:is chain inners,
 	// keyed by the inner AST's backing array.
 	selfSetCache map[string]map[*treeNode]bool
+
+	// The query-wide WORK budget: every node visited, edge crossed, and
+	// site/line scanned spends one unit. A hop bound would guard the
+	// wrong axis (breadth, not depth, is the cost; capping hops silently
+	// under-reports — the grep-looked-complete failure). The budget
+	// guards the real risk (hot-name fan-out on a big workspace) and
+	// trips LOUDLY: partial results, flagged, with the repair recipe.
+	workLeft     int
+	workExceeded bool
 }
+
+// spend charges n work units; false means the budget is gone and the
+// caller should stop expanding (results become partial + flagged).
+func (e *engine) spend(n int) bool {
+	if e.workExceeded {
+		return false
+	}
+	e.workLeft -= n
+	if e.workLeft < 0 {
+		e.workExceeded = true
+		return false
+	}
+	return true
+}
+
+const defaultQueryWorkBudget = 200_000
 
 // kids returns n's children, parsing a file's symbols on first use.
 // A ref node's children are its FAR END(s) — that is how a chain
@@ -277,6 +302,10 @@ func (s *Server) buildTree() (*engine, error) {
 		abs:   root,
 	}
 	e := &engine{s: s, project: project, fileByRel: map[string]*treeNode{}}
+	e.workLeft = s.queryWorkBudget
+	if e.workLeft <= 0 {
+		e.workLeft = defaultQueryWorkBudget
+	}
 	e.walkDir(root, project)
 	return e, nil
 }
@@ -1912,6 +1941,9 @@ func (e *engine) refMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed
 	for h := range hosts {
 		cand := map[*treeNode]bool{}
 		for _, r := range e.refNodes(h) {
+			if !e.spend(1) {
+				break
+			}
 			if relaxed {
 				if refDirMatch(r, comp) {
 					cand[r] = true
@@ -2012,6 +2044,9 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 	}
 	g := comp.fragSpec
 	for i, l := range lines {
+		if !e.spend(1) {
+			break
+		}
 		if !relaxed && !g.matchLine(l) {
 			continue
 		}
@@ -2078,6 +2113,9 @@ func (e *engine) collectMatches(anchor *treeNode, min, max int, comp *selCompoun
 	needSyms := relaxed || compNeedsSymbols(comp)
 	var walk func(n *treeNode, d int)
 	walk = func(n *treeNode, d int) {
+		if !e.spend(1) {
+			return
+		}
 		if d >= min && (relaxed || e.positionalMatch(n, comp)) {
 			out[n] = true
 		}
@@ -2338,7 +2376,7 @@ func (e *engine) upstream(tips map[*treeNode]bool) map[*treeNode]bool {
 	for len(frontier) > 0 {
 		next := map[*treeNode]bool{}
 		add := func(n *treeNode) {
-			if n != nil && !out[n] {
+			if n != nil && !out[n] && e.spend(1) {
 				out[n] = true
 				next[n] = true
 			}
@@ -2476,6 +2514,9 @@ func (e *engine) fileSites(rel string) []refSite {
 	}
 	for _, name := range idx.Names() {
 		for _, site := range idx.LookupExisting(name) {
+			if !e.spend(1) {
+				return out
+			}
 			if relPath(site.File, e.s.getRoot()) != rel {
 				continue
 			}
@@ -2531,6 +2572,9 @@ func (e *engine) declsOf(name string) []*treeNode {
 		e.declsByName = map[string][]*treeNode{}
 		var walk func(n *treeNode)
 		walk = func(n *treeNode) {
+			if !e.spend(1) {
+				return
+			}
 			if n.sym != "" {
 				e.declsByName[n.leaf] = append(e.declsByName[n.leaf], n)
 			}

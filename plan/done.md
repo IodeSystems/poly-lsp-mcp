@@ -998,3 +998,17 @@ Driven by bonsai's hand-written dead-func detector
   callers minus the roots the runtime calls for you. bonsai's exclusion
   instinct was the insight; its direction (out vs in) was flipped — kept the
   recipe prominent for exactly that reason.
+
+## Query work budget (shipped 2026-07-17)
+
+"Isn't {1,} dangerous?" — no, and the analysis is the record: unbounded
+traversals are termination-safe (visited sets = subgraph stability, O(V+E)),
+and a hop cap guards the WRONG axis — breadth (hot-name fan-out on the
+lexical index) is the cost, not depth, and capping hops reintroduces the
+measured worst failure (silently-incomplete results that look complete).
+The real guard is a query-wide WORK budget: every node visited, edge
+crossed, and site/line scanned spends one unit (default 200k,
+SetQueryWorkBudget to override). Tripping is LOUD and non-fatal: partial
+results with truncated:true and a note naming the repair (kind class,
+filtered inner, bounded hops, tighter scope) — the same never-cut-silently
+contract pagination keeps.

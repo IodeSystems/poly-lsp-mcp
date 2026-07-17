@@ -235,6 +235,12 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	if end < total || offset > 0 {
 		payload["note"] = fmt.Sprintf("%d of %d shown; raise limit or use offset", len(paged), total)
 	}
+	// The work budget tripping is the OTHER partial-result path — same
+	// contract: flag it and name the fix, never trim quietly.
+	if e.workExceeded {
+		payload["truncated"] = true
+		payload["note"] = "evaluation stopped at the work budget — results may be INCOMPLETE. Narrow the traversal: a kind class (::in.call), a filtered inner (:parents(func)), bounded hops ({1,3}), or a tighter scope"
+	}
 	return jsonContent(payload), false, nil
 }
 

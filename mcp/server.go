@@ -116,6 +116,11 @@ type Server struct {
 	legacyTools bool
 	readOnly    bool
 
+	// queryWorkBudget caps one node_query evaluation's WORK (nodes
+	// visited + edges crossed + sites/lines scanned). 0 = the default.
+	// See engine.spend — tripping it is loud, never silent.
+	queryWorkBudget int
+
 	// proactiveOpenDoneMu guards proactiveOpenDone. The channel is
 	// (re)created at the start of each proactive walk and closed when
 	// it finishes. WaitForProactiveOpen reads it under the lock so a
@@ -253,6 +258,15 @@ func (s *Server) WaitForProactiveOpen(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// SetQueryWorkBudget overrides the per-query work cap (nodes visited +
+// edges crossed + sites/lines scanned; default 200000). A tripped
+// budget returns PARTIAL results loudly flagged with the repair recipe
+// — never an error, never a silent cut. Mainly for tests and for
+// monstrous workspaces in either direction.
+func (s *Server) SetQueryWorkBudget(n int) {
+	s.queryWorkBudget = n
 }
 
 // SetGitPrewarm toggles the post-initialize ancestor-branch walk

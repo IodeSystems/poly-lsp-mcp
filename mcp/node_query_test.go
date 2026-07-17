@@ -54,6 +54,10 @@ func TestUserCreate() {}
 func querySession(t *testing.T, dir string) *mcpSession {
 	t.Helper()
 	s := startSessionFull(t, dir, nil, nil)
+	// These tests exercise the LEGACY node_query tool (select= field,
+	// grouped-by-file output) — the modern node_query has a different
+	// name-shared tool with a different schema/output shape.
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 	return s

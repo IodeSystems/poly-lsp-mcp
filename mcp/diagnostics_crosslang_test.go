@@ -86,6 +86,7 @@ func TestCrossLanguageDiagnosticOnGeneratedStub(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetLegacyTools(true) // uses node_references + byte-precise node_edit ranges
 	srv.SetManager(multiplex.NewManager(reg))
 	// gopls on a multi-file module needs more headroom for first
 	// publish than the throwaway single-file test.
@@ -317,6 +318,7 @@ func runSiblingCase(t *testing.T, fixtureDir string, sibling *bool, wantSiblingD
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetLegacyTools(true) // uses node_references + byte-precise node_edit ranges
 	srv.SetManager(multiplex.NewManager(reg))
 	srv.SetDiagnosticWait(12 * time.Second)
 

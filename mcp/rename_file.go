@@ -38,8 +38,17 @@ func handleNodeRenameFile(s *Server, args json.RawMessage) ([]Content, bool, err
 		return nil, true, errors.New("from and to are required")
 	}
 	root := s.getRoot()
-	fromAbs := s.resolveFileArg(p.From)
-	toAbs := s.resolveFileArg(p.To)
+	// BOTH ends are jailed: a rename is a write to `to` as much as it is a
+	// read of `from`, so an unchecked destination would move a workspace file
+	// out of the workspace.
+	fromAbs, err := s.resolveFileArg(p.From)
+	if err != nil {
+		return nil, true, err
+	}
+	toAbs, err := s.resolveFileArg(p.To)
+	if err != nil {
+		return nil, true, err
+	}
 
 	content, err := os.ReadFile(fromAbs)
 	if err != nil {

@@ -29,7 +29,7 @@ func TestImportEditsForRename(t *testing.T) {
 
 	want := map[string]string{
 		filepath.Join(root, "src/screens/list.tsx"): "../fundraisers",
-		filepath.Join(root, "src/client.ts"):        "./fundraisers",   // first occurrence
+		filepath.Join(root, "src/client.ts"):        "./fundraisers",    // first occurrence
 		filepath.Join(root, "src/withext.ts"):       "./fundraisers.ts", // extension preserved
 	}
 	for f, newSpec := range want {

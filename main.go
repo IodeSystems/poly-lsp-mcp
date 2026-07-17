@@ -50,6 +50,8 @@ func runLSP() {
 func runMCP() {
 	configPath := flag.String("config", "poly-lsp-mcp.yaml", "language registry config file")
 	rootPath := flag.String("root", ".", "workspace root directory the symbol index covers")
+	legacyTools := flag.Bool("legacy-tools", false, "expose the legacy 9-tool MCP surface instead of the 3-tool surface")
+	readOnly := flag.Bool("read-only", false, "hide every mutating tool (node_edit/node_delete/node_refactor/node_rename_file); navigation + reading only")
 	flag.Parse()
 
 	cfg, reg := loadConfigOrDie(*configPath)
@@ -71,6 +73,11 @@ func runMCP() {
 	}
 
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+	srv.SetLegacyTools(*legacyTools)
+	srv.SetReadOnly(*readOnly)
+	if *readOnly {
+		log.Printf("mcp: READ-ONLY — mutating tools are not registered")
+	}
 	srv.SetCachePath(filepath.Join(root, ".poly-lsp-mcp", "cache.gob"))
 	// Spawn child LSPs so node_edit / node_delete / node_refactor can
 	// surface publishDiagnostics in their responses. Manager.Start runs

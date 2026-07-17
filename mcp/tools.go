@@ -53,7 +53,7 @@ type Tool struct {
 // hash sweep when called on a directory; node_edit / node_delete
 // re-parse the file they just wrote. Together they keep the index
 // honest without an explicit refresh step.
-func registerTools() map[string]Tool {
+func registerLegacyTools() map[string]Tool {
 	return map[string]Tool{
 		"structure": {
 			Name: "structure",
@@ -286,7 +286,7 @@ func registerTools() map[string]Tool {
   },
   "required": ["select"]
 }`),
-			Handler: handleNodeQuery,
+			Handler: handleLegacyNodeQuery,
 		},
 	}
 }
@@ -343,7 +343,10 @@ func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	if p.Path == "" {
 		p.Path = "."
 	}
-	root := s.resolveFileArg(p.Path)
+	root, err := s.resolveFileArg(p.Path)
+	if err != nil {
+		return nil, true, err
+	}
 	limit := 100
 	if p.Limit != nil {
 		if *p.Limit < 1 {
@@ -468,7 +471,10 @@ func handleNodeReferences(s *Server, args json.RawMessage) ([]Content, bool, err
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
 	}
 
-	abs := s.resolveFileArg(a.File)
+	abs, err := s.resolveFileArg(a.File)
+	if err != nil {
+		return nil, true, err
+	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
@@ -584,7 +590,10 @@ func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
 
 	hasRange := a.StartCol != nil || a.EndLine != nil || a.EndCol != nil
 	hasLineCaps := a.LineLimit != nil || a.LineLength != nil
-	abs := s.resolveFileArg(a.File)
+	abs, err := s.resolveFileArg(a.File)
+	if err != nil {
+		return nil, true, err
+	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
@@ -858,7 +867,7 @@ func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		if err != nil {
 			return nil, true, err
 		}
-		return s.applyRangeRewrite(rn.declRange, p.NewText, p.diagnosticOptions)
+		return s.applyRangeRewrite(p.Node, rn.declRange, p.NewText, p.diagnosticOptions)
 	}
 
 	if p.File == "" {
@@ -875,7 +884,7 @@ func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		if p.StartLine == nil || p.StartCol == nil || p.EndLine == nil || p.EndCol == nil {
 			return nil, true, errors.New("range form requires all of startLine, startCol, endLine, endCol")
 		}
-		return s.applyRangeRewrite(rangeArgs{
+		return s.applyRangeRewrite(p.File, rangeArgs{
 			File:      p.File,
 			StartLine: *p.StartLine, StartCol: *p.StartCol,
 			EndLine: *p.EndLine, EndCol: *p.EndCol,
@@ -926,7 +935,7 @@ func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) 
 		if err != nil {
 			return nil, true, err
 		}
-		return s.applyRangeRewrite(rn.declRange, "", p.diagnosticOptions)
+		return s.applyRangeRewrite(p.Node, rn.declRange, "", p.diagnosticOptions)
 	}
 	if p.File == "" {
 		return nil, true, errors.New("file is required")
@@ -935,7 +944,7 @@ func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) 
 		if p.StartLine == nil || p.StartCol == nil || p.EndLine == nil || p.EndCol == nil {
 			return nil, true, errors.New("range form requires all of startLine, startCol, endLine, endCol")
 		}
-		return s.applyRangeRewrite(rangeArgs{
+		return s.applyRangeRewrite(p.File, rangeArgs{
 			File:      p.File,
 			StartLine: *p.StartLine, StartCol: *p.StartCol,
 			EndLine: *p.EndLine, EndCol: *p.EndCol,
@@ -955,7 +964,10 @@ func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) 
 // Returns an error when the file doesn't exist so the agent gets a
 // clear "already gone" signal instead of silent success.
 func (s *Server) applyWholeFileDelete(file string, opts diagnosticOptions) ([]Content, bool, error) {
-	abs := s.resolveFileArg(file)
+	abs, err := s.resolveFileArg(file)
+	if err != nil {
+		return nil, true, err
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("stat %s: %w", file, err)
@@ -982,7 +994,8 @@ func (s *Server) applyWholeFileDelete(file string, opts diagnosticOptions) ([]Co
 	// pass an empty content map.
 	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{}, opts)
 	payload := map[string]any{
-		"file":                 file,
+		"note":                 editNote("deleted", file, int(bytesRemoved), 0),
+		"node":                 file,
 		"deleted":              true,
 		"bytesRemoved":         bytesRemoved,
 		"diagnosticsAvailable": diags.Available,
@@ -999,11 +1012,16 @@ func (s *Server) applyWholeFileDelete(file string, opts diagnosticOptions) ([]Co
 // reads + edits + atomic-renames the file, then reparses just this
 // file's slice of the index so subsequent node_references sees the
 // new state.
-func (s *Server) applyRangeRewrite(a rangeArgs, newText string, opts diagnosticOptions) ([]Content, bool, error) {
+// node is the ADDRESS the caller aimed at ("main.go#Free"), which is what the
+// result reports back. The range is how we do it; the node is what it means.
+func (s *Server) applyRangeRewrite(node string, a rangeArgs, newText string, opts diagnosticOptions) ([]Content, bool, error) {
 	if err := a.validate(); err != nil {
 		return nil, true, err
 	}
-	abs := s.resolveFileArg(a.File)
+	abs, err := s.resolveFileArg(a.File)
+	if err != nil {
+		return nil, true, err
+	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
@@ -1046,8 +1064,13 @@ func (s *Server) applyRangeRewrite(a rangeArgs, newText string, opts diagnosticO
 	uri := pathToURI(abs)
 	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
 
+	// The lines are part of the target here: a range rewrite did NOT touch the
+	// whole file, and a note that said "updated app.go" would overstate it.
 	payload := map[string]any{
-		"file":                 a.File,
+		"note": editNote("updated",
+			fmt.Sprintf("%s:%d-%d", a.File, a.StartLine, a.EndLine),
+			endOff-startOff, len(newText)),
+		"node":                 node,
 		"replacedFrom":         map[string]int{"line": a.StartLine, "col": a.StartCol},
 		"replacedTo":           map[string]int{"line": a.EndLine, "col": a.EndCol},
 		"bytesRemoved":         endOff - startOff,
@@ -1068,7 +1091,10 @@ func (s *Server) applyRangeRewrite(a rangeArgs, newText string, opts diagnosticO
 // existing file's mode when overwriting, defaults to 0644 when
 // creating.
 func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOptions) ([]Content, bool, error) {
-	abs := s.resolveFileArg(file)
+	abs, err := s.resolveFileArg(file)
+	if err != nil {
+		return nil, true, err
+	}
 	created := false
 	mode := os.FileMode(0o644)
 	bytesRemoved := 0
@@ -1099,8 +1125,13 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 
 	uri := pathToURI(abs)
 	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
+	verb := "updated"
+	if created {
+		verb = "created"
+	}
 	payload := map[string]any{
-		"file":                 file,
+		"note":                 editNote(verb, file, bytesRemoved, len(out)),
+		"node":                 file,
 		"created":              created,
 		"bytesRemoved":         bytesRemoved,
 		"bytesAdded":           len(out),
@@ -1120,7 +1151,10 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 // agent can regenerate the patch against fresh content. File must
 // already exist — create-on-write goes through the no-range path.
 func (s *Server) applyDiffRewrite(file, diff string, opts diagnosticOptions) ([]Content, bool, error) {
-	abs := s.resolveFileArg(file)
+	abs, err := s.resolveFileArg(file)
+	if err != nil {
+		return nil, true, err
+	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", file, err)
@@ -1303,7 +1337,10 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 // removed args, insert zero values for added ones) lands in a follow-
 // up; for now the diagnostic round-trip surfaces broken callers.
 func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments bool, dopts diagnosticOptions) ([]Content, bool, error) {
-	abs := s.resolveFileArg(a.File)
+	abs, err := s.resolveFileArg(a.File)
+	if err != nil {
+		return nil, true, err
+	}
 	lang := s.languageForFile(abs)
 	if !signatureSupportedLanguage(lang) {
 		return nil, true, fmt.Errorf("signature refactor not supported for language %q (try go / typescript / python)", lang)
@@ -1588,7 +1625,10 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	if idx == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
 	}
-	abs := s.resolveFileArg(a.File)
+	abs, err := s.resolveFileArg(a.File)
+	if err != nil {
+		return nil, true, err
+	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", a.File, err)
@@ -2109,16 +2149,64 @@ func confidenceLabel(c symbols.Confidence) string {
 	return "unknown"
 }
 
-// resolveFileArg turns a workspace-relative or absolute path from a
-// tool argument into an absolute path.
-func (s *Server) resolveFileArg(file string) string {
-	if filepath.IsAbs(file) {
-		return file
+// editNote states in one plain line what an edit ACTUALLY did — the target it
+// landed on and the size of the change:
+//
+//	created plan.md (+4392)
+//	updated app.go#Server.Start, -120 +145
+//	deleted app.go#Old (-83)
+//
+// The structured fields carry the same facts, but a model skims them. A model
+// asked for "plan.md" that wrote "plan" had `"file":"plan","created":true` in
+// front of it and sailed straight past; the point of the note is that "created
+// plan" is a sentence you have to actively misread. Cheap self-check: the
+// result restates the request back, so a wrong target is visible at the moment
+// it happens rather than at grading time.
+//
+// target is the addressed node (a "<file>#<sym>" address where one applies,
+// else the file) so the note names what the caller aimed at, not just its file.
+func editNote(verb, target string, removed, added int) string {
+	switch {
+	case removed == 0:
+		return fmt.Sprintf("%s %s (+%d)", verb, target, added)
+	case added == 0:
+		return fmt.Sprintf("%s %s (-%d)", verb, target, removed)
+	default:
+		return fmt.Sprintf("%s %s, -%d +%d", verb, target, removed, added)
 	}
-	if root := s.getRoot(); root != "" {
-		return filepath.Join(root, file)
+}
+
+// resolveFileArg turns a workspace-relative or absolute path from a tool
+// argument into an absolute path CONFINED TO THE ROOT.
+//
+// An absolute path is allowed only when it lands inside the root: clients
+// legitimately echo back absolute paths this server itself handed them, so
+// rejecting every absolute path (the way a pure-relative jail would) breaks
+// ordinary use. What is rejected is any path that ends up OUTSIDE the root,
+// however it got there — absolute ("/etc/passwd") or climbing
+// ("../../etc/passwd").
+//
+// Both holes were live: absolute paths returned verbatim, and filepath.Join
+// CLEANS but does not CONFINE, so "../.." walked straight out. node_edit would
+// then create the file, i.e. arbitrary writes anywhere the process could reach
+// — from a server whose entire contract is --root.
+//
+// No root configured = explicitly unjailed; pass through.
+func (s *Server) resolveFileArg(file string) (string, error) {
+	root := s.getRoot()
+	if root == "" {
+		return file, nil
 	}
-	return file
+	abs := file
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(root, abs)
+	}
+	abs = filepath.Clean(abs)
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes the workspace root: %q (paths must resolve inside %s)", file, root)
+	}
+	return abs, nil
 }
 
 // languageForFile dispatches by extension via the registry. Returns ""

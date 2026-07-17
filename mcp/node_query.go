@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
@@ -56,6 +57,13 @@ type qCompound struct {
 	class   string  // the type selector (a symbol `class`), if !anyType
 	attrs   []qAttr // [name …] filters
 	has     []qList // :has(...) inner selector lists
+
+	// depth is an optional :depth(min,max) override. When set on a
+	// compound, it REPLACES the default depth range of the combinator
+	// immediately to its left (see combDefaultRange / depthLevels):
+	// measured from the PREVIOUS compound in the chain, 0 = that
+	// compound itself. nil means "use the combinator's default".
+	depth *[2]int
 }
 
 type qCombinator int
@@ -218,13 +226,21 @@ func (p *selParser) parseCompound() (qCompound, error) {
 			}
 			comp.attrs = append(comp.attrs, a)
 		case ':':
-			inner, err := p.parseHas()
+			hasList, depthRange, err := p.parsePseudo()
 			if err != nil {
 				return comp, err
 			}
-			comp.has = append(comp.has, inner)
+			if hasList != nil {
+				comp.has = append(comp.has, *hasList)
+			}
+			if depthRange != nil {
+				if comp.depth != nil {
+					return comp, p.errf("only one :depth(...) per compound")
+				}
+				comp.depth = depthRange
+			}
 		default:
-			if !sawType && len(comp.attrs) == 0 && len(comp.has) == 0 {
+			if !sawType && len(comp.attrs) == 0 && len(comp.has) == 0 && comp.depth == nil {
 				return comp, p.errf("a type selector ('func', '*', …) or '['")
 			}
 			return comp, nil
@@ -279,28 +295,78 @@ func (p *selParser) parseAttr() (qAttr, error) {
 	return a, nil
 }
 
-// parseHas parses ":has(<selector-list>)". The leading ':' is at the
-// cursor.
-func (p *selParser) parseHas() (qList, error) {
+// parsePseudo parses one ":name(...)" pseudo-class at the cursor
+// (leading ':' still unconsumed), dispatching on the name. Returns
+// EITHER a :has(...) inner selector list OR a :depth(min,max) range —
+// never both; the caller folds whichever came back into the compound
+// being built.
+func (p *selParser) parsePseudo() (has *qList, depth *[2]int, err error) {
 	p.i++ // consume ':'
 	name := p.readIdent()
-	if name != "has" {
-		return nil, fmt.Errorf("unknown pseudo-class %q: only :has(...) is supported", ":"+name)
+	switch name {
+	case "has":
+		if p.peek() != '(' {
+			return nil, nil, p.errf("'(' after :has")
+		}
+		p.i++
+		inner, err := p.parseList()
+		if err != nil {
+			return nil, nil, err
+		}
+		p.skipWS()
+		if p.peek() != ')' {
+			return nil, nil, p.errf("')' to close :has")
+		}
+		p.i++
+		return &inner, nil, nil
+	case "depth":
+		if p.peek() != '(' {
+			return nil, nil, p.errf("'(' after :depth")
+		}
+		p.i++
+		p.skipWS()
+		lo, ok := p.readNonNegInt()
+		if !ok {
+			return nil, nil, p.errf("a non-negative integer (min)")
+		}
+		p.skipWS()
+		if p.peek() != ',' {
+			return nil, nil, p.errf("',' in :depth(min,max)")
+		}
+		p.i++
+		p.skipWS()
+		hi, ok := p.readNonNegInt()
+		if !ok {
+			return nil, nil, p.errf("a non-negative integer (max)")
+		}
+		p.skipWS()
+		if p.peek() != ')' {
+			return nil, nil, p.errf("')' to close :depth")
+		}
+		p.i++
+		if hi < lo {
+			return nil, nil, fmt.Errorf("bad :depth(%d,%d): max must be >= min", lo, hi)
+		}
+		return nil, &[2]int{lo, hi}, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown pseudo-class %q: only :has(...) and :depth(min,max) are supported", ":"+name)
 	}
-	if p.peek() != '(' {
-		return nil, p.errf("'(' after :has")
+}
+
+// readNonNegInt reads a run of ASCII digits at the cursor.
+func (p *selParser) readNonNegInt() (int, bool) {
+	start := p.i
+	for !p.eof() && p.s[p.i] >= '0' && p.s[p.i] <= '9' {
+		p.i++
 	}
-	p.i++
-	inner, err := p.parseList()
+	if p.i == start {
+		return 0, false
+	}
+	n, err := strconv.Atoi(string(p.s[start:p.i]))
 	if err != nil {
-		return nil, err
+		return 0, false
 	}
-	p.skipWS()
-	if p.peek() != ')' {
-		return nil, p.errf("')' to close :has")
-	}
-	p.i++
-	return inner, nil
+	return n, true
 }
 
 func (p *selParser) readIdent() string {
@@ -420,6 +486,56 @@ func matchComplex(n qNode, cx qComplex, byFile *fileNodes) bool {
 	return matchChain(n, cx, last, byFile)
 }
 
+// depthLevels returns the nesting-depth difference between an ancestor
+// sym path and a candidate sym path: 0 when they're equal (the
+// "anchor itself"), N when the candidate is N dotted segments below
+// the ancestor. ancestorSym == "" means "the file's own root" — every
+// top-level symbol (no dots) is level 1 below it, and level 0 matches
+// only the root itself (sym == ""). ok is false when sym isn't
+// ancestorSym's self-or-descendant.
+//
+// This is the SINGLE shared evaluator behind both node_query's `depth`
+// field and the :depth(min,max) pseudo-class, so the two can't
+// semantically drift.
+func depthLevels(ancestorSym, sym string) (levels int, ok bool) {
+	if ancestorSym == sym {
+		return 0, true
+	}
+	if ancestorSym == "" {
+		return strings.Count(sym, ".") + 1, true
+	}
+	prefix := ancestorSym + "."
+	if !strings.HasPrefix(sym, prefix) {
+		return 0, false
+	}
+	return strings.Count(sym[len(prefix):], ".") + 1, true
+}
+
+// inDepthRange reports whether sym is within [min,max] levels below
+// ancestorSym (0 = ancestorSym itself). max < 0 means unlimited.
+func inDepthRange(ancestorSym, sym string, min, max int) bool {
+	levels, ok := depthLevels(ancestorSym, sym)
+	if !ok {
+		return false
+	}
+	return levels >= min && (max < 0 || levels <= max)
+}
+
+// combDefaultRange is the depth range a combinator implies on the
+// compound to its right when that compound carries no :depth(min,max)
+// override: child ≡ [1,1], descendant ≡ [1,∞) (self excluded).
+func combDefaultRange(c qCombinator) (min, max int) {
+	if c == combChild {
+		return 1, 1
+	}
+	return 1, -1
+}
+
+// matchChain walks the combinator chain right-to-left. For each link
+// it resolves a depth range (either the compound's own :depth(min,max)
+// override, or the combinator's default) and searches every candidate
+// ancestor within that range — uniformly for child, descendant, and
+// :depth() links, so all three go through inDepthRange/depthLevels.
 func matchChain(n qNode, cx qComplex, idx int, byFile *fileNodes) bool {
 	if !matchCompound(n, cx.compounds[idx], byFile) {
 		return false
@@ -427,25 +543,20 @@ func matchChain(n qNode, cx qComplex, idx int, byFile *fileNodes) bool {
 	if idx == 0 {
 		return true
 	}
-	switch cx.combs[idx-1] {
-	case combChild:
-		parent, ok := byFile.bySym[parentSymPath(n.sym)]
-		if !ok {
-			return false
-		}
-		return matchChain(parent, cx, idx-1, byFile)
-	default: // combDescendant
-		pfxOf := n.sym
-		for _, a := range byFile.nodes {
-			if a.sym == n.sym || !strings.HasPrefix(pfxOf, a.sym+".") {
-				continue
-			}
-			if matchChain(a, cx, idx-1, byFile) {
-				return true
-			}
-		}
-		return false
+	minD, maxD := combDefaultRange(cx.combs[idx-1])
+	if dr := cx.compounds[idx].depth; dr != nil {
+		minD, maxD = dr[0], dr[1]
 	}
+	for _, a := range byFile.nodes {
+		levels, ok := depthLevels(a.sym, n.sym)
+		if !ok || levels < minD || (maxD >= 0 && levels > maxD) {
+			continue
+		}
+		if matchChain(a, cx, idx-1, byFile) {
+			return true
+		}
+	}
+	return false
 }
 
 // matchList reports whether any complex in the union matches the node.
@@ -458,15 +569,6 @@ func matchList(n qNode, list qList, byFile *fileNodes) bool {
 	return false
 }
 
-// parentSymPath strips the last dotted segment ("Server.Start" ->
-// "Server"; "Server" -> "").
-func parentSymPath(sym string) string {
-	if i := strings.LastIndex(sym, "."); i >= 0 {
-		return sym[:i]
-	}
-	return ""
-}
-
 // fileNodes holds one file's candidates plus a sym index for ancestor /
 // child resolution.
 type fileNodes struct {
@@ -476,7 +578,7 @@ type fileNodes struct {
 
 // ----------------------------------------------------------- tool handler
 
-func handleNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleLegacyNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Select string `json:"select"`
 		Path   string `json:"path"`
@@ -504,7 +606,10 @@ func handleNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	if p.Path == "" {
 		p.Path = "."
 	}
-	abs := s.resolveFileArg(p.Path)
+	abs, err := s.resolveFileArg(p.Path)
+	if err != nil {
+		return nil, true, err
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("stat %s: %w", p.Path, err)
@@ -583,4 +688,35 @@ func handleNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		payload["limit"] = limit
 	}
 	return jsonContent(payload), false, nil
+}
+
+// walkQueryFiles returns every file under abs (or abs itself if it's
+// a file), sorted for determinism — the file-scope walk shared by the
+// modern node_query handler. Language filtering happens per-file at
+// the caller (matches the legacy handler's inline walk above).
+func (s *Server) walkQueryFiles(abs string) ([]string, error) {
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	if info.IsDir() {
+		_ = filepath.WalkDir(abs, func(path string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if skipScanDir(d.Name()) {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			files = append(files, path)
+			return nil
+		})
+	} else {
+		files = append(files, abs)
+	}
+	sort.Strings(files)
+	return files, nil
 }

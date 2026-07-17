@@ -112,7 +112,10 @@ func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		nodeLimit = *p.NodeLimit
 	}
 
-	abs := s.resolveFileArg(p.Path)
+	abs, err := s.resolveFileArg(p.Path)
+	if err != nil {
+		return nil, true, err
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("stat %s: %w", p.Path, err)
@@ -396,6 +399,15 @@ func (s *Server) enclosingSymPath(absFile string, line int, cache map[string][]s
 	bestSpan := 1 << 30
 	bestDots := -1
 	for _, sym := range syms {
+		// An `argument` is a leaf DECLARATION, not an enclosing scope:
+		// a parameter sits on its callable's signature line with a
+		// zero-line span, so without this it would out-compete the
+		// callable itself for every hit on that line (and change what
+		// the legacy search / node_references report). "Which symbol
+		// encloses this line" should answer with the callable.
+		if sym.Class == "argument" {
+			continue
+		}
 		if sym.DeclStartLine <= line && line <= sym.DeclEndLine {
 			span := sym.DeclEndLine - sym.DeclStartLine
 			dots := strings.Count(sym.Sym, ".")
@@ -415,6 +427,7 @@ func (s *Server) enclosingSymPath(absFile string, line int, cache map[string][]s
 type resolvedNode struct {
 	declRange rangeArgs
 	nameRange rangeArgs
+	sym       string // canonical dotted sym path resolved by matchSym; "" = whole file
 }
 
 // resolveNodeAddr resolves a "<file>#<sym>" node address into ranges.
@@ -431,7 +444,10 @@ func (s *Server) resolveNodeAddr(node string) (*resolvedNode, error) {
 	if file == "" {
 		return nil, fmt.Errorf("node address needs a file: \"<file>#<sym>\"")
 	}
-	abs := s.resolveFileArg(file)
+	abs, err := s.resolveFileArg(file)
+	if err != nil {
+		return nil, err
+	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", file, err)
@@ -439,7 +455,7 @@ func (s *Server) resolveNodeAddr(node string) (*resolvedNode, error) {
 	if symPath == "" {
 		endLine, endCol := contentEndPosition(content)
 		r := rangeArgs{File: file, StartLine: 1, StartCol: 1, EndLine: endLine, EndCol: endCol}
-		return &resolvedNode{declRange: r, nameRange: r}, nil
+		return &resolvedNode{declRange: r, nameRange: r, sym: ""}, nil
 	}
 	lang := s.languageForFile(abs)
 	syms, err := symbols.FileSymbols(lang, content)
@@ -451,6 +467,7 @@ func (s *Server) resolveNodeAddr(node string) (*resolvedNode, error) {
 			return &resolvedNode{
 				declRange: rangeArgs{File: file, StartLine: sym.DeclStartLine, StartCol: sym.DeclStartCol, EndLine: sym.DeclEndLine, EndCol: sym.DeclEndCol},
 				nameRange: rangeArgs{File: file, StartLine: sym.NameStartLine, StartCol: sym.NameStartCol, EndLine: sym.NameEndLine, EndCol: sym.NameEndCol},
+				sym:       sym.Sym,
 			}, nil
 		}
 	}

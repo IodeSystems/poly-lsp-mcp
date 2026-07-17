@@ -50,6 +50,7 @@ func TestProactiveOpenPopulatesDiagnosticsResource(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetLegacyTools(true) // uses the poly-lsp-mcp://diagnostics resource
 	srv.SetManager(multiplex.NewManager(reg))
 	srv.SetDiagnosticWait(8 * time.Second)
 

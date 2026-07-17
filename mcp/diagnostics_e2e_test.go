@@ -49,6 +49,7 @@ func TestNodeEditSurfacesGoplsDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetLegacyTools(true) // uses node_references + byte-precise node_edit ranges
 	srv.SetManager(multiplex.NewManager(reg))
 	// gopls takes longer to first-publish than the production default.
 	// 8s is comfortable.
@@ -176,4 +177,3 @@ func TestNodeEditSurfacesGoplsDiagnostics(t *testing.T) {
 		t.Errorf("EnclosingNode.Name = %q, want main", hit.EnclosingNode.Name)
 	}
 }
-

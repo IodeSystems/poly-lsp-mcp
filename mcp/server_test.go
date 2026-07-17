@@ -217,9 +217,10 @@ func TestEOFWithoutShutdownReturnsSentinel(t *testing.T) {
 
 // ---- tools/list ----
 
-func TestToolsListAdvertisesNineToolSurface(t *testing.T) {
+func TestToolsListAdvertisesLegacyNineToolSurface(t *testing.T) {
 	s := startSession(t, "")
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -262,6 +263,66 @@ func TestToolsListAdvertisesNineToolSurface(t *testing.T) {
 		if !found {
 			t.Errorf("tool %q missing from catalog", name)
 		}
+	}
+}
+
+// TestToolsListAdvertisesThreeToolSurface: the DEFAULT surface (no
+// SetLegacyTools call) is the trimmed 3-tool set — this is the whole
+// point of the redesign, since tool-definition JSON is re-sent every
+// turn by the MCP protocol.
+func TestToolsListAdvertisesThreeToolSurface(t *testing.T) {
+	s := startSession(t, "")
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	resp := s.request("tools/list", nil)
+	var got struct {
+		Tools []struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"node_query": false,
+		"node_read":  false,
+		"node_edit":  false,
+	}
+	for _, tool := range got.Tools {
+		if _, ok := want[tool.Name]; ok {
+			want[tool.Name] = true
+		} else {
+			t.Errorf("unexpected tool in modern catalog: %q", tool.Name)
+		}
+		if tool.Description == "" {
+			t.Errorf("tool %q has empty description", tool.Name)
+		}
+		if len(tool.InputSchema) == 0 {
+			t.Errorf("tool %q has empty inputSchema", tool.Name)
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("tool %q missing from modern catalog", name)
+		}
+	}
+
+	// The 3 legacy resources are gone from the default surface too.
+	rresp := s.request("resources/list", nil)
+	var rgot struct {
+		Resources []struct {
+			URI string `json:"uri"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal(rresp.Result, &rgot); err != nil {
+		t.Fatal(err)
+	}
+	if len(rgot.Resources) != 0 {
+		t.Errorf("expected no resources on the modern surface, got %+v", rgot.Resources)
 	}
 }
 
@@ -334,6 +395,7 @@ func TestStructureWorkspaceListsTopLevelEntries(t *testing.T) {
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -360,6 +422,7 @@ func TestStructureFileReturnsFlatSymbolsWithClassAndRange(t *testing.T) {
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -397,6 +460,7 @@ func TestStructureFileWithoutTreeSitterGrammar(t *testing.T) {
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -432,6 +496,7 @@ func TestStructureUnknownExtensionReturnsTextNode(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -459,6 +524,7 @@ func TestStructureUnknownExtensionReturnsTextNode(t *testing.T) {
 func TestStructureRejectsNegativeDepth(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -475,6 +541,7 @@ func TestStructureRejectsNegativeDepth(t *testing.T) {
 func TestStructureGrepMatchesIdentifier(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -497,6 +564,7 @@ func TestStructureGrepMatchesIdentifier(t *testing.T) {
 func TestStructureGrepMatchesFileBasename(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -519,6 +587,7 @@ func TestStructureGrepMatchesFileBasename(t *testing.T) {
 func TestStructureGrepNoMatchReturnsEmpty(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -541,6 +610,7 @@ func TestStructureGrepNoMatchReturnsEmpty(t *testing.T) {
 func TestStructureGrepInvalidRegexIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -563,6 +633,7 @@ func TestStructureNodeLimitAutoCapEmitsHint(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -606,6 +677,7 @@ func TestStructureNodeLimitExplicit(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -636,6 +708,7 @@ func TestStructureUnderLimitNoTruncation(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("x"), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -671,6 +744,7 @@ func TestSearchFindsAcrossFiles(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -730,6 +804,7 @@ func TestSearchGlobFilter(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -758,6 +833,7 @@ func TestSearchLimitOverflowReported(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -790,6 +866,7 @@ func TestSearchContextLines(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -818,6 +895,7 @@ func TestSearchContextLines(t *testing.T) {
 func TestSearchEmptyPatternIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -830,6 +908,7 @@ func TestSearchEmptyPatternIsError(t *testing.T) {
 func TestSearchInvalidRegexIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -845,6 +924,7 @@ func TestNodeReferencesByIdentifierRange(t *testing.T) {
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -895,6 +975,7 @@ func TestNodeReferencesIncludesAtRefMarker(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -940,6 +1021,7 @@ func refHasClassInFile(payloadJSON, fileBase, class string) bool {
 func TestNodeReferencesEmptyRangeIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -969,6 +1051,7 @@ func TestNodeReadReturnsExactText(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1000,6 +1083,7 @@ func TestNodeReadWholeFile(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1030,6 +1114,7 @@ func TestNodeReadLinePreview(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1129,6 +1214,7 @@ func TestNodeReadAutoCapHintGuidesWidening(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1163,6 +1249,7 @@ func TestNodeEditCreateFile(t *testing.T) {
 	dir := t.TempDir()
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1198,6 +1285,7 @@ func TestNodeEditOverwriteFile(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("old contents\n"), 0o600)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1260,6 +1348,7 @@ func TestNodeEditDiff(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte(orig), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1284,6 +1373,7 @@ func TestNodeEditDiffContextMismatchIsError(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha\nbravo\n"), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1309,6 +1399,7 @@ func TestNodeEditDiffAmbiguousContextIsGuidedError(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte(orig), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1344,6 +1435,7 @@ func TestNodeEditMixedShapesIsError(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi\n"), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1375,6 +1467,7 @@ func TestNodeReadAutoCapEmitsHint(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1419,6 +1512,7 @@ func TestNodeReadUserLimitEmitsLimitReason(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte(buf.String()), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1448,6 +1542,7 @@ func TestNodeReadLineLengthTruncation(t *testing.T) {
 		[]byte("short\n"+strings.Repeat("X", 500)+"\nalso short\n"), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1485,6 +1580,7 @@ func TestNodeReadStartLineOnly(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte(buf.String()), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1513,6 +1609,7 @@ func TestNodeReadMixedShapesIsError(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi\n"), 0o644)
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1540,6 +1637,7 @@ func TestNodeEditRewritesFileAtomicallyAndRefreshesIndex(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1611,6 +1709,7 @@ func TestNodeDeleteRemovesRange(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1638,6 +1737,7 @@ func TestNodeDeleteWholeFile(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1664,6 +1764,7 @@ func TestNodeDeleteWholeFileMissingIsError(t *testing.T) {
 	dir := t.TempDir()
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1682,6 +1783,7 @@ func TestNodeDeleteWholeFileDirectoryIsError(t *testing.T) {
 	}
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1720,6 +1822,7 @@ func TestNodeRefactorRenameAcrossLanguages(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1750,6 +1853,7 @@ func TestNodeRefactorRenameAcrossLanguages(t *testing.T) {
 func TestNodeRefactorMissingKindIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1781,6 +1885,7 @@ func TestNodeRefactorNestedShapeRenameIsEquivalent(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1813,6 +1918,7 @@ func TestNodeRefactorNestedShapeRenameIsEquivalent(t *testing.T) {
 func TestNodeRefactorConflictingShapesIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1846,6 +1952,7 @@ func TestNodeRefactorSignatureChangeParams(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1884,6 +1991,7 @@ func TestNodeRefactorSignatureChangeReturn(t *testing.T) {
 		}
 		s := startSessionFull(t, dir, nil, nil)
 		defer s.close()
+		s.srv.SetLegacyTools(true)
 		s.request("initialize", map[string]any{})
 		s.notify("notifications/initialized", map[string]any{})
 
@@ -1915,6 +2023,7 @@ func TestNodeRefactorSignatureChangeReturn(t *testing.T) {
 		}
 		s := startSessionFull(t, dir, nil, nil)
 		defer s.close()
+		s.srv.SetLegacyTools(true)
 		s.request("initialize", map[string]any{})
 		s.notify("notifications/initialized", map[string]any{})
 
@@ -1954,6 +2063,7 @@ func TestNodeRefactorSignatureCallSiteAddArg(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -1999,6 +2109,7 @@ func TestNodeRefactorSignatureCallSiteDropArg(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2044,6 +2155,7 @@ func TestNodeRefactorSignatureCombinedRename(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2093,6 +2205,7 @@ func TestNodeRefactorTSSignature(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2140,6 +2253,7 @@ func TestNodeRefactorPythonSignature(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2172,6 +2286,7 @@ func TestNodeRefactorPythonSignature(t *testing.T) {
 func TestNodeRefactorUnknownKindIsError(t *testing.T) {
 	s := startSession(t, polyglotFixture(t))
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2200,6 +2315,7 @@ func TestNodeRefactorRenameDefaultSkipsComments(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2241,6 +2357,7 @@ func TestNodeRefactorRenameIncludeCommentsTouchesComments(t *testing.T) {
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2290,6 +2407,7 @@ func TestNodeRefactorRenameIncludeCommentsDedupesWithDeclaredSites(t *testing.T)
 
 	s := startSessionFull(t, dir, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2327,6 +2445,7 @@ func TestInitializeAdvertisesResourcesCapability(t *testing.T) {
 func TestResourcesListReturnsCatalog(t *testing.T) {
 	s := startSession(t, "")
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2360,6 +2479,7 @@ func TestResourcesReadDiagnosticsWithoutManager(t *testing.T) {
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2391,6 +2511,7 @@ func TestResourcesReadWorkspaceSummary(t *testing.T) {
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
@@ -2421,6 +2542,7 @@ func TestResourcesReadBindingsCatalogWithSchemas(t *testing.T) {
 	schemas := []config.Schema{{File: "api.proto", Dialect: "proto"}}
 	s := startSessionFull(t, root, nil, schemas)
 	defer s.close()
+	s.srv.SetLegacyTools(true)
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 

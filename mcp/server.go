@@ -110,6 +110,12 @@ type Server struct {
 	// only publish after didOpen / didSave. Default true.
 	proactiveOpen bool
 
+	// legacyTools / readOnly are remembered so SetLegacyTools and SetReadOnly
+	// compose in either call order: each re-registers the base surface, then
+	// re-applies the read-only filter.
+	legacyTools bool
+	readOnly    bool
+
 	// proactiveOpenDoneMu guards proactiveOpenDone. The channel is
 	// (re)created at the start of each proactive walk and closed when
 	// it finishes. WaitForProactiveOpen reads it under the lock so a
@@ -163,10 +169,61 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		gitPrewarm:    true,
 		fileWatch:     true,
 	}
-	s.tools = registerTools()
-	s.resources = registerResources()
+	s.SetLegacyTools(false)
 	s.parseCache = symbols.NewParseCache()
 	return s
+}
+
+// SetLegacyTools swaps the tool/resource surface. false (the default
+// New() leaves it in) is the modern 3-tool surface (node_query,
+// node_read, node_edit) with no resources — tool-definition JSON is
+// re-sent every turn by the MCP protocol, so the trimmed surface is
+// the dominant lever on prompt-token cost. true restores today's
+// 9-tool surface (structure, node_references, node_read, node_edit,
+// node_delete, node_refactor, search, node_rename_file, node_query)
+// plus its 3 resources (workspace/bindings/diagnostics). Call before
+// Serve.
+func (s *Server) SetLegacyTools(enabled bool) {
+	s.legacyTools = enabled
+	if enabled {
+		s.tools = registerLegacyTools()
+		s.resources = registerResources()
+	} else {
+		s.tools = registerModernTools()
+		s.resources = map[string]Resource{}
+	}
+	s.applyReadOnly()
+}
+
+// SetReadOnly removes every mutating tool from the surface, leaving
+// navigation and reading. Call before Serve; composes with
+// SetLegacyTools in either order.
+//
+// This is enforcement, not a hint: a tool the model cannot see is a tool it
+// cannot call, which is stronger than any instruction not to. For exploration,
+// review, or an agent pointed at a repo you don't want written to, that removes
+// the whole class of "it edited something" outcomes.
+//
+// It's also cheaper. node_edit is ~370 of the surface's ~995 tokens — the
+// refactor fields (rename/params/return/resolution) are most of its schema —
+// so read-only is a ~37% smaller surface for a job that never needed them.
+func (s *Server) SetReadOnly(enabled bool) {
+	s.readOnly = enabled
+	s.SetLegacyTools(s.legacyTools) // re-register, then re-filter
+}
+
+// applyReadOnly strips mutating tools from whatever surface is registered. It
+// filters by NAME rather than a flag on Tool: the legacy and modern surfaces
+// share handlers, and a name list makes "what can write" auditable in one line.
+func (s *Server) applyReadOnly() {
+	if !s.readOnly {
+		return
+	}
+	for _, name := range []string{
+		"node_edit", "node_delete", "node_refactor", "node_rename_file",
+	} {
+		delete(s.tools, name)
+	}
 }
 
 // SetProactiveOpen toggles the post-initialize workspace walk that

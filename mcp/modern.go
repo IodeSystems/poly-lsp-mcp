@@ -140,7 +140,8 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	if strings.TrimSpace(p.Grep) != "" {
 		return nil, true, errors.New("the grep field is gone — put the pattern IN the selector as a fragment: <sel>::grep('-i -A2 derp'). Same flags; every match is an addressable line")
 	}
-	list, err := parseModernSelector(p.Selector)
+	sel, explain := splitExplain(p.Selector)
+	list, err := parseModernSelector(sel)
 	if err != nil {
 		return nil, true, err
 	}
@@ -165,6 +166,16 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	}
 
 	rows := e.evaluate(list)
+
+	// :explain returns a cost TRACE, not matches — a deliberate
+	// result-shape fork. The query still RAN (that is the measured
+	// column); we just render the estimate/actual per element instead.
+	if explain {
+		return jsonContent(map[string]any{
+			"explain":   e.explainRows(list),
+			"truncated": e.workExceeded,
+		}), false, nil
+	}
 
 	total := len(rows)
 	if offset > total {

@@ -38,6 +38,7 @@ func (s *Server) QueryText(selector string, limit, offset int, w io.Writer) erro
 		return errors.New("offset must be >= 0")
 	}
 
+	selector, explain := splitExplain(selector)
 	list, err := parseModernSelector(selector)
 	if err != nil {
 		return err
@@ -69,6 +70,10 @@ func (s *Server) QueryText(selector string, limit, offset int, w io.Writer) erro
 		end = total
 	}
 	paged := rows[offset:end]
+
+	if explain {
+		return renderExplain(w, e.explainRows(list), e.workExceeded)
+	}
 
 	var trace []string
 	if e.workExceeded {
@@ -162,6 +167,30 @@ func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, wor
 		// and names the fix. Never trim quietly.
 		fmt.Fprintln(w, "warning: evaluation stopped at the work budget — results are INCOMPLETE.")
 		return writeBudgetBlow(w, trace)
+	}
+	return nil
+}
+
+// renderExplain prints the :explain cost tree — each element's a-priori
+// est beside the measured work it actually cost, with the ">x" floor on
+// the element the budget tripped in.
+func renderExplain(w io.Writer, rows []explainRow, workExceeded bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "element\test\tmeasured")
+	for _, r := range rows {
+		mark := ""
+		if r.Blown {
+			mark = "\t← budget ran out here"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s%s\n", r.Element, r.Est, r.Measured, mark)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "est = a-priori (free, from index tallies); measured = work actually spent.")
+	if workExceeded {
+		fmt.Fprintln(w, ">x = lower bound (budget tripped mid-element); — = never reached.")
 	}
 	return nil
 }

@@ -1897,6 +1897,10 @@ WORK IN SMALL STEPS. Run a cheap query, take an ADDRESS from matches[].node, fee
 next query or to node_read/node_edit. Two simple queries beat one clever one — every nesting
 level is a chance to lose a paren. If you are 3 parens deep, split the query.
 
+:explain <selector>  a query MODE (prefix, not a pseudo) — returns a COST TREE, not matches:
+each element's a-priori est (free) beside its measured work, with >x lower bounds on the element
+that ate the budget. Use it when a query blows the budget to see WHICH element to narrow.
+
 TASK → QUERY
   what is here?               :root > *            then descend:  #web > *
   find something by name      #Save                anywhere;  #'store.go#Save' pins one
@@ -2128,6 +2132,95 @@ func (s *Server) classCounts() map[string]int {
 	s.statsClass = counts
 	s.statsGen = gen
 	return counts
+}
+
+// splitExplain strips a leading ":explain" query MODE. It is a mode, not
+// a pseudo — kept out of the grammar so it can never nest inside a
+// selector. Returns the remaining selector and whether explain was asked.
+func splitExplain(sel string) (rest string, explain bool) {
+	s := strings.TrimSpace(sel)
+	const p = ":explain"
+	if s == p {
+		return "", true
+	}
+	if strings.HasPrefix(s, p) {
+		switch s[len(p)] {
+		case ' ', '\t', '\n':
+			return strings.TrimSpace(s[len(p):]), true
+		}
+	}
+	return sel, false
+}
+
+// explainRow is one element on the :explain cost tree: its a-priori EST
+// (free, from the commit-2 tallies) beside its MEASURED cost (the actual
+// budget spent). Measured degrades to a ">x" LOWER BOUND on the element
+// the budget tripped in, and "—" for elements the walk never reached —
+// full while there's budget, a floor once there isn't.
+type explainRow struct {
+	Element  string `json:"element"`
+	Est      string `json:"est"`
+	Measured string `json:"measured"`
+	Blown    bool   `json:"blown,omitempty"`
+}
+
+func (e *engine) explainRows(list selectorList) []explainRow {
+	var rows []explainRow
+	reached := true
+	var walk func(elems []selElem, indent string)
+	walk = func(elems []selElem, indent string) {
+		for i := range elems {
+			el := &elems[i]
+			r := explainRow{Element: indent + renderElem(el), Est: e.estElem(el)}
+			switch {
+			case !reached:
+				r.Measured = "—" // never ran — the budget was gone before it
+			case e.workExceeded && el == e.blownElem:
+				r.Measured = ">" + commaInt(e.elemCost[el])
+				r.Blown = true
+				reached = false
+			default:
+				r.Measured = commaInt(e.elemCost[el])
+			}
+			rows = append(rows, r)
+			if el.group != nil {
+				walk(el.group.elems, indent+"  ")
+			}
+		}
+	}
+	for ci := range list {
+		if len(list) > 1 {
+			rows = append(rows, explainRow{Element: fmt.Sprintf("branch %d:", ci+1)})
+		}
+		walk(list[ci].elems, "")
+	}
+	return rows
+}
+
+// estElem is one element's a-priori cardinality from the commit-2 tallies
+// — free, no budget spent. An exact name filter reads NameFreq (O(1)); a
+// bare class reads classCounts. Edges and `*` are "?" — the index has no
+// fan-out, so their breadth only shows in the MEASURED column (the
+// deferred fan-out the commit-2 note names).
+func (e *engine) estElem(el *selElem) string {
+	if el.comp == nil {
+		return "?"
+	}
+	c := el.comp
+	if idx := e.s.getIndex(); idx != nil {
+		for _, a := range c.attrs {
+			if a.op == selExact && a.axis != attrPath {
+				return commaInt(idx.NameFreq(a.value))
+			}
+		}
+	}
+	switch {
+	case c.isRef, c.isFrag, c.isComment, c.anyType:
+		return "?"
+	case c.class != "":
+		return commaInt(e.s.classCounts()[c.class])
+	}
+	return "?"
 }
 
 // costTrace renders the selector as a per-element cost breakdown, marking

@@ -345,9 +345,12 @@ func TestModernQueryGuidedParseError(t *testing.T) {
 		t.Errorf("expected a guided usage dump; got %q", msg)
 	}
 	// The deep grammar (attribute ops) is taught by the error, not the
-	// every-turn description.
-	if !strings.Contains(msg, "[name^=X]") {
-		t.Errorf("grammar dump should teach attribute ops; got %q", msg)
+	// every-turn description: the literal ops AND the regex op, which is
+	// how the language spells OR.
+	for _, want := range []string{"^=", "~= is a regex", "[path~=test|smoke]"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("grammar dump should teach attribute ops; missing %q in %q", want, msg)
+		}
 	}
 	// A bare word that isn't a type: almost always a workspace NAME used where
 	// a type belongs, so the error points at the id.

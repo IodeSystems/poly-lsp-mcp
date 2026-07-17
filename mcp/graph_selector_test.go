@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -502,15 +503,242 @@ func TestWorkBudgetTripsLoudly(t *testing.T) {
 	}
 }
 
+// A tripped budget must return the SAME partial result every run.
+//
+// The traversal carries node sets as map[*treeNode]bool, and ranging a
+// Go map is randomized per run. That is invisible while a query runs to
+// completion — the result set is the same however you reach it, and
+// evaluate sorts before returning. The moment the budget trips it stops
+// being invisible: the cutoff lands wherever the random walk happened to
+// be, so the same selector answers differently every run. Truncated is
+// allowed to be partial; it is not allowed to be a coin flip.
+// The budgets here are tuned to trip PART WAY THROUGH a set of tips —
+// that is the only window where order is observable. Too low and the
+// walk dies before it branches (stable by luck); too high and it
+// finishes (stable by completion). Both directions pass vacuously, so
+// the test asserts Truncated to prove it is still in the window.
+func TestTrippedBudgetIsReproducible(t *testing.T) {
+	for _, tc := range []struct {
+		sel    string
+		budget int
+	}{
+		{`func::out`, 75},        // per-host walk in refMatches
+		{`func:parents(*)`, 100}, // the :parents frontier
+		{`*:where(::out)`, 100},  // pseudo pipeline per subject
+	} {
+		t.Run(tc.sel, func(t *testing.T) {
+			s := startGraph(t)
+			defer s.close()
+			s.srv.SetQueryWorkBudget(tc.budget)
+
+			var first string
+			for i := 0; i < 25; i++ {
+				q := query(t, s, map[string]any{"selector": tc.sel, "limit": 50})
+				if !q.Truncated {
+					t.Fatalf("budget %d no longer trips for %s — retune it, "+
+						"or this test proves nothing", tc.budget, tc.sel)
+				}
+				got := fmt.Sprint(q.Matches)
+				if i == 0 {
+					first = got
+					continue
+				}
+				if got != first {
+					t.Fatalf("a tripped budget returned DIFFERENT results across runs — "+
+						"truncation is a coin flip, not an answer.\nrun 0:  %s\nrun %d: %s",
+						first, i, got)
+				}
+			}
+		})
+	}
+}
+
+// Asking for ONE direction must not build the other.
+//
+// buildRefs used to materialize both halves and let the caller filter,
+// so ::out silently paid the ::in bill — and the ::in half sweeps every
+// occurrence of the name workspace-wide. Measured on a real workspace:
+// #New::out cost 1.78M work units for the same 49 matches that 140k
+// buys, against a 200k default budget. That single waste is what made
+// the whole edge half of the language unusable by default.
+//
+// This asserts the CONTRACT, not the numbers: after an ::out query, no
+// node has an incoming half built.
+func TestOutQueryNeverBuildsIncomingRefs(t *testing.T) {
+	s := startGraph(t)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	list, err := parseModernSelector(`func::out`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.srv.buildTree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := e.evaluate(list); len(rows) == 0 {
+		t.Fatal("fixture should have outgoing edges for this to prove anything")
+	}
+
+	var walk func(n *treeNode)
+	walk = func(n *treeNode) {
+		if n.refsInLoaded {
+			t.Fatalf("::out built the INCOMING half for %s — the expensive "+
+				"direction nobody asked for", n.addr())
+		}
+		for _, c := range n.children {
+			walk(c)
+		}
+	}
+	walk(e.project)
+}
+
+// --------------------------------------------------------- name vs path
+
+// [name] and [path] are disjoint axes: a node is CALLED something and
+// it LIVES somewhere. They were one axis until [name] was found
+// answering path questions — on a real workspace func[name*=test]
+// returned 508 funcs (every func in a _test.go file, matched through
+// the "<file>#<sym>" address id) where 1 was actually named *test*.
+// That left no spelling for "named test", which is the whole point of
+// splitting them.
+func TestNameAndPathAreDifferentAxes(t *testing.T) {
+	s := startGraph(t)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// The fixture's funcs live in main.go / web/*.ts and none is NAMED
+	// for its file, so the two axes must disagree.
+	byPath := query(t, s, map[string]any{"selector": `func[path$=.ts]`, "limit": 50})
+	wantNodes(t, byPath, "web/app.ts#useHelper", "web/util.ts#tsHelper")
+
+	// [name] must not see the path at all: no func is CALLED "app.ts".
+	byName := query(t, s, map[string]any{"selector": `func[name*=app.ts]`, "limit": 50})
+	if byName.TotalMatches != 0 {
+		t.Errorf("[name] leaked the path — func[name*=app.ts] matched %v; "+
+			"paths belong to [path]", nodes(byName))
+	}
+	// ...and a dir/file is CALLED its basename, not its path.
+	fileByName := query(t, s, map[string]any{"selector": `file[name*=web/]`, "limit": 50})
+	if fileByName.TotalMatches != 0 {
+		t.Errorf("[name] leaked the path on a file: %v", nodes(fileByName))
+	}
+	fileByPath := query(t, s, map[string]any{"selector": `file[path*=web/]`, "limit": 50})
+	if fileByPath.TotalMatches == 0 {
+		t.Error("[path*=web/] should match the files under web/")
+	}
+
+	// #id keeps spanning BOTH, addresses included — pinning one symbol
+	// by its "<file>#<sym>" address is the language's anchor move and
+	// must survive the split.
+	pinned := query(t, s, map[string]any{"selector": `#'web/app.ts#useHelper'`, "limit": 50})
+	wantNodes(t, pinned, "web/app.ts#useHelper")
+}
+
+// The motivating query, end to end: "the funcs that are not test funcs"
+// must be expressible, and must not be answered by name.
+func TestNonTestFilterUsesPathAxis(t *testing.T) {
+	s := startGraph(t)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	all := query(t, s, map[string]any{"selector": `func`, "limit": 50})
+	ts := query(t, s, map[string]any{"selector": `func[path$=.ts]`, "limit": 50})
+	notTS := query(t, s, map[string]any{"selector": `func:not([path$=.ts])`, "limit": 50})
+
+	if all.TotalMatches != ts.TotalMatches+notTS.TotalMatches {
+		t.Errorf("a path filter and its negation must partition the set: "+
+			"all=%d ts=%d not-ts=%d", all.TotalMatches, ts.TotalMatches, notTS.TotalMatches)
+	}
+	for _, n := range nodes(notTS) {
+		if strings.HasSuffix(n, ".ts") || strings.Contains(n, "web/") {
+			t.Errorf(":not([path$=.ts]) returned a .ts node: %s", n)
+		}
+	}
+}
+
+// `~=` is how this language spells OR, and the two boolean axes must
+// hold together: OR is the regex's own `|`, AND is a compound of attrs
+// (CSS conjoins them already — no operator invented for it).
+func TestAttrRegexIsTheOrOperator(t *testing.T) {
+	s := startGraph(t)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// OR: the union of two literal filters, in one test.
+	ts := query(t, s, map[string]any{"selector": `func[path*=app]`, "limit": 50})
+	util := query(t, s, map[string]any{"selector": `func[path*=util]`, "limit": 50})
+	either := query(t, s, map[string]any{"selector": `func[path~=app|util]`, "limit": 50})
+	if either.TotalMatches != ts.TotalMatches+util.TotalMatches {
+		t.Errorf("[path~=a|b] must be the union: app=%d util=%d either=%d",
+			ts.TotalMatches, util.TotalMatches, either.TotalMatches)
+	}
+
+	// Anchors subsume ^= and $= exactly.
+	if re, lit := query(t, s, map[string]any{"selector": `file[path~=\.ts$]`, "limit": 50}),
+		query(t, s, map[string]any{"selector": `file[path$=.ts]`, "limit": 50}); re.TotalMatches != lit.TotalMatches {
+		t.Errorf("[path~=\\.ts$] and [path$=.ts] must agree: %d vs %d", re.TotalMatches, lit.TotalMatches)
+	}
+
+	// AND needs no operator: a compound conjoins.
+	both := query(t, s, map[string]any{"selector": `func[path*=web][path*=.ts]`, "limit": 50})
+	for _, n := range nodes(both) {
+		if !strings.Contains(n, "web") || !strings.Contains(n, ".ts") {
+			t.Errorf("compound attrs must AND; got %s", n)
+		}
+	}
+
+	// A bad pattern is a selector ERROR at parse time, never a silent
+	// zero-match that reads like "nothing matched".
+	if msg := queryErr(t, s, map[string]any{"selector": `func[path~=a(b]`}); !strings.Contains(msg, "bad regex") {
+		t.Errorf("a bad regex must say so; got %s", msg)
+	}
+}
+
+// A literal op with a `|` in it is an alternation attempt: it looks for
+// the literal "a|b", finds nothing, and a wrapping :not() then excludes
+// nothing and hands back the WHOLE set — measured at 820/820 funcs
+// before ~= existed. A filter may match nothing; it may not look like
+// it filtered. Quoting is the escape for a real '|'.
+func TestLiteralOpRefusesAlternationAndNamesRegex(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	msg := queryErr(t, s, map[string]any{"selector": `func:not([path*=test|smoke])`})
+	for _, want := range []string{
+		"silently no-ops",
+		"[path~=test|smoke]", // the repair, spelled out
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("literal-op alternation must name the regex fix; missing %q in: %s", want, msg)
+		}
+	}
+	// Quoted is the literal escape and must NOT trip the guard — it has
+	// to parse and simply match nothing, which is the honest answer for
+	// a path that really contains "a|b".
+	if r := s.callTool("node_query", map[string]any{"selector": `func[path*='a|b']`}); r.IsError {
+		t.Errorf("a quoted '|' is a literal, not an alternation attempt; got error: %s",
+			r.Content[0].Text)
+	}
+}
+
 // --------------------------------------------------------- guided errors
 
 func TestRetiredSpellingsNameTheirReplacement(t *testing.T) {
 	s := startGraph(t)
 	defer s.close()
 
+	// NB: [name~=X] used to live here — CSS's word-list match is useless
+	// on names, so it was an error pointing at ^= *= $=. It is now the
+	// REGEX op (the language's OR: [path~=a|b]), so it is a real
+	// spelling and no longer retired. See TestAttrRegexIsTheOrOperator.
 	for sel, want := range map[string]string{
 		`func:has_parent(#'a.go')`:  `#'a.ts' func`,
-		`func[name~=Test]`:          "^=",
 		`*:references(#'C')`:        "::out",
 		`*:depth(0,0)`:              "{m,n}",
 		`func::ref.out`:             "::in",

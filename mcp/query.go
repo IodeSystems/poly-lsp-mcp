@@ -88,11 +88,24 @@ type treeNode struct {
 	refConf string      // "lexical" today; "lsp" when a child LSP resolves it
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
 
-	// refs are the node's generated ref children, materialized lazily
-	// (refsLoaded) and kept OUT of children so containment walks and
-	// `*` never see them.
-	refs       []*treeNode
-	refsLoaded bool
+	// The node's generated ref children, materialized lazily and kept OUT
+	// of children so containment walks and `*` never see them.
+	//
+	// The two directions are built and cached SEPARATELY because they
+	// cost wildly different amounts and no caller wants both. Outgoing
+	// reads this node's OWN file. Incoming asks the index for every
+	// occurrence of the node's NAME workspace-wide, so its cost scales
+	// with how common the name is — measured at ~20-45k work units per
+	// occurrence, where the whole default budget is 200k.
+	//
+	// Building both halves regardless of the question made ::out pay the
+	// ::in bill: #New::out cost 1.78M work and returned the same 49
+	// matches that 140k buys now. Direction is therefore REQUIRED to ask
+	// for refs; there is no "both".
+	refsOut       []*treeNode
+	refsIn        []*treeNode
+	refsOutLoaded bool
+	refsInLoaded  bool
 
 	// Fragment nodes (class == "fragment") — a matched line of the
 	// host's own source, minted by ::grep. frag carries the match text
@@ -147,6 +160,47 @@ func (n *treeNode) nodeIDs() []string {
 	return []string{n.leaf, n.full, n.file + "#" + n.sym}
 }
 
+// nameIDs is the `[name]` axis: what the node is CALLED. It is nodeIDs
+// minus every id that is really a LOCATION — a symbol's "<file>#<sym>"
+// address and a dir/file's workspace-relative path. Those moved to
+// [path].
+//
+// Keeping locations here made [name] quietly answer path questions:
+// func[name*=test] matched every func in a _test.go file (508 of them,
+// via the address id) instead of the ~6 funcs actually named *test*.
+// A filter that says `name` and means `name or path` has no spelling
+// left for "named test" — hence two axes.
+//
+// #id is unaffected: it keeps matching addresses through nodeIDs.
+func (n *treeNode) nameIDs() []string {
+	switch n.class {
+	case "project":
+		return []string{n.full}
+	case "dir", "file":
+		return []string{n.leaf} // .full is the PATH — [path] owns it
+	case "ref":
+		var ids []string
+		for _, f := range n.refFar {
+			ids = append(ids, f.nameIDs()...)
+		}
+		return ids
+	case "fragment":
+		return nil
+	}
+	return []string{n.leaf, n.full} // leaf + dotted path; NOT the address
+}
+
+// nodePath is the `[path]` axis: where the node LIVES, workspace-
+// relative. A symbol, edge or fragment answers with its FILE's path —
+// that is where it lives. The project IS the root, so it has no path
+// inside the workspace and matches no [path] filter.
+func nodePath(n *treeNode) string {
+	if n.class == "project" {
+		return ""
+	}
+	return n.file
+}
+
 // engine holds one query's tree and the server it reads through.
 type engine struct {
 	s       *Server
@@ -171,6 +225,9 @@ type engine struct {
 	siteCache   map[string][]refSite
 	declsByName map[string][]*treeNode
 	symCache    map[string][]symbols.Symbol
+	// rawSites: the index inverted name→sites into file→sites, once per
+	// query (see sitesByFile). nil until first asked.
+	rawSites map[string][]rawSite
 
 	// fragCache: minted ::grep fragments per host per pattern, so the
 	// same host+pattern yields the SAME nodes across a query (set
@@ -386,11 +443,43 @@ const (
 	selPrefix                // ^=
 	selSuffix                // $=
 	selContains              // *=
+	// selRegex is `~=` — an unanchored RE2 match, which is how this
+	// language spells OR: [path~=test|smoke]. CSS defines ~= as a
+	// space-separated word-list match, which is worthless here (names
+	// and paths are not word lists) — it used to be an error pointing
+	// at ^= *= $=. Regex is what callers actually reach for, and it
+	// subsumes all three with anchors.
+	//
+	// AND is NOT here on purpose: compound attrs already conjoin,
+	// [path*=ma][path*=in], which is CSS-native and needs no operator.
+	selRegex // ~=
+)
+
+// selAttrAxis picks WHICH strings an attr filter tests a node against.
+// The axes are deliberately disjoint: a node is CALLED something and it
+// LIVES somewhere, and conflating the two made [name] quietly answer
+// path questions (see nameIDs).
+type selAttrAxis uint8
+
+const (
+	// attrID is `#id` — every id the node answers to, INCLUDING a
+	// symbol's "<file>#<sym>" address. This is the zero value because
+	// `#id` is parsed straight into a selAttr, and the address must keep
+	// matching: #'store.go#Save' is how a single symbol is pinned.
+	attrID selAttrAxis = iota
+	// attrName is `[name]` — what the node is CALLED, never where it lives.
+	attrName
+	// attrPath is `[path]` — where the node LIVES, never what it's called.
+	attrPath
 )
 
 type selAttr struct {
+	axis  selAttrAxis
 	op    selOp
 	value string
+	// re is the compiled pattern for `~=`, compiled at PARSE time so a
+	// bad regex is a selector error rather than a silent zero-match.
+	re *regexp.Regexp
 }
 
 type selCompound struct {
@@ -1220,8 +1309,15 @@ func (p *modSelParser) parseAttr() (selAttr, error) {
 	if name == "" {
 		return a, p.errf("an attribute name")
 	}
-	if name != "name" {
-		return a, fmt.Errorf("unknown attribute %q: only [name] is supported (ops: = ^= $= *=)\n\n%s", name, selectorGrammarHelp)
+	switch name {
+	case "name":
+		a.axis = attrName
+	case "path":
+		a.axis = attrPath
+	default:
+		return a, fmt.Errorf("unknown attribute %q: [name] (what it's CALLED — leaf or dotted path) "+
+			"and [path] (where it LIVES — workspace-relative file path) are the attributes "+
+			"(ops: = ^= $= *=)\n\n%s", name, selectorGrammarHelp)
 	}
 	switch p.peek() {
 	case '=':
@@ -1249,11 +1345,37 @@ func (p *modSelParser) parseAttr() (selAttr, error) {
 		p.i++
 		a.op = selContains
 	case '~':
-		return a, fmt.Errorf("[name~=X] is CSS's space-separated word-list match, and names aren't word lists — use [name^=X] (prefix), [name*=X] (contains) or [name$=X] (suffix)")
+		p.i++
+		if p.peek() != '=' {
+			return a, p.errf("'=' (to complete '~=')")
+		}
+		p.i++
+		a.op = selRegex
 	default:
 		return a, p.errf("one of = ^= $= *=")
 	}
-	a.value = p.readAttrValue()
+	value, quoted := p.readAttrValue()
+	a.value = value
+	if a.op == selRegex {
+		re, err := regexp.Compile(a.value)
+		if err != nil {
+			return a, fmt.Errorf("[%s~=%s]: bad regex: %w", name, a.value, err)
+		}
+		a.re = re
+	} else if !quoted && strings.Contains(a.value, "|") {
+		// `|` under a LITERAL op is always an alternation attempt: it
+		// matches the literal "a|b", finds nothing, and a wrapping :not()
+		// then excludes nothing and hands back the unfiltered set.
+		// Measured before ~= existed: func:not([path*=test|smoke])
+		// returned all 820 funcs, looking exactly like a filter that
+		// worked. A silent no-op is the one outcome a filter must never
+		// have — so this stays an error even though ~= now answers it.
+		return a, fmt.Errorf("[%s%s%s]: %s is a LITERAL match, so this looks for the literal %q "+
+			"and silently no-ops (a wrapping :not() would then exclude nothing). "+
+			"Alternation is regex: [%s~=%s]. To match a real '|', quote it: [%s%s'%s']",
+			name, selOpSpelling(a.op), a.value, selOpSpelling(a.op), a.value,
+			name, a.value, name, selOpSpelling(a.op), a.value)
+	}
 	if p.peek() != ']' {
 		return a, p.errf("']'")
 	}
@@ -1545,7 +1667,24 @@ func (p *modSelParser) readIdent() string {
 	return string(p.s[start:p.i])
 }
 
-func (p *modSelParser) readAttrValue() string {
+// selOpSpelling renders an op back as written, so an error can quote
+// the caller's own selector instead of a normalized one.
+func selOpSpelling(op selOp) string {
+	switch op {
+	case selPrefix:
+		return "^="
+	case selSuffix:
+		return "$="
+	case selContains:
+		return "*="
+	}
+	return "="
+}
+
+// readAttrValue returns the value and whether it was QUOTED. Quoting is
+// the literal escape — [path*='a|b'] means the caller wants a real '|',
+// so the alternation guard must not fire on it.
+func (p *modSelParser) readAttrValue() (string, bool) {
 	if c := p.peek(); c == '"' || c == '\'' {
 		quote := c
 		p.i++
@@ -1557,13 +1696,13 @@ func (p *modSelParser) readAttrValue() string {
 		if !p.eof() {
 			p.i++
 		}
-		return v
+		return v, true
 	}
 	start := p.i
 	for !p.eof() && p.s[p.i] != ']' {
 		p.i++
 	}
-	return strings.TrimSpace(string(p.s[start:p.i]))
+	return strings.TrimSpace(string(p.s[start:p.i])), false
 }
 
 func isModIdentPart(c rune) bool {
@@ -1675,7 +1814,13 @@ SPEC
          module import argument, * — fixed; you cannot invent one. Language class: file.go.
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
-  ATTR   [name=X] [name^=X] [name$=X] [name*=X].  #id ≡ [name=id].
+  ATTR   [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES
+         (workspace-relative file path; a symbol answers with its FILE's).
+         OPS  = ^= $= *= are LITERAL (exact/prefix/suffix/contains).  ~= is a regex.
+         OR   is the regex: [path~=test|smoke].  Quote a literal '|': [path*='a|b'].
+         AND  is just two attrs — [path*=ma][path*=in] — CSS conjoins a compound.
+         Non-test funcs: func:not([path~=test|smoke]).
+         #id spans both axes and adds the "<file>#<sym>" address; it is never a regex.
   EDGES  ::in / ::out, kind class .call/.type/.import (bare = any). Attached to the INNERMOST
          enclosing symbol: X::out = X's own, X ::out = nested symbols' too. {m,n} = edges
          crossed, {1,} = transitive. * NEVER matches an edge. Address = site ("file@line").
@@ -1733,16 +1878,30 @@ func nodeLess(a, b *treeNode) bool {
 	return a.leaf < b.leaf
 }
 
-// evaluate runs a parsed selector over the tree and returns the
-// matching nodes in deterministic pre-order.
-func (e *engine) evaluate(list selectorList) []*treeNode {
-	set := e.evalList(list, e.project, false)
+// ordered returns set's nodes in document order.
+//
+// Traversal order is load-bearing ONLY because the work budget can trip
+// mid-walk. Ranging a Go map is randomized per run, so when the budget
+// trips the cutoff lands on a different subset every time and the same
+// selector answers differently run to run. Walking a fixed order makes
+// a budget-truncated result reproducible: still partial, still flagged
+// by workExceeded, but the SAME partial every time.
+//
+// Use this in any loop that can reach e.spend. Loops that only union
+// sets together are order-independent — leave those ranging the map.
+func ordered(set map[*treeNode]bool) []*treeNode {
 	out := make([]*treeNode, 0, len(set))
 	for n := range set {
 		out = append(out, n)
 	}
 	sort.Slice(out, func(i, j int) bool { return nodeLess(out[i], out[j]) })
 	return out
+}
+
+// evaluate runs a parsed selector over the tree and returns the
+// matching nodes in deterministic pre-order.
+func (e *engine) evaluate(list selectorList) []*treeNode {
+	return ordered(e.evalList(list, e.project, false))
 }
 
 // evalList evaluates every complex in the union from `anchor` and
@@ -1889,7 +2048,7 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 func (e *engine) evalInstance(tips map[*treeNode]bool, el *selElem, min, max int, relaxed bool) map[*treeNode]bool {
 	if el.group != nil {
 		out := map[*treeNode]bool{}
-		for t := range tips {
+		for _, t := range ordered(tips) {
 			for n := range e.evalElems(el.group.elems, map[*treeNode]bool{t: true}, min, max, relaxed) {
 				out[n] = true
 			}
@@ -1904,7 +2063,7 @@ func (e *engine) evalInstance(tips map[*treeNode]bool, el *selElem, min, max int
 		return e.fragMatches(tips, comp, relaxed)
 	}
 	out := map[*treeNode]bool{}
-	for t := range tips {
+	for _, t := range ordered(tips) {
 		// A subject with a :parents move keeps its positional part even
 		// under relaxation — the relaxation moves into the move's inner.
 		cand := e.collectMatches(t, min, max, comp, relaxed && !comp.hasMove())
@@ -1922,11 +2081,7 @@ func (e *engine) selectOrdered(cand map[*treeNode]bool, comp *selCompound, relax
 	if comp.ordSel == 0 || relaxed {
 		return e.applyPseudos(cand, comp, relaxed)
 	}
-	nodes := make([]*treeNode, 0, len(cand))
-	for n := range cand {
-		nodes = append(nodes, n)
-	}
-	sort.Slice(nodes, func(i, j int) bool { return nodeLess(nodes[i], nodes[j]) })
+	nodes := ordered(cand)
 	if comp.ordSel == 2 {
 		for i, j := 0, len(nodes)-1; i < j; i, j = i+1, j-1 {
 			nodes[i], nodes[j] = nodes[j], nodes[i]
@@ -1945,9 +2100,11 @@ func (e *engine) selectOrdered(cand map[*treeNode]bool, comp *selCompound, relax
 // asked about is structure; the kind and ids are the tested property.
 func (e *engine) refMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
 	out := map[*treeNode]bool{}
-	for h := range hosts {
+	for _, h := range ordered(hosts) {
 		cand := map[*treeNode]bool{}
-		for _, r := range e.refNodes(h) {
+		// The compound names its direction (::in / ::out), so build only
+		// that half — the other is pure waste for this query.
+		for _, r := range e.refNodes(h, comp.refDir) {
 			if !e.spend(1) {
 				break
 			}
@@ -2015,7 +2172,7 @@ func (e *engine) globalComplexSet(cx *selComplex) map[*treeNode]bool {
 // is EVERY line — :all(::grep(p)) = every line of the host matches p.
 func (e *engine) fragMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
 	out := map[*treeNode]bool{}
-	for h := range hosts {
+	for _, h := range ordered(hosts) {
 		cand := map[*treeNode]bool{}
 		for _, f := range e.fragmentsOf(h, comp, relaxed) {
 			cand[f] = true
@@ -2194,7 +2351,7 @@ func (e *engine) applyPseudos(set map[*treeNode]bool, comp *selCompound, relaxed
 		return set
 	}
 	out := map[*treeNode]bool{}
-	for n := range set {
+	for _, n := range ordered(set) {
 		for r := range e.runPipeline(n, comp.pseudos, relaxed) {
 			out[r] = true
 		}
@@ -2264,7 +2421,7 @@ func (e *engine) runPipeline(subject *treeNode, pseudos []selPseudo, relaxed boo
 				continue
 			}
 			next := map[*treeNode]bool{}
-			for t := range tips {
+			for _, t := range ordered(tips) {
 				if e.pseudoHolds(t, ps) {
 					next[t] = true
 				}
@@ -2388,13 +2545,12 @@ func (e *engine) upstream(tips map[*treeNode]bool) map[*treeNode]bool {
 				next[n] = true
 			}
 		}
-		for n := range frontier {
+		for _, n := range ordered(frontier) {
 			add(n.parent)
-			for _, r := range e.refNodes(n) {
-				if r.refDir == "in" {
-					for _, src := range r.refFar {
-						add(src)
-					}
+			// :parents is upstream — incoming edges only.
+			for _, r := range e.refNodes(n, "in") {
+				for _, src := range r.refFar {
+					add(src)
 				}
 			}
 		}
@@ -2421,23 +2577,37 @@ type refSite struct {
 	encl      string // dotted sym path of the innermost enclosing symbol
 }
 
-// refNodes materializes (once) and returns n's generated ref children.
-func (e *engine) refNodes(n *treeNode) []*treeNode {
+// refNodes materializes (once per direction) and returns n's generated
+// ref children for ONE direction — "in" or "out".
+//
+// Direction is required, not a filter applied afterwards: the incoming
+// half is 12-16x the cost of the outgoing one, so building both and
+// discarding half is what put a single ::out over the whole budget.
+func (e *engine) refNodes(n *treeNode, dir string) []*treeNode {
 	switch n.class {
 	case "project", "dir", "ref":
 		return nil
 	}
-	if !n.refsLoaded {
-		n.refsLoaded = true
-		e.buildRefs(n)
+	if dir == "out" {
+		if !n.refsOutLoaded {
+			n.refsOutLoaded = true
+			e.buildOutRefs(n)
+		}
+		return n.refsOut
 	}
-	return n.refs
+	if !n.refsInLoaded {
+		n.refsInLoaded = true
+		e.buildInRefs(n)
+	}
+	return n.refsIn
 }
 
-func (e *engine) buildRefs(n *treeNode) {
-	// Outgoing: sites in n's own file whose innermost enclosing symbol
-	// is n itself — nesting attribution is the TREE SHAPE, so a closure's
-	// calls belong to the closure, and `>` vs space picks inner vs outer.
+// buildOutRefs: sites in n's own file whose innermost enclosing symbol
+// is n itself — nesting attribution is the TREE SHAPE, so a closure's
+// calls belong to the closure, and `>` vs space picks inner vs outer.
+// Reads ONE file, so its cost is flat regardless of how common the
+// names it mentions are.
+func (e *engine) buildOutRefs(n *treeNode) {
 	for _, site := range e.fileSites(n.file) {
 		if site.encl != n.sym {
 			continue
@@ -2446,7 +2616,7 @@ func (e *engine) buildRefs(n *treeNode) {
 		if len(far) == 0 {
 			continue
 		}
-		n.refs = append(n.refs, &treeNode{
+		n.refsOut = append(n.refsOut, &treeNode{
 			class: "ref", refDir: "out", refKind: site.kind, refConf: "lexical",
 			leaf: site.name, full: site.name,
 			file: n.file, abs: n.abs, at: [2]int{site.line, site.line},
@@ -2454,8 +2624,18 @@ func (e *engine) buildRefs(n *treeNode) {
 			fileOrd: n.fileOrd, symOrd: n.symOrd,
 		})
 	}
-	// Incoming: every site of n's NAME elsewhere; the far end is the
-	// site's innermost enclosing symbol (the source).
+}
+
+// buildInRefs: every site of n's NAME elsewhere; the far end is the
+// site's innermost enclosing symbol (the source).
+//
+// This is the expensive half, and unavoidably so while edges are
+// name-keyed: it must visit every occurrence of the name in the
+// workspace, so a common name costs more than a rare one for the same
+// symbol (#New = 93 occurrences = 1.78M work; #nodePath = 2 = 74k).
+// The child-LSP edge-precision pass is what makes this a lookup rather
+// than a sweep.
+func (e *engine) buildInRefs(n *treeNode) {
 	if n.sym == "" {
 		return // files/project have no indexed name to be targeted by
 	}
@@ -2488,7 +2668,7 @@ func (e *engine) buildRefs(n *treeNode) {
 			continue
 		}
 		fnode := e.fileByRel[rel]
-		n.refs = append(n.refs, &treeNode{
+		n.refsIn = append(n.refsIn, &treeNode{
 			class: "ref", refDir: "in", refKind: hit.kind, refConf: "lexical",
 			leaf: n.leaf, full: n.leaf,
 			file: rel, abs: fnode.abs, at: [2]int{hit.line, hit.line},
@@ -2496,6 +2676,70 @@ func (e *engine) buildRefs(n *treeNode) {
 			fileOrd: n.fileOrd, symOrd: n.symOrd,
 		})
 	}
+}
+
+// rawSite is one indexed occurrence, before any per-file classification.
+type rawSite struct {
+	name string
+	line int
+	col  int
+}
+
+// sitesByFile inverts the index ONCE per query: the index maps name →
+// sites, and every consumer in here wants file → sites.
+//
+// fileSites used to bridge that gap by sweeping EVERY name and EVERY
+// site in the workspace and discarding everything outside the one file
+// it was asked about — a whole-workspace sweep per file. Measured: 98%
+// of func#main::out.call's budget (461,594 of 470,490 units) was seven
+// sweeps of the same data, and each swept through LookupExisting, which
+// stats every occurrence's file — 52% of all CPU went to syscalls.
+//
+// One inversion answers every file, and one stat per FILE replaces one
+// per occurrence.
+func (e *engine) sitesByFile() map[string][]rawSite {
+	if e.rawSites != nil {
+		return e.rawSites
+	}
+	e.rawSites = map[string][]rawSite{}
+	idx := e.s.getIndex()
+	if idx == nil {
+		return e.rawSites
+	}
+	root := e.s.getRoot()
+	alive := map[string]bool{}
+	var dead []string
+	for _, name := range idx.Names() {
+		// Lookup, not LookupExisting: the liveness check is hoisted here
+		// so it costs one stat per file instead of one per occurrence.
+		for _, site := range idx.Lookup(name) {
+			if !e.spend(1) {
+				// Partial inversion — workExceeded already says the walk
+				// did not finish, so the caller is told, not misled.
+				return e.rawSites
+			}
+			ok, seen := alive[site.File]
+			if !seen {
+				_, err := os.Stat(site.File)
+				ok = err == nil
+				alive[site.File] = ok
+				if !ok {
+					dead = append(dead, site.File)
+				}
+			}
+			if !ok {
+				continue
+			}
+			rel := relPath(site.File, root)
+			e.rawSites[rel] = append(e.rawSites[rel], rawSite{name: name, line: site.Line, col: site.Col})
+		}
+	}
+	// Keep LookupExisting's self-healing: evict vanished files once for
+	// the whole query rather than once per name per call.
+	if len(dead) > 0 {
+		idx.RemoveFiles(dead)
+	}
+	return e.rawSites
 }
 
 // fileSites returns every classified non-declaration site in one file,
@@ -2519,22 +2763,16 @@ func (e *engine) fileSites(rel string) []refSite {
 	if e.symCache == nil {
 		e.symCache = map[string][]symbols.Symbol{}
 	}
-	for _, name := range idx.Names() {
-		for _, site := range idx.LookupExisting(name) {
-			if !e.spend(1) {
-				return out
-			}
-			if relPath(site.File, e.s.getRoot()) != rel {
-				continue
-			}
-			if e.isDeclSite(site.File, site.Line, site.Col, name, e.symCache) {
-				continue
-			}
-			out = append(out, refSite{
-				name: name, line: site.Line, col: site.Col,
-				encl: e.s.enclosingSymPath(site.File, site.Line, e.symCache),
-			})
+	// Only THIS file's occurrences, straight from the inversion — the
+	// symbol-dependent work below stays scoped to one file.
+	for _, raw := range e.sitesByFile()[rel] {
+		if e.isDeclSite(fnode.abs, raw.line, raw.col, raw.name, e.symCache) {
+			continue
 		}
+		out = append(out, refSite{
+			name: raw.name, line: raw.line, col: raw.col,
+			encl: e.s.enclosingSymPath(fnode.abs, raw.line, e.symCache),
+		})
 	}
 	// Classify all of the file's sites in ONE parse.
 	if content, err := os.ReadFile(fnode.abs); err == nil {
@@ -2597,25 +2835,44 @@ func (e *engine) declsOf(name string) []*treeNode {
 // matchSelAttr tests a [name …] filter against every id the node
 // answers to (see nodeIDs).
 func matchSelAttr(n *treeNode, a selAttr) bool {
-	for _, id := range n.nodeIDs() {
-		switch a.op {
-		case selExact:
-			if id == a.value {
+	for _, id := range attrAxisValues(n, a.axis) {
+		if a.op == selRegex {
+			if a.re != nil && a.re.MatchString(id) {
 				return true
 			}
-		case selPrefix:
-			if strings.HasPrefix(id, a.value) {
-				return true
-			}
-		case selSuffix:
-			if strings.HasSuffix(id, a.value) {
-				return true
-			}
-		case selContains:
-			if strings.Contains(id, a.value) {
-				return true
-			}
+			continue
 		}
+		if matchAttrOp(id, a.op, a.value) {
+			return true
+		}
+	}
+	return false
+}
+
+// attrAxisValues returns the strings one axis tests against.
+func attrAxisValues(n *treeNode, axis selAttrAxis) []string {
+	switch axis {
+	case attrName:
+		return n.nameIDs()
+	case attrPath:
+		if p := nodePath(n); p != "" {
+			return []string{p}
+		}
+		return nil
+	}
+	return n.nodeIDs() // attrID — `#id`, addresses included
+}
+
+func matchAttrOp(id string, op selOp, want string) bool {
+	switch op {
+	case selExact:
+		return id == want
+	case selPrefix:
+		return strings.HasPrefix(id, want)
+	case selSuffix:
+		return strings.HasSuffix(id, want)
+	case selContains:
+		return strings.Contains(id, want)
 	}
 	return false
 }

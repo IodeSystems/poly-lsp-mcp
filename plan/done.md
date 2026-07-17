@@ -3,6 +3,77 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Query CLI, deterministic truncation, name/path axes (DONE 2026-07-17)
+
+- [x] **`poly-lsp-mcp query [flags] <selector>`** — compiles + evaluates one
+  selector and prints a tree grouped by file. Same hand-rolled dispatch as
+  `mcp`. Flags: `--root --config --limit --offset --budget`. `?` prints the
+  grammar. `bin/dev` is an auto-building launcher (mcpshell's pattern);
+  `/bin/poly-lsp-mcp-*` is gitignored, `bin/dev` is tracked.
+- [x] **`Server.QueryText`** (`mcp/query_text.go`) — the CLI's renderer over
+  the SAME parse/build/evaluate path node_query serves. Verified at parity on
+  budget-safe selectors (1 / 787 / 20 exact vs node_query).
+- [x] **`Server.BuildIndex`** — extracted from `handleInitialize`. Refs resolve
+  through `s.index`, so a caller that skipped it got a tree that answered
+  containment normally and silently found NO references. Both entry points now
+  share one definition of "indexed workspace"; the manager/prewarm/watch bits
+  stay server-only.
+- [x] **Deterministic truncation** (`ordered()`, `mcp/query.go`) — node sets are
+  `map[*treeNode]bool`; ranging them is randomized per run. Invisible while a
+  query completes (evaluate sorts), fatal once the work budget trips: the
+  cutoff landed wherever the random walk was, so the same selector answered
+  24/26/48/64/74/77 across runs. Every loop that can reach `e.spend` now walks
+  in document order. Regression test asserts a tripped budget is byte-identical
+  across 25 runs, and FAILS against the pre-fix code.
+- [x] **`[path]` axis + de-leaked `[name]`** — `nodeIDs` (which `#id` uses)
+  includes a symbol's `<file>#<sym>` address, so `[name]` quietly answered path
+  questions: `func[name*=test]` returned 508 (every func in a _test.go file)
+  where 1 was actually named *test*. Now `[name]` = `nameIDs` (what it's
+  CALLED), `[path]` = the workspace-relative file path (where it LIVES), `#id`
+  unchanged and still pins addresses. **BREAKING**; the `#id ≡ [name=id]` law
+  no longer holds for addresses and the grammar help says so.
+- [x] **The index is inverted ONCE per query (`sitesByFile`).** `fileSites(rel)`
+  answered "the sites in ONE file" by sweeping EVERY name and EVERY site in the
+  workspace and discarding everything outside that file — a whole-workspace
+  sweep per file, through `LookupExisting`, which stats every occurrence.
+  Attribution showed it WAS the budget: 65,942 of `#nodePath::out`'s 74,523
+  units (88%) and 461,594 of `func#main::out.call`'s 470,490 (98%) — seven
+  sweeps of the same data. Now one inversion (name→sites into file→sites) with
+  one stat per FILE. Everything fits the 200k default:
+  `func#main::out.call > func` 20 matches (was budget-dead), `func::out` the
+  full 24,590 (was 7.65M work), `func::in` 2,752 — each identical to a 100M
+  budget, so complete rather than truncated. CPU: syscalls 52% → 3.1%,
+  LookupExisting 66.8% → off the profile, 3x `#New::out` 16.3s → 1.38s.
+- [x] **Edges build ONE direction (12-16x on `::out`).** `buildRefs` built both
+  halves and let the caller filter, so `::out` paid the `::in` bill — and the
+  incoming half sweeps every occurrence of the name workspace-wide. Cost was a
+  function of NAME FREQUENCY, not of the symbol: measured ~20-45k work units per
+  occurrence (#nodePath 2 occurrences = 74k … #New 93 = 1.78M), where the whole
+  default budget is 200k. Asking a direction was free — `#Default::out` and
+  `#Default::in` cost an identical 1,190,365. Now `refNodes(n, dir)` builds and
+  caches each half separately (`buildOutRefs` / `buildInRefs`): #New::out 1.78M →
+  140k, #Default::out 1.19M → 74k, **same matches**, and the residual base no
+  longer scales with name frequency. `TestOutQueryNeverBuildsIncomingRefs`
+  asserts the contract (no node has `refsInLoaded` after an ::out query) and
+  fails against build-both.
+- [x] **`~=` is the regex op — the language's OR.** `[path~=test|smoke]`.
+  Unanchored RE2 (Go stdlib), compiled at PARSE time so a bad pattern is a
+  selector error, never a silent zero-match. `~=` used to be an error (CSS's
+  word-list match is worthless on names/paths); regex is what callers reach
+  for, and anchors subsume `^=`/`$=`/`*=` exactly (verified: `[path~=^config/]`
+  ≡ `[path^=config/]`, both 24).
+  - **No `&&`/`||` operators.** A sum-of-products value grammar was started and
+    scrapped: AND is already CSS-native — a compound conjoins, `[path*=ma][path*=in]`
+    (verified 30 vs 63/129 apart) — and OR is the regex's own `|`. Inventing two
+    operators would have duplicated both.
+  - `#id` is never a regex: an id NAMES one thing.
+- [x] **Alternation under a LITERAL op still refused loudly** — `[path*=a|b]`
+  matched the literal "a|b", found nothing, and a wrapping `:not()` then
+  excluded nothing and returned the whole set looking like a filter that worked
+  (820/820 funcs). Now an error naming the regex repair, with quoting
+  (`[path*='a|b']`) as the escape for a real '|'. Single `|`/`&` stay literal
+  characters — `R&D.md` is a real filename.
+
 ## Phase 0 — scaffold (DONE)
 
 - [x] Go module, JSON-RPC framing (`internal/jsonrpc`), stdio loop

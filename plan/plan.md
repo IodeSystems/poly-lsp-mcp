@@ -34,7 +34,38 @@ languages (lexical / declared / schema-anchored tiers). `poly-lsp-mcp mcp --root
 
 ## Active work
 
-None in flight. The graph selector language (three slices) ✅ → done.md.
+✅ **Edge cost — fixed, → done.md.** The direction split + the once-per-query
+index inversion together took `func::out` from budget-dead to its full 24,590
+matches inside the 200k default, and `func#main::out.call > func` back to life.
+The budget is no longer the binding constraint on any query tried. Remaining,
+opt-in:
+  - ◻ **Nothing short-circuits.** `evaluate()` computes the FULL set and the
+    caller slices after, so `--limit 5` and `:first` pay for everything. Much
+    less urgent now that the sweep is gone, but it is why `:first` costs what
+    no-`:first` costs. Traversal is document-ordered, so a top-level early exit
+    at offset+limit is sound. **blocking decision**: it costs `totalMatches`
+    (you cannot report "of 24,590" without finishing) — node_query's result
+    shape and truncation contract would change.
+  - ◻ **Move the inversion into `symbols.Index`** (build it once per index, not
+    per query). Would drop the last fixed ~66k prefix off every edge query.
+    **risk**: it is derived state, so it needs invalidating on Refresh /
+    RemoveFiles / file-watch — the per-query version has no staleness surface,
+    which is why it was chosen first.
+**Assumption made**: `:parents` wants incoming edges only — that is what the
+old code filtered for, and the split now hard-codes it.
+
+❓ **The edges are name coincidences, not references** (pre-existing, known,
+and now the biggest correctness gap — see "Known caveats" below). Worth
+raising to a scheduled slice: the cost work removed the excuse for not
+fixing it, and every transitive query (`::in.call{1,}`, the headline feature)
+compounds the noise per hop.
+
+◻ **Query CLI + determinism** — shipped this pass, see done.md:
+`poly-lsp-mcp query [flags] <selector>` + `bin/dev` launcher; deterministic
+truncation; `[path]` axis + de-leaked `[name]`. **next**: the budget call
+above. **risks**: `[name]` de-leak is BREAKING (`func[name*=test]` 508 → 1);
+`bin/dev` is untested on darwin/arm64.
+
 Next candidates are opt-in, in icebox.md — most valuable: adoption
 measurement (does bonsai USE ::in/::out unprompted?), then the child-LSP
 edge-precision pass (refConf lexical → lsp).

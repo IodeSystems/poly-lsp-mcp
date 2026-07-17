@@ -67,6 +67,15 @@ type Server struct {
 	indexMu sync.RWMutex
 	index   *symbols.Index
 
+	// classCount tallies symbols per class (func/type/…) for the query-cost
+	// estimator's a-priori bare-class figure. It needs the SYMBOL TREE (the
+	// index has names, not classes), so it is a one-time full-symbol walk
+	// memoized against the index generation — recomputed only when the
+	// index actually changes. See classCounts.
+	statsMu    sync.Mutex
+	statsGen   uint64
+	statsClass map[string]int
+
 	// derivRoots maps a symbol name → the @derived sources registered for it
 	// (gat operation / sqlc column). node_refactor consults this to detect when
 	// a rename touches a derivation graph and must resolve a mode (the variance

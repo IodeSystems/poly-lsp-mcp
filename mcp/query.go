@@ -2095,6 +2095,41 @@ func (e *engine) evaluate(list selectorList) []*treeNode {
 	return ordered(e.evalList(list, e.project, false))
 }
 
+// classCounts returns symbols-per-class over the whole workspace, the
+// a-priori bare-class figure for the query-cost estimator (:explain's est
+// column, the descendant-chain planner). The class lives in the symbol
+// TREE, not the index, so the first call after any index change walks
+// every file's symbols once; it is then memoized against the index
+// generation and O(1) until the index next changes. An estimate — it
+// never spends the query budget (walks kids directly, not through spend).
+func (s *Server) classCounts() map[string]int {
+	var gen uint64
+	if idx := s.getIndex(); idx != nil {
+		gen = idx.Generation()
+	}
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if s.statsClass != nil && s.statsGen == gen {
+		return s.statsClass
+	}
+	counts := map[string]int{}
+	if e, err := s.buildTree(); err == nil {
+		var walk func(n *treeNode)
+		walk = func(n *treeNode) {
+			if n.sym != "" { // symbols only — dirs/files/project have no class to tally
+				counts[n.class]++
+			}
+			for _, c := range e.kids(n) {
+				walk(c)
+			}
+		}
+		walk(e.project)
+	}
+	s.statsClass = counts
+	s.statsGen = gen
+	return counts
+}
+
 // costTrace renders the selector as a per-element cost breakdown, marking
 // the element the budget tripped on. Empty when nothing was billed (a
 // query that never touched the budget), so a caller can skip it.

@@ -104,6 +104,31 @@ type Index struct {
 	sites         map[string][]Site
 	declaredSites map[string][]Site
 	commentSites  map[string][]Site
+
+	// gen bumps on every mutation. Derived state (the query-cost
+	// estimator's tallies, later the inversion cache) memoizes against
+	// it: same gen → reuse, otherwise recompute. A no-op mutation may
+	// bump it too — a spurious recompute is cheap; stale tallies are not.
+	gen uint64
+}
+
+// Generation returns the index's mutation counter — the memo key for any
+// derived-from-the-index state.
+func (i *Index) Generation() uint64 {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.gen
+}
+
+// NameFreq is an O(1) a-priori estimate of how often a name occurs — the
+// raw site tally across the three stores, no per-position dedup (Lookup's
+// job). It is the cheap selectivity signal the query-cost estimator and
+// the pushdown reason about: a rare name narrows hard, a common one does
+// not. An estimate, deliberately not the exact deduped count.
+func (i *Index) NameFreq(name string) int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return len(i.sites[name]) + len(i.declaredSites[name]) + len(i.commentSites[name])
 }
 
 func NewIndex() *Index {
@@ -197,6 +222,7 @@ func (i *Index) RemoveFiles(files []string) {
 		gone[f] = true
 	}
 	i.mu.Lock()
+	i.gen++
 	defer i.mu.Unlock()
 	for _, store := range []map[string][]Site{i.sites, i.declaredSites, i.commentSites} {
 		for name, list := range store {
@@ -221,6 +247,7 @@ func (i *Index) RemoveFiles(files []string) {
 // produce duplicate edits at rename time.
 func (i *Index) InsertDeclared(name, file, language string, line, col int) {
 	i.mu.Lock()
+	i.gen++
 	defer i.mu.Unlock()
 	for _, s := range i.declaredSites[name] {
 		if s.File == file && s.Line == line && s.Col == col {
@@ -240,6 +267,7 @@ func (i *Index) InsertDeclared(name, file, language string, line, col int) {
 // before re-applying the new bindings from disk.
 func (i *Index) ClearDeclared() {
 	i.mu.Lock()
+	i.gen++
 	defer i.mu.Unlock()
 	i.declaredSites = map[string][]Site{}
 }
@@ -250,6 +278,7 @@ func (i *Index) ClearDeclared() {
 // default policy.
 func (i *Index) InsertComment(name, file, language string, line, col int) {
 	i.mu.Lock()
+	i.gen++
 	defer i.mu.Unlock()
 	for _, s := range i.commentSites[name] {
 		if s.File == file && s.Line == line && s.Col == col {
@@ -271,6 +300,7 @@ func (i *Index) InsertComment(name, file, language string, line, col int) {
 // snapshot.
 func (i *Index) RefreshCommentsForFile(file string) {
 	i.mu.Lock()
+	i.gen++
 	defer i.mu.Unlock()
 	i.clearCommentFileLocked(file)
 }
@@ -361,6 +391,7 @@ func (i *Index) Names() []string {
 // used by watchers on didSave.
 func (i *Index) Refresh(file, language string, hits []Hit) {
 	i.mu.Lock()
+	i.gen++
 	defer i.mu.Unlock()
 	i.clearFileLocked(file)
 	i.insertLocked(file, language, hits)
@@ -370,6 +401,7 @@ func (i *Index) Refresh(file, language string, hits []Hit) {
 // scratch and never re-visits a file.
 func (i *Index) addHits(file, language string, hits []Hit) {
 	i.mu.Lock()
+	i.gen++
 	defer i.mu.Unlock()
 	i.insertLocked(file, language, hits)
 }

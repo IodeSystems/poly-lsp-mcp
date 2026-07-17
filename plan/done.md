@@ -3,6 +3,24 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Descendant-chain planner (DONE 2026-07-17)
+
+- [x] `C0 C1 … Cn` (descendant) is the Cn matches whose ancestors match C0 ⊃ …
+  ⊃ C(n-1); the forward evaluator collects C0 and descends, costly when C0 is
+  broad. When the tip Cn is an exact NAME far rarer than the leading element,
+  `planReorder` seeds Cn from the INDEX (`declsNamed` loads only files
+  containing the name) and keeps those whose ancestor SUBSEQUENCE matches the
+  leading compounds — the containment form of the leading-ref pushdown.
+  `struct #Name` / `func #ctx`: ~6.9k work → 0; does NOT fire for a bare-class
+  tip or an already-rare leading element.
+- **Lesson**: the first cut seeded via `collectMatches` and was a correct
+  NO-OP — the tree walk negated the win (measured identical cost). The fix was
+  index-seeding + an O(1) decision (`estCardCheap` / `Index.Cardinality`, never
+  `classCounts`, which would trigger the full-symbol walk the seed avoids).
+  Sound via a greedy ancestor-subsequence; gated to plain pure-descendant
+  chains; equivalence + "cheaper" gated by a test that fails if the ancestor
+  check breaks.
+
 ## :explain cost tree — commit 3 (DONE 2026-07-17)
 
 - [x] `:explain <selector>` is a query MODE (a prefix stripped by one shared

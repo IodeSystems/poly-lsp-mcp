@@ -122,11 +122,17 @@ fan-out. A fan-out estimate (from `::out` avg degree, or the pushdown's
 opposite-edge count) would fill those in; deferred until the descendant-chain
 planner (below) needs it, since they share the estimator.
 
-◻ **Cardinality-order a descendant chain** (moved up from the shared-estimator
-note): `A B` evaluates left-to-right; if B is far rarer than A, start from B.
-The per-element `est` `:explain` now renders is the number to reorder on —
-build the reorder on top of it. This is where the deferred fan-out estimate
-earns its consumer.
+✅ **Cardinality-order a descendant chain → done.md.** A plain pure-descendant
+chain whose tip is an exact NAME far rarer than the broad leading element is
+now seeded from the INDEX (`declsNamed` loads only the files containing the
+name) and filtered by an ancestor SUBSEQUENCE — `struct #Name` dropped ~6.9k
+work → 0, equivalence + "actually cheaper" gated by test. Lesson recorded: the
+first cut (seed via collectMatches) was a correct NO-OP — the tree walk negated
+the win; the fix was index-seeding + an O(1) decision (`estCardCheap`, NOT
+classCounts). **Remaining planner ideas** (opt-in): a bare-class or edge tip
+can't be index-seeded (no class/fan-out in the index) — those still forward.
+The fan-out estimate `:explain` shows as `?` for edges is the same gap; fill it
+only when a query needs an edge-tip reorder.
 
 ◐ **Edges: from coincidence toward reference.** Two of three steps done
 (→ done.md): lexical scope killed 99% of far ends (a local is not visible

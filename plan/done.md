@@ -898,3 +898,53 @@ claims incl. the `:any` complement, canonical `:where(&…)` ≡ bare-postfix
 equivalence, bare `:all` ≡ parenthesized `:all` agreement, `&`/claim parse
 rules, `{m,n}` ≡ `:depth` byte-equal results, `{0}` self trick. Live-smoked
 on this repo.
+
+## Graph selector language — slice 3: references are NODES (shipped 2026-07-17)
+
+The final shape, converged with the user (and bonsai) same-day. Supersedes the
+slice-1/2 operator surface entirely; we are the only consumers, so no shims.
+
+- **A reference is a pseudo-element NODE, named by direction**: `::in` (who
+  points here) / `::out` (what this node's body points at); KIND as class
+  (.call/.type/.import — closed, tree-sitter-classified per language; bare
+  matches any kind incl. unclassified — a Go func pointer is `::out`, not
+  `::out.call`). Each edge appears twice (out under the source, in under the
+  target); id = the far end's ids; span/address = the SITE ("file@line"), so
+  node_read/node_edit touch the call site. refConf = "lexical" (name-keyed
+  index); per-edge "lsp" upgrade via child-LSP definition is the planned
+  precision pass — works for TS (tsserver) and Go (gopls) alike; the node
+  model itself needs no LSP.
+- **The pseudo-element contract does the safety work**: `*` never matches an
+  edge, walks never enter one — containment queries can't leak into the graph;
+  crossing is explicit (`::out.call > #'B'`, the far end is the edge's child).
+  Attachment is CSS-exact: `X::out` = X's own edges, `X ::out` = nested
+  symbols' too (#a::before vs #a ::before) — ref nodes hang under the
+  INNERMOST enclosing symbol, so `>` vs space IS the attribution axis (no
+  :first/:last gymnastics needed for it).
+- **{m,n} is repetition** (regex prior, icebox-original): child-joined chains
+  (func{2} = func > func), groups repeat as units ((a b){2}), zero reps make
+  the element vanish (its combinator vanishes with it), {m,} is a cycle-safe
+  fixpoint. On an edge element it counts EDGES crossed ((::out > *){k} > ::out
+  expansion — always ends AT an edge). :depth retired (guided error).
+- **:parents(sel) is the one inverse**: roots of sel with a path down/out to
+  the tip — containment ancestors ∪ incoming-reference sources, transitive.
+  `*:parents:empty` = exactly the workspace root (proven in test).
+- **Bare claims are position claims**: :any/:all/:empty judge the arrival set
+  at their chain position (inside :where/…; terminal) or close a :parents
+  excursion; :all is the relaxed-domain compare, direction stays structural
+  under relaxation. Top-level bare claims are guided errors.
+- **Language classes**: file.go / func.ts (closed registry vocabulary +
+  aliases). :first/:last = per-anchor document-order selection (jQuery at the
+  root anchor). :with(project.go) scoping → icebox.
+- Description rewritten recipes-first for quantized models (user call after
+  bonsai trials); budget 1080 → 1160. Guided errors for every retired
+  spelling (:references, :depth, ::ref, :has/:has_parent, top-level claims).
+
+Verified: graph_selector_test.go rewritten against a polyglot go+ts fixture —
+kind classification (call vs type vs import vs unclassified var-ref), `*`
+exclusion + gate opacity, direct/transitive/exact-window crossing over a real
+cycle, dead-code/leaf/∀ position claims, upstream :parents incl. multi-element
+roots, language classes, :first/:last per anchor, repetition/groups/zero-rep,
+site addressing (node_read of an edge shows the call), 13 guided errors. Live
+on this repo: #'nodeLess'::in.call returns exactly its two call sites with
+from: carrying the callers.

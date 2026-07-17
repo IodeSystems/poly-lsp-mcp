@@ -67,7 +67,7 @@ func TestMalformedSelectorStillGetsGrammar(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	r := s.callTool("node_query", map[string]any{"selector": ":root > *.md"})
+	r := s.callTool("node_query", map[string]any{"selector": ":root > func[name"})
 	if !r.IsError {
 		t.Fatal("malformed selector should error")
 	}

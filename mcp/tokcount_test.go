@@ -47,7 +47,12 @@ import (
 // RECIPES keyed to an address ("you have store.go#Save — now what"), the one
 // form measured to move usage (took :references 0 → opening move). If the
 // recipes don't move :parents usage, cut them and take the tokens back.
-const modernTokenBudget = 1080
+// 1080 → 1160 for the node model: references became ::in/::out pseudo-element
+// NODES with kind classes, plus language classes, {m,n} repetition/groups,
+// position claims and the upstream :parents — a whole graph algebra whose
+// description is recipes-first by design. If edge usage doesn't move, the
+// recipes are the first thing to re-measure, not the first thing to cut.
+const modernTokenBudget = 1160
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

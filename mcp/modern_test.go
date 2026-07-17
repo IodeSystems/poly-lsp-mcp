@@ -279,46 +279,38 @@ func TestModernQueryContains(t *testing.T) {
 	}
 }
 
-func TestModernQueryDepthFromRoot(t *testing.T) {
+func TestModernQueryRepetitionFromRoot(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	// Bare :depth() with no preceding target is measured from :root.
-	// depth 0 = the project itself.
-	q := query(t, s, map[string]any{"selector": "*:depth(0,0)", "limit": 50})
-	if q.TotalMatches != 1 || q.Matches[0].Class != "project" {
-		t.Errorf(":depth(0,0) should be the project itself; got %v", nodes(q))
-	}
-
-	// depth 0..1 INCLUDES the anchor plus top-level dirs/files.
-	q = query(t, s, map[string]any{"selector": "*:depth(0,1)", "limit": 50})
+	// {m,n} repeats child-joined; {0,…}'s skip path keeps the anchor.
+	q := query(t, s, map[string]any{"selector": ":root > *{0,1}", "limit": 50})
 	if !hasNode(q, "main.go") {
-		t.Errorf(":depth(0,1) should include top-level files; got %v", nodes(q))
+		t.Errorf("{0,1} should include top-level files; got %v", nodes(q))
 	}
 	classes := map[string]bool{}
 	for _, m := range q.Matches {
 		classes[m.Class] = true
 	}
 	if !classes["project"] {
-		t.Errorf(":depth(0,n) must include the anchor itself; got %v", nodes(q))
+		t.Errorf("{0,n} must include the anchor itself (skip path); got %v", nodes(q))
 	}
-	// depth 2 reaches into a top-level file's symbols but not a
-	// nested dir's file symbols.
-	q = query(t, s, map[string]any{"selector": "*:depth(2,2)", "limit": 100})
+	// Two child steps reach a top-level file's symbols.
+	q = query(t, s, map[string]any{"selector": ":root > *{2}", "limit": 100})
 	if !hasNode(q, "main.go#Server") {
-		t.Errorf(":depth(2,2) should reach main.go's symbols; got %v", nodes(q))
+		t.Errorf("*{2} should reach main.go's symbols; got %v", nodes(q))
 	}
 }
 
-func TestModernQueryDepthIncludesAnchorInChain(t *testing.T) {
+func TestModernQueryZeroRepIsTheAnchor(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	// :depth(0,n) after a combinator can reach the previous target
-	// ITSELF, which a bare descendant space ([1,∞]) never can.
-	q := query(t, s, map[string]any{"selector": "file#main.go *:depth(0,0)", "limit": 50})
+	// {0}: the element vanishes — only the skip path remains, so the
+	// chain yields the previous target itself.
+	q := query(t, s, map[string]any{"selector": "file#main.go > *{0}", "limit": 50})
 	if q.TotalMatches != 1 || !hasNode(q, "main.go") {
-		t.Errorf(":depth(0,0) should select the anchor file itself; got %v", nodes(q))
+		t.Errorf("*{0} should be the anchor file itself; got %v", nodes(q))
 	}
 	// Contrast: the default descendant range excludes self.
 	q = query(t, s, map[string]any{"selector": "file#main.go *", "limit": 100})

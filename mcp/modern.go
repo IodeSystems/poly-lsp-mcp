@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
@@ -62,17 +63,17 @@ func registerModernTools() map[string]Tool {
 // information. Keep them dense.
 
 const modernNodeQueryDescription = `Projectional editor over ONE node tree, queried by CSS selector: project > dir > file > symbols (dotted-nested) > argument. Files are nodes; no separate filesystem API.
-TYPES are bare tags (fixed set): project dir file func method type struct interface class const var field enum ctor module import argument, or *. Workspace NAMES are #ids, never tags: dir cache/ = #cache. Ids: #bare or #'quoted'; a '<file>#<sym>' address is an id: #'store.go#Save'.
-space=descendant, >=child, comma=union — containment, as CSS.
-Moves walk the REFERENCE graph from the current node: :parents = who points at it, :references = what it points at. (sel) constrains every hop; {m,n} hops, {1,} = transitive. The chain continues from the moved-to nodes.
-A BARE :any/:all/:empty closes the walk: ∃/∀/∄ over the reached set, keeping or killing the node that STARTED it. :where/:any/:all/:empty(sel) test a relative selector — its start is assumed to be & (this node), CSS-nesting style: a leading pseudo attaches to &, a leading tag/#id means a descendant.
+TYPES are bare tags (fixed set): project dir file func method type struct interface class const var field enum ctor module import argument, or *. Workspace NAMES are #ids, never tags: dir cache/ = #cache. Ids: #bare or #'quoted'; a '<file>#<sym>' address is an id: #'store.go#Save'. A class scopes a tag to a LANGUAGE: file.go, func.ts.
+space=descendant, >=child, comma=union — containment, as CSS. {m,n} REPEATS an element or (group), child-joined: func{2} = func > func.
+REFERENCES are pseudo-element nodes on every symbol: ::in (who points here) / ::out (what its body points at); kind as class (.call/.type/.import, bare = any kind). X::out = X's own edges, X ::out includes nested symbols'. The far end is the edge's child — cross with '>'. {m,n} on the element = edges crossed; {1,} = transitive. '*' NEVER matches an edge, so containment queries never leak.
+:parents(sel) — everything UPSTREAM (ancestors + incoming references, transitive) matching sel. A BARE :any/:all/:empty judges the set at its position and decides the node under test (inside :where, or closing :parents). :where/:any/:all/:empty(sel) are relative, CSS-nesting style: a leading pseudo/::element binds to the node itself, a leading tag/#id means a descendant.
 RECIPES (start from an address in matches[].node):
-#'store.go#Save':parents(*) who calls Save | :parents(func){1,} every transitive caller | #'main.go#main':references(func) what main calls | func:parents:empty dead code | func:references(func):empty calls nothing | #'store.go' func funcs in that file | #cache func:any(argument#ctx) funcs under cache/ taking a ctx arg | #'Save':parents(func) argument args of every caller | :root > * top-level tour.
+#'store.go#Save'::in.call who calls Save (rows carry from:) | ::in.call{1,} > * every transitive caller | #'main'::out.call > * what main calls | func:where(::in:empty) dead code | func:where(::out.call:empty) calls nothing | #'store.go' func funcs in that file | *:parents:empty the root | :root > * top-level tour. An edge's address is its SITE (file@line): node_read/node_edit touch the call site.
 grep: flags+pattern over each match's own source, e.g. "-i -A2 derp". -i -w -E -F -v -n -A/-B/-C<n>; literal unless -E. Nodes with no hit drop out.
-limit default 20; offset pages. selector "?" returns the full grammar (:contains, {m,n} depth ranges, [name^=] …).`
+limit default 20; offset pages. selector "?" returns the full grammar (:contains, groups, [name^=] …).`
 
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
-	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save':parents(*)"},` +
+	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
 	`"grep":{"type":"string","description":"grep flags + pattern, e.g. \"-i -A2 derp\""},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."}},` +
@@ -210,6 +211,25 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 		if r.n.class != "project" && r.n.class != "dir" {
 			m["@"] = []int{r.n.at[0], r.n.at[1]}
 		}
+		// A ref row teaches the edge: its type IS the selector spelling,
+		// and the far end is keyed by direction so the row reads as the
+		// fact it states.
+		if r.n.class == "ref" {
+			cls := "::" + r.n.refDir
+			if r.n.refKind != "" {
+				cls += "." + r.n.refKind
+			}
+			m["type"] = cls
+			far := make([]string, 0, len(r.n.refFar))
+			for _, f := range r.n.refFar {
+				far = append(far, f.addr())
+			}
+			if r.n.refDir == "out" {
+				m["to"] = far
+			} else {
+				m["from"] = far
+			}
+		}
 		if len(r.hits) > 0 {
 			m["hits"] = r.hits
 		}
@@ -255,6 +275,31 @@ type modernNode struct {
 
 // ordinalSuffix matches the "[n]" disambiguator renderSegment emits.
 var ordinalSuffix = regexp.MustCompile(`\[\d+\]`)
+
+// refSiteAddr matches a ref node's "<file>@<line>" site address.
+var refSiteAddr = regexp.MustCompile(`^(.+)@(\d+)$`)
+
+// resolveRefSiteAddr resolves "<file>@<line>" to that line of the file.
+func (s *Server) resolveRefSiteAddr(file, lineStr string) (*modernNode, error) {
+	abs, err := s.resolveFileArg(file)
+	if err != nil {
+		return nil, err
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, err
+	}
+	line, _ := strconv.Atoi(lineStr)
+	lines := splitNodeReadLines(content)
+	if line < 1 || line > len(lines) {
+		return nil, fmt.Errorf("%s has no line %d", file, line)
+	}
+	r := rangeArgs{File: file, StartLine: line, StartCol: 1, EndLine: line, EndCol: len(lines[line-1]) + 1}
+	return &modernNode{
+		class: "ref", file: file, addr: fmt.Sprintf("%s@%d", file, line),
+		exists: true, decl: r, name: r,
+	}, nil
+}
 
 // isClassicSymPath reports whether a "<file>#<here>" fragment is a
 // plain dotted symbol path rather than selector syntax. Dots-as-nesting
@@ -326,6 +371,15 @@ func (s *Server) resolveModernNode(node string) (*modernNode, error) {
 	node = strings.TrimSpace(node)
 	if node == "" {
 		return nil, errors.New("node is required")
+	}
+
+	// "<file>@<line>" — a ref node's SITE address (node_query's ref
+	// rows). Resolves to that whole line, so reading it shows the site
+	// and oldText/newText edits the call site.
+	if m := refSiteAddr.FindStringSubmatch(node); m != nil {
+		if rn, err := s.resolveRefSiteAddr(m[1], m[2]); err == nil {
+			return rn, nil
+		}
 	}
 
 	file, symPath := node, ""
@@ -563,7 +617,7 @@ func handleModernNodeRead(s *Server, args json.RawMessage) ([]Content, bool, err
 		"file": rn.file,
 		"type": rn.class, // "type", matching the tag grammar — see node_query
 		"@":    []int{rn.decl.StartLine, rn.decl.EndLine},
-		"text":  text,
+		"text": text,
 	}), false, nil
 }
 

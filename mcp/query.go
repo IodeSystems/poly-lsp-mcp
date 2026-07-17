@@ -76,17 +76,38 @@ type treeNode struct {
 	// canonical `:root > *` tour from parsing the whole workspace.
 	loaded bool
 	abs    string // absolute path, for lazy loading + source reads
+
+	// Ref nodes (class == "ref") — a reified reference edge, generated
+	// under its innermost enclosing symbol (.out: under the SOURCE;
+	// .in: under the TARGET). `at` is the SITE line, `file`/`abs` the
+	// site's file, and the far end(s) are this node's only children.
+	// Generated: `*` never matches one and walks never enter one — only
+	// naming ::in/::out does (the CSS pseudo-element contract).
+	refDir  string      // "in" | "out"
+	refKind string      // "call" | "type" | "import" | ""
+	refConf string      // "lexical" today; "lsp" when a child LSP resolves it
+	refFar  []*treeNode // the far end(s) — >1 only under name collisions
+
+	// refs are the node's generated ref children, materialized lazily
+	// (refsLoaded) and kept OUT of children so containment walks and
+	// `*` never see them.
+	refs       []*treeNode
+	refsLoaded bool
 }
 
 // addr renders the node's address — the exact string node_read /
 // node_edit accept. Dirs get their relpath (addressing one is a clear
-// error at read/edit time, not here).
+// error at read/edit time, not here). A ref node addresses its SITE:
+// "<file>@<line>" — reading it is the site line, editing it edits the
+// call site.
 func (n *treeNode) addr() string {
 	switch n.class {
 	case "project":
 		return n.full
 	case "dir", "file":
 		return n.file
+	case "ref":
+		return fmt.Sprintf("%s@%d", n.file, n.at[0])
 	}
 	if n.sym == "" {
 		return n.file
@@ -107,6 +128,14 @@ func (n *treeNode) nodeIDs() []string {
 		return []string{n.full}
 	case "dir", "file":
 		return []string{n.leaf, n.full}
+	case "ref":
+		// A ref answers to its FAR END's ids — ::out.call#'Save'
+		// names the edge by what it points at (or, for .in, points from).
+		var ids []string
+		for _, f := range n.refFar {
+			ids = append(ids, f.nodeIDs()...)
+		}
+		return ids
 	}
 	return []string{n.leaf, n.full, n.file + "#" + n.sym}
 }
@@ -126,22 +155,24 @@ type engine struct {
 	// Per-query memos. All are keyed for the life of ONE query: the tree
 	// and the index don't change under a running evaluation.
 	//
-	// matchSetCache: full-tree match set per inner selector AST (used by
-	// the moves to test "does this node match sel"), keyed by the AST's
-	// backing-array pointer plus the relaxation flag.
-	// refByName: referrer nodes per symbol NAME (one incoming hop).
-	// refsOut: node → the decl nodes its span references (the outgoing
-	// edge), built whole on first :references use.
+	// siteCache: classified non-declaration sites per file (ref-node
+	// materialization).
+	// declsByName: every declared node per name — the far ends of
+	// outgoing edges.
 	// symCache: parsed symbols per abs file, shared by decl-site checks
 	// and enclosing-symbol lookups.
-	matchSetCache map[string]map[*treeNode]bool
-	refByName     map[string][]*treeNode
-	refsOut       map[*treeNode][]*treeNode
-	symCache      map[string][]symbols.Symbol
+	siteCache   map[string][]refSite
+	declsByName map[string][]*treeNode
+	symCache    map[string][]symbols.Symbol
 }
 
 // kids returns n's children, parsing a file's symbols on first use.
+// A ref node's children are its FAR END(s) — that is how a chain
+// continues through a named gate ("::out.call > #'B'").
 func (e *engine) kids(n *treeNode) []*treeNode {
+	if n.class == "ref" {
+		return n.refFar
+	}
 	if n.class == "file" && !n.loaded {
 		n.loaded = true
 		e.loadFileSymbols(n)
@@ -324,19 +355,52 @@ type selCompound struct {
 	class   string // type selector (func), if !anyType
 	root    bool   // :root — matches the single .project node
 
+	// isRef marks an `::in` / `::out` pseudo-element compound — a
+	// reified reference edge, named by its DIRECTION. Ref nodes are
+	// generated: `*` never matches them and walks never enter them —
+	// only naming the element does (the CSS pseudo-element contract).
+	// refClasses are the validated KIND classes (.call/.type/.import);
+	// omitting the kind matches every kind, classified or not.
+	isRef      bool
+	refDir     string // "in" | "out"
+	refClasses []string
+
+	// langClass scopes a real-node compound to one language: file.go,
+	// func.ts. Languages are a closed vocabulary (the registry), which
+	// is what makes a class selector safe here.
+	langClass string
+
 	attrs []selAttr
 
-	// depth is an optional :depth(m,n) override. It REPLACES the
-	// default range of the relation to this compound's left — the
-	// preceding combinator, or (for the leftmost compound) the range
-	// the whole complex is anchored by.
-	depth *[2]int
+	// ordSel picks from the compound's matches PER ANCHOR in document
+	// order — :first / :last (jQuery-level selection, scoped to the
+	// position's local candidate set).
+	ordSel int // 0 none, 1 first, 2 last
 
 	// pseudos hold the compound's semantic pseudo-classes IN WRITTEN
 	// ORDER. Order matters because :parents MOVES the tip: filters
-	// before a move test the pre-move node, filters after it test the
-	// referrers it moved to.
+	// before a move test the pre-move set, filters after it test the
+	// upstream set.
 	pseudos []selPseudo
+
+	// positionClaims are BARE :any/:all/:empty with no open :parents
+	// excursion: they judge the ARRIVAL SET at this chain position and
+	// decide the enclosing :where/:any(...) subject. Terminal, and only
+	// legal inside a relative list.
+	positionClaims []selPseudoKind
+}
+
+// selElem is one chain element — a compound or a parenthesized group —
+// with regex-style repetition. Instances repeat CHILD-joined
+// (b{2} = b > b); a ref element repeats by edge HOPS (each hop crosses
+// the ref to its far end and takes the far end's next matching ref),
+// which is the (::out > *){k} > ::out expansion — the element always
+// ends AT a ref, so a following '>' is the far end.
+type selElem struct {
+	comb     selComb // relation of the FIRST instance to the previous element
+	comp     *selCompound
+	group    *selComplex // parenthesized sub-chain; comp == nil
+	min, max int         // {m,n}; max < 0 = unbounded; default {1,1}
 }
 
 // hasMove reports whether the compound re-roots (carries a move).
@@ -352,35 +416,31 @@ func (c *selCompound) hasMove() bool {
 type selPseudoKind int
 
 const (
-	pseudoContains selPseudoKind = iota // :contains('text')      — filter on own source
-	pseudoParents                       // :parents[(sel)]{m,n}   — MOVE to referrers (incoming)
-	pseudoRefs                          // :references[(sel)]{m,n} — MOVE to referents (outgoing)
-	pseudoWhere                         // :where(sel)            — filter: a path matches
-	pseudoAny                           // :any[(sel)]            — ∃ claim
-	pseudoAll                           // :all[(sel)]            — ∀ claim
-	pseudoEmpty                         // :empty[(sel)]          — ∄ claim
+	pseudoContains selPseudoKind = iota // :contains('text') — filter on own source
+	pseudoParents                       // :parents[(sel)]   — MOVE upstream (the one inverse)
+	pseudoWhere                         // :where(sel)       — filter: a path matches
+	pseudoAny                           // :any[(sel)]       — ∃ claim
+	pseudoAll                           // :all[(sel)]       — ∀ claim
+	pseudoEmpty                         // :empty[(sel)]     — ∄ claim
 )
 
-func (k selPseudoKind) isMove() bool  { return k == pseudoParents || k == pseudoRefs }
+func (k selPseudoKind) isMove() bool  { return k == pseudoParents }
 func (k selPseudoKind) isClaim() bool { return k == pseudoAny || k == pseudoAll || k == pseudoEmpty }
 
 type selPseudo struct {
 	kind  selPseudoKind
 	grep  *grepSpec    // pseudoContains only
-	inner selectorList // nil on a BARE move (= unfiltered) or a BARE claim
-
-	// moves only: how many reference hops the move may take.
-	// max < 0 = unbounded (fixpoint). Default {1,1}.
-	min, max int
+	inner selectorList // nil on a bare :parents (= :parents(*)) or a bare claim
 }
 
 // A compound's pseudo chain is a PIPELINE over the node it positionally
-// matched: a move opens an excursion (tips walk the reference graph), a
-// parenthesized pseudo filters the current tips, and a BARE claim
-// closes the excursion — it validates the excursion set and collapses
-// back to the subject. `func:parents:empty` is therefore an easy
-// rewrite of the canonical `func:where(&:parents:empty)` shape: both
-// keep the FUNC, deciding it by the excursion.
+// matched: :parents opens an excursion (tips = everything upstream — the
+// containment ancestors plus, transitively, the sources of incoming
+// reference edges — filtered to the roots of the inner selector),
+// parenthesized pseudos filter the current tips, and a BARE claim closes
+// the excursion — it validates the excursion set and collapses back to
+// the subject. `*:parents:empty` therefore matches only the workspace
+// root: everything else has SOMETHING upstream.
 
 type selComb int
 
@@ -417,12 +477,23 @@ func (r selRel) rng() (min, max int) {
 	return 0, -1
 }
 
-// selComplex is a chain of compounds joined by combinators; the LAST
-// compound is the subject.
+// selComplex is a chain of elements; the LAST element is the subject.
 type selComplex struct {
-	compounds []selCompound
-	combs     []selComb
-	rel       selRel
+	elems []selElem
+	rel   selRel
+}
+
+// subjectComp returns the complex's subject compound (a group's subject
+// is its own last element's, recursively), or nil for an empty complex.
+func (cx *selComplex) subjectComp() *selCompound {
+	if len(cx.elems) == 0 {
+		return nil
+	}
+	e := &cx.elems[len(cx.elems)-1]
+	if e.comp != nil {
+		return e.comp
+	}
+	return e.group.subjectComp()
 }
 
 type selectorList []selComplex
@@ -497,10 +568,8 @@ func (p *modSelParser) parseList() (selectorList, error) {
 		if err != nil {
 			return nil, err
 		}
-		for i := range cx.compounds {
-			if cx.compounds[i].selfRef {
-				return nil, fmt.Errorf("'&' names the node under test, so it only makes sense inside :where/:any/:all/:empty (e.g. :where(&:parents:empty))")
-			}
+		if err := validateGlobalComplex(&cx); err != nil {
+			return nil, err
 		}
 		list = append(list, cx)
 		p.skipWS()
@@ -512,34 +581,217 @@ func (p *modSelParser) parseList() (selectorList, error) {
 	}
 }
 
+// validateGlobalComplex rejects relative-only constructs ('&', position
+// claims) in a GLOBAL selector — the top level and :parents inners.
+func validateGlobalComplex(cx *selComplex) error {
+	for i := range cx.elems {
+		el := &cx.elems[i]
+		if el.group != nil {
+			if err := validateGlobalComplex(el.group); err != nil {
+				return err
+			}
+			continue
+		}
+		if el.comp.selfRef {
+			return fmt.Errorf("'&' names the node under test, so it only makes sense inside :where/:any/:all/:empty (e.g. :where(&:parents:empty))")
+		}
+		if len(el.comp.positionClaims) > 0 {
+			return fmt.Errorf("a bare claim judges a position inside :where/:any/:all/:empty — write func:where(::in:empty), or open a :parents excursion first")
+		}
+	}
+	return nil
+}
+
+// parseComplex parses a chain of ELEMENTS: compounds, parenthesized
+// groups, and ::in/::out pseudo-elements, each with optional {m,n}
+// repetition. `X::out` binds the ref to X (child-tight); a standalone
+// `::out` gets an implied universal host, so `X ::out` is a
+// descendant's ref — exactly CSS's `#a::before` vs `#a ::before`.
 func (p *modSelParser) parseComplex() (selComplex, error) {
 	var cx selComplex
-	first, err := p.parseCompound()
-	if err != nil {
-		return cx, err
-	}
-	cx.compounds = append(cx.compounds, first)
+	firstElem := true
 	for {
-		sawWS := p.skipWS()
-		c := p.peek()
-		if p.eof() || c == ',' || c == ')' {
-			return cx, nil
-		}
 		comb := selDescendant
-		if c == '>' {
+		if firstElem {
+			// The complex-level anchoring (rel) covers the first element.
+		} else {
+			sawWS := p.skipWS()
+			c := p.peek()
+			if p.eof() || c == ',' || c == ')' {
+				return cx, nil
+			}
+			if c == '>' {
+				p.i++
+				p.skipWS()
+				comb = selChild
+			} else if !sawWS {
+				return cx, p.errf("a combinator, ',' or end of selector")
+			}
+		}
+
+		// A claimed position is terminal: nothing may follow it.
+		if n := len(cx.elems); n > 0 {
+			if c := cx.elems[n-1].comp; c != nil && len(c.positionClaims) > 0 {
+				return cx, fmt.Errorf("a bare claim closes its position — nothing can follow it in the chain")
+			}
+		}
+
+		switch {
+		case p.peek() == '(':
+			// Group: a parenthesized sub-chain, usually repeated.
 			p.i++
+			sub, err := p.parseComplex()
+			if err != nil {
+				return cx, err
+			}
 			p.skipWS()
-			comb = selChild
-		} else if !sawWS {
-			return cx, p.errf("a combinator, ',' or end of selector")
+			if p.peek() != ')' {
+				return cx, p.errf("')' to close the group")
+			}
+			p.i++
+			el := selElem{comb: comb, group: &sub, min: 1, max: 1}
+			if p.peek() == '{' {
+				if el.min, el.max, err = p.parseBraceRange(); err != nil {
+					return cx, err
+				}
+			}
+			cx.elems = append(cx.elems, el)
+		case p.peekIsPseudoElement():
+			// Standalone ::in/::out — implied universal host.
+			host := selCompound{anyType: true, implied: true}
+			cx.elems = append(cx.elems, selElem{comb: comb, comp: &host, min: 1, max: 1})
+			if err := p.appendRefElem(&cx); err != nil {
+				return cx, err
+			}
+		default:
+			comp, err := p.parseCompound()
+			if err != nil {
+				return cx, err
+			}
+			el := selElem{comb: comb, comp: &comp, min: 1, max: 1}
+			if p.peek() == '{' {
+				if el.min, el.max, err = p.parseBraceRange(); err != nil {
+					return cx, err
+				}
+			}
+			cx.elems = append(cx.elems, el)
+			// A tight `X::out` — the ref binds to this compound.
+			if p.peekIsPseudoElement() {
+				if err := p.appendRefElem(&cx); err != nil {
+					return cx, err
+				}
+			}
 		}
-		next, err := p.parseCompound()
-		if err != nil {
-			return cx, err
-		}
-		cx.combs = append(cx.combs, comb)
-		cx.compounds = append(cx.compounds, next)
+		firstElem = false
 	}
+}
+
+func (p *modSelParser) peekIsPseudoElement() bool {
+	return p.peek() == ':' && p.i+1 < len(p.s) && p.s[p.i+1] == ':'
+}
+
+// appendRefElem parses one `::in`/`::out` pseudo-element (plus its optional
+// {m,n} hop range) and appends it CHILD-joined to the last element —
+// the host. Repetition of a ref element counts edges crossed.
+func (p *modSelParser) appendRefElem(cx *selComplex) error {
+	comp, err := p.parsePseudoElement()
+	if err != nil {
+		return err
+	}
+	el := selElem{comb: selChild, comp: &comp, min: 1, max: 1}
+	if p.peek() == '{' {
+		if el.min, el.max, err = p.parseBraceRange(); err != nil {
+			return err
+		}
+		if el.min < 1 {
+			return fmt.Errorf("::%s{%d,…}: edge hops start at 1 (0 edges crossed is the host itself — drop the element)", comp.refDir, el.min)
+		}
+	}
+	cx.elems = append(cx.elems, el)
+	return nil
+}
+
+// parsePseudoElement parses "::in" / "::out" plus its kind classes and
+// the usual ids/attrs/pseudos. Ref nodes are the reified reference
+// edges — see selCompound.isRef.
+func (p *modSelParser) parsePseudoElement() (selCompound, error) {
+	var comp selCompound
+	p.i += 2 // '::'
+	name := p.readIdent()
+	switch name {
+	case "in", "out":
+		comp.refDir = name
+	case "ref":
+		return comp, fmt.Errorf("the reference elements are named by DIRECTION: ::in (who points here) and ::out (what this points at) — e.g. ::out.call, ::in.type")
+	default:
+		return comp, fmt.Errorf("unknown pseudo-element ::%s — the reference edges are ::in and ::out (kind as class: ::out.call, ::in.type, ::out.import)", name)
+	}
+	comp.isRef = true
+	comp.class = "ref"
+	for {
+		switch p.peek() {
+		case '.':
+			p.i++
+			cls := p.readIdent()
+			if cls == "in" || cls == "out" {
+				return comp, fmt.Errorf("direction IS the element (::%s); the class is the KIND: ::%s.call, ::%s.type, ::%s.import", cls, comp.refDir, comp.refDir, comp.refDir)
+			}
+			if !validRefClass(cls) {
+				return comp, fmt.Errorf("::%s.%s: reference kinds are .call/.type/.import; omit the kind to match all (unclassified references match only the bare element)", comp.refDir, cls)
+			}
+			comp.refClasses = append(comp.refClasses, cls)
+		case '#':
+			p.i++
+			id, err := p.readID()
+			if err != nil {
+				return comp, err
+			}
+			comp.attrs = append(comp.attrs, selAttr{op: selExact, value: id})
+		case '[':
+			a, err := p.parseAttr()
+			if err != nil {
+				return comp, err
+			}
+			comp.attrs = append(comp.attrs, a)
+		case ':':
+			if p.peekIsPseudoElement() {
+				return comp, fmt.Errorf("an ::in/::out has no pseudo-elements of its own; continue the chain instead (::out.call > #'target')")
+			}
+			if err := p.parsePseudo(&comp); err != nil {
+				return comp, err
+			}
+		default:
+			return comp, nil
+		}
+	}
+}
+
+func validRefClass(c string) bool {
+	switch c {
+	case "call", "type", "import":
+		return true
+	}
+	return false
+}
+
+// languageClassAliases maps class spellings to registry language names.
+// Short forms are the ones people (and models) actually write.
+var languageClassAliases = map[string]string{
+	"go": "go", "typescript": "typescript", "ts": "typescript", "tsx": "typescript",
+	"python": "python", "py": "python", "markdown": "markdown", "md": "markdown",
+	"yaml": "yaml", "json": "json", "sql": "sql", "proto": "proto",
+	"graphql": "graphql", "gql": "graphql",
+}
+
+func knownLanguageClass(c string) bool { _, ok := languageClassAliases[c]; return ok }
+
+func knownLanguageClasses() []string {
+	out := make([]string, 0, len(languageClassAliases))
+	for c := range languageClassAliases {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (p *modSelParser) parseCompound() (selCompound, error) {
@@ -558,22 +810,22 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 		comp.anyType = true
 		sawType = true
 	case p.peek() == '.':
-		// Tags are canonical (see below), but `.func` is ACCEPTED for a known
-		// type. Measured: even with the description stating tags twice, the
-		// model kept writing `.file` — a CSS prior beats a schema line, every
-		// time. Rejecting it bought nothing and cost ~4 turns of round-trips
-		// per task fixing a spelling that was never ambiguous.
-		//
-		// The invention guard is unaffected, because it was never about the
-		// dot: `.cache` fails on `cache` not being a TYPE, and still says
-		// "try #cache". So we accept what is unambiguous and reject only what
-		// is actually wrong.
+		// A leading dot is either the OLD `.func` spelling for a known
+		// type (accepted: a CSS prior beats a schema line, measured) or
+		// a language class on the implied universal (`.go` = any Go
+		// node). Workspace NAMES are neither — the guided error routes
+		// them to #ids.
 		p.i++
 		name := p.readIdent()
-		if !knownSelectorClass(name) {
+		switch {
+		case knownSelectorClass(name):
+			comp.class = name
+		case knownLanguageClass(name):
+			comp.anyType = true
+			comp.langClass = name
+		default:
 			return comp, dotIsNotAClassErr(name)
 		}
-		comp.class = name
 		sawType = true
 	case isSelIdentStart(p.peek()):
 		// A bare word is the TAG — the node's intrinsic type, as `div` is an
@@ -590,7 +842,23 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 	}
 
 	for {
+		if p.peekIsPseudoElement() {
+			// `X::out` — the caller (parseComplex) owns the pseudo-element.
+			return comp, nil
+		}
 		switch p.peek() {
+		case '.':
+			// After a tag: the LANGUAGE class — file.go, func.ts. A
+			// closed vocabulary (the registry), unlike workspace names.
+			p.i++
+			cls := p.readIdent()
+			if !knownLanguageClass(cls) {
+				return comp, fmt.Errorf("no language %q: a class after a tag scopes it to a language (file.go, func.ts — one of %s). A workspace NAME is an id: #%s", cls, strings.Join(knownLanguageClasses(), " "), cls)
+			}
+			if comp.langClass != "" {
+				return comp, fmt.Errorf("only one language class per compound")
+			}
+			comp.langClass = cls
 		case '#':
 			p.i++
 			id, err := p.readID()
@@ -609,22 +877,9 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 			if err := p.parsePseudo(&comp); err != nil {
 				return comp, err
 			}
-		case '{':
-			// Compound depth range — the canonical spelling of :depth:
-			// b{1,3} = within 1..3 levels of the previous target, {0}
-			// = that target itself. (A move's {m,n} was consumed by
-			// parsePseudo, so a '{' here always ranges the compound.)
-			lo, hi, err := p.parseBraceRange()
-			if err != nil {
-				return comp, err
-			}
-			if comp.depth != nil {
-				return comp, fmt.Errorf("only one depth range ({m,n} / :depth) per compound")
-			}
-			comp.depth = &[2]int{lo, hi}
 		default:
 			if !sawType && !comp.root && len(comp.attrs) == 0 &&
-				len(comp.pseudos) == 0 && comp.depth == nil {
+				len(comp.pseudos) == 0 && len(comp.positionClaims) == 0 {
 				return comp, p.errf("a type tag ('func'), '*', '#id', '[name…]' or a pseudo-class")
 			}
 			return comp, nil
@@ -735,12 +990,11 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 	case "root":
 		comp.root = true
 		return nil
-	case "parents", "references":
-		kind := pseudoParents
-		if name == "references" {
-			kind = pseudoRefs
-		}
-		ps := selPseudo{kind: kind, min: 1, max: 1}
+	case "parents":
+		// The one inverse move: everything upstream (containment
+		// ancestors ∪ sources of incoming references, transitively),
+		// filtered to the ROOTS of the inner selector. Bare = :parents(*).
+		ps := selPseudo{kind: pseudoParents}
 		if p.peek() == '(' {
 			inner, err := p.parsePseudoArg(name, false)
 			if err != nil {
@@ -749,11 +1003,19 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 			ps.inner = inner
 		}
 		if p.peek() == '{' {
-			if err := p.parseHopRange(&ps); err != nil {
-				return err
-			}
+			return fmt.Errorf(":parents is always transitive (the whole upstream); bound reference hops on the edge instead: ::in.call{1,3}")
 		}
 		comp.pseudos = append(comp.pseudos, ps)
+		return nil
+	case "first", "last":
+		if comp.ordSel != 0 {
+			return fmt.Errorf("only one of :first/:last per compound")
+		}
+		if name == "first" {
+			comp.ordSel = 1
+		} else {
+			comp.ordSel = 2
+		}
 		return nil
 	case "where":
 		inner, err := p.parsePseudoArg(name, true)
@@ -772,17 +1034,16 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 			comp.pseudos = append(comp.pseudos, selPseudo{kind: kind, inner: inner})
 			return nil
 		}
-		// BARE claim: closes the compound's open excursion. Only legal
-		// with a move before it (since the last bare claim) — otherwise
-		// there is no set to test.
-		if !hasOpenMove(comp.pseudos) {
-			return fmt.Errorf(
-				":%s needs a set to test: open one first (as in func:parents:empty = no callers) or pass a selector (:%s(*) tests descendants)",
-				name, name)
+		// BARE claim. With an open :parents excursion it closes it;
+		// otherwise it is a POSITION claim — it judges the arrival set
+		// at this chain position (validated relative-only in parseList).
+		if hasOpenMove(comp.pseudos) {
+			comp.pseudos = append(comp.pseudos, selPseudo{kind: kind})
+			return nil
 		}
-		comp.pseudos = append(comp.pseudos, selPseudo{kind: kind})
+		comp.positionClaims = append(comp.positionClaims, kind)
 		return nil
-	case "has", "has_parent":
+	case "has", "has_parent", "references":
 		return removedPseudoErr(name)
 	case "contains":
 		if p.peek() != '(' {
@@ -820,38 +1081,7 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 		comp.pseudos = append(comp.pseudos, selPseudo{kind: pseudoContains, grep: g})
 		return nil
 	case "depth":
-		if p.peek() != '(' {
-			return p.errf("'(' after :depth")
-		}
-		p.i++
-		p.skipWS()
-		lo, ok := p.readNonNegInt()
-		if !ok {
-			return p.errf("a non-negative integer (min)")
-		}
-		p.skipWS()
-		if p.peek() != ',' {
-			return p.errf("',' in :depth(min,max)")
-		}
-		p.i++
-		p.skipWS()
-		hi, ok := p.readNonNegInt()
-		if !ok {
-			return p.errf("a non-negative integer (max)")
-		}
-		p.skipWS()
-		if p.peek() != ')' {
-			return p.errf("')' to close :depth")
-		}
-		p.i++
-		if hi < lo {
-			return fmt.Errorf("bad :depth(%d,%d): max must be >= min", lo, hi)
-		}
-		if comp.depth != nil {
-			return fmt.Errorf("only one :depth(...) per compound")
-		}
-		comp.depth = &[2]int{lo, hi}
-		return nil
+		return fmt.Errorf(":depth is gone — {m,n} REPEATS (regex semantics): func{2} = func > func; 'within 1..3 levels' = \"> *{0,2} > func\". Pass selector \"?\" for the grammar.")
 	default:
 		return fmt.Errorf("unknown pseudo-class %q\n\n%s", ":"+name, selectorGrammarHelp)
 	}
@@ -906,12 +1136,16 @@ func (p *modSelParser) parseRelativeList() (selectorList, error) {
 		if err != nil {
 			return nil, err
 		}
-		for i := 1; i < len(cx.compounds); i++ {
-			if cx.compounds[i].selfRef {
+		if len(cx.elems) == 0 {
+			return nil, p.errf("a selector")
+		}
+		for i := 1; i < len(cx.elems); i++ {
+			if c := cx.elems[i].comp; c != nil && c.selfRef {
 				return nil, fmt.Errorf("'&' can only START a selector inside :where/:any/:all/:empty — it names the node under test")
 			}
 		}
-		switch first := &cx.compounds[0]; {
+		switch first := cx.elems[0].comp; {
+		case first == nil: // a group leads — plain relative anchoring
 		case first.selfRef:
 			if rel == relChild {
 				return nil, fmt.Errorf("'> &' contradicts itself: '&' IS the node under test; drop the '>'")
@@ -919,7 +1153,7 @@ func (p *modSelParser) parseRelativeList() (selectorList, error) {
 			rel = relScope
 		case first.root:
 			rel = relTop // :root re-anchors at the workspace root
-		case rel == relDescendant && first.pseudoOnly():
+		case rel == relDescendant && first.pseudoOnly() && !first.isRef:
 			rel = relScope // implicit &: a leading pseudo attaches to the node itself
 		}
 		cx.rel = rel
@@ -934,8 +1168,9 @@ func (p *modSelParser) parseRelativeList() (selectorList, error) {
 }
 
 // parseBraceRange parses "{m}", "{m,}" or "{m,n}" — the ONE range
-// syntax, shared by move hops (:parents(...){1,}) and compound depth
-// (b{1,3} = within 1..3 levels of the previous target).
+// syntax: REPETITION of the element it follows (regex semantics).
+// Instances chain child-joined; on an ::in/::out element it counts edges
+// crossed.
 func (p *modSelParser) parseBraceRange() (lo, hi int, err error) {
 	p.i++ // '{'
 	p.skipWS()
@@ -968,24 +1203,14 @@ func (p *modSelParser) parseBraceRange() (lo, hi int, err error) {
 	return lo, hi, nil
 }
 
-// parseHopRange applies a brace range to a move's hop count.
-func (p *modSelParser) parseHopRange(ps *selPseudo) error {
-	lo, hi, err := p.parseBraceRange()
-	if err != nil {
-		return err
-	}
-	if lo < 1 {
-		return fmt.Errorf(":parents(...){%d,…}: hops start at 1 (0 hops is the node itself — just drop the move)", lo)
-	}
-	ps.min, ps.max = lo, hi
-	return nil
-}
-
 // removedPseudoErr answers the retired pseudos with their modern
 // spelling — terse, naming the fix (see unknownTypeErr for why).
 func removedPseudoErr(name string) error {
-	if name == "has" {
+	switch name {
+	case "has":
 		return fmt.Errorf(":has is now :any — file:any(func#test) = files with such a descendant. :all/:empty quantify the same way. Pass selector \"?\" for the grammar.")
+	case "references":
+		return fmt.Errorf(":references is now a NODE — a reified edge: X's outgoing calls are \"#'X'::out.call\", its callers \"#'X'::in.call > *\". Pass selector \"?\" for the grammar.")
 	}
 	return fmt.Errorf(":has_parent is gone: write the ancestor BEFORE the node — func:has_parent(#'a.ts') is now \"#'a.ts' func\". Pass selector \"?\" for the grammar.")
 }
@@ -1121,43 +1346,46 @@ func dotIsNotAClassErr(name string) error {
 		name, strings.Join(selectorTypeList(), " "), name)
 }
 
-const selectorGrammarHelp = `Selector grammar (CSS over the unified node tree, plus moves that walk the reference graph).
-
-At every point in a selector there is a set of nodes. Combinators walk DOWN
-through containment — that half is literally CSS. A MOVE re-roots at reference
-edges instead; it may happen at any point, and the chain continues from the
-moved-to nodes.
+const selectorGrammarHelp = `Selector grammar (CSS over the unified node tree; references are pseudo-element NODES).
 
 A node's TYPE is a bare tag, like CSS's div/span — a fixed set you cannot
 invent. Anything the workspace NAMES — a dir, a file, a symbol — is an #id. So
-the cache/ directory is #cache, never "cache". There are no classes.
+the cache/ directory is #cache, never "cache". A class after a tag scopes it to
+a LANGUAGE: file.go, func.ts. The reference graph is reified as generated edge
+nodes (::in / ::out): '*' never matches one and walks never enter one — you
+cross an edge only by naming it.
 
   TYPES  project dir file
          func method type struct interface class const var field enum ctor module import argument
-         * = any type.
+         * = any type (never an edge).
   TREE   project#<root-name> > dir#<relpath> > file#<relpath> > <symbols, dotted-nested> > argument#<param>
          :root is a pseudo-class matching the single project node (as CSS's :root matches <html>).
   ID     #bare  (charset [A-Za-z_][A-Za-z0-9_.-]*)  or  #'anything else'  (spaces, slashes, …). Quote instead of escaping; there is no backslash escape.
-         A symbol answers to its leaf name, its dotted path, and its full "<file>#<sym>" address.
-         A dir/file answers to its basename AND its workspace-relative path.
+         A symbol answers to its leaf name, its dotted path, and its full "<file>#<sym>". An EDGE answers to its far end's ids.
   ATTR   [name=X] exact  [name^=X] prefix  [name$=X] suffix  [name*=X] contains.  #id is sugar for [name=id].
-  MOVE   :parents[(sel)][{m,n}]     tip := nodes matching sel that REFERENCE the tip.   #'a.go#Save':parents(*) = Save's callers.
-         :references[(sel)][{m,n}]  tip := nodes the tip references.                    #'main':references(func) = what main calls.
-         Bare = unfiltered. {m,n} = that many hops, every hop matching sel; {1,} = transitive: :parents(func){1,} = all callers, recursively.
-  CLAIM  a BARE :any / :all / :empty after a move closes it: ∃ / ∀ / ∄ over the reached set, collapsing back to the node that STARTED the move.
-         func:parents:empty = dead code ≡ func:where(&:parents:empty). func:parents(func):all = every referrer is a func.
-  SET    :where(sel)  :any(sel)  :all(sel)  :empty(sel) — test a RELATIVE selector: its start is assumed to be & (this node), CSS-nesting style.
-         A leading pseudo attaches to & (:where(:parents:empty)); a leading tag/*/#id means a descendant (file:any(func#test));
-         '>' = child; :root re-anchors at the workspace root; an explicit & is always allowed.
-  PSEUDO :contains('text')   this node's own source contains text (same flags as grep: -i -w -E -F -v)
-         :depth(m,n)         alias of the {m,n} compound range below.
-  COMB   space = descendant ≡ {1,}   '>' = direct child ≡ {1}
-         b{m,n}  b within m..n levels of the PREVIOUS target (0 = that target itself; with no preceding
-                 target, measured from :root). Overrides the combinator: file *{0} = the file itself.
+  EDGES  ::in = references pointing HERE.  ::out = what this node's own body points at.  Kind as class:
+         ::out.call  ::in.type  ::out.import  — bare matches every kind (incl. unclassified).
+         Attached to the INNERMOST enclosing symbol: X::out = X's own edges (as CSS #a::before),
+         X ::out = nested symbols' too (as #a ::before). The far end is the edge's only child:
+         #'A'::out.call > #'B' = A calls B. An edge's address is its SITE ("file@line") — node_read /
+         node_edit touch the call site. ::out.call{1,16} = crossing 1..16 call edges; {1,} = transitive.
+  MOVE   :parents(sel) — tip := the ROOTS of sel with a path down/out to the tip: everything upstream,
+         containment ancestors ∪ incoming-reference sources, transitive. Bare = :parents(*).
+         *:parents:empty = only :root — everything else has something upstream.
+  CLAIM  a BARE :any / :all / :empty judges the set at its position, deciding the node under test:
+         func:where(::in:empty) = dead code. After :parents it closes the excursion (*:parents:empty).
+         Parenthesized :where/:any/:all/:empty(sel) take a RELATIVE selector (CSS nesting): a leading
+         pseudo/::element binds to the node itself; a leading tag/*/#id means a descendant
+         (file:any(func#test)); '>' = child; :root re-anchors; an explicit & is the node under test.
+  ORDER  :first / :last — pick from this position's matches, per anchor, in document order.
+  REP    {m,n} REPEATS an element or (group), child-joined: func{2} = func > func; (a b){2} = a b > a b.
+         {m,} = unbounded, cycle-safe. Zero reps make the element vanish: "> *{0,2} > b" = b within 1..3 levels.
+  COMB   space = descendant   '>' = direct child
   COMMA  union: "func, method"
-Examples: file = EVERY file, nested included  |  #cache > file = files directly in dir cache/  |  :root > * = ONLY top level
-          #'store.go' func = funcs in that file  |  func[name^=Test]  |  #'store.go#Save':parents(*) = who calls Save
-          #'Save':parents(func){1,} argument = args of every transitive caller  |  func:references(func):empty = calls nothing`
+Examples: #cache > file = files directly in cache/  |  :root > * = ONLY top level  |  file.go = Go files
+          #'store.go#Save'::in.call = the calls to Save (rows carry from:)  |  ::in.call{1,} > * = every transitive caller
+          #'main'::out.call > * = what main calls  |  func:where(::out.call:empty) = calls nothing
+          method:where(::out #'parseAttr') = methods whose body mentions it  |  file > func:first = each file's first func`
 
 // ----------------------------------------------------------- evaluation
 //
@@ -1181,6 +1409,24 @@ func combRange(c selComb) (min, max int) {
 	return 1, -1
 }
 
+// nodeLess is the document order: pre-order over (fileOrd, symOrd),
+// with the site line + direction breaking ties among a host's ref nodes.
+func nodeLess(a, b *treeNode) bool {
+	if a.fileOrd != b.fileOrd {
+		return a.fileOrd < b.fileOrd
+	}
+	if a.symOrd != b.symOrd {
+		return a.symOrd < b.symOrd
+	}
+	if a.at[0] != b.at[0] {
+		return a.at[0] < b.at[0]
+	}
+	if a.refDir != b.refDir {
+		return a.refDir < b.refDir
+	}
+	return a.leaf < b.leaf
+}
+
 // evaluate runs a parsed selector over the tree and returns the
 // matching nodes in deterministic pre-order.
 func (e *engine) evaluate(list selectorList) []*treeNode {
@@ -1189,12 +1435,7 @@ func (e *engine) evaluate(list selectorList) []*treeNode {
 	for n := range set {
 		out = append(out, n)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].fileOrd != out[j].fileOrd {
-			return out[i].fileOrd < out[j].fileOrd
-		}
-		return out[i].symOrd < out[j].symOrd
-	})
+	sort.Slice(out, func(i, j int) bool { return nodeLess(out[i], out[j]) })
 	return out
 }
 
@@ -1218,37 +1459,215 @@ func (e *engine) evalList(list selectorList, anchor *treeNode, relaxSubject bool
 }
 
 func (e *engine) evalComplex(cx selComplex, anchor *treeNode, relaxSubject bool) map[*treeNode]bool {
-	last := len(cx.compounds) - 1
-	comp := &cx.compounds[0]
+	if len(cx.elems) == 0 {
+		return nil
+	}
 	if cx.rel == relTop {
 		// relTop complexes are GLOBAL: top-level selectors, :parents
 		// inners, and :root-led complexes inside relative lists (":root
 		// re-anchors" is the one exception to the assumed '&' start).
 		anchor = e.project
 	}
-	min, max := cx.rel.rng()
-	if comp.depth != nil {
-		min, max = comp.depth[0], comp.depth[1]
-	}
-	relaxed := relaxSubject && last == 0
-	tips := e.collectMatches(anchor, min, max, comp, relaxed && !comp.hasMove())
-	tips = e.applyPseudos(tips, comp, relaxed)
-	for i, comb := range cx.combs {
-		comp = &cx.compounds[i+1]
-		cmin, cmax := combRange(comb)
-		if comp.depth != nil {
-			cmin, cmax = comp.depth[0], comp.depth[1]
+	min0, max0 := cx.rel.rng()
+	start := map[*treeNode]bool{anchor: true}
+	tips := e.evalElems(cx.elems, start, min0, max0, relaxSubject)
+
+	// Position claims on the subject: judge the arrival set, collapse to
+	// the anchor (they decide the enclosing :where/:any subject).
+	if sub := cx.subjectComp(); sub != nil && len(sub.positionClaims) > 0 {
+		if relaxSubject {
+			return tips // claims are the tested property, not the domain
 		}
-		relaxed = relaxSubject && i+1 == last
-		next := map[*treeNode]bool{}
-		for t := range tips {
-			for m := range e.collectMatches(t, cmin, cmax, comp, relaxed && !comp.hasMove()) {
-				next[m] = true
+		for _, k := range sub.positionClaims {
+			ok := false
+			switch k {
+			case pseudoAny:
+				ok = len(tips) > 0
+			case pseudoEmpty:
+				ok = len(tips) == 0
+			case pseudoAll:
+				// ∀ at a position: everything the structure reaches also
+				// matches as written — the relaxed-domain compare.
+				domain := e.evalElems(cx.elems, start, min0, max0, true)
+				ok = setsEqual(tips, domain)
+			}
+			if !ok {
+				return nil
 			}
 		}
-		tips = e.applyPseudos(next, comp, relaxed)
+		return map[*treeNode]bool{anchor: true}
 	}
 	return tips
+}
+
+// evalElems runs an element chain from a tip set. min0/max0 anchor the
+// FIRST element's first instance (the complex's rel, or child for group
+// repetitions); every other instance joins as written (its combinator),
+// with repeated instances child-joined. A {0,…} element simply vanishes
+// on the skip path — its combinator vanishes with it.
+func (e *engine) evalElems(elems []selElem, tips map[*treeNode]bool, min0, max0 int, relaxSubject bool) map[*treeNode]bool {
+	last := len(elems) - 1
+	for i := range elems {
+		el := &elems[i]
+		relaxed := relaxSubject && i == last
+		imin, imax := min0, max0
+		if i > 0 {
+			imin, imax = combRange(el.comb)
+		}
+		next := e.evalRepeat(tips, el, imin, imax, relaxed)
+		if el.min == 0 {
+			for t := range tips {
+				next[t] = true // the skip path: the element vanishes
+			}
+		}
+		tips = next
+		if len(tips) == 0 {
+			return tips
+		}
+	}
+	return tips
+}
+
+// evalRepeat evaluates one element's {m,n} repetition. Instance 1 joins
+// via [min1,max1]; instances 2..n join CHILD (each a direct child of
+// the previous — the regex-over-child-steps reading), except an ::in/::out
+// element, which repeats by edge HOPS: cross the ref to its far end and
+// take the far end's next matching ref, so the element always ends AT a
+// ref. Unbounded {m,} is a fixpoint — the visited set bounds cycles.
+func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int, relaxed bool) map[*treeNode]bool {
+	out := map[*treeNode]bool{}
+	if el.max == 0 {
+		return out // {0}: only the skip path exists (the element vanishes)
+	}
+	frontier := e.evalInstance(tips, el, min1, max1, relaxed)
+	if el.min <= 1 {
+		for n := range frontier {
+			out[n] = true
+		}
+	}
+	var visited map[*treeNode]bool
+	if el.max < 0 {
+		visited = map[*treeNode]bool{}
+		for n := range frontier {
+			visited[n] = true
+		}
+	}
+	for count := 2; (el.max < 0 || count <= el.max) && len(frontier) > 0; count++ {
+		var next map[*treeNode]bool
+		if el.comp != nil && el.comp.isRef {
+			next = e.refHop(frontier, el.comp, relaxed)
+		} else {
+			next = e.evalInstance(frontier, el, 1, 1, relaxed)
+		}
+		if visited != nil {
+			pruned := map[*treeNode]bool{}
+			for n := range next {
+				if !visited[n] {
+					visited[n] = true
+					pruned[n] = true
+				}
+			}
+			next = pruned
+		}
+		if count >= el.min {
+			for n := range next {
+				out[n] = true
+			}
+		}
+		frontier = next
+	}
+	return out
+}
+
+// evalInstance evaluates ONE instance of an element from each tip.
+func (e *engine) evalInstance(tips map[*treeNode]bool, el *selElem, min, max int, relaxed bool) map[*treeNode]bool {
+	if el.group != nil {
+		out := map[*treeNode]bool{}
+		for t := range tips {
+			for n := range e.evalElems(el.group.elems, map[*treeNode]bool{t: true}, min, max, relaxed) {
+				out[n] = true
+			}
+		}
+		return out
+	}
+	comp := el.comp
+	if comp.isRef {
+		return e.refMatches(tips, comp, relaxed)
+	}
+	out := map[*treeNode]bool{}
+	for t := range tips {
+		// A subject with a :parents move keeps its positional part even
+		// under relaxation — the relaxation moves into the move's inner.
+		cand := e.collectMatches(t, min, max, comp, relaxed && !comp.hasMove())
+		for n := range e.selectOrdered(cand, comp, relaxed) {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// selectOrdered applies the compound's pipeline pseudos and the
+// :first/:last selection to one anchor's candidate set. Selection is
+// per-anchor in document order — jQuery-level, scoped to the position.
+func (e *engine) selectOrdered(cand map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
+	if comp.ordSel == 0 || relaxed {
+		return e.applyPseudos(cand, comp, relaxed)
+	}
+	nodes := make([]*treeNode, 0, len(cand))
+	for n := range cand {
+		nodes = append(nodes, n)
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodeLess(nodes[i], nodes[j]) })
+	if comp.ordSel == 2 {
+		for i, j := 0, len(nodes)-1; i < j; i, j = i+1, j-1 {
+			nodes[i], nodes[j] = nodes[j], nodes[i]
+		}
+	}
+	for _, n := range nodes {
+		if got := e.applyPseudos(map[*treeNode]bool{n: true}, comp, relaxed); len(got) > 0 {
+			return got
+		}
+	}
+	return nil
+}
+
+// refMatches returns the matching ref children of each host tip. Under
+// ∀-relaxation the DIRECTION classes still apply — which edge set you
+// asked about is structure; the kind and ids are the tested property.
+func (e *engine) refMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
+	out := map[*treeNode]bool{}
+	for h := range hosts {
+		cand := map[*treeNode]bool{}
+		for _, r := range e.refNodes(h) {
+			if relaxed {
+				if refDirMatch(r, comp) {
+					cand[r] = true
+				}
+			} else if e.positionalMatch(r, comp) {
+				cand[r] = true
+			}
+		}
+		for n := range e.selectOrdered(cand, comp, relaxed) {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+func refDirMatch(r *treeNode, comp *selCompound) bool {
+	return r.refDir == comp.refDir
+}
+
+// refHop crosses each ref to its far end(s) and takes the far ends'
+// next matching refs — one edge hop of a repeated ::in/::out element.
+func (e *engine) refHop(refs map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
+	fars := map[*treeNode]bool{}
+	for r := range refs {
+		for _, f := range r.refFar {
+			fars[f] = true
+		}
+	}
+	return e.refMatches(fars, comp, relaxed)
 }
 
 // collectMatches walks anchor's subtree within [min,max] levels (0 =
@@ -1302,8 +1721,28 @@ func compNeedsSymbols(comp *selCompound) bool {
 }
 
 func (e *engine) positionalMatch(n *treeNode, comp *selCompound) bool {
-	if !comp.anyType && n.class != comp.class {
-		return false
+	if comp.isRef {
+		if n.class != "ref" || n.refDir != comp.refDir {
+			return false
+		}
+		for _, c := range comp.refClasses {
+			if n.refKind != c {
+				return false
+			}
+		}
+	} else {
+		// Generated ref nodes are pseudo-elements: `*` (and every real
+		// tag) never matches one — only ::in/::out does.
+		if n.class == "ref" {
+			return false
+		}
+		if !comp.anyType && n.class != comp.class {
+			return false
+		}
+		if comp.langClass != "" &&
+			e.s.languageForFile(n.abs) != languageClassAliases[comp.langClass] {
+			return false
+		}
 	}
 	for _, a := range comp.attrs {
 		if !matchSelAttr(n, a) {
@@ -1333,15 +1772,15 @@ func (e *engine) applyPseudos(set map[*treeNode]bool, comp *selCompound, relaxed
 // runPipeline evaluates one compound's pseudo chain IN WRITTEN ORDER
 // over one positionally-matched subject:
 //
-//   - a MOVE (:parents/:references) opens an excursion: the tips walk
-//     the reference graph;
-//   - a parenthesized pseudo filters the CURRENT tips (before a move
-//     that's the subject, after it the moved-to nodes);
+//   - :parents opens an excursion: the tips become everything UPSTREAM
+//     (containment ancestors ∪ sources of incoming references,
+//     transitively), narrowed to the ROOTS of its inner selector;
+//   - a parenthesized pseudo filters the CURRENT tips (before the move
+//     that's the subject, after it the upstream set);
 //   - a BARE claim (:any/:all/:empty) closes the excursion — it decides
 //     by the tip set and collapses back to the subject. Bare :all
-//     compares against the DOMAIN: the same excursion with every move
-//     unfiltered, tracked alongside (∀ = the structure reaches nothing
-//     the written moves rejected).
+//     compares against the DOMAIN: the same excursion with the inner
+//     relaxed (∀ = nothing upstream fails the inner's tests).
 //
 // relaxed is the ∀-domain pass of an ENCLOSING parenthesized :all: the
 // subject's filters and claims are the property under test, so they are
@@ -1366,9 +1805,9 @@ func (e *engine) runPipeline(subject *treeNode, pseudos []selPseudo, relaxed boo
 				if domain == nil {
 					domain = map[*treeNode]bool{subject: true}
 				}
-				domain = e.moveEdges(domain, ps, true)
+				domain = e.parentsMove(domain, ps, true)
 			}
-			tips = e.moveEdges(tips, ps, relaxed && i == lastMove)
+			tips = e.parentsMove(tips, ps, relaxed && i == lastMove)
 		case ps.kind.isClaim() && ps.inner == nil:
 			if relaxed {
 				continue
@@ -1458,56 +1897,68 @@ func (e *engine) pseudoHolds(n *treeNode, ps *selPseudo) bool {
 // when one was written (bare = unfiltered). Repeated min..max hops;
 // every hop must match the inner (that is what "through" means — the
 // intermediates are named, hence constrained).
-func (e *engine) moveEdges(set map[*treeNode]bool, ps *selPseudo, relaxInner bool) map[*treeNode]bool {
-	var admit map[*treeNode]bool // nil = every node admitted
-	if ps.inner != nil {
-		admit = e.globalMatchSet(ps.inner, relaxInner)
+// parentsMove is the ONE inverse move. The upstream of the current tips
+// — containment ancestors ∪ sources of incoming references, computed as
+// a transitive fixpoint (the visited set bounds cycles) — is narrowed to
+// the ROOTS of the inner selector: nodes matching the inner's first
+// element whose chain-subject lies upstream. `*:parents:empty` is
+// therefore only ever the workspace root.
+func (e *engine) parentsMove(tips map[*treeNode]bool, ps *selPseudo, relaxInner bool) map[*treeNode]bool {
+	up := e.upstream(tips)
+	if ps.inner == nil {
+		return up
 	}
-	step := e.referrersOf
-	if ps.kind == pseudoRefs {
-		step = e.referencesOf
-	}
-	admits := func(n *treeNode) bool { return admit == nil || admit[n] }
 	out := map[*treeNode]bool{}
-	frontier := set
-	if ps.max < 0 {
-		// Unbounded {m,}: a fixpoint over the reference graph. The
-		// visited set is what bounds cycles (Walk → Walk): re-reaching a
-		// node never grows the frontier, so the loop terminates when the
-		// subgraph is stable. Each node lands at its SHORTEST hop.
-		visited := map[*treeNode]bool{}
-		for hop := 1; len(frontier) > 0; hop++ {
-			next := map[*treeNode]bool{}
-			for t := range frontier {
-				for _, r := range step(t) {
-					if visited[r] || !admits(r) {
-						continue
-					}
-					visited[r] = true
-					next[r] = true
-				}
-			}
-			if hop >= ps.min {
-				for n := range next {
-					out[n] = true
-				}
-			}
-			frontier = next
+	for _, cx := range ps.inner {
+		if len(cx.elems) == 0 {
+			continue
 		}
-		return out
+		min0, max0 := cx.rel.rng()
+		start := map[*treeNode]bool{e.project: true}
+		roots := e.evalRepeat(start, &cx.elems[0], min0, max0, relaxInner && len(cx.elems) == 1)
+		for r := range roots {
+			if len(cx.elems) == 1 {
+				if up[r] {
+					out[r] = true
+				}
+				continue
+			}
+			cm, cM := combRange(cx.elems[1].comb)
+			subs := e.evalElems(cx.elems[1:], map[*treeNode]bool{r: true}, cm, cM, relaxInner)
+			for s := range subs {
+				if up[s] {
+					out[r] = true
+					break
+				}
+			}
+		}
 	}
-	for hop := 1; hop <= ps.max && len(frontier) > 0; hop++ {
+	return out
+}
+
+// upstream is the transitive closure of "who is above / who points
+// here": the containment parent plus every source of an incoming
+// reference edge. Recursive nodes ARE their own upstream (Walk calls
+// Walk); the visited set keeps cycles finite.
+func (e *engine) upstream(tips map[*treeNode]bool) map[*treeNode]bool {
+	out := map[*treeNode]bool{}
+	frontier := tips
+	for len(frontier) > 0 {
 		next := map[*treeNode]bool{}
-		for t := range frontier {
-			for _, r := range step(t) {
-				if admits(r) {
-					next[r] = true
-				}
+		add := func(n *treeNode) {
+			if n != nil && !out[n] {
+				out[n] = true
+				next[n] = true
 			}
 		}
-		if hop >= ps.min {
-			for n := range next {
-				out[n] = true
+		for n := range frontier {
+			add(n.parent)
+			for _, r := range e.refNodes(n) {
+				if r.refDir == "in" {
+					for _, src := range r.refFar {
+						add(src)
+					}
+				}
 			}
 		}
 		frontier = next
@@ -1515,127 +1966,167 @@ func (e *engine) moveEdges(set map[*treeNode]bool, ps *selPseudo, relaxInner boo
 	return out
 }
 
-// globalMatchSet memoizes "every node matching this selector list" per
-// inner AST for the life of one query — :parents tests each referrer
-// against it, potentially once per hop.
+// --------------------------------------------------------- ref nodes
 //
-// %p on a slice is its backing-array address: stable across calls
-// because the parsed AST is built once and only ever copied by header.
-func (e *engine) globalMatchSet(list selectorList, relaxed bool) map[*treeNode]bool {
-	key := fmt.Sprintf("%p:%t", list, relaxed)
-	if e.matchSetCache == nil {
-		e.matchSetCache = map[string]map[*treeNode]bool{}
-	}
-	if v, ok := e.matchSetCache[key]; ok {
-		return v
-	}
-	v := e.evalList(list, e.project, relaxed)
-	e.matchSetCache[key] = v
-	return v
+// A reference is a NODE: tag ref, direction + kind as its class set, id
+// = the far end, span = the site. Each edge appears twice — ::out
+// under the innermost symbol enclosing the site (the source), ::in
+// under the target — and the far end is the node's only child. Edges
+// ride the lexical index, so they are NAME-keyed (same-named symbols
+// share edges) and carry refConf "lexical"; a child-LSP precision pass
+// can upgrade individual edges to "lsp" later without reshaping.
+
+// refSite is one classified, non-declaration occurrence of a name.
+type refSite struct {
+	name      string
+	line, col int
+	kind      string // "call" | "type" | "import" | ""
+	encl      string // dotted sym path of the innermost enclosing symbol
 }
 
-// referrersOf returns the nodes holding a reference to t — each
-// reference SITE of t's name resolved to its enclosing symbol (or its
-// file, for a site inside no symbol), minus t's own declaration.
-// Memoized per NAME: the lexical index is name-keyed, so two symbols
-// sharing a name share referrers (a known index limitation, unchanged
-// from :references).
-func (e *engine) referrersOf(t *treeNode) []*treeNode {
-	if t.sym == "" {
-		return nil // project/dir/file nodes have no indexed name
+// refNodes materializes (once) and returns n's generated ref children.
+func (e *engine) refNodes(n *treeNode) []*treeNode {
+	switch n.class {
+	case "project", "dir", "ref":
+		return nil
 	}
-	name := t.leaf
-	if e.refByName == nil {
-		e.refByName = map[string][]*treeNode{}
+	if !n.refsLoaded {
+		n.refsLoaded = true
+		e.buildRefs(n)
 	}
-	if v, ok := e.refByName[name]; ok {
-		return v
-	}
-	if e.symCache == nil {
-		e.symCache = map[string][]symbols.Symbol{}
-	}
-	var out []*treeNode
-	seen := map[*treeNode]bool{}
-	if idx := e.s.getIndex(); idx != nil {
-		for _, site := range idx.LookupExisting(name) {
-			// A declaration is not a reference: the site at the symbol's
-			// own NAME position is excluded, so a non-recursive Save has
-			// no referrer named Save while a recursive Walk keeps its
-			// real Walk(n-1) site. (LSP's includeDeclaration line.)
-			if e.isDeclSite(site.File, site.Line, site.Col, name, e.symCache) {
-				continue
-			}
-			rel := relPath(site.File, e.s.getRoot())
-			n := e.nodeByAddr(rel, e.s.enclosingSymPath(site.File, site.Line, e.symCache))
-			if n != nil && !seen[n] {
-				seen[n] = true
-				out = append(out, n)
-			}
+	return n.refs
+}
+
+func (e *engine) buildRefs(n *treeNode) {
+	// Outgoing: sites in n's own file whose innermost enclosing symbol
+	// is n itself — nesting attribution is the TREE SHAPE, so a closure's
+	// calls belong to the closure, and `>` vs space picks inner vs outer.
+	for _, site := range e.fileSites(n.file) {
+		if site.encl != n.sym {
+			continue
 		}
+		far := e.declsOf(site.name)
+		if len(far) == 0 {
+			continue
+		}
+		n.refs = append(n.refs, &treeNode{
+			class: "ref", refDir: "out", refKind: site.kind, refConf: "lexical",
+			leaf: site.name, full: site.name,
+			file: n.file, abs: n.abs, at: [2]int{site.line, site.line},
+			parent: n, depth: n.depth + 1, refFar: far,
+			fileOrd: n.fileOrd, symOrd: n.symOrd,
+		})
 	}
-	e.refByName[name] = out
-	return out
-}
-
-// referencesOf is the OUTGOING edge: the decl nodes whose name appears
-// as a reference site inside t's span. Built whole on first use — an
-// outgoing-edge query is inherently whole-graph (any node might mention
-// any name), so there is no per-name laziness to exploit.
-//
-// Same index, same limitations as referrersOf: edges are name-keyed and
-// declarations are not references. A node DOES reference its own
-// arguments and nested symbols when its body mentions them — filter
-// with the move's inner (:references(func)) when that is noise.
-func (e *engine) referencesOf(t *treeNode) []*treeNode {
-	if e.refsOut == nil {
-		e.buildRefsOut()
+	// Incoming: every site of n's NAME elsewhere; the far end is the
+	// site's innermost enclosing symbol (the source).
+	if n.sym == "" {
+		return // files/project have no indexed name to be targeted by
 	}
-	return e.refsOut[t]
-}
-
-func (e *engine) buildRefsOut() {
-	e.refsOut = map[*treeNode][]*treeNode{}
 	idx := e.s.getIndex()
 	if idx == nil {
 		return
 	}
+	for _, site := range idx.LookupExisting(n.leaf) {
+		rel := relPath(site.File, e.s.getRoot())
+		sites := e.fileSites(rel)
+		var hit *refSite
+		for i := range sites {
+			if sites[i].name == n.leaf && sites[i].line == site.Line && sites[i].col == site.Col {
+				hit = &sites[i]
+				break
+			}
+		}
+		if hit == nil {
+			continue // the declaration itself, or an unindexed file
+		}
+		src := e.nodeByAddr(rel, hit.encl)
+		if src == nil {
+			continue
+		}
+		fnode := e.fileByRel[rel]
+		n.refs = append(n.refs, &treeNode{
+			class: "ref", refDir: "in", refKind: hit.kind, refConf: "lexical",
+			leaf: n.leaf, full: n.leaf,
+			file: rel, abs: fnode.abs, at: [2]int{hit.line, hit.line},
+			parent: n, depth: n.depth + 1, refFar: []*treeNode{src},
+			fileOrd: n.fileOrd, symOrd: n.symOrd,
+		})
+	}
+}
+
+// fileSites returns every classified non-declaration site in one file,
+// memoized. Declarations are excluded here once, so neither direction
+// ever counts a symbol's own name as an edge (LSP's includeDeclaration
+// line: recursive Walk keeps its Walk(n-1) site, plain Save gets none).
+func (e *engine) fileSites(rel string) []refSite {
+	if e.siteCache == nil {
+		e.siteCache = map[string][]refSite{}
+	}
+	if v, ok := e.siteCache[rel]; ok {
+		return v
+	}
+	out := []refSite{}
+	defer func() { e.siteCache[rel] = out }()
+	idx := e.s.getIndex()
+	fnode := e.fileByRel[rel]
+	if idx == nil || fnode == nil {
+		return out
+	}
 	if e.symCache == nil {
 		e.symCache = map[string][]symbols.Symbol{}
 	}
-	// Every declared node, by name — the possible TARGETS of an edge.
-	declsByName := map[string][]*treeNode{}
-	var walk func(n *treeNode)
-	walk = func(n *treeNode) {
-		if n.sym != "" {
-			declsByName[n.leaf] = append(declsByName[n.leaf], n)
-		}
-		for _, c := range e.kids(n) {
-			walk(c)
-		}
-	}
-	walk(e.project)
-	seen := map[*treeNode]map[*treeNode]bool{}
-	for name, decls := range declsByName {
+	for _, name := range idx.Names() {
 		for _, site := range idx.LookupExisting(name) {
+			if relPath(site.File, e.s.getRoot()) != rel {
+				continue
+			}
 			if e.isDeclSite(site.File, site.Line, site.Col, name, e.symCache) {
 				continue
 			}
-			rel := relPath(site.File, e.s.getRoot())
-			src := e.nodeByAddr(rel, e.s.enclosingSymPath(site.File, site.Line, e.symCache))
-			if src == nil {
-				continue
-			}
-			for _, d := range decls {
-				if seen[src] == nil {
-					seen[src] = map[*treeNode]bool{}
-				}
-				if !seen[src][d] {
-					seen[src][d] = true
-					e.refsOut[src] = append(e.refsOut[src], d)
-				}
-			}
+			out = append(out, refSite{
+				name: name, line: site.Line, col: site.Col,
+				encl: e.s.enclosingSymPath(site.File, site.Line, e.symCache),
+			})
 		}
 	}
+	// Classify all of the file's sites in ONE parse.
+	if content, err := os.ReadFile(fnode.abs); err == nil {
+		positions := make([][2]int, len(out))
+		for i, s := range out {
+			positions[i] = [2]int{s.line, s.col}
+		}
+		kinds := symbols.SiteKinds(e.s.languageForFile(fnode.abs), content, positions)
+		for i := range out {
+			out[i].kind = kinds[i]
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].line != out[j].line {
+			return out[i].line < out[j].line
+		}
+		return out[i].col < out[j].col
+	})
+	return out
+}
+
+// declsOf returns every declared node answering to a name — the
+// possible far ends of an outgoing edge. The full-tree walk parses
+// every file once; graph queries are inherently whole-workspace.
+func (e *engine) declsOf(name string) []*treeNode {
+	if e.declsByName == nil {
+		e.declsByName = map[string][]*treeNode{}
+		var walk func(n *treeNode)
+		walk = func(n *treeNode) {
+			if n.sym != "" {
+				e.declsByName[n.leaf] = append(e.declsByName[n.leaf], n)
+			}
+			for _, c := range e.kids(n) {
+				walk(c)
+			}
+		}
+		walk(e.project)
+	}
+	return e.declsByName[name]
 }
 
 // matchSelAttr tests a [name …] filter against every id the node

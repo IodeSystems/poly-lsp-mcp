@@ -24,7 +24,7 @@ import (
 // limit <= 0 means "no limit": a human at a terminal wants the whole
 // answer, where the model's tight default window exists to push it
 // toward a narrower selector.
-func (s *Server) QueryText(selector string, limit, offset int, w io.Writer) error {
+func (s *Server) QueryText(selector string, limit, offset int, budget string, w io.Writer) error {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		return errors.New("selector is required (e.g. \":root > *\" for the top-level tour)")
@@ -56,6 +56,9 @@ func (s *Server) QueryText(selector string, limit, offset int, w io.Writer) erro
 	if err != nil {
 		return err
 	}
+	if v, unit, ok := parseBudget(budget); ok {
+		e.setBudget(v, unit)
+	}
 	rows := e.evaluate(list)
 
 	total := len(rows)
@@ -79,7 +82,7 @@ func (s *Server) QueryText(selector string, limit, offset int, w io.Writer) erro
 	if e.workExceeded {
 		trace = e.costTrace(list)
 	}
-	return renderQueryTree(w, paged, total, offset, end, e.workExceeded, trace)
+	return renderQueryTree(w, paged, total, offset, end, e.workExceeded, e.timedOut, trace)
 }
 
 // maxFarEnds caps how many far ends one ref row spells out before it
@@ -106,15 +109,15 @@ func groupKey(n *treeNode) string {
 	return n.file
 }
 
-func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, workExceeded bool, trace []string) error {
+func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, workExceeded, timedOut bool, trace []string) error {
 	if total == 0 {
 		// A bare "no matches" would claim the selector's answer IS none.
 		// When the budget killed the walk, that is not what happened and
 		// not what we know — say which one this is.
 		if workExceeded {
-			fmt.Fprintln(w, "no matches — but evaluation stopped at the work budget FIRST,")
+			fmt.Fprintf(w, "no matches — but evaluation stopped at %s FIRST,\n", budgetLabel(timedOut))
 			fmt.Fprintln(w, "so this is NOT an answer: the walk never finished.")
-			return writeBudgetBlow(w, trace)
+			return writeBudgetBlow(w, timedOut, trace)
 		}
 		_, err := fmt.Fprintln(w, "no matches")
 		return err
@@ -165,10 +168,19 @@ func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, wor
 	if workExceeded {
 		// Same contract as node_query: a budget-trimmed result says so
 		// and names the fix. Never trim quietly.
-		fmt.Fprintln(w, "warning: evaluation stopped at the work budget — results are INCOMPLETE.")
-		return writeBudgetBlow(w, trace)
+		fmt.Fprintf(w, "warning: evaluation stopped at %s — results are INCOMPLETE.\n", budgetLabel(timedOut))
+		return writeBudgetBlow(w, timedOut, trace)
 	}
 	return nil
+}
+
+// budgetLabel names which budget tripped — the time limit's result is
+// nondeterministic, the work budget's is not, and the reader must know.
+func budgetLabel(timedOut bool) string {
+	if timedOut {
+		return "the TIME limit (nondeterministic — vary run to run; use Nops for a reproducible cut)"
+	}
+	return "the work budget"
 }
 
 // renderExplain prints the :explain cost tree — each element's a-priori
@@ -198,16 +210,20 @@ func renderExplain(w io.Writer, rows []explainRow, workExceeded bool) error {
 // writeBudgetBlow renders the per-element cost trace (pointing at the
 // element that ate the budget) then the narrow-it advice. The trace is
 // what turns the generic warning into something legible.
-func writeBudgetBlow(w io.Writer, trace []string) error {
+func writeBudgetBlow(w io.Writer, timedOut bool, trace []string) error {
 	if len(trace) > 0 {
 		fmt.Fprintln(w, "cost by element (units spent):")
 		for _, l := range trace {
 			fmt.Fprintln(w, l)
 		}
 	}
-	_, err := fmt.Fprintln(w, "  Narrow the traversal: a kind class (::in.call), a filtered inner\n"+
-		"  (:parents(func)), bounded hops ({1,3}), or a tighter scope.")
-	return err
+	fmt.Fprintln(w, "  Narrow the traversal: a kind class (::in.call), a filtered inner\n"+
+		"  (:parents(func)), bounded hops ({1,3}), or a tighter scope — or raise --budget.")
+	if timedOut {
+		_, err := fmt.Fprintln(w, "  (Stopped on the time limit; pass Nops for a reproducible cut.)")
+		return err
+	}
+	return nil
 }
 
 // isContainerOf reports whether n is the node its own group is named

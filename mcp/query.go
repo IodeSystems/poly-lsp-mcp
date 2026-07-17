@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -275,6 +276,16 @@ type engine struct {
 	workLeft     int
 	workExceeded bool
 
+	// deadline is a wall-clock budget (ms mode): spend() trips when the
+	// clock passes it. Zero = no time limit (ops mode only). timedOut
+	// records that the TIME limit tripped, not the work budget — the
+	// distinction matters because a time-truncated result is NON-
+	// deterministic (it stops wherever the clock lands), where the ops
+	// budget truncates deterministically.
+	deadline  time.Time
+	timedOut  bool
+	spendTick int // spend counter, so the clock is read every Nth spend not every one
+
 	// Cost trace (always-on, ~free): costStack is the element chain under
 	// evaluation. spend() increments the top FRAME's counter (a slice
 	// index, no map), and evalElems flushes each frame to elemCost on pop
@@ -302,6 +313,22 @@ func (e *engine) spend(n int) bool {
 	}
 	if e.workExceeded {
 		return false
+	}
+	// Wall-clock budget (ms mode): read the clock every 256th spend — a
+	// time check per work unit would dominate a fast query, and ms
+	// granularity does not need finer sampling.
+	if !e.deadline.IsZero() {
+		e.spendTick++
+		// Check on the first spend (an already-expired budget trips at
+		// once) then every 256th — finer sampling would tax a fast query.
+		if (e.spendTick == 1 || e.spendTick&0xff == 0) && time.Now().After(e.deadline) {
+			e.workExceeded = true
+			e.timedOut = true
+			if len(e.costStack) > 0 {
+				e.blownElem = e.costStack[len(e.costStack)-1].el
+			}
+			return false
+		}
 	}
 	e.workLeft -= n
 	if e.workLeft < 0 {
@@ -2309,6 +2336,51 @@ func (e *engine) ancestorSubseq(n *treeNode, comps []*selCompound) bool {
 		}
 	}
 	return i < 0
+}
+
+const (
+	maxBudgetOps = 5_000_000 // deterministic work-unit cap
+	maxBudgetMs  = 30_000    // wall-clock cap (30s) — a runaway can't stall the server
+)
+
+// parseBudget reads a budget value with an optional `ms`/`ops` suffix. A
+// bare number is MILLISECONDS (wall clock — the intuitive default); `ops`
+// is deterministic work units. ok=false on empty or non-numeric input.
+func parseBudget(s string) (value int, unit string, ok bool) {
+	s = strings.TrimSpace(strings.Trim(strings.TrimSpace(s), `"`))
+	if s == "" || s == "null" {
+		return 0, "", false
+	}
+	unit = "ms"
+	switch {
+	case strings.HasSuffix(s, "ops"):
+		unit, s = "ops", strings.TrimSuffix(s, "ops")
+	case strings.HasSuffix(s, "ms"):
+		unit, s = "ms", strings.TrimSuffix(s, "ms")
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n <= 0 {
+		return 0, "", false
+	}
+	return n, unit, true
+}
+
+// setBudget applies a parsed budget: `ops` sets the deterministic work
+// budget; `ms` sets a wall-clock deadline and leaves work effectively
+// unbounded (capped) so the clock is the limit. Call after buildTree.
+func (e *engine) setBudget(value int, unit string) {
+	if unit == "ops" {
+		if value > maxBudgetOps {
+			value = maxBudgetOps
+		}
+		e.workLeft = value
+		return
+	}
+	if value > maxBudgetMs {
+		value = maxBudgetMs
+	}
+	e.deadline = time.Now().Add(time.Duration(value) * time.Millisecond)
+	e.workLeft = maxBudgetOps // ms mode: the clock trips first; this only backstops a runaway
 }
 
 // splitExplain strips a leading ":explain" query MODE. It is a mode, not

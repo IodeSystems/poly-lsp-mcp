@@ -74,14 +74,8 @@ var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."},` +
-	`"budget":{"type":"integer","minimum":1,"description":"max work units, default 200000, max 5M"}},` +
+	`"budget":{"type":["integer","string"],"description":"limit Nms (bare=ms) or Nops; def 200000ops"}},` +
 	`"required":["selector"]}`)
-
-// maxNodeQueryBudget caps a caller-supplied budget: the MCP server is
-// long-lived, so an unbounded budget would let one query stall every
-// other request. Narrowing is the intended fix; raising is the escape
-// hatch for a genuinely large query.
-const maxNodeQueryBudget = 5_000_000
 
 const modernNodeReadDescription = `Read a node whole. node = an address from node_query's matches[].node ("<file>#<sym>" or "<file>"), or a selector matching exactly one node (2+ errors and lists candidates).
 An addressed symbol is NEVER truncated: you get the complete declaration, byte-for-byte the span node_edit's newText replaces.
@@ -125,11 +119,11 @@ const defaultQueryLimit = 20
 
 func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
-		Selector string `json:"selector"`
-		Grep     string `json:"grep"`
-		Limit    *int   `json:"limit"`
-		Offset   *int   `json:"offset"`
-		Budget   *int   `json:"budget"`
+		Selector string          `json:"selector"`
+		Grep     string          `json:"grep"`
+		Limit    *int            `json:"limit"`
+		Offset   *int            `json:"offset"`
+		Budget   json.RawMessage `json:"budget"` // number (=ms) or "Nms"/"Nops"
 	}
 	if len(args) > 0 && string(args) != "null" {
 		if err := json.Unmarshal(args, &p); err != nil {
@@ -172,12 +166,8 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	if err != nil {
 		return nil, true, err
 	}
-	if p.Budget != nil && *p.Budget > 0 {
-		b := *p.Budget
-		if b > maxNodeQueryBudget {
-			b = maxNodeQueryBudget
-		}
-		e.workLeft = b // per-query override of the default work budget
+	if v, unit, ok := parseBudget(string(p.Budget)); ok {
+		e.setBudget(v, unit) // Nms wall-clock (bare=ms) or Nops deterministic
 	}
 
 	rows := e.evaluate(list)
@@ -278,7 +268,11 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	// contract: flag it and name the fix, never trim quietly.
 	if e.workExceeded {
 		payload["truncated"] = true
-		payload["note"] = "evaluation stopped at the work budget — results may be INCOMPLETE. Two levers: (1) NARROW — cost[] names the element that ate the budget; add a kind class (::in.call), a filter (:parents(func)), or bounded hops ({1,3}) THERE. (2) RAISE — retry with a higher `budget` arg (max 5000000) if the query is genuinely large. Narrowing is usually right."
+		lim := "the work budget"
+		if e.timedOut {
+			lim = "the TIME limit (results are NON-deterministic — vary run to run; pass an `ops` budget for a reproducible cut)"
+		}
+		payload["note"] = "evaluation stopped at " + lim + " — results may be INCOMPLETE. Two levers: (1) NARROW — cost[] names the element that ate the budget; add a kind class (::in.call), a filter (:parents(func)), or bounded hops ({1,3}) THERE. (2) RAISE — retry with a higher `budget` (Nms or Nops) if the query is genuinely large. Narrowing is usually right."
 		// The per-element cost trace points at what ate the budget, so
 		// the model narrows the RIGHT element instead of guessing.
 		payload["cost"] = e.costTrace(list)

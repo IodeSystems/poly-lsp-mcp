@@ -60,6 +60,7 @@ func runMCP() {
 	rootPath := flag.String("root", ".", "workspace root directory the symbol index covers")
 	legacyTools := flag.Bool("legacy-tools", false, "expose the legacy 9-tool MCP surface instead of the 3-tool surface")
 	readOnly := flag.Bool("read-only", false, "hide every mutating tool (node_edit/node_delete/node_refactor/node_rename_file); navigation + reading only")
+	validate := flag.Bool("validate", false, "revert-on-new-diagnostics: an edit that introduces a new error is rolled back instead of landing (needs a child LSP)")
 	flag.Parse()
 
 	cfg, reg := loadConfigOrDie(*configPath)
@@ -85,6 +86,10 @@ func runMCP() {
 	srv.SetReadOnly(*readOnly)
 	if *readOnly {
 		log.Printf("mcp: READ-ONLY — mutating tools are not registered")
+	}
+	srv.SetValidateEdits(*validate)
+	if *validate {
+		log.Printf("mcp: VALIDATE — edits that introduce a new error are reverted")
 	}
 	srv.SetCachePath(filepath.Join(root, ".poly-lsp-mcp", "cache.gob"))
 	// Spawn child LSPs so node_edit / node_delete / node_refactor can

@@ -88,11 +88,12 @@ var modernNodeReadSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"required":["node"]}`)
 
 const modernNodeEditDescription = `Edit one node of the projection. node = an address from node_query's matches[].node, or a selector matching exactly one node (2+ errors and lists candidates).
+RENAMING a symbol (type/func/method/var/field)? Use the rename op — ONE call renames the declaration AND every usage across the WHOLE workspace, atomically. Do NOT rename by hand-editing files one at a time with oldText/newText: that misses usages and leaves the build broken between edits.
 Exactly ONE op:
+rename:"NewName" — workspace-wide semantic rename (the right tool for ANY rename); lexical guesses reported under candidates, never applied.
 oldText+newText — replace a snippet inside the node. oldText must occur exactly once in the node; the address scopes it, so it need only be unique WITHIN that node — keep it short. Pass the node's whole text to rewrite it entirely.
 newText alone — CREATE the node; only where the address resolves to nothing yet (a new path makes a file node).
 delete:true — excise the node.
-rename — workspace-wide semantic rename; lexical guesses reported under candidates, never applied.
 params — [{name,type}] rebuilds the parameter list (go/typescript/python).
 return — rebuilds the return type.
 includeComments / resolution:{mode,target} — rename only.`
@@ -862,7 +863,7 @@ func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, err
 		// applyCandidates is always false here: the old two-phase
 		// preview/apply workflow is gone. Cross-namespace lexical
 		// guesses still surface under `candidates`, never auto-applied.
-		return s.refactorRename(rn.name, *p.Rename, p.IncludeComments, false, mode, target, p.diagnosticOptions)
+		return s.refactorRename(rn.name, *p.Rename, p.IncludeComments, false, mode, target, p.diagnosticOptions, nil)
 	default: // params / return
 		ro := refactorOps{}
 		if p.Params != nil {

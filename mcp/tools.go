@@ -1050,38 +1050,25 @@ func (s *Server) applyRangeRewrite(node string, a rangeArgs, newText string, opt
 	out = append(out, newText...)
 	out = append(out, content[endOff:]...)
 
-	tmp := abs + ".poly-lsp-mcp.tmp"
-	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
-		return nil, true, fmt.Errorf("write temp: %w", err)
+	oc, err := s.applyBytes(abs, content, out, info.Mode().Perm(), opts)
+	if err != nil {
+		return nil, true, err
 	}
-	if err := os.Rename(tmp, abs); err != nil {
-		_ = os.Remove(tmp)
-		return nil, true, fmt.Errorf("rename: %w", err)
-	}
-
-	s.refreshFileInIndex(abs, out)
-
-	uri := pathToURI(abs)
-	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
-
 	// The lines are part of the target here: a range rewrite did NOT touch the
 	// whole file, and a note that said "updated app.go" would overstate it.
+	label := fmt.Sprintf("%s:%d-%d", a.File, a.StartLine, a.EndLine)
+	if oc.Rejected {
+		return jsonContent(oc.rejection(label)), true, nil
+	}
 	payload := map[string]any{
-		"note": editNote("updated",
-			fmt.Sprintf("%s:%d-%d", a.File, a.StartLine, a.EndLine),
-			endOff-startOff, len(newText)),
-		"node":                 node,
-		"replacedFrom":         map[string]int{"line": a.StartLine, "col": a.StartCol},
-		"replacedTo":           map[string]int{"line": a.EndLine, "col": a.EndCol},
-		"bytesRemoved":         endOff - startOff,
-		"bytesAdded":           len(newText),
-		"diagnosticsAvailable": diags.Available,
-		"diagnosticsTimedOut":  diags.TimedOut,
-		"diagnostics":          diags.Items,
+		"note":         editNote("updated", label, endOff-startOff, len(newText)),
+		"node":         node,
+		"replacedFrom": map[string]int{"line": a.StartLine, "col": a.StartCol},
+		"replacedTo":   map[string]int{"line": a.EndLine, "col": a.EndCol},
+		"bytesRemoved": endOff - startOff,
+		"bytesAdded":   len(newText),
 	}
-	if diags.DroppedDiagnostics > 0 {
-		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
-	}
+	oc.attach(payload)
 	return jsonContent(payload), false, nil
 }
 
@@ -1097,11 +1084,11 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 	}
 	created := false
 	mode := os.FileMode(0o644)
-	bytesRemoved := 0
+	var orig []byte // pre-edit bytes for revert; nil on create
 	if info, err := os.Stat(abs); err == nil {
 		mode = info.Mode().Perm()
 		if existing, err := os.ReadFile(abs); err == nil {
-			bytesRemoved = len(existing)
+			orig = existing
 		}
 	} else if os.IsNotExist(err) {
 		created = true
@@ -1113,35 +1100,25 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 	}
 
 	out := []byte(newText)
-	tmp := abs + ".poly-lsp-mcp.tmp"
-	if err := os.WriteFile(tmp, out, mode); err != nil {
-		return nil, true, fmt.Errorf("write temp: %w", err)
+	oc, err := s.applyBytes(abs, orig, out, mode, opts)
+	if err != nil {
+		return nil, true, err
 	}
-	if err := os.Rename(tmp, abs); err != nil {
-		_ = os.Remove(tmp)
-		return nil, true, fmt.Errorf("rename: %w", err)
+	if oc.Rejected {
+		return jsonContent(oc.rejection(file)), true, nil
 	}
-	s.refreshFileInIndex(abs, out)
-
-	uri := pathToURI(abs)
-	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
 	verb := "updated"
 	if created {
 		verb = "created"
 	}
 	payload := map[string]any{
-		"note":                 editNote(verb, file, bytesRemoved, len(out)),
-		"node":                 file,
-		"created":              created,
-		"bytesRemoved":         bytesRemoved,
-		"bytesAdded":           len(out),
-		"diagnosticsAvailable": diags.Available,
-		"diagnosticsTimedOut":  diags.TimedOut,
-		"diagnostics":          diags.Items,
+		"note":         editNote(verb, file, len(orig), len(out)),
+		"node":         file,
+		"created":      created,
+		"bytesRemoved": len(orig),
+		"bytesAdded":   len(out),
 	}
-	if diags.DroppedDiagnostics > 0 {
-		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
-	}
+	oc.attach(payload)
 	return jsonContent(payload), false, nil
 }
 
@@ -1168,29 +1145,19 @@ func (s *Server) applyDiffRewrite(file, diff string, opts diagnosticOptions) ([]
 		return nil, true, fmt.Errorf("apply diff: %w", err)
 	}
 
-	tmp := abs + ".poly-lsp-mcp.tmp"
-	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
-		return nil, true, fmt.Errorf("write temp: %w", err)
+	oc, err := s.applyBytes(abs, content, out, info.Mode().Perm(), opts)
+	if err != nil {
+		return nil, true, err
 	}
-	if err := os.Rename(tmp, abs); err != nil {
-		_ = os.Remove(tmp)
-		return nil, true, fmt.Errorf("rename: %w", err)
+	if oc.Rejected {
+		return jsonContent(oc.rejection(file)), true, nil
 	}
-	s.refreshFileInIndex(abs, out)
-
-	uri := pathToURI(abs)
-	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
 	payload := map[string]any{
-		"file":                 file,
-		"bytesRemoved":         len(content),
-		"bytesAdded":           len(out),
-		"diagnosticsAvailable": diags.Available,
-		"diagnosticsTimedOut":  diags.TimedOut,
-		"diagnostics":          diags.Items,
+		"file":         file,
+		"bytesRemoved": len(content),
+		"bytesAdded":   len(out),
 	}
-	if diags.DroppedDiagnostics > 0 {
-		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
-	}
+	oc.attach(payload)
 	return jsonContent(payload), false, nil
 }
 
@@ -1320,7 +1287,7 @@ func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error
 	}
 	signatureOps := ops.Params != nil || ops.Return != ""
 	if !signatureOps {
-		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.Resolution.Mode, p.Resolution.Target, p.diagnosticOptions)
+		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.Resolution.Mode, p.Resolution.Target, p.diagnosticOptions, nil)
 	}
 	return s.refactorSignature(p.rangeArgs, ops, p.IncludeComments, p.diagnosticOptions)
 }
@@ -1379,6 +1346,10 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	if err != nil {
 		return nil, true, fmt.Errorf("stat %s: %w", a.File, err)
 	}
+	// One validation txn spans the whole refactor — the declaration file, the
+	// nested rename's files, and every caller — so a new error reverts them all.
+	txn := s.beginValidationTxn(dopts)
+	txn.record(pathToURI(abs), content)
 	tmp := abs + ".poly-lsp-mcp.tmp"
 	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
 		return nil, true, fmt.Errorf("write temp: %w", err)
@@ -1399,7 +1370,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 	if ops.Rename != "" && ops.Rename != oldName {
 		nameRangeArgs := nameRangeAfterSignature(a, postSig, out)
-		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, "", "", diagnosticOptions{})
+		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, "", "", diagnosticOptions{}, txn)
 		if renameErr != nil {
 			return renameContent, renameIsErr, renameErr
 		}
@@ -1435,7 +1406,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	uris := []string{pathToURI(abs)}
 	contentsByURI := map[string][]byte{uris[0]: out}
 	if ops.Params != nil {
-		callResults, callContents := s.rewriteCallSites(lang, currentName, ops.Params)
+		callResults, callContents := s.rewriteCallSites(lang, currentName, ops.Params, txn)
 		for _, cr := range callResults {
 			if cr.File == results[0].File {
 				results[0].Edits += cr.Edits
@@ -1451,6 +1422,12 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 
 	diags := s.collectDiagnostics(uris, contentsByURI, dopts)
 
+	oc := txn.verify(diags)
+	if oc.Rejected {
+		rej := oc.rejection(oldName + " signature")
+		rej["kind"], rej["oldName"], rej["newName"], rej["results"] = "signature", oldName, ops.Rename, results
+		return jsonContent(rej), true, nil
+	}
 	payload := map[string]any{
 		"kind":                 "signature",
 		"oldName":              oldName,
@@ -1464,6 +1441,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	if diags.DroppedDiagnostics > 0 {
 		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
 	}
+	oc.annotate(payload)
 	return jsonContent(payload), false, nil
 }
 
@@ -1488,7 +1466,7 @@ func signatureSupportedLanguage(lang string) bool {
 //
 // Per-site outcomes return as applyResult entries (one per touched
 // file); contents-by-URI for the diagnostic round-trip.
-func (s *Server) rewriteCallSites(language, funcName string, params []refactorParam) ([]applyResult, map[string][]byte) {
+func (s *Server) rewriteCallSites(language, funcName string, params []refactorParam, txn *validationTxn) ([]applyResult, map[string][]byte) {
 	idx := s.getIndex()
 	if idx == nil {
 		return nil, nil
@@ -1556,6 +1534,7 @@ func (s *Server) rewriteCallSites(language, funcName string, params []refactorPa
 		if err != nil {
 			continue
 		}
+		txn.record(pathToURI(file), content)
 		tmp := file + ".poly-lsp-mcp.tmp"
 		if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
 			continue
@@ -1620,7 +1599,14 @@ func byteOffsetToLineColPos(content []byte, offset int) (int, int) {
 	return line, col
 }
 
-func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, applyCandidates bool, mode, target string, opts diagnosticOptions) ([]Content, bool, error) {
+// txn threads a shared validation transaction from a caller (refactorSignature
+// runs a nested rename inside its own txn). nil = standalone: this call owns a
+// fresh txn and verifies/reverts at the end.
+func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, applyCandidates bool, mode, target string, opts diagnosticOptions, txn *validationTxn) ([]Content, bool, error) {
+	ownTxn := txn == nil
+	if ownTxn {
+		txn = s.beginValidationTxn(opts)
+	}
 	idx := s.getIndex()
 	if idx == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
@@ -1683,6 +1669,11 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	for _, abs := range order {
 		edits := byFile[abs]
 		rel := edits[0].RelFile
+		if txn.active {
+			if orig, rerr := os.ReadFile(abs); rerr == nil {
+				txn.record(pathToURI(abs), orig)
+			}
+		}
 		n, err := applyFileEdits(abs, edits)
 		if err != nil {
 			results = append(results, applyResult{File: rel, Skipped: err.Error()})
@@ -1703,6 +1694,17 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	sort.Strings(uris)
 	diags := s.collectDiagnostics(uris, newContents, opts)
 
+	// Only the OWNER of the txn verifies — a nested rename (inside a signature
+	// refactor) just records into the shared txn; the outer op reverts.
+	var oc editOutcome
+	if ownTxn {
+		if oc = txn.verify(diags); oc.Rejected {
+			rej := oc.rejection(name + " → " + newName)
+			rej["kind"], rej["oldName"], rej["newName"], rej["results"] = "rename", name, newName, results
+			return jsonContent(rej), true, nil
+		}
+	}
+
 	payload := map[string]any{
 		"kind":                 "rename",
 		"oldName":              name,
@@ -1716,6 +1718,7 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	if diags.DroppedDiagnostics > 0 {
 		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
 	}
+	oc.annotate(payload)
 	// Guessed (lexical, cross-namespace) sites are RECOMMENDED, not actioned —
 	// surface them so the caller can review and opt in with applyCandidates:true.
 	if len(candidates) > 0 {

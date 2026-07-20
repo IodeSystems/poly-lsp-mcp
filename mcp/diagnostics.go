@@ -103,6 +103,12 @@ type diagnosticOptions struct {
 	ReferenceLimit  int `json:"referenceLimit"`
 	ContextLines    int `json:"contextLines"`
 
+	// Validate makes an edit that introduces a NEW error REVERT instead of
+	// landing (revert-on-new-diagnostics). Set server-wide by --validate, or
+	// per-call. No-op without a child LSP — reported (validated:false), never
+	// a silent pass. See validate.go.
+	Validate bool `json:"validate,omitempty"`
+
 	// SiblingDiagnostics controls whether the response includes
 	// diagnostics for files OTHER than the one(s) the tool edited.
 	// gopls (and most LSPs) publish at the package level — a single

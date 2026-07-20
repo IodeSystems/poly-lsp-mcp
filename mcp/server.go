@@ -124,6 +124,9 @@ type Server struct {
 	// re-applies the read-only filter.
 	legacyTools bool
 	readOnly    bool
+	// validateEdits: when true, node_edit reverts any write that introduces a
+	// new error (revert-on-new-diagnostics). Set by --validate. See validate.go.
+	validateEdits bool
 
 	// queryWorkBudget caps one node_query evaluation's WORK (nodes
 	// visited + edges crossed + sites/lines scanned). 0 = the default.
@@ -225,6 +228,9 @@ func (s *Server) SetLegacyTools(enabled bool) {
 // It's also cheaper. node_edit is ~370 of the surface's ~995 tokens — the
 // refactor fields (rename/params/return/resolution) are most of its schema —
 // so read-only is a ~37% smaller surface for a job that never needed them.
+// SetValidateEdits toggles revert-on-new-diagnostics for every mutating edit.
+func (s *Server) SetValidateEdits(enabled bool) { s.validateEdits = enabled }
+
 func (s *Server) SetReadOnly(enabled bool) {
 	s.readOnly = enabled
 	s.SetLegacyTools(s.legacyTools) // re-register, then re-filter

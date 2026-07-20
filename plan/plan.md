@@ -95,6 +95,70 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **`--validate` (revert-on-new-diagnostics) + the safe-edit-loop thesis,
+shipped, tested, and MEASURED.** The whole arc — reframe → build → benchmark →
+tune → measure with error bars.
+
+**Thesis (why):** LLMs run a grep→read→edit loop and reach for grep by habit.
+Don't fight it — ABSORB it: keep the loop, make edits *safe*. node_edit is the
+edit; `--validate` makes it un-break-able.
+
+**Built (poly-lsp side, all in `mcp/validate.go`):**
+- Write paths (range/whole-file/diff) run through `applyBytes`: fingerprint the
+  workspace's pre-edit errors, write, re-collect, and if the edit introduces a
+  NEW error, atomically restore + report `rejected` (isError=true; `newErrors`).
+- Multi-file rename/signature via `validationTxn` — records every touched file's
+  pre-edit bytes before writing, reverts them ALL as one unit on any new error
+  (nested rename inside signature shares the outer txn: all-or-nothing).
+- **CROSS-FILE**: the fingerprint is WORKSPACE-WIDE (`errorFingerprintAll` over
+  the store snapshot), so an edit that breaks an IMPORTER (rename a type its
+  callers use) is caught — gopls publishes package-level, `settleErrorFingerprint`
+  waits for the sibling republish to land before the diff. This was the binding
+  constraint the benchmark exposed.
+- Server flag `--validate` (or per-call `validate:true`); no-op-but-flagged
+  without a child LSP (`validated:false`).
+- **Sharpened `node_edit` rename description** (modern.go, shipped default):
+  leads with "renaming? use the rename op — one atomic call, don't hand-edit".
+- Tests (gopls-backed, stable): `TestNodeEditValidateReverts`,
+  `TestRefactorRenameValidateRevertsAllFiles`, `TestNodeEditValidateCrossFileRevert`;
+  full mcp suite green.
+
+**Measured (corrallm llm-bench, Qwen3-6-27B-MPT via llm.iodesystems.com, n=5):**
+on a cross-file rename (`edit-safety-rename`, type used across 4 files):
+| arm | rename-op | broken-intermediates | pass | tokens |
+|---|---|---|---|---|
+| baseline (shell/read/edit) | n/a | **2 [2–2]** | 5/5 | 9k |
+| polylsp / polylsp-validate | **5/5** | **0 [0–0]** | 5/5 | ~30k |
+**Net benefit, with error bars:** poly-lsp reliably completes the refactor with
+ZERO broken intermediate states (baseline lands 2 every time) — structural
+safety grep+sed can't match — at ~3× the token cost. **The lever was
+PRESENTATION**: the sharpened description gets Qwen onto the atomic rename op
+10/10 runs; that op is safe by construction, so `broken=0` even WITHOUT
+validation. Validation is the untested insurance for when presentation doesn't
+land (weaker model / harder refactor / hand-editing).
+
+**Lessons the runs taught (each cost a wrong turn until measured):** (1) on
+tasks a capable model passes, pass/fail is BLIND to the offering's value — the
+`broken_intermediates` safety metric is what separates the arms. (2) `--validate`
+is redundant for a diligent model WITH a build tool (it self-heals); its value
+needs the no-self-check path (`--run-tool=false`) or a task the model breaks.
+(3) single runs LIE — the validate arm "hand-edited (64k tokens)" was n=1 noise;
+at n=5 it's 5/5 atomic rename. Always `--runs`.
+
+**Remaining (opt-in):** `validate:"strict"` (refuse, not fail-open, when no LSP);
+pre-touch baseline for never-analyzed files (an unanalyzed file with prior
+errors could false-revert its first edit — documented limitation); the ~3×
+token premium is the thing to shave if this goes wide.
+
+**⚑ corrallm-side changes (their repo, uncommitted — flag for review):**
+`services/corrallm` gained, to make the above measurable: the
+`broken_intermediates` metric + task `safetyCheck` field (run after each mutating
+call); `--run-tool` gate + toolset `baseArgs` (argument the base llm-bench-mcp,
+generalizing `cedeFileTools`); `--runs N` + per-run artifact naming (`_rN`); the
+`edit-safety-{pop,import,rename}` probes + `polylsp-validate`/`polylsp-norun*`
+toolsets. Also: the `scheduler.go` tech_lead user-turn fix (bonsai template) is a
+genuine agentkit-host bug fix, unrelated to poly-lsp.
+
 ◐ **Adoption measurement — the existential question, now instrumented.**
 `llm-bench/` (own nested module, uses `agentkit` — `mcpmgr` spawns the server,
 `agent.Session` drives the model on llm.iodesystems.com) poses relationship-
@@ -113,15 +177,86 @@ run (needs `AGENTKIT_API_KEY` + network). **next**:
     momentum, unprompted), not the wording. The direct-question set can't
     measure the thing that matters; I measured the easy case. Only flicker:
     `pattern` reached graph grep-free most often (weak, n=1).
-  - ◻ **Build the discriminating set: grep-TEMPTING, IN-FLOW tasks.** Embed the
-    question in a multi-step task where grep is the habitual default AND gives a
-    plausible-but-WRONG answer (name collisions — the lexical-vs-precise story).
-    That reproduces the 0-calls condition; only there can a description move
-    behavior. Metric shifts to "reached graph FIRST / grep-free" + correctness,
-    not binary reach (which saturates). Add `--runs` (single runs are noise).
-  - ◻ **Then judge correctness** (LLM-judge over each task's `want`).
-**Do NOT rewrite `modern.go`'s description yet** — the data doesn't support
-"docs are the wall" for obvious tasks, and the in-flow case is untested.
+  - ✅ **In-flow grep-tempting set built + run (5 tasks incl. a collision
+    canary; asis/pattern/inspired, n=1).** Metrics: reach, graph-FIRST,
+    grep-free. Result across ALL three variants: reach **4/4**, graph-first
+    **4/4** even in-flow — the model reaches for node_query FIRST, unprompted,
+    on grep-tempting tasks, regardless of doc wording. grep-free was the only
+    mover (asis/pattern 3/4, **inspired 2/4** — its longer prose induced MORE
+    grep scaffolding; the verbose "inspirations" strategy underperforms tight
+    recipes and even the plain spec).
+  - ❗ **The bench structurally CANNOT answer the absolute adoption question.**
+    In-harness, grep is just another advertised tool with a one-line desc — it
+    has NO home-field advantage. The icebox's "0 calls" was grep as the model's
+    NATIVE, reflexively-trained tool inside a real agent. This bench is NEUTRAL
+    ground, where node_query competes as a peer and wins on description alone.
+    So: node_query is *competitive as a peer* (real result), but "does it beat
+    the model's native grep/read in a real agent" needs the REAL agent.
+  - ◐ **True adoption test = the real agent (autowork3) already exists.**
+    `services/autowork3` is a full agentkit worker that spawns poly-lsp-mcp as a
+    sidecar (`cmd/worker/mcp_child.go`) AND merges it with native grep/read/ls in
+    ONE session (`cmd/worker/main.go:174`) — the home-turf contest llm-bench
+    can't stage. Tool calls log to the `spans` table (`attributes.tool_name` +
+    `.role`). Query WIRED: `llm-bench/adoption_autowork3.sql` (+ `./pg.sh prod`)
+    runs graph-vs-native against the live DB (`postgres://aw3@127.0.0.1:1212`).
+    **Result today: EMPTY.** Prod has 3 sessions, all `product_owner`
+    (orchestration only — submit_chat/thread_set_title); ZERO `developer`/
+    `reviewer` sessions, so poly-lsp-mcp AND grep have never fired. The real
+    test still hasn't RUN — worse than the icebox's "0 calls / 8 runs" (this DB
+    lacks even those). llm-bench's remaining value: A/B descriptions as peers,
+    correctness, cost — not the native-vs-newcomer asymmetry.
+  - ❗ **Populating real dev spans = operating the whole autowork3 platform;
+    stopped at that boundary.** Attempted (user opted in): booted a HEALTHY
+    daemon (`aw daemon serve`, API :8401), confirmed `autowork3-worker-dev`
+    images exist. But staging one developer session needs, in sequence: a
+    context→repo→WORKTREE binding (the `projects` table that held `repo_path`
+    is GONE; `aw context create` has no repo flag; repo lands via a
+    `worktree.Manager` installed only in the PROD daemon config, `api.go:236`),
+    per-thread worker CONTAINERS, and the product_owner→tech_lead→developer
+    summon chain against a cold/flaky model (`Qwen3-6-27B-MPT` state=absent,
+    warms on demand). That's autowork3-internal operational setup, unsafe to
+    reverse-engineer blind against the prod DB. **Stopped clean: no thread/
+    session rows written (prod still 3/3), daemon killed.** `bonsai` is NOT a
+    registered autowork3 model nor corrallm-served — unresolved.
+  - ◐ **Live populate attempt (bonsai) — chain runs, breaks at tech_lead.**
+    `bonsai` = `ternary-bonsai-27b` (corrallm, state=ready; the ONE ready chat
+    model — Qwen/gemma absent). Registered it in autowork3 (`aw model add`),
+    created a repo-bound project (poly-lsp-mcp, `aw project create --repo-path`),
+    booted `aw daemon serve --no-vite` (worktrees auto-install), started a
+    thread on bonsai with a code-nav task. **product_owner RAN on bonsai +
+    called submit_plan** (pipeline is live). But **tech_lead FAILED**: bonsai's
+    GGUF chat template raises `No user query found in messages` → 400 (its
+    template asserts a user turn; autowork3 builds tech_lead from the PO plan =
+    system+assistant/tool only). So the summon chain dies BEFORE a developer is
+    spawned → still no poly-lsp-mcp/grep spans. **Blocker is now a
+    bonsai-template ↔ autowork3-message-shape incompatibility** (corrallm or
+    autowork3 side), not missing infra. Prod DB now holds: model `bonsai`,
+    project `13749f79`, thread `969c7fab` (PO closed, TL failed); daemon left up
+    on :8401 for retry.
+  - ✅ **tech_lead message-shape fix — DONE, verified.** Root cause: a freshly-
+    summoned transient role (tech_lead/dev/reviewer) had its task in the SYSTEM
+    prompt and an EMPTY conversation; agentkit's shaper never guarantees a user
+    turn, so bonsai's template raised. Fix (`internal/server/scheduler.go`,
+    runSession): for non-PO roles with zero prior events, seed one
+    `EventUserMessage` ("Proceed with the task…") before the Turn. Retest on a
+    fresh thread: **tech_lead failed→CLOSED** — seeded user turn present, it
+    decomposed into leaves. Chain advanced PO→TL→developer. (This is an
+    autowork3 code change — flag for their review/commit.)
+  - ◻ **Next blocker (operational, not code): developer needs a node-manager.**
+    developer session failed: `no live node-manager for thread … assign via aw
+    node-manager assign`. A node-manager is the long-running worker process that
+    orchestrates aw3-worker CONTAINERS (image `autowork3-worker-dev:latest`
+    exists). To finish: `aw node-manager register` + `serve` + assign to the
+    project → developer runs in a container → poly-lsp-mcp + grep fire →
+    `./pg.sh prod` prints the home-turf ratio. Separate operational layer.
+  - ◻ **Collision canary** (`collision*`): grep AND lexical node_query both
+    return the merged set (verified) — flips to a graph win only when the LSP
+    precision pass resolves the site. Re-run with precision ON to show the
+    graph's real differentiator.
+**Do NOT rewrite `modern.go`'s description** — across quick + in-flow, two
+sets × three variants, the shipped spec-first desc already saturates reach and
+graph-first. The wording is not the bottleneck on neutral ground; if `inspired`
+taught anything it's that MORE prose is worse, not better.
 **This gates further engine investment**: keep building the engine once
 adoption says agents reach for the graph at all — pause if it says they don't.
 **blocking decision (USER owns)**: if both variants stay low, the tool loses on

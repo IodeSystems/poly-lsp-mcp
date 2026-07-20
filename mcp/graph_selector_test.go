@@ -21,7 +21,6 @@ import (
 //	     Y ◀──▶ X ──▶ C          (X/Y are a real cycle)
 //	     UsesT(t T)              (T used AS A TYPE)
 //	ts:  useHelper ──▶ tsHelper  (plus an IMPORT of tsHelper)
-//
 const graphGoSrc = `package lib
 
 type T struct{}
@@ -843,18 +842,18 @@ func TestRetiredSpellingsNameTheirReplacement(t *testing.T) {
 	// REGEX op (the language's OR: [path~=a|b]), so it is a real
 	// spelling and no longer retired. See TestAttrRegexIsTheOrOperator.
 	for sel, want := range map[string]string{
-		`func:has_parent(#'a.go')`:  `#'a.ts' func`,
-		`*:references(#'C')`:        "::out",
-		`*:depth(0,0)`:              "{m,n}",
-		`func::ref.out`:             "::in",
-		`func::before`:              "::out",
-		`func:empty`:                ":where",
-		`&:parents:empty`:           ":where",
-		`func:where(> &)`:           "contradicts",
-		`func:where(::in:empty *)`:  "follow",
-		`::in{0,}`:                  "hops start at 1",
-		`func::out.ptr`:             ".call/.type/.import",
-		`file.rust`:                 "language",
+		`func:has_parent(#'a.go')`: `#'a.ts' func`,
+		`*:references(#'C')`:       "::out",
+		`*:depth(0,0)`:             "{m,n}",
+		`func::ref.out`:            "::in",
+		`func::before`:             "::out",
+		`func:empty`:               ":where",
+		`&:parents:empty`:          ":where",
+		`func:where(> &)`:          "contradicts",
+		`func:where(::in:empty *)`: "follow",
+		`::in{0,}`:                 "hops start at 1",
+		`func::out.ptr`:            ".call/.type/.import",
+		`file.rust`:                "language",
 	} {
 		got := queryErr(t, s, map[string]any{"selector": sel})
 		if !strings.Contains(got, want) {

@@ -49,10 +49,10 @@ import (
 //   - full — a symbol's dotted path, or a dir/file's workspace-relative
 //     path.
 type treeNode struct {
-	class string // "project"|"dir"|"file"|<symbol class>|"argument"|"annotation"
-	leaf  string
-	full  string
-	alias    string // extra id (an annotation's own name, e.g. app.route)
+	class     string // "project"|"dir"|"file"|<symbol class>|"argument"|"annotation"
+	leaf      string
+	full      string
+	alias     string // extra id (an annotation's own name, e.g. app.route)
 	commentAt [2]int // joined doc-comment span above this symbol (0 = none); ::comment reads it
 
 	file string // workspace-relative file path ("" for project/dir)
@@ -388,12 +388,12 @@ func (e *engine) loadFileSymbols(f *treeNode) {
 			commentAt: [2]int{sym.CommentStartLine, sym.CommentEndLine},
 			file:      f.file,
 			sym:       sym.Sym,
-			at:      [2]int{sym.DeclStartLine, sym.DeclEndLine},
-			parent:  parent,
-			depth:   parent.depth + 1,
-			abs:     f.abs,
-			fileOrd: f.fileOrd,
-			symOrd:  i + 1,
+			at:        [2]int{sym.DeclStartLine, sym.DeclEndLine},
+			parent:    parent,
+			depth:     parent.depth + 1,
+			abs:       f.abs,
+			fileOrd:   f.fileOrd,
+			symOrd:    i + 1,
 		}
 		bySym[sym.Sym] = n
 		parent.children = append(parent.children, n)
@@ -670,15 +670,15 @@ func (c *selCompound) hasMove() bool {
 type selPseudoKind int
 
 const (
-	pseudoContains selPseudoKind = iota // :contains('text') — filter on own source
-	pseudoAnnotated                     // :annotated('text')— filter on the block ABOVE the decl
-	pseudoParents                       // :parents[(sel)]   — MOVE upstream (the one inverse)
-	pseudoWhere                         // :where(sel)       — filter: a path matches
-	pseudoAny                           // :any[(sel)]       — ∃ claim
-	pseudoAll                           // :all[(sel)]       — ∀ claim
-	pseudoEmpty                         // :empty[(sel)]     — ∄ claim
-	pseudoNot                           // :not(sel)         — the node ITSELF does not match (CSS-true)
-	pseudoIs                            // :is(sel)          — the node ITSELF matches (CSS-true)
+	pseudoContains  selPseudoKind = iota // :contains('text') — filter on own source
+	pseudoAnnotated                      // :annotated('text')— filter on the block ABOVE the decl
+	pseudoParents                        // :parents[(sel)]   — MOVE upstream (the one inverse)
+	pseudoWhere                          // :where(sel)       — filter: a path matches
+	pseudoAny                            // :any[(sel)]       — ∃ claim
+	pseudoAll                            // :all[(sel)]       — ∀ claim
+	pseudoEmpty                          // :empty[(sel)]     — ∄ claim
+	pseudoNot                            // :not(sel)         — the node ITSELF does not match (CSS-true)
+	pseudoIs                             // :is(sel)          — the node ITSELF matches (CSS-true)
 )
 
 func (k selPseudoKind) isMove() bool  { return k == pseudoParents }

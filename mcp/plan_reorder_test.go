@@ -73,8 +73,8 @@ func TestReorderEquivalentAndCheaper(t *testing.T) {
 	// Chains the reorder targets (broad class ⊃ rare name) and control
 	// chains it must leave alone.
 	for _, sel := range []string{
-		`func #needle`,       // fires: broad func ⊃ rare needle
-		`func #Handler`,      // fires: the func itself, name-anchored
+		`func #needle`,      // fires: broad func ⊃ rare needle
+		`func #Handler`,     // fires: the func itself, name-anchored
 		`func #Nonexistent`, // fires (empty), must stay empty
 		`func argument`,     // control: tip is a bare class, not a name
 		`#'hot.go' #needle`, // control: leading elem already rare

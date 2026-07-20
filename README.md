@@ -3,7 +3,8 @@
 A polyglot LSP + MCP server in Go. One binary, two surfaces:
 
 - **LSP server** (`poly-lsp-mcp`) — editor integration. Multiplexes child language servers (gopls / tsserver / pylsp / …) and falls back to tree-sitter where no child exists.
-- **MCP server** (`poly-lsp-mcp mcp`) — LLM agent integration. Same workspace machinery exposed as a six-tool surface.
+- **MCP server** (`poly-lsp-mcp mcp`) — LLM agent integration. The same workspace machinery exposed as **three tools** (`node_query` / `node_read` / `node_edit`) over a unified node tree, driven by a **CSS-inspired selector language** that queries containment *and* the reference graph. Edits are **LSP-validated** (`--validate`) so an agent can't leave the workspace broken.
+- **Query CLI** (`poly-lsp-mcp query <selector>`) — run one selector from the shell, no editor or agent.
 
 The unique value-add over single-language LSPs is **cross-language linkage**: rename `UserID` in Go and the rename propagates through TypeScript, Python, YAML config values, proto messages, OpenAPI schemas, and prose — declared bindings, schema-anchored sites, and `@ref` comment markers all stitch the languages together.
 
@@ -50,7 +51,45 @@ Child LSP requests (`hover`, `definition`, completion, signature help, code acti
 poly-lsp-mcp mcp --root /path/to/workspace
 ```
 
-Speaks MCP (newline-delimited JSON-RPC) over stdio. Seven tools:
+Speaks MCP (newline-delimited JSON-RPC) over stdio. The **default surface is three tools** over one unified node tree (`project > dir > file > symbols > argument`), addressed as `<file>#<sym>`, driven by a CSS-inspired selector:
+
+| Tool | Purpose |
+|------|---------|
+| `node_query` | Find nodes with a CSS-like selector over the AST **and the reference graph**. Returns `matches[].node` addresses. `:explain <selector>` returns a cost tree instead of matches; `"?"` returns the grammar. |
+| `node_read` | Read a node whole — a symbol's complete declaration (never truncated), or a file — via a `<file>#<sym>` address or a selector matching exactly one node. |
+| `node_edit` | Edit one node: `oldText`+`newText`, whole-node rewrite, `delete`, `rename` (workspace-wide, atomic), `params`/`return` (signature). Under `--validate`, an edit that introduces a new error is reverted. |
+
+### Selector language
+
+CSS selectors, but the document is your codebase. `func` is a tag, `#name` an id, `>` is child, space is descendant, `,` is union; `:has()` / `:not()` / `:where()` behave as in CSS, `:first` / `:last` as in jQuery. One new idea: the reference **graph** rides on pseudo-element syntax — `::in` / `::out` are edges the way `::before` is generated content.
+
+```
+#'store.go#Save'::in.call                              who calls Save (callers, with call sites)
+#main::out.call > *                                    what main calls (callees)
+#Handler::in.call{1,} > *                              everything that reaches Handler (transitive)
+type#Server > method                                   methods of the Server type
+struct:has(field[name$=ID])                            structs that declare an *ID field
+func:not(#main):not(#init):not([name^=Test]):where(::in:empty)   dead code
+file:has(func:where(::out.call{15,16}))                files whose funcs call 15–16 deep
+import#huma::in.call::grep('-E (Get|Post)\(')          endpoints of a dependency
+:root > *                                              tour the workspace
+```
+
+Take any match's `node` (`<file>#<sym>`) straight to `node_read` / `node_edit`. Attribute axes: `[name]` (what it's called) vs `[path]` (where it lives); operators `= ^= $= *=` (literal) and `~=` (regex). Bare `:any/:all/:empty` are position claims; `:parents(sel)` is the one inverse (upstream). `{m,n}` is regex repetition on elements, edge *hops* on an edge (`::in.call{1,}` = transitive). Reference **kind** is a class (`.call`/`.type`/`.import`), **position** another (`.return`/`.param`/`.field`).
+
+**Edges carry a confidence label.** The index is name-keyed (lexical) by default; a running child LSP settles the true target, stamped `conf: lexical | lsp` per edge. Partiality is always surfaced — a budget-exhausted query says so, an ambiguous edge says so — so an agent never mistakes a guess for a fact.
+
+### Safe editing — `--validate`
+
+```sh
+poly-lsp-mcp mcp --root . --validate
+```
+
+`node_edit` runs the child LSP after each write and **reverts any edit that introduces a NEW error** — same-file *or* cross-file (a rename that breaks a caller is caught workspace-wide, once gopls's package re-check settles). The edit is reported `rejected` with the offending `newErrors` instead of landing; a multi-file rename/signature reverts as one all-or-nothing unit. Without a child LSP the edit is applied but flagged `validated:false` — never a silent pass. This keeps the agent's grep→read→edit loop but makes it unable to leave the workspace in a broken state.
+
+### Legacy 9-tool surface (`--legacy-tools`)
+
+The prior surface — `structure`, `search`, `node_references`, `node_read`, `node_edit`, `node_delete`, `node_refactor`, `node_rename_file`, and a bare-grammar `node_query` — is still available behind `--legacy-tools` (add `--read-only` to hide every mutating tool). Its tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -87,6 +126,20 @@ Most tools are polymorphic — pick the input shape that fits the task. The "nod
 - `poly-lsp-mcp://diagnostics` — workspace-wide diagnostic snapshot enriched the same way edit responses are.
 
 Edit / refactor responses carry enriched diagnostics: `{text, context, enclosingNode, references}` per diagnostic. Sibling-file diagnostics roll up by default so compile cascades are visible in one response. Configurable caps per call (`diagnosticLimit`, `referenceLimit`, `contextLines`, `siblingDiagnostics`).
+
+## Query CLI
+
+Run a selector once from the shell — no editor, no agent:
+
+```sh
+poly-lsp-mcp query --root . "#spend::in.call"          # callers of spend
+poly-lsp-mcp query --root . "type#Server > method"     # methods of the Server type
+poly-lsp-mcp query --root . ":root > *"                # workspace tour
+poly-lsp-mcp query --root . ":explain <selector>"      # cost tree, not matches
+poly-lsp-mcp query --root . "?"                        # the full grammar
+```
+
+Renders a grouped tree of matches per file. Lexical-only by default (a one-shot run spawns no child LSP), so reference edges are name-keyed — run the MCP server for LSP-settled edges. `--budget Nms|Nops` raises the work budget when a broad query reports it stopped early.
 
 ## Configuration
 

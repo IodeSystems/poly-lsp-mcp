@@ -124,3 +124,41 @@ parked here:
 - **More pseudo-elements, same contract.** ::doc / ::signature / ::body as
   generated readable/editable sub-parts of a symbol — invisible to `*`,
   addressable like edge sites.
+
+## Field reports — redline2 dogfooding (2026-07-20)
+
+Three items from an agent driving poly-lsp-mcp across a full redline2 session
+(many `/go` slices). Reading/nav (`structure grep=`, `node_read` + its "call
+again with startLine=" hints) were the wins and got used constantly; editing
+drifted to the host's built-in Edit + Bash. Why, filed as work:
+
+- **BUG — `search` blows the token budget instead of capping.** A broad regex
+  that hit generated files returned a **422 (~422k chars)** and force-dumped to
+  a scratch file with "read it in chunks" instructions — a hard stop mid-task.
+  Repro: `search "View as coach|View user record"` over redline2 matched
+  `ui/src/gql/*` (generated, ~40k-char lines). `grep --exclude` never does this.
+  Fix: a byte cap + truncation summary (`N more matches — narrow with
+  glob=/path=`), the way node_read / node_query already degrade; and/or
+  default-skip generated / huge-line files (the noise-dir set already skips
+  .git/node_modules/vendor — generated source with 40k-char lines is the same
+  hazard). Single sharpest edge — it cost a real detour.
+
+- **FEATURE (reinforces the existing "Child-LSP edge precision" item) — Go
+  refs/rename read as lexical, so I never trusted them.** The host doc flags
+  node_references / node_refactor as tree-sitter-lexical (not gopls) for Go;
+  that caveat alone suppressed 100% of my rename use — I fell back to Edit +
+  grep every time. The existing icebox fix (resolve a site via
+  textDocument/definition, stamp refConf `lsp`) is the answer; this is field
+  evidence it gates ADOPTION, not just precision. For a tool named *LSP*,
+  lexical rename is the expectation-gap that most undersells it.
+
+- **NOTE (mostly host-side) — node_edit doesn't fire the project's custom
+  post-edit checks, so built-in Edit won.** node_edit already returns LSP
+  diagnostics (phase 6.1), but redline2's value came from PROJECT-custom
+  PostToolUse hooks (a reflection-based nullability test, graphql-eslint) that
+  fire only on the host's Edit/Write tool, not on an MCP edit — and they caught
+  real errors the instant I saved. Net: gopls diagnostics ⊄ project validation,
+  and the hook wiring keys on the built-in tool, so it's likely a Claude Code
+  harness concern, not poly-lsp's to fix — but it's the #1 reason node_edit went
+  unused here. Recorded as the honest adoption blocker; the safe-edit thesis
+  competes directly against it.

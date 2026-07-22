@@ -25,14 +25,14 @@ func writeTree(t *testing.T, root string, files map[string]string) {
 func TestSearchFindsMatches(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
-		"a.go":      "package main\n// TODO: clean this up\nfunc foo() {}\n",
-		"sub/b.go":  "package sub\n// TODO(carl): another\n",
-		"c.md":      "# Header\n\nTODO write docs\n",
+		"a.go":         "package main\n// TODO: clean this up\nfunc foo() {}\n",
+		"sub/b.go":     "package sub\n// TODO(carl): another\n",
+		"c.md":         "# Header\n\nTODO write docs\n",
 		"no-match.txt": "nothing interesting here\n",
 	})
 
 	pat := regexp.MustCompile(`TODO`)
-	hits, dropped, err := symbols.Search(dir, pat, symbols.SearchOptions{})
+	hits, dropped, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,13 +58,13 @@ func TestSearchFindsMatches(t *testing.T) {
 func TestSearchRespectsGlob(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
-		"a.go":  "TODO go\n",
-		"b.py":  "TODO py\n",
-		"c.md":  "TODO md\n",
+		"a.go": "TODO go\n",
+		"b.py": "TODO py\n",
+		"c.md": "TODO md\n",
 	})
 
 	pat := regexp.MustCompile(`TODO`)
-	hits, _, err := symbols.Search(dir, pat, symbols.SearchOptions{Glob: "*.go"})
+	hits, _, _, err := symbols.Search(dir, pat, symbols.SearchOptions{Glob: "*.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestSearchSkipsBinaryFiles(t *testing.T) {
 	}
 
 	pat := regexp.MustCompile(`TODO`)
-	hits, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
+	hits, _, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestSearchSkipsNoiseDirs(t *testing.T) {
 	})
 
 	pat := regexp.MustCompile(`TODO`)
-	hits, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
+	hits, _, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestSearchLimitTrips(t *testing.T) {
 		"a.txt": "TODO\nTODO\nTODO\nTODO\nTODO\n",
 	})
 	pat := regexp.MustCompile(`TODO`)
-	hits, dropped, err := symbols.Search(dir, pat, symbols.SearchOptions{Limit: 3})
+	hits, dropped, _, err := symbols.Search(dir, pat, symbols.SearchOptions{Limit: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestSearchContextLines(t *testing.T) {
 		"a.txt": "line 1\nline 2\nMATCH here\nline 4\nline 5\n",
 	})
 	pat := regexp.MustCompile(`MATCH`)
-	hits, _, err := symbols.Search(dir, pat, symbols.SearchOptions{ContextLines: 2})
+	hits, _, _, err := symbols.Search(dir, pat, symbols.SearchOptions{ContextLines: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestSearchCaseInsensitiveViaInlineFlag(t *testing.T) {
 		"a.txt": "Hello World\nhello there\nHELLO\n",
 	})
 	pat := regexp.MustCompile(`(?i)hello`)
-	hits, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
+	hits, _, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestSearchCaseInsensitiveViaInlineFlag(t *testing.T) {
 
 func TestSearchEmptyPatternErrors(t *testing.T) {
 	dir := t.TempDir()
-	_, _, err := symbols.Search(dir, nil, symbols.SearchOptions{})
+	_, _, _, err := symbols.Search(dir, nil, symbols.SearchOptions{})
 	if err == nil {
 		t.Error("expected error for nil pattern")
 	}
@@ -186,12 +186,12 @@ func TestSearchEmptyPatternErrors(t *testing.T) {
 func TestSearchSortedDeterministic(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
-		"z.txt":       "TODO at z\n",
-		"a.txt":       "line\nTODO at a\nTODO again\n",
-		"sub/m.txt":   "TODO in sub\n",
+		"z.txt":     "TODO at z\n",
+		"a.txt":     "line\nTODO at a\nTODO again\n",
+		"sub/m.txt": "TODO in sub\n",
 	})
 	pat := regexp.MustCompile(`TODO`)
-	hits, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
+	hits, _, _, err := symbols.Search(dir, pat, symbols.SearchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

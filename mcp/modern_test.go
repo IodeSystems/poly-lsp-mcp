@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -397,6 +398,149 @@ func TestModernQueryGrepFragmentsWithContext(t *testing.T) {
 	}
 	if len(m.After) != 1 || !strings.Contains(m.After[0], "return nil") {
 		t.Errorf("-A1 should carry one following line; got %+v", m.After)
+	}
+}
+
+// A ::grep hit on a pathologically long line (a generated bundle a file
+// node can still point at) must come back ELIDED around the match, not as
+// a multi-KB fragment that blows the token budget.
+func TestModernQueryGrepCapsLongLine(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module x\ngo 1.26\n")
+	// A 12k-char line with the match buried in the middle.
+	longLine := "// " + strings.Repeat("a", 6000) + "NEEDLE" + strings.Repeat("b", 6000)
+	write("gen.go", "package x\n"+longLine+"\nvar ok = 1\n")
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	q := query(t, s, map[string]any{"selector": `#'gen.go'::grep('NEEDLE')`, "limit": 5})
+	if q.TotalMatches != 1 {
+		t.Fatalf("want 1 fragment, got %d (%v)", q.TotalMatches, nodes(q))
+	}
+	m := q.Matches[0]
+	if len(m.Text) > 700 {
+		t.Errorf("long ::grep line not capped: %d bytes", len(m.Text))
+	}
+	if !strings.Contains(m.Text, "NEEDLE") {
+		t.Errorf("the match must survive the cap; got %.80q", m.Text)
+	}
+	if !strings.Contains(m.Text, "chars)") {
+		t.Errorf("an elided fragment must carry a (+N chars) marker; got %.80q", m.Text)
+	}
+}
+
+// The `return` node exposes a callable's return TYPE as an addressable
+// child, so `func:any(return#error)` = funcs returning error — including
+// Go's (T, error) tuple, which splits into one node per type.
+func TestModernQueryReturnNode(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module x\ngo 1.26\n")
+	write("m.go", `package x
+
+import "io"
+
+func Single() error { return nil }
+func Tuple() (int, error) { return 0, nil }
+func Writer() io.Writer { return nil }
+func Void() {}
+`)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// The headline: funcs returning error — both the single and the tuple.
+	q := query(t, s, map[string]any{"selector": `func:any(return#error)`, "limit": 20})
+	got := nodes(q)
+	if !slices.Contains(got, "m.go#Single") || !slices.Contains(got, "m.go#Tuple") {
+		t.Errorf(":any(return#error) should match Single and Tuple; got %v", got)
+	}
+	if slices.Contains(got, "m.go#Void") || slices.Contains(got, "m.go#Writer") {
+		t.Errorf(":any(return#error) must exclude Void and Writer; got %v", got)
+	}
+
+	// A qualified type matches by leaf (Writer) and by full alias (io.Writer).
+	if q := query(t, s, map[string]any{"selector": `func:any(return#Writer)`}); !slices.Contains(nodes(q), "m.go#Writer") {
+		t.Errorf(":any(return#Writer) should match Writer via the leaf; got %v", nodes(q))
+	}
+	if q := query(t, s, map[string]any{"selector": `func:any(return#'io.Writer')`}); !slices.Contains(nodes(q), "m.go#Writer") {
+		t.Errorf(":any(return#'io.Writer') should match via the alias; got %v", nodes(q))
+	}
+
+	// The tuple's two types are BOTH addressable children.
+	q = query(t, s, map[string]any{"selector": `#'m.go#Tuple' > return`, "limit": 20})
+	if q.TotalMatches != 2 {
+		t.Errorf("Tuple returns (int, error) — want 2 return children; got %v", nodes(q))
+	}
+}
+
+// :arity filters by the count of `argument` children — a sound,
+// structural signature-size predicate (no edge guessing).
+func TestModernQueryArity(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	// Exact counts. Start(ctx, retries) = 2; Free(only) = 1.
+	if q := query(t, s, map[string]any{"selector": `method#Start:arity(2)`}); q.TotalMatches != 1 {
+		t.Errorf("Start has 2 params — :arity(2) should match; got %v", nodes(q))
+	}
+	if q := query(t, s, map[string]any{"selector": `method#Start:arity(1)`}); q.TotalMatches != 0 {
+		t.Errorf("Start has 2 params — :arity(1) must NOT match; got %v", nodes(q))
+	}
+	if q := query(t, s, map[string]any{"selector": `func#Free:arity(1)`}); q.TotalMatches != 1 {
+		t.Errorf("Free has 1 param — :arity(1) should match; got %v", nodes(q))
+	}
+
+	// No-arg: init()/CallsStart() match; Free (1 arg) does not.
+	q := query(t, s, map[string]any{"selector": `func:arity(0,0)`, "limit": 50})
+	got := nodes(q)
+	for _, n := range got {
+		if strings.Contains(n, "#Free") {
+			t.Errorf(":arity(0,0) must exclude Free (1 arg); got %v", got)
+		}
+	}
+	if !slices.Contains(got, "main.go#CallsStart") {
+		t.Errorf(":arity(0,0) should include CallsStart (0 args); got %v", got)
+	}
+
+	// Open upper bound: two-or-more.
+	q = query(t, s, map[string]any{"selector": `method:arity(2,)`, "limit": 50})
+	for _, m := range q.Matches {
+		if m.Node == "" {
+			t.Errorf("bad match %+v", m)
+		}
+	}
+	if q.TotalMatches < 1 {
+		t.Errorf(":arity(2,) should match Start (2 params); got %v", nodes(q))
+	}
+
+	// Malformed ranges are guided errors, not silent.
+	if msg := queryErr(t, s, map[string]any{"selector": `func:arity()`}); !strings.Contains(msg, "arity") {
+		t.Errorf("empty :arity() should error and name the pseudo; got %q", msg)
+	}
+	if msg := queryErr(t, s, map[string]any{"selector": `func:arity(2,1)`}); !strings.Contains(msg, "max must be >= min") {
+		t.Errorf(":arity(2,1) should reject max<min; got %q", msg)
 	}
 }
 

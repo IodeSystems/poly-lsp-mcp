@@ -9,7 +9,96 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
+
+// maxHitLineBytes caps how much of a single matched line a hit carries.
+// A hit's Text is the WHOLE matched line, and one line in a generated
+// bundle (minified JS, a gql document) can be tens of thousands of bytes
+// — so 100 hits could dump megabytes and blow the tool-result token
+// budget, a hard stop mid-task. Past this width the line is elided around
+// the match with a "(+N chars)" marker, which keeps the match visible
+// while bounding the payload.
+const maxHitLineBytes = 500
+
+// maxSearchLineBytes is the "this file is generated" threshold. A source
+// file whose LONGEST line exceeds this is a minified/generated bundle
+// (hand-written code effectively never has a 5000-byte line), and its
+// matches are noise, not navigation targets. Search skips such files and
+// reports the count, so the skip is loud, never silent.
+const maxSearchLineBytes = 5000
+
+// CapHitLine returns a rune-safe rendering of `line` no longer than
+// maxHitLineBytes, centred on the match span [matchStart,matchEnd) (byte
+// offsets into line), with a "(+N chars)" marker standing in for the
+// elided head and/or tail. A line already within the cap is returned
+// unchanged. Pass (0,0) for a context line with no match — it keeps the
+// head. This is the per-line half of the budget guard; a generated file
+// is skipped whole by Search, but a merely long line in a real file is
+// trimmed here so the match still shows.
+func CapHitLine(line string, matchStart, matchEnd int) string {
+	n := len(line)
+	if n <= maxHitLineBytes {
+		return line
+	}
+	if matchStart < 0 || matchStart > n {
+		matchStart = 0
+	}
+	if matchEnd < matchStart || matchEnd > n {
+		matchEnd = matchStart
+	}
+	var start, end int
+	if mlen := matchEnd - matchStart; mlen >= maxHitLineBytes {
+		start, end = matchStart, matchStart+maxHitLineBytes // match alone overflows; show its head
+	} else {
+		slack := maxHitLineBytes - mlen
+		start, end = matchStart-slack/2, matchEnd+(slack-slack/2)
+		if start < 0 {
+			end -= start
+			start = 0
+		}
+		if end > n {
+			start -= end - n
+			end = n
+		}
+		if start < 0 {
+			start = 0
+		}
+	}
+	// Snap the window inward to rune boundaries so a cut never lands
+	// mid-rune (which would emit invalid UTF-8).
+	for start > 0 && start < n && !utf8.RuneStart(line[start]) {
+		start++
+	}
+	for end < n && !utf8.RuneStart(line[end]) {
+		end++
+	}
+	var b strings.Builder
+	if start > 0 {
+		fmt.Fprintf(&b, "(+%d chars)", start)
+	}
+	b.WriteString(line[start:end])
+	if end < n {
+		fmt.Fprintf(&b, "(+%d chars)", n-end)
+	}
+	return b.String()
+}
+
+// exceedsLineBudget reports whether any line in content is longer than
+// limit bytes — the generated-file heuristic, computed in one pass over
+// the newline offsets without allocating the split.
+func exceedsLineBudget(content []byte, limit int) bool {
+	start := 0
+	for i, b := range content {
+		if b == '\n' {
+			if i-start > limit {
+				return true
+			}
+			start = i + 1
+		}
+	}
+	return len(content)-start > limit
+}
 
 // SearchHit is one regex match inside a workspace file. Position is
 // 1-based — Line counts from 1, Col is the byte offset (not rune
@@ -49,6 +138,11 @@ type SearchOptions struct {
 	// matched line to include. Useful for previewing without a
 	// follow-up node_read.
 	ContextLines int
+	// IncludeGenerated disables the "skip files with a pathologically
+	// long line" heuristic. Off by default: generated/minified bundles
+	// are noise and their giant lines blow the token budget. Set it only
+	// when the caller genuinely wants to grep generated output.
+	IncludeGenerated bool
 }
 
 // Search walks `root` recursively and returns every regex hit in
@@ -66,12 +160,13 @@ type SearchOptions struct {
 // pattern is required. Pass `(?i)…` for case-insensitive matching
 // (Go's regexp syntax supports inline flags natively — no separate
 // option needed).
-func Search(root string, pattern *regexp.Regexp, opts SearchOptions) ([]SearchHit, int, error) {
+func Search(root string, pattern *regexp.Regexp, opts SearchOptions) ([]SearchHit, int, int, error) {
 	if pattern == nil {
-		return nil, 0, fmt.Errorf("search: pattern is required")
+		return nil, 0, 0, fmt.Errorf("search: pattern is required")
 	}
 	var hits []SearchHit
 	dropped := 0
+	skippedGenerated := 0
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -109,6 +204,13 @@ func Search(root string, pattern *regexp.Regexp, opts SearchOptions) ([]SearchHi
 		if bytes.IndexByte(probe, 0) >= 0 {
 			return nil
 		}
+		// A file with a pathologically long line is generated/minified;
+		// its matches are noise. Skip it whole and count it (reported,
+		// never silent).
+		if !opts.IncludeGenerated && exceedsLineBudget(content, maxSearchLineBytes) {
+			skippedGenerated++
+			return nil
+		}
 
 		fileHits := searchFile(path, content, pattern, opts.ContextLines)
 		for _, h := range fileHits {
@@ -121,7 +223,7 @@ func Search(root string, pattern *regexp.Regexp, opts SearchOptions) ([]SearchHi
 		return nil
 	})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
 	sort.Slice(hits, func(i, j int) bool {
@@ -133,7 +235,7 @@ func Search(root string, pattern *regexp.Regexp, opts SearchOptions) ([]SearchHi
 		}
 		return hits[i].Col < hits[j].Col
 	})
-	return hits, dropped, nil
+	return hits, dropped, skippedGenerated, nil
 }
 
 // searchFile scans content line by line and produces one SearchHit
@@ -162,13 +264,25 @@ func searchFile(path string, content []byte, pattern *regexp.Regexp, contextLine
 				Line:        lineIdx + 1,
 				Col:         span[0] + 1,
 				MatchEndCol: span[1] + 1,
-				Text:        line,
-				Before:      contextBefore(lines, lineIdx, contextLines),
-				After:       contextAfter(lines, lineIdx, contextLines),
+				// Text is display-only; Col/MatchEndCol keep the true
+				// file offsets. A long line is elided around the match so
+				// one generated line can't blow the token budget.
+				Text:   CapHitLine(line, span[0], span[1]),
+				Before: capContextLines(contextBefore(lines, lineIdx, contextLines)),
+				After:  capContextLines(contextAfter(lines, lineIdx, contextLines)),
 			})
 		}
 	}
 	return out
+}
+
+// capContextLines trims each context line to the per-line budget. A
+// context line has no match to centre on, so it keeps the head.
+func capContextLines(lines []string) []string {
+	for i, l := range lines {
+		lines[i] = CapHitLine(l, 0, 0)
+	}
+	return lines
 }
 
 func contextBefore(lines []string, idx, n int) []string {

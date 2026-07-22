@@ -106,7 +106,7 @@ func usesEdge(selector string) bool {
 
 const lexicalEdgeNote = "\nnote: ::in/::out edges are name-keyed (lexical) here — a far end may be a\n" +
 	"same-named symbol, not the resolved one. The MCP server resolves via child\n" +
-	"LSPs and labels each edge (conf: lsp|lexical); `query` does not.\n"
+	"LSPs and labels each edge (conf: lsp|lexical|unsettled); `query` does not.\n"
 
 // maxFarEnds caps how many far ends one ref row spells out before it
 // starts counting them instead.

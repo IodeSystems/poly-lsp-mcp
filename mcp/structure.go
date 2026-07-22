@@ -399,13 +399,14 @@ func (s *Server) enclosingSymPath(absFile string, line int, cache map[string][]s
 	bestSpan := 1 << 30
 	bestDots := -1
 	for _, sym := range syms {
-		// An `argument` is a leaf DECLARATION, not an enclosing scope:
-		// a parameter sits on its callable's signature line with a
-		// zero-line span, so without this it would out-compete the
-		// callable itself for every hit on that line (and change what
-		// the legacy search / node_references report). "Which symbol
+		// `argument` and `return` are leaf DECLARATIONS, not enclosing
+		// scopes: both sit on their callable's signature line with a
+		// zero-line span, so without this they would out-compete the
+		// callable itself for every hit on that line (a call or type in
+		// `return B()` / the result type), stealing the site's
+		// attribution and the ref's enclosing symbol. "Which symbol
 		// encloses this line" should answer with the callable.
-		if sym.Class == "argument" {
+		if sym.Class == "argument" || sym.Class == "return" {
 			continue
 		}
 		if sym.DeclStartLine <= line && line <= sym.DeclEndLine {

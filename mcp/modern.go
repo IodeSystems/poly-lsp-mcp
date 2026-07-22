@@ -219,9 +219,10 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 			}
 			m["type"] = cls
 			// What settled this edge. A caller acting on "who calls Save"
-			// needs to know whether a language server said so or a name
-			// matched — and "lexical" with several far ends is a list of
-			// CANDIDATES, not a fact.
+			// needs to know whether a language server said so (lsp), the
+			// name is unique so the match is certain anyway (lexical), or
+			// it is an "unsettled" guess whose several far ends are a
+			// CANDIDATE LIST, not a fact.
 			m["conf"] = n.refConf
 			far := make([]string, 0, len(n.refFar))
 			for _, f := range n.refFar {

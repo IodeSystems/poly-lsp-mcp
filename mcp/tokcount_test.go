@@ -55,7 +55,15 @@ import (
 // 1160 → 1050: the description compacted to surprises-and-footguns-first
 // (the FOOTGUNS block + recipes ARE the description; everything derivable
 // from CSS priors got cut — the priors are correct now, that's the point).
-const modernTokenBudget = 1050
+// 1050 → 1160: features shipped after the compaction re-added bytes, each
+// earning its attention — the node_edit RENAME-SAFETY block ("use the
+// rename op, don't hand-edit"), which the --validate benchmark measured as
+// THE lever that put Qwen on the atomic rename op 10/10 (broken=0 without
+// even validating); the node_query `budget` arg (Nms/Nops) + its blow note;
+// ::in.return.type / precision `conf`. Re-audited at 1133: every line is a
+// footgun or a measured recipe, no sprawl to shave. Back to the prior
+// high-water ceiling, not past it.
+const modernTokenBudget = 1160
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

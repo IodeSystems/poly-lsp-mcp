@@ -89,7 +89,7 @@ type treeNode struct {
 	refDir  string      // "in" | "out"
 	refKind string      // "call" | "type" | "import" | ""  (the KIND axis)
 	refPos  string      // "return" | "param" | "field" | "var" | ""  (the POSITION axis)
-	refConf string      // refLexical (name-keyed guess) | refLSP (a child LSP settled it)
+	refConf string      // refLexical (name-unique) | refLSP (child LSP settled it) | refUnsettled (ambiguous guess)
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
 
 	// The node's generated ref children, materialized lazily and kept OUT
@@ -251,6 +251,17 @@ type engine struct {
 	lspLeft     int
 	lspAsked    int
 	lspResolved int
+
+	// Per-transitive-walk precision, for the hop-aware precisionNote: the
+	// deepest hop any repeated ::in/::out reached, the shallowest hop that
+	// carried an unsettled edge, and how many distinct unsettled edges the
+	// walk crossed. hopCounted dedupes a ref node reached at more than one
+	// hop (a bounded walk can revisit). Set only for genuinely repeated
+	// edge elements ({m,}/{m>1}); a single hop leans on the aggregate line.
+	maxHopReached    int
+	unsettledFromHop int
+	transUnsettled   int
+	hopCounted       map[*treeNode]bool
 
 	// fragCache: minted ::grep fragments per host per pattern, so the
 	// same host+pattern yields the SAME nodes across a query (set
@@ -679,6 +690,7 @@ const (
 	pseudoEmpty                          // :empty[(sel)]     — ∄ claim
 	pseudoNot                            // :not(sel)         — the node ITSELF does not match (CSS-true)
 	pseudoIs                             // :is(sel)          — the node ITSELF matches (CSS-true)
+	pseudoArity                          // :arity(m,n)       — count of `argument` children in [m,n]
 )
 
 func (k selPseudoKind) isMove() bool  { return k == pseudoParents }
@@ -688,6 +700,10 @@ type selPseudo struct {
 	kind  selPseudoKind
 	grep  *grepSpec    // pseudoContains only
 	inner selectorList // nil on a bare :parents (= :parents(*)) or a bare claim
+
+	// arityLo/arityHi bound pseudoArity's `argument`-child count. arityHi
+	// < 0 means unbounded (:arity(m,) — m-or-more).
+	arityLo, arityHi int
 }
 
 // A compound's pseudo chain is a PIPELINE over the node it positionally
@@ -1627,6 +1643,16 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 		}
 		comp.pseudos = append(comp.pseudos, selPseudo{kind: pseudoAnnotated, grep: g})
 		return nil
+	case "arity":
+		// Structural (not edge-guessed): the count of `argument` children.
+		// :arity(2) exactly two, :arity(2,) two-or-more, :arity(0,3) up to
+		// three, :arity(0,0) no-arg.
+		lo, hi, err := p.parseParenRange("arity")
+		if err != nil {
+			return err
+		}
+		comp.pseudos = append(comp.pseudos, selPseudo{kind: pseudoArity, arityLo: lo, arityHi: hi})
+		return nil
 	case "depth":
 		return fmt.Errorf(":depth is gone — {m,n} REPEATS (regex semantics): func{2} = func > func; 'within 1..3 levels' = \"> *{0,2} > func\". Pass selector \"?\" for the grammar.")
 	default:
@@ -1745,6 +1771,44 @@ func (p *modSelParser) parseBraceRange() (lo, hi int, err error) {
 	}
 	if p.peek() != '}' {
 		return 0, 0, p.errf("'}' to close the {m,n} range")
+	}
+	p.i++
+	return lo, hi, nil
+}
+
+// parseParenRange parses a pseudo's "(m)", "(m,)" or "(m,n)" argument —
+// the same m,n shape as {m,n} but parenthesized, for count-valued
+// pseudos like :arity. hi < 0 means unbounded ((m,) = m-or-more).
+func (p *modSelParser) parseParenRange(name string) (lo, hi int, err error) {
+	if p.peek() != '(' {
+		return 0, 0, p.errf("'(' after :" + name)
+	}
+	p.i++ // '('
+	p.skipWS()
+	lo, ok := p.readNonNegInt()
+	if !ok {
+		return 0, 0, p.errf("a count, e.g. :" + name + "(2) or :" + name + "(0,3)")
+	}
+	hi = lo
+	p.skipWS()
+	if p.peek() == ',' {
+		p.i++
+		p.skipWS()
+		if p.peek() == ')' {
+			hi = -1 // (m,) — unbounded
+		} else {
+			hi, ok = p.readNonNegInt()
+			if !ok {
+				return 0, 0, p.errf("a max count or ')' (as in :" + name + "(2,) = two-or-more)")
+			}
+			if hi < lo {
+				return 0, 0, fmt.Errorf(":%s(%d,%d): max must be >= min", name, lo, hi)
+			}
+			p.skipWS()
+		}
+	}
+	if p.peek() != ')' {
+		return 0, 0, p.errf("')' to close :" + name)
 	}
 	p.i++
 	return lo, hi, nil
@@ -1871,7 +1935,7 @@ var selectorClasses = map[string]bool{
 	"func": true, "method": true, "type": true, "struct": true,
 	"interface": true, "class": true, "const": true, "var": true,
 	"field": true, "enum": true, "ctor": true, "module": true,
-	"import": true, "argument": true, "annotation": true,
+	"import": true, "argument": true, "annotation": true, "return": true,
 	// NB: no "text" — that class is the legacy structure tool's
 	// whole-file fallback for grammar-less files, never emitted by
 	// FileSymbols. In this tree such a file is simply a .file node with
@@ -1963,9 +2027,11 @@ COMPOSING — one hop at a time, left to right:
 
 SPEC
   TAGS   project dir file func method type struct interface class const var field enum ctor
-         module import argument annotation, * — fixed; can't invent one. Lang class: file.go.
+         module import argument annotation return, * — fixed; can't invent one. Lang class: file.go.
          annotation = a decorator (@route, py/ts) or struct-tag key (json, go), a CHILD of the
          symbol it marks. func:any(annotation#route). #route = leaf, #'app.route' = as written.
+         return = a callable's result TYPE, a CHILD of it. func:any(return#error); Go (T,error)
+         splits into one return child per type. #error = leaf, #'io.Writer' = via the full alias.
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
   ATTR   [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES
@@ -1975,8 +2041,8 @@ SPEC
          AND  is just two attrs — [path*=ma][path*=in] — CSS conjoins a compound.
          Non-test funcs: func:not([path~=test|smoke]).
          #id spans both axes and adds the "<file>#<sym>" address; it is never a regex.
-  CONF   every edge row carries conf: "lsp" = a child LSP resolved it; "lexical" = name-keyed
-         (scope-filtered). A lexical row with several to:/from: is a CANDIDATE LIST, not a fact.
+  CONF   edge conf: "lsp" = LSP-resolved; "lexical" = name UNIQUE (certain); "unsettled" =
+         several same-named decls, no LSP — a GUESS whose to:/from: is a CANDIDATE LIST, not a fact.
   EDGES  ::in / ::out, on TWO orthogonal class axes (bare = any): KIND .call/.type/.import
          (what it is) and POSITION .return/.param/.field/.var (where it sits). They compose:
          #'S'::in.return.type = S used as a return type, .param.type = as a param type. The
@@ -1999,6 +2065,8 @@ SPEC
          RELATIVE (CSS-nesting): leading tag = descendant, leading ::/pseudo = the node, '>' =
          child, & = the node, :root re-anchors.
   SELF   :not(sel)/:is(sel) test the node ITSELF (CSS): func:not(#main), file > :is(func,method).
+  ARITY  :arity(m,n) filters by argument-child count — :arity(2) exactly two, :arity(2,)
+         two-or-more, :arity(0,0) no-arg. Structural (not edge-resolved). func:arity(4,).
   ORDER  :first/:last — this position's matches, per anchor, document order.
   REP    {m,n} repeats an element or (group), child-joined: func{2} = func>func; within 1..3
          levels = "> *{0,2} > x". {m,} unbounded (safe: cycle-guarded + work budget).
@@ -2717,7 +2785,15 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 	if el.max == 0 {
 		return out // {0}: only the skip path exists (the element vanishes)
 	}
+	// A repeated edge element is a transitive walk; record per-hop
+	// precision so precisionNote can say where the unsettled edges begin
+	// (the cap is spent shallowest-first). A single hop leans on the
+	// aggregate line instead.
+	trackHops := el.comp != nil && el.comp.isRef && (el.max < 0 || el.max > 1)
 	frontier := e.evalInstance(tips, el, min1, max1, relaxed)
+	if trackHops {
+		e.noteHop(1, frontier)
+	}
 	if el.min <= 1 {
 		for n := range frontier {
 			out[n] = true
@@ -2747,6 +2823,9 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 			}
 			next = pruned
 		}
+		if trackHops {
+			e.noteHop(count, next)
+		}
 		if count >= el.min {
 			for n := range next {
 				out[n] = true
@@ -2755,6 +2834,31 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 		frontier = next
 	}
 	return out
+}
+
+// noteHop records one hop of a transitive edge walk: how deep it reached
+// and, if any of this hop's edges are unsettled guesses, the shallowest
+// hop at which that first happens (unsettled edges cluster at the deep
+// hops, where the LSP cap is already spent). refs are the ref NODES the
+// hop produced; a node reached at more than one hop is counted once.
+func (e *engine) noteHop(hop int, refs map[*treeNode]bool) {
+	if len(refs) == 0 {
+		return // an empty hop crossed nothing; the walk terminated
+	}
+	e.maxHopReached = max(e.maxHopReached, hop)
+	if e.hopCounted == nil {
+		e.hopCounted = map[*treeNode]bool{}
+	}
+	for r := range refs {
+		if r.refConf != refUnsettled || e.hopCounted[r] {
+			continue
+		}
+		e.hopCounted[r] = true
+		e.transUnsettled++
+		if e.unsettledFromHop == 0 || hop < e.unsettledFromHop {
+			e.unsettledFromHop = hop
+		}
+	}
 }
 
 // evalInstance evaluates ONE instance of an element from each tip.
@@ -2930,7 +3034,17 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 		if !relaxed && !g.matchLine(l) {
 			continue
 		}
-		hit := &grepHit{Line: startLine + i, Text: l}
+		// Elide a long matched line around the match so one generated
+		// line can't blow the token budget (the same guard the `search`
+		// tool applies). -v has no span to centre on; keep the head.
+		ms, me := 0, 0
+		if !g.invert {
+			if loc := g.re.FindStringIndex(l); loc != nil {
+				ms, me = loc[0], loc[1]
+			}
+		}
+		capped := symbols.CapHitLine(l, ms, me)
+		hit := &grepHit{Line: startLine + i, Text: capped}
 		// Context is clipped to the host's own span — a fragment never
 		// leaks its neighbours' lines.
 		if g.before > 0 {
@@ -2939,7 +3053,7 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 				lo = 0
 			}
 			if lo < i {
-				hit.Before = append([]string(nil), lines[lo:i]...)
+				hit.Before = capGrepContext(lines[lo:i])
 			}
 		}
 		if g.after > 0 {
@@ -2948,17 +3062,29 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 				hi = len(lines)
 			}
 			if i+1 < hi {
-				hit.After = append([]string(nil), lines[i+1:hi]...)
+				hit.After = capGrepContext(lines[i+1 : hi])
 			}
 		}
 		frags = append(frags, &treeNode{
-			class: "fragment", leaf: strings.TrimSpace(l), full: strings.TrimSpace(l),
+			class: "fragment", leaf: strings.TrimSpace(capped), full: strings.TrimSpace(capped),
 			file: h.file, abs: h.abs, at: [2]int{hit.Line, hit.Line},
 			parent: h, depth: h.depth + 1, frag: hit,
 			fileOrd: h.fileOrd, symOrd: h.symOrd,
 		})
 	}
 	return frags
+}
+
+// capGrepContext copies context lines and trims each to the per-line
+// budget (no match to centre on — keep the head), so a fragment's
+// neighbours can't reintroduce the long-line hazard the matched line
+// dodges.
+func capGrepContext(src []string) []string {
+	out := make([]string, len(src))
+	for i, l := range src {
+		out[i] = symbols.CapHitLine(l, 0, 0)
+	}
+	return out
 }
 
 // commentMatches returns each host's ::comment node — the joined doc
@@ -3209,6 +3335,20 @@ func setsEqual(a, b map[*treeNode]bool) bool {
 	return true
 }
 
+// argCount returns how many `argument` children a node declares — the
+// structural signature size :arity filters on. A non-callable (no
+// argument children) is zero, so :arity(0,0) is a valid "no-arg" test on
+// anything.
+func (e *engine) argCount(n *treeNode) int {
+	c := 0
+	for _, k := range e.kids(n) {
+		if k.class == "argument" {
+			c++
+		}
+	}
+	return c
+}
+
 // pseudoHolds evaluates one filter pseudo against one node. The inner
 // selector is RELATIVE to n (see selRel), so :any(func) asks about n's
 // descendants and :any(:parents(S)) about n's own referrers.
@@ -3216,6 +3356,9 @@ func (e *engine) pseudoHolds(n *treeNode, ps *selPseudo) bool {
 	switch ps.kind {
 	case pseudoContains:
 		return e.nodeContains(n, ps.grep)
+	case pseudoArity:
+		c := e.argCount(n)
+		return c >= ps.arityLo && (ps.arityHi < 0 || c <= ps.arityHi)
 	case pseudoAnnotated:
 		return e.nodeAnnotated(n, ps.grep)
 	case pseudoWhere, pseudoAny:
@@ -3333,8 +3476,9 @@ func (e *engine) upstream(tips map[*treeNode]bool) map[*treeNode]bool {
 // under the innermost symbol enclosing the site (the source), ::in
 // under the target — and the far end is the node's only child. Edges
 // ride the lexical index, so they are NAME-keyed (same-named symbols
-// share edges) and carry refConf "lexical"; a child-LSP precision pass
-// can upgrade individual edges to "lsp" later without reshaping.
+// share edges) and carry refConf "lexical" (name-unique) or "unsettled"
+// (ambiguous); a child-LSP precision pass can upgrade individual edges to
+// "lsp" later without reshaping.
 
 // refSite is one classified, non-declaration occurrence of a name.
 type refSite struct {
@@ -3354,6 +3498,14 @@ type refSite struct {
 func (e *engine) refNodes(n *treeNode, dir string) []*treeNode {
 	switch n.class {
 	case "project", "dir", "ref":
+		return nil
+	case "return":
+		// A `return` node is a type PROJECTION, not an edge participant.
+		// Its leaf is the return TYPE's name, so it answers to #Error the
+		// same as the type's declaration — but it has no edges of its own;
+		// building them would double every `#Type::in.type` (the type decl
+		// AND each return projection both scanning the same sites). The
+		// type USAGE it marks is already an incoming edge on the type.
 		return nil
 	}
 	if dir == "out" {
@@ -3767,6 +3919,14 @@ func (e *engine) isDeclSite(absFile string, line, col int, name string, cache ma
 		cache[absFile] = syms
 	}
 	for _, sym := range syms {
+		// A `return` node is a PROJECTION of a type usage — its name span
+		// sits on the return-type occurrence, which is a reference, not a
+		// declaration. Counting it here would delete that ref (and misfile
+		// the position axis). It declares nothing the name-keyed edge index
+		// should treat as a decl.
+		if sym.Class == "return" {
+			continue
+		}
 		if lastSeg(sym.Sym) == name && sym.NameStartLine == line && sym.NameStartCol == col {
 			return true
 		}

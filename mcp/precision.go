@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -29,17 +30,25 @@ import (
 //     the lexical candidates stand. A precision pass that could add
 //     edges would be a second, unreviewed graph builder.
 //
-// Everything here degrades to lexical: no manager (the `query` CLI), no
-// child for the language (tree-sitter-only), a timeout, a dead child. It
-// degrades LOUDLY — refConf carries "lsp" vs "lexical" per edge, and the
-// result says how many of each it is made of.
+// Everything here degrades: no manager (the `query` CLI), no child for
+// the language (tree-sitter-only), a timeout, a dead child. It degrades
+// LOUDLY — refConf carries one of three states per edge, and the result
+// says how many of each it is made of.
 
 // An edge's refConf says what settled it — never decoration: a caller
 // acting on "who calls Save" needs to know whether that is a language
-// server's answer or a name match.
+// server's answer, a name that is unique anyway, or an unsettled guess.
+//
+// The split matters: "lexical" and "unsettled" were once one value, but
+// they are opposites. A name-unique edge is CERTAIN without an LSP; an
+// ambiguous edge no LSP could settle is a GUESS listing candidates. On a
+// transitive walk the per-query cap is spent shallowest-first, so the
+// unsettled edges cluster at the deep hops — and only a distinct value
+// can say "these distant nodes are the least certain."
 const (
-	refLexical = "lexical" // name-keyed, scope-filtered; may be >1 far end
-	refLSP     = "lsp"     // a child LSP picked the far end
+	refLexical   = "lexical"   // name is UNIQUE in the workspace — certain without an LSP
+	refLSP       = "lsp"       // a child LSP picked the far end
+	refUnsettled = "unsettled" // >1 same-named decl, no LSP resolution — a guess (lists candidates)
 )
 
 // defaultLSPResolveCap bounds LSP round-trips per query. A round-trip is
@@ -154,24 +163,25 @@ func firstDefinition(raw json.RawMessage) (string, int, bool) {
 // happens.
 func (e *engine) refineFar(far []*treeNode, siteAbs string, line, col int) ([]*treeNode, string) {
 	if len(far) < 2 {
-		return far, refLexical // nothing ambiguous to settle
+		return far, refLexical // one candidate — name-unique, certain
 	}
 	if e.lspLeft <= 0 || !e.s.lspAvailable(siteAbs) {
-		return far, refLexical
+		return far, refUnsettled // ambiguous, nothing to settle it — a guess
 	}
 	e.lspLeft--
 	e.lspAsked++
 	defAbs, defLine, ok := e.s.resolveDefinition(siteAbs, line, col)
 	if !ok {
-		return far, refLexical
+		return far, refUnsettled
 	}
 	defRel := relPath(defAbs, e.s.getRoot())
 	picked := pickByDefinition(far, defRel, defLine)
 	if picked == nil {
 		// The LSP pointed outside the modelled tree (stdlib, vendor,
 		// generated). Narrowing to nothing would DELETE a real edge, so
-		// the lexical candidates stand.
-		return far, refLexical
+		// the candidates stand — but which one (if any) is right is
+		// unknown, so this is unsettled, not certain.
+		return far, refUnsettled
 	}
 	e.lspResolved++
 	return []*treeNode{picked}, refLSP
@@ -194,16 +204,16 @@ func (e *engine) refineFar(far []*treeNode, siteAbs string, line, col int) ([]*t
 // uncapped, timed out, unparseable.
 func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambiguous bool) (keep bool, conf string) {
 	if !ambiguous {
-		return true, refLexical // only one decl answers to this name
+		return true, refLexical // only one decl answers to this name — certain
 	}
 	if e.lspLeft <= 0 || !e.s.lspAvailable(siteAbs) {
-		return true, refLexical
+		return true, refUnsettled // ambiguous, nothing to settle it — a guess
 	}
 	e.lspLeft--
 	e.lspAsked++
 	defAbs, defLine, ok := e.s.resolveDefinition(siteAbs, line, col)
 	if !ok {
-		return true, refLexical
+		return true, refUnsettled
 	}
 	e.lspResolved++
 	defRel := relPath(defAbs, e.s.getRoot())
@@ -214,20 +224,41 @@ func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambig
 }
 
 // precisionNote reports what this query's edges are made of, or "" when
-// no edges were crossed. The cap is a partial-result path like the work
-// budget, so it says so and names the lever.
+// there is nothing precision-relevant to say. Three facts can appear: how
+// many ambiguous edges an LSP settled (and whether the cap ran out), and
+// — for a transitive walk — at which HOP the unsettled edges begin, since
+// the cap is spent shallowest-first and distant nodes are the least
+// certain. It says what IS precise and what wasn't.
 func (e *engine) precisionNote() string {
-	if e.lspAsked == 0 && e.lspResolved == 0 {
+	var parts []string
+	if e.lspAsked > 0 || e.lspResolved > 0 {
+		if e.lspLeft <= 0 {
+			parts = append(parts, fmt.Sprintf("%d ambiguous edge(s) settled by a child "+
+				"LSP, then the per-query cap ran out — remaining ambiguous edges are "+
+				"UNSETTLED (name-keyed candidates, not resolved references). Narrow the "+
+				"selector to bring the rest under the cap.", e.lspResolved))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d ambiguous edge(s) settled by a child "+
+				"LSP; the rest were name-unique (lexical) or unsettled.", e.lspResolved))
+		}
+	}
+	if e.maxHopReached > 1 {
+		if e.transUnsettled > 0 {
+			parts = append(parts, fmt.Sprintf("This walk crossed up to %d hops; %d "+
+				"unsettled edge(s) begin at hop %d — the LSP cap is spent shallowest-first, "+
+				"so distant nodes are the least certain.", e.maxHopReached, e.transUnsettled,
+				e.unsettledFromHop))
+		} else {
+			parts = append(parts, fmt.Sprintf("This walk crossed up to %d hops, all "+
+				"LSP-resolved or name-unique.", e.maxHopReached))
+		}
+	}
+	if len(parts) == 0 {
 		return ""
 	}
-	if e.lspLeft <= 0 {
-		return fmt.Sprintf("%d ambiguous edge(s) settled by a child LSP, then the "+
-			"per-query cap ran out — any remaining edges are LEXICAL candidates "+
-			"(name-keyed, scope-filtered), not resolved references. Narrow the "+
-			"selector to bring the rest under the cap.", e.lspResolved)
-	}
-	return fmt.Sprintf("%d ambiguous edge(s) settled by a child LSP; the rest were "+
-		"unambiguous or lexical. Each row's conf says which.", e.lspResolved)
+	parts = append(parts, "Each edge's conf says which: lsp (resolved) | lexical "+
+		"(name-unique, certain) | unsettled (a guess).")
+	return strings.Join(parts, " ")
 }
 
 // pickByDefinition finds the candidate whose source span contains the

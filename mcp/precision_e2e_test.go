@@ -164,9 +164,11 @@ func TestPrecisionDropsCoincidentalIncomingEdge(t *testing.T) {
 	}
 }
 
-// No manager (the `query` CLI's shape) must still answer — lexically,
-// and saying so. Precision is an upgrade, never a dependency.
-func TestWithoutLSPEdgesStayLexicalAndSaySo(t *testing.T) {
+// No manager (the `query` CLI's shape) must still answer — and, with no
+// LSP to settle the collision, say so honestly: Run's call to the
+// ambiguous `Save` (two same-named decls) is UNSETTLED, not a certain
+// lexical hit. Precision is an upgrade, never a dependency.
+func TestWithoutLSPEdgesStayUnsettledAndSaySo(t *testing.T) {
 	dir := writePrecisionFixture(t)
 	cfg, _, err := config.LoadOrDefault("nonexistent.yaml") // defaults
 	if err != nil {
@@ -190,11 +192,13 @@ func TestWithoutLSPEdgesStayLexicalAndSaySo(t *testing.T) {
 	}
 	rows := e.evaluate(list)
 	if len(rows) == 0 {
-		t.Fatal("no manager must still produce lexical edges")
+		t.Fatal("no manager must still produce edges")
 	}
+	// Run's only outgoing call is `Save`, which two packages declare — an
+	// ambiguity nothing here can settle, so it is unsettled, not lexical.
 	for _, r := range rows {
-		if r.refConf != refLexical {
-			t.Errorf("with no child LSP every edge is lexical; got conf=%q", r.refConf)
+		if r.refConf != refUnsettled {
+			t.Errorf("an ambiguous edge with no child LSP is a GUESS (unsettled); got conf=%q", r.refConf)
 		}
 	}
 	if e.lspAsked != 0 {

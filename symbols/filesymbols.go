@@ -175,6 +175,10 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 			// then also drag in body-local declarations).
 			appendParamSymbols(language, in.node, full, in.class, content, &out)
 
+			// Return TYPES become `.return` children of their callable,
+			// so `func:any(return#error)` composes like containment.
+			appendReturnSymbols(language, in.node, full, in.class, content, &out)
+
 			// Decorators / annotations / struct tags become `.annotation`
 			// children of the symbol they mark — the SYMBOL carrying the
 			// mark, addressable and composable, not a comment line.
@@ -264,6 +268,120 @@ func appendParamSymbols(lang string, node *sitter.Node, owner, class string, con
 		sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = nodeLineCols(nameNode)
 		*out = append(*out, sym)
 	}
+}
+
+// ------------------------------------------------------- .return nodes
+
+// appendReturnSymbols emits one Class:"return" child per declared return
+// TYPE of a callable, so `func:any(return#error)` = funcs returning error
+// and `#'T.M' > return` lists a method's result types. Like .argument
+// nodes these are synthesized off the owning node's result/return_type
+// field, not walked.
+//
+// A Go multi-return `(int, error)` becomes TWO return children — one per
+// type — so `return#error` matches it, which is the whole point for Go's
+// `(T, error)` idiom. TS/Python keep a single node (a union `A | B` is one
+// type expression). Each node answers to its type's LEAF (the last dotted
+// segment: io.Writer -> Writer) via its Sym path, and to the FULL type
+// (io.Writer) via its Alias — mirroring how .annotation carries both.
+func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, content []byte, out *[]Symbol) {
+	if !classTakesParams(class) {
+		return
+	}
+	nodes := returnTypeNodes(lang, node)
+	if len(nodes) == 0 {
+		return
+	}
+	type retInfo struct {
+		seg, alias string
+		node       *sitter.Node
+	}
+	var infos []retInfo
+	for _, n := range nodes {
+		full := collapseType(n.Content(content))
+		if full == "" {
+			continue
+		}
+		seg := full
+		alias := ""
+		if i := strings.LastIndex(full, "."); i >= 0 {
+			// A qualified type (io.Writer): the path segment must be
+			// dot-free, so the leaf is the last component and the full
+			// form is preserved as the alias.
+			seg = full[i+1:]
+			alias = full
+		}
+		if seg == "" {
+			continue
+		}
+		infos = append(infos, retInfo{seg: seg, alias: alias, node: n})
+	}
+	counts := map[string]int{}
+	for _, in := range infos {
+		counts[in.seg]++
+	}
+	seen := map[string]int{}
+	for _, in := range infos {
+		seen[in.seg]++
+		seg := renderSegment(in.seg, seen[in.seg], counts[in.seg])
+		sym := Symbol{Sym: owner + "." + seg, Class: "return", Alias: in.alias}
+		sym.DeclStartLine, sym.DeclStartCol, sym.DeclEndLine, sym.DeclEndCol = nodeLineCols(in.node)
+		sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = nodeLineCols(in.node)
+		*out = append(*out, sym)
+	}
+}
+
+// returnTypeNodes resolves the individual return-TYPE nodes of a callable.
+// Go's result field may be a bare type or a parameter_list (the tuple
+// case, split into one node per element); TS/Python carry a single
+// return_type (unwrapped from TS's `: T` type_annotation).
+func returnTypeNodes(lang string, node *sitter.Node) []*sitter.Node {
+	switch lang {
+	case "go":
+		res := node.ChildByFieldName("result")
+		if res == nil {
+			return nil
+		}
+		if res.Type() != "parameter_list" {
+			return []*sitter.Node{res}
+		}
+		var out []*sitter.Node
+		cnt := int(res.NamedChildCount())
+		for i := 0; i < cnt; i++ {
+			c := res.NamedChild(i)
+			if ty := c.ChildByFieldName("type"); ty != nil {
+				out = append(out, ty)
+			} else {
+				out = append(out, c)
+			}
+		}
+		return out
+	case "typescript":
+		rt := node.ChildByFieldName("return_type")
+		if rt == nil {
+			return nil
+		}
+		// The field is a `type_annotation` (": T"); the type itself is
+		// its last named child.
+		if rt.Type() == "type_annotation" && rt.NamedChildCount() > 0 {
+			return []*sitter.Node{rt.NamedChild(int(rt.NamedChildCount()) - 1)}
+		}
+		return []*sitter.Node{rt}
+	case "python":
+		rt := node.ChildByFieldName("return_type")
+		if rt == nil {
+			return nil
+		}
+		return []*sitter.Node{rt}
+	}
+	return nil
+}
+
+// collapseType renders a type node's source as a single trimmed line,
+// collapsing internal runs of whitespace so a multi-line signature still
+// yields one clean leaf.
+func collapseType(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // ------------------------------------------------------- .annotation nodes

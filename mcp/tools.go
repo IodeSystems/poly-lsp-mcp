@@ -362,7 +362,7 @@ func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		ctxLines = *p.ContextLines
 	}
 
-	hits, dropped, err := symbols.Search(root, re, symbols.SearchOptions{
+	hits, dropped, skippedGenerated, err := symbols.Search(root, re, symbols.SearchOptions{
 		Glob:         p.Glob,
 		Limit:        limit,
 		ContextLines: ctxLines,
@@ -415,6 +415,10 @@ func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	}
 	if dropped > 0 {
 		payload["droppedMatches"] = dropped
+	}
+	if skippedGenerated > 0 {
+		payload["skippedGeneratedFiles"] = skippedGenerated
+		payload["note"] = fmt.Sprintf("%d file(s) with a very long line (generated/minified) were skipped; their matches would blow the token budget. Narrow with glob= or path=, or grep the specific file node with node_query ::grep.", skippedGenerated)
 	}
 	return jsonContent(payload), false, nil
 }

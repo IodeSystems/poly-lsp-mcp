@@ -544,26 +544,21 @@ func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambig
 	return false, refLSP // resolves to a different declaration
 }
 
-// confirmSelfEdge decides whether an out.call self-edge (far end == n) is a
-// REAL recursive call, not a name collision. If the precision pass already
-// resolved this edge to n (conf lsp), it is trusted. Otherwise — a
-// name-unique or unsettled self-edge, never LSP-checked at build — the site
-// is resolved now and confirmed only if the definition lands inside n's own
-// span. With no LSP to ask, it returns false and marks the query
-// under-resolved, so :recursive degrades to "cannot confirm", never to a
-// silent false negative dressed as a real answer.
-func (e *engine) confirmSelfEdge(n *treeNode, ref *treeNode) bool {
-	if ref.refConf == refLSP {
-		return true // the precision pass already resolved this edge to n
-	}
+// confirmSelfCall decides whether a call to n's OWN name inside its body is a
+// REAL recursive call, not a name collision (an interface method of the same
+// name). The site is resolved by the child LSP and confirmed only if the
+// definition lands inside n's own span. With no LSP to ask, it returns false
+// and marks the query under-resolved, so :recursive degrades to "cannot
+// confirm", never to a silent false negative dressed as a real answer.
+func (e *engine) confirmSelfCall(n *treeNode, line, col int) bool {
 	e.ensureLSPCap()
-	if e.lspLeft <= 0 || !e.s.lspAvailable(ref.abs) {
+	if e.lspLeft <= 0 || !e.s.lspAvailable(n.abs) {
 		e.recursiveUnconfirmed = true
 		return false
 	}
 	e.lspLeft--
 	e.lspAsked++
-	defAbs, defLine, ok := e.s.resolveDefinition(ref.abs, ref.at[0], ref.refCol)
+	defAbs, defLine, ok := e.s.resolveDefinition(n.abs, line, col)
 	if !ok {
 		e.recursiveUnconfirmed = true
 		return false

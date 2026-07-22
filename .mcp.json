@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "poly-lsp": {
+      "command": "./bin/dev",
+      "args": ["mcp", "--root", ".", "--validate"]
+    }
+  }
+}

@@ -98,7 +98,6 @@ type treeNode struct {
 	refKind string      // "call" | "type" | "import" | ""  (the KIND axis)
 	refPos  string      // "return" | "param" | "field" | "var" | ""  (the POSITION axis)
 	refConf string      // refLexical (name-unique) | refLSP (child LSP settled it) | refUnsettled (ambiguous guess)
-	refCol  int         // the SITE's column — kept so :recursive can re-resolve the site via the LSP
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
 
 	// The node's generated ref children, materialized lazily and kept OUT
@@ -3563,14 +3562,20 @@ func (e *engine) isRecursive(n *treeNode) bool {
 	default:
 		return false // only callables call
 	}
-	for _, ref := range e.refNodes(n, "out") {
-		if ref.refKind != "call" {
+	// Only a call to the func's OWN name can be a self-edge, so scan just
+	// those sites (a handful, usually zero) and resolve THEM — instead of
+	// building and LSP-resolving every outgoing call. The old path made a
+	// broad `func:recursive` exhaust the round-trip cap on calls it did not
+	// care about (dogfooding: 700 round-trips, cap tripped, under-resolved).
+	for _, site := range e.fileSites(n.file) {
+		if site.kind != "call" || site.name != n.leaf {
 			continue
 		}
-		for _, far := range ref.refFar {
-			if far == n && e.confirmSelfEdge(n, ref) {
-				return true
-			}
+		if site.encl != n.sym || site.line < n.at[0] || site.line > n.at[1] {
+			continue // the call must sit inside n's own body
+		}
+		if e.confirmSelfCall(n, site.line, site.col) {
+			return true
 		}
 	}
 	return false
@@ -3923,8 +3928,7 @@ func (e *engine) buildOutRefs(n *treeNode) {
 		far, conf := e.refineFar(far, n.abs, site.line, site.col)
 		n.refsOut = append(n.refsOut, &treeNode{
 			class: "ref", refDir: "out", refKind: site.kind, refPos: site.pos, refConf: conf,
-			refCol: site.col,
-			leaf:   site.name, full: site.name,
+			leaf: site.name, full: site.name,
 			file: n.file, abs: n.abs, at: [2]int{site.line, site.line},
 			parent: n, depth: n.depth + 1, refFar: far,
 			fileOrd: n.fileOrd, symOrd: n.symOrd,
@@ -3996,8 +4000,7 @@ func (e *engine) buildInRefs(n *treeNode) {
 		}
 		n.refsIn = append(n.refsIn, &treeNode{
 			class: "ref", refDir: "in", refKind: hit.kind, refPos: hit.pos, refConf: conf,
-			refCol: hit.col,
-			leaf:   n.leaf, full: n.leaf,
+			leaf: n.leaf, full: n.leaf,
 			file: rel, abs: fnode.abs, at: [2]int{hit.line, hit.line},
 			parent: n, depth: n.depth + 1, refFar: []*treeNode{src},
 			fileOrd: n.fileOrd, symOrd: n.symOrd,

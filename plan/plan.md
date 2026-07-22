@@ -254,6 +254,19 @@ taught anything it's that MORE prose is worse, not better.
 home turf (autowork3 dead). Either find/build another real-agent vehicle, or
 accept the llm-bench peer result and let the roadmap ride on it.
 
+✅ **Dogfooding wired: `.mcp.json` registers poly-lsp as a NATIVE tool** for
+Claude Code in this repo (`./bin/dev mcp --root . --validate` — build chatter
+is stderr, stdout is clean JSON-RPC, verified). So the project develops
+itself with its own `node_query`/`node_read`/`node_edit` — the closest thing
+to the missing real-agent vehicle, and a standing dogfood. **First dogfood
+session already paid off**: driving the real MCP server surfaced the
+`:recursive` cost cliff (see Edges) that 100% test coverage missed — the
+edit/transaction UX and instructive help were confirmed excellent in real
+use, `:recursive` broad was noisy+incomplete, now fixed. "Complete" = the
+natural queries a model reaches for are cheap, quiet, and complete; tests
+prove correctness, dogfooding proves usability, and they diverge exactly at
+cost cliffs like this one.
+
 ◻ **Cost visibility + planning share an estimator.**
   - ◻ **Cardinality-order a descendant chain.** `A B` evaluates left-to-right;
     if B is far rarer than A, start from B and check ancestors. Needs the same
@@ -385,14 +398,20 @@ per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
     callable with a self-call the child LSP resolves back into its OWN span.
     Unblocked by the precision pass (the icebox parked it as lexically unsound:
     `func Write` calling `w.Write` is io.Writer's, not itself). `isRecursive`
-    walks `::out.call` for a self far end; `confirmSelfEdge` trusts an edge the
-    precision pass already resolved to it (conf lsp), else re-resolves the site
-    (name-unique self-edges are never LSP-checked at build) via the stored
-    `refCol`. No LSP ⇒ confirms nothing and SAYS so (`recursive` note / CLI
-    caveat), never a silent false negative. Bare only — mutual/cyclic rejects
-    an arg and points at `::out.call{1,}`. Tests: `TestRecursivePredicateLSPConfirmed`
-    (gopls: fib + method self-call yes; Write/Plain/mutual no),
-    `TestRecursiveWithoutLSPIsUnderResolved`.
+    scans ONLY the func's self-name call sites (`fileSites` filtered to
+    `kind==call && name==n.leaf` inside its body) and `confirmSelfCall`
+    resolves those via the LSP. No LSP ⇒ confirms nothing and SAYS so
+    (`recursive` note / CLI caveat), never a silent false negative. Bare only —
+    mutual/cyclic rejects an arg and points at `::out.call{1,}`. Tests:
+    `TestRecursivePredicateLSPConfirmed` (gopls), `TestRecursiveWithoutLSPIsUnderResolved`.
+    - ✅ **Cost-cliff fixed (DOGFOODING).** The first cut walked `::out.call`
+      and resolved EVERY outgoing call of every candidate — a broad
+      `func:recursive` on this repo did ~700 round-trips, tripped the cap, and
+      returned 1 match with an "UNDER-RESOLVED, may miss real recursion"
+      caveat. Only self-NAME calls can be self-edges, so scanning just those
+      dropped it to a handful of resolutions: broad `func:recursive` is now
+      2.2s and returns **10** (complete) — the cap exhaustion had been HIDING
+      9 of them. Found by actually driving the MCP server, not the tests.
   - ✅ **`.implements` — the first LSP-NATIVE edge kind.** `interface#Foo::in.implements
     > *` = implementers; `type#Bar::out.implements > *` = interfaces Bar
     satisfies. Go's structural typing has NO lexical clause to key on, so

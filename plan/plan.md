@@ -172,6 +172,17 @@ routes through the open batch; the handler is the state machine; semantic ops
 server, `editMu`-serialized. Tests: `TestEditBatchStageAndRollback` (mechanics,
 no-gopls), `TestEditBatchAtomicCommit` (gopls: sig+caller as one clean unit;
 lone breaking edit → rejected+help).
+  - ✅ **Semantic refactors (`params`/`return`/`rename`) can now JOIN a batch.**
+    `validationTxn` is batch-aware: when a `commit:false` batch is open,
+    `beginValidationTxn` returns a txn whose `record` feeds the batch's
+    originals and whose `verify` DEFERS to the batch commit — so a refactor's
+    multi-file edits stage into the same all-or-nothing unit as raw text edits.
+    (A nested rename inside a signature refactor already skips its own verify —
+    `ownTxn` — so it can't commit the batch early.) Now
+    `node_edit(#F, return:'string', commit:false)` + `node_edit(#F::body,
+    newText, commit:false)` + commit is one atomic sig+body change. Count is
+    handler-managed (one per staged node_edit). Test:
+    `TestEditBatchStagesSemanticRefactor` (gopls).
 
 ✅ **Editable `::signature` / `::body` — SHIPPED (on the txn).** `::body` is
 now the STATEMENTS between the braces (a rewrite replaces just the impl,

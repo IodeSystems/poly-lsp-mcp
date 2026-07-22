@@ -137,6 +137,57 @@ func TestEditBatchAtomicCommit(t *testing.T) {
 	}
 }
 
+// A SEMANTIC refactor (return-type change) staged alongside a ::body rewrite
+// commits as one atomic unit — each is a broken intermediate alone (the body
+// returns the wrong type / the sig expects the old type), the union is clean.
+func TestEditBatchStagesSemanticRefactor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("gopls e2e skipped under -short")
+	}
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not on PATH")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(path, []byte("package x\n\nfunc F() int {\n\treturn 1\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, _ := config.Default().Build()
+	srv := New(reg, dir, nil, nil)
+	srv.SetManager(multiplex.NewManager(reg))
+	srv.SetValidateEdits(true)
+	srv.SetDiagnosticWait(8 * time.Second)
+	sIn, cOut := io.Pipe()
+	cIn, sOut := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(sIn, sOut) }()
+	s := &mcpSession{t: t, srv: srv, srvIn: cOut, clientR: json.NewDecoder(cIn), clientW: cOut, done: done}
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// Stage the return-type refactor (semantic op — previously refused).
+	r := s.callTool("node_edit", map[string]any{"node": "a.go#F", "return": "string", "commit": false})
+	if m := txnDecode(t, r); m["staged"] != true {
+		t.Fatalf("a params/return refactor must be stageable now; got %+v", m)
+	}
+	// Stage the body rewrite to match.
+	s.callTool("node_edit", map[string]any{"node": `#'a.go#F'::body`, "newText": "\treturn \"hi\"", "commit": false})
+	// Commit the union.
+	r = s.callTool("node_edit", map[string]any{"commit": true})
+	if m := txnDecode(t, r); m["committed"] != true {
+		t.Fatalf("sig+body union is valid — must commit; got %+v", m)
+	}
+	b, _ := os.ReadFile(path)
+	if got := string(b); !containsAll(got, "func F() string", `return "hi"`) {
+		t.Fatalf("both the refactor and the body edit must land; got %q", got)
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !contains1(s, sub) {

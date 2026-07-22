@@ -1436,6 +1436,9 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	diags := s.collectDiagnostics(uris, contentsByURI, dopts)
 
 	oc := txn.verify(diags)
+	if c, isErr, handled := batchResponse(oc); handled {
+		return c, isErr, nil
+	}
 	if oc.Rejected {
 		rej := oc.rejection(oldName + " signature")
 		rej["kind"], rej["oldName"], rej["newName"], rej["results"] = "signature", oldName, ops.Rename, results
@@ -1711,7 +1714,11 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	// refactor) just records into the shared txn; the outer op reverts.
 	var oc editOutcome
 	if ownTxn {
-		if oc = txn.verify(diags); oc.Rejected {
+		oc = txn.verify(diags)
+		if c, isErr, handled := batchResponse(oc); handled {
+			return c, isErr, nil
+		}
+		if oc.Rejected {
 			rej := oc.rejection(name + " → " + newName)
 			rej["kind"], rej["oldName"], rej["newName"], rej["results"] = "rename", name, newName, results
 			return jsonContent(rej), true, nil

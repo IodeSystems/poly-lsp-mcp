@@ -94,7 +94,6 @@ func (b *editBatch) stage(abs string, orig, out []byte, mode os.FileMode, opts d
 	if b.validate {
 		b.s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
 	}
-	b.count++
 	return nil
 }
 
@@ -230,9 +229,21 @@ type validationTxn struct {
 	active    bool
 	baseline  map[string]int
 	originals map[string][]byte // uri → pre-edit bytes (first record wins)
+
+	// batch, when set, redirects this txn into the OPEN commit:false batch:
+	// record() feeds the batch's originals (so a refactor's files join the
+	// batch's all-or-nothing revert) and verify() DEFERS to the batch's
+	// commit. committing marks the edit that closes the batch.
+	batch      *editBatch
+	committing bool
 }
 
 func (s *Server) beginValidationTxn(opts diagnosticOptions) *validationTxn {
+	// A commit:false batch is open — a refactor run now joins it instead of
+	// validating on its own; opts.commitBatch marks the edit that closes it.
+	if s.editBatch != nil {
+		return &validationTxn{s: s, active: s.editBatch.validate, batch: s.editBatch, committing: opts.commitBatch}
+	}
 	return &validationTxn{
 		s:      s,
 		active: (opts.Validate || s.validateEdits) && s.manager != nil,
@@ -246,6 +257,14 @@ func (s *Server) beginValidationTxn(opts diagnosticOptions) *validationTxn {
 // writing the file; the first record for a URI wins (the true original, never
 // an intermediate rewrite).
 func (t *validationTxn) record(uri string, orig []byte) {
+	if t.batch != nil {
+		// Feed the open batch: it owns the baseline (captured at open) and
+		// the all-or-nothing revert set.
+		if _, seen := t.batch.originals[uri]; !seen {
+			t.batch.originals[uri] = orig
+		}
+		return
+	}
 	if !t.active {
 		return
 	}
@@ -267,6 +286,16 @@ func (t *validationTxn) record(uri string, orig []byte) {
 // !Rejected; the caller then attaches Validated/Skipped via annotate().
 func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 	oc := editOutcome{Diags: diags}
+	// Routed into an open batch: defer to the batch. The committing edit
+	// validates the union and closes it; every other edit just stages.
+	if t.batch != nil {
+		if !t.committing {
+			return editOutcome{Diags: diags, Staged: true, Pending: t.batch.count}
+		}
+		bc := t.batch.commit()
+		t.s.closeBatch()
+		return bc
+	}
 	if !t.active {
 		return oc
 	}

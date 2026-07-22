@@ -877,20 +877,17 @@ func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, err
 		}
 	}
 
-	// Semantic refactors are already atomic and coherent — they must not be
-	// staged (renaming keeps callers in sync; params/return rebuild the
-	// signature). Only raw text edits (oldText/newText, ::body/::signature,
-	// delete) need the batch to cross a broken intermediate.
-	if !commit && (p.Rename != nil || p.Params != nil || p.Return != nil) {
-		return nil, true, errors.New("rename/params/return are already atomic and coherent — don't stage them; stage raw oldText/newText/::body edits with commit:false instead")
-	}
-	// Open the batch when staging; flag the edit that closes it.
+	// Open the batch when staging; flag the edit that closes it. Every edit
+	// that joins the batch — a raw text edit OR a params/return/rename
+	// refactor — counts as one pending operation.
 	if !commit {
 		if s.editBatch == nil {
 			s.editBatch = s.openBatch(p.diagnosticOptions)
 		}
+		s.editBatch.count++
 	} else if s.editBatch != nil {
 		p.commitBatch = true // this edit stages then validates+commits the union
+		s.editBatch.count++
 	}
 
 	rn, err := s.resolveModernNode(p.Node)

@@ -266,6 +266,16 @@ type engine struct {
 	lspAsked    int
 	lspResolved int
 
+	// The LSP cap is set LAZILY on the first round-trip (ensureLSPCap): an
+	// explicit server cap, else one TUNED from the workspace collision rate
+	// (collAmbiguous of collTotal declared names). lspCapChosen records the
+	// value for the legibility note; capTuned marks it as workspace-derived.
+	lspCapReady   bool
+	lspCapChosen  int
+	collTotal     int
+	collAmbiguous int
+	capTuned      bool
+
 	// Per-transitive-walk precision, for the hop-aware precisionNote: the
 	// deepest hop any repeated ::in/::out reached, the shallowest hop that
 	// carried an unsettled edge, and how many distinct unsettled edges the
@@ -499,10 +509,8 @@ func (s *Server) buildTree() (*engine, error) {
 		e.deadline = time.Now().Add(defaultBudgetMs * time.Millisecond)
 		e.workLeft = maxBudgetOps
 	}
-	e.lspLeft = s.lspResolveCap
-	if e.lspLeft <= 0 {
-		e.lspLeft = defaultLSPResolveCap
-	}
+	// lspLeft is set lazily on the first round-trip (ensureLSPCap), so a
+	// non-edge query never pays to compute the workspace-tuned cap.
 	e.walkDir(root, project)
 	return e, nil
 }

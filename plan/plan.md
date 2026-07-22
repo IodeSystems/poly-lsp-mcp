@@ -302,6 +302,24 @@ per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
     `TestDefCacheCachesNegatives` (mechanics), `TestResolveDefinitionCachedAcrossQueries`
     (gopls e2e: identical 2nd query = 0 new round-trips). Pure perf, no
     behavior change.
+  - ✅ **The LSP cap is TUNED from the workspace collision rate (Timsort-style).**
+    The flat `defaultLSPResolveCap = 200` is gone. Only AMBIGUOUS edges cost a
+    round-trip, and names are Zipfian (most unique → free), so the cap only has
+    to cover the collision-prone tail: it now scales with the count of declared
+    names that have ≥2 EDGE-TARGETABLE declarations (params/return/annotation
+    excluded) — `tunedLSPCap` = floor 64 + 4/name, ceilinged at 1500 (bounded
+    cost = the explainable-cost moat). Set LAZILY (`ensureLSPCap`) on the first
+    round-trip off the already-built `declsByName` (free — the edge builds it
+    first), so a non-edge query never pays. Legible: the cap + collision counts
+    surface in `precisionNote` when it's hit; `SetLSPResolveCap` overrides.
+    **Measured on THIS repo: 216 collision-prone of 1964 declared → cap 928**
+    (4.6× the old flat 200 — a collision-heavy codebase gets budget where it
+    needs it; a clean one sits at the floor and never hits it). Tests:
+    `TestTunedLSPCapFormula`, `TestLSPCapTunedFromCollisions`,
+    `TestLSPCapExplicitOverride`. **Next (the broader "tune for code" arc):**
+    same treatment for the other magic constants (generated-file line
+    threshold as a percentile, etc.), and adaptive re-plan when realized
+    cardinality diverges from `:explain`'s estimate.
   - ✅ **A resolved far end OUTSIDE the root is now an EXTERNAL STUB** (North
     Star Stage 0 — SHIPPED). `refineFar`'s `picked==nil` path splits on
     `filepath.IsLocal(defRel)`: outside the root → mint an `external` node

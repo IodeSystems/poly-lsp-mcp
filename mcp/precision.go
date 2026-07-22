@@ -53,12 +53,76 @@ const (
 	refUnsettled = "unsettled" // >1 same-named decl, no LSP resolution — a guess (lists candidates)
 )
 
-// defaultLSPResolveCap bounds LSP round-trips per query. A round-trip is
+// The LSP round-trip cap bounds per-query resolution. A round-trip is
 // ~50-100ms, and a broad selector has thousands of ambiguous edges
 // (func::out: 9,080) — uncapped that is minutes. Past the cap the
 // remaining edges stay lexical and say so, which is the same contract
 // the work budget already uses: partial, flagged, never silent.
-const defaultLSPResolveCap = 200
+//
+// It is TUNED to the workspace, Timsort-style — cheap when the input has
+// structure. The only edges that cost a round-trip are AMBIGUOUS ones (a
+// name several decls answer to); names are Zipfian, so most are unique and
+// resolve for free, and the cap only has to cover the collision-prone tail.
+// So the cap scales with that tail — the count of declared names with >=2
+// declarations — from a floor (a clean repo still resolves its rare
+// collision) to a ceiling (cost stays predictable, the explainable-cost
+// moat). An explicit SetLSPResolveCap overrides the tuning.
+const (
+	lspCapFloor   = 64   // a near-collision-free workspace still gets this
+	lspCapPerName = 4    // round-trips to budget per collision-prone name
+	lspCapCeil    = 1500 // ceiling — bounded cost regardless of workspace size
+)
+
+// tunedLSPCap maps the count of collision-prone (ambiguous) declared names
+// to a per-query round-trip budget.
+func tunedLSPCap(ambiguous int) int {
+	c := lspCapFloor + lspCapPerName*ambiguous
+	if c > lspCapCeil {
+		c = lspCapCeil
+	}
+	return c
+}
+
+// ensureLSPCap sets the per-query round-trip budget on first use. An
+// explicit server cap wins; otherwise it is tuned from the workspace
+// collision rate. declsByName is already built by the edge that triggers
+// this (buildOutRefs/buildInRefs call declsOf first), so the count is free.
+func (e *engine) ensureLSPCap() {
+	if e.lspCapReady {
+		return
+	}
+	e.lspCapReady = true
+	if e.s.lspResolveCap > 0 {
+		e.lspLeft, e.lspCapChosen = e.s.lspResolveCap, e.s.lspResolveCap
+		return
+	}
+	e.declsOf("") // ensure declsByName is built (no-op once it is)
+	for _, decls := range e.declsByName {
+		// Count only EDGE-TARGETABLE declarations: a name-collision costs a
+		// round-trip only when a call/type site could resolve to more than
+		// one of them. Synthetic leaves (params, return types, annotations)
+		// aren't edge targets, so a param named `x` in many funcs is not a
+		// collision that the cap has to cover.
+		real := 0
+		for _, d := range decls {
+			switch d.class {
+			case "argument", "return", "annotation":
+			default:
+				real++
+			}
+		}
+		if real == 0 {
+			continue
+		}
+		e.collTotal++
+		if real >= 2 {
+			e.collAmbiguous++
+		}
+	}
+	e.capTuned = true
+	e.lspLeft = tunedLSPCap(e.collAmbiguous)
+	e.lspCapChosen = e.lspLeft
+}
 
 // lspResolveTimeout bounds ONE definition round-trip. gopls answers a
 // warm file in single-digit ms; a slow one is not worth stalling a query
@@ -221,6 +285,7 @@ func (e *engine) refineFar(far []*treeNode, siteAbs string, line, col int) ([]*t
 	if len(far) < 2 {
 		return far, refLexical // one candidate — name-unique, certain
 	}
+	e.ensureLSPCap()
 	if e.lspLeft <= 0 || !e.s.lspAvailable(siteAbs) {
 		return far, refUnsettled // ambiguous, nothing to settle it — a guess
 	}
@@ -359,6 +424,7 @@ func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambig
 	if !ambiguous {
 		return true, refLexical // only one decl answers to this name — certain
 	}
+	e.ensureLSPCap()
 	if e.lspLeft <= 0 || !e.s.lspAvailable(siteAbs) {
 		return true, refUnsettled // ambiguous, nothing to settle it — a guess
 	}
@@ -388,6 +454,7 @@ func (e *engine) confirmSelfEdge(n *treeNode, ref *treeNode) bool {
 	if ref.refConf == refLSP {
 		return true // the precision pass already resolved this edge to n
 	}
+	e.ensureLSPCap()
 	if e.lspLeft <= 0 || !e.s.lspAvailable(ref.abs) {
 		e.recursiveUnconfirmed = true
 		return false
@@ -417,10 +484,15 @@ func (e *engine) precisionNote() string {
 	var parts []string
 	if e.lspAsked > 0 || e.lspResolved > 0 {
 		if e.lspLeft <= 0 {
+			cap := "the per-query cap"
+			if e.capTuned {
+				cap = fmt.Sprintf("the per-query cap (%d, tuned from %d collision-prone "+
+					"names of %d)", e.lspCapChosen, e.collAmbiguous, e.collTotal)
+			}
 			parts = append(parts, fmt.Sprintf("%d ambiguous edge(s) settled by a child "+
-				"LSP, then the per-query cap ran out — remaining ambiguous edges are "+
-				"UNSETTLED (name-keyed candidates, not resolved references). Narrow the "+
-				"selector to bring the rest under the cap.", e.lspResolved))
+				"LSP, then %s ran out — remaining ambiguous edges are UNSETTLED (name-keyed "+
+				"candidates, not resolved references). Narrow the selector to bring the rest "+
+				"under the cap.", e.lspResolved, cap))
 		} else {
 			parts = append(parts, fmt.Sprintf("%d ambiguous edge(s) settled by a child "+
 				"LSP; the rest were name-unique (lexical) or unsettled.", e.lspResolved))

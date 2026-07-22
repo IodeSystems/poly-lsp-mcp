@@ -145,7 +145,7 @@ type Server struct {
 	queryWorkBudget int
 
 	// lspResolveCap bounds child-LSP round-trips per query (see
-	// precision.go). 0 = defaultLSPResolveCap.
+	// precision.go). 0 = tune it from the workspace collision rate.
 	lspResolveCap int
 
 	// proactiveOpenDoneMu guards proactiveOpenDone. The channel is

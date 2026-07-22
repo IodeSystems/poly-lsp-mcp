@@ -207,6 +207,34 @@ func TestWithoutLSPEdgesStayUnsettledAndSaySo(t *testing.T) {
 	}
 }
 
+// A warm session resolves each site ONCE: the second identical edge query
+// is served entirely from the definition cache — same answers, zero new
+// LSP round-trips.
+func TestResolveDefinitionCachedAcrossQueries(t *testing.T) {
+	requireGopls(t)
+	dir := writePrecisionFixture(t)
+
+	s := startPrecisionSession(t, dir)
+	defer s.close()
+
+	sel := map[string]any{"selector": `#'main.go#Run'::out.call`, "limit": 20}
+	q1 := query(t, s, sel)
+	after1 := s.srv.defMisses
+	if after1 == 0 {
+		t.Fatal("the ambiguous Save edge must force at least one round-trip")
+	}
+
+	q2 := query(t, s, sel)
+	after2 := s.srv.defMisses
+	if after2 != after1 {
+		t.Errorf("the second identical query must hit the cache — 0 new round-trips; misses %d → %d", after1, after2)
+	}
+	// And the cached run returns the SAME answer.
+	if q1.TotalMatches != q2.TotalMatches {
+		t.Errorf("cached query changed the result: %d vs %d matches", q1.TotalMatches, q2.TotalMatches)
+	}
+}
+
 // :recursive is the edge-semantic predicate the icebox parked until the
 // precision pass existed. The soundness case: `fib` really recurses, but
 // `func Write` calling `w.Write` (io.Writer's method, same name) must NOT

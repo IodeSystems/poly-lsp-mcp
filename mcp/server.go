@@ -107,6 +107,17 @@ type Server struct {
 	openDocsMu sync.Mutex
 	openDocs   map[string]int32
 
+	// defCache memoizes textDocument/definition answers across queries: a
+	// warm session resolves the same site (an ::in target with N callers,
+	// a :recursive self-call) once instead of per query. Keyed on the
+	// site position and valid for ONE index generation — any workspace
+	// mutation bumps the gen and drops the whole cache, so a stale
+	// definition can't survive an edit.
+	defCacheMu  sync.Mutex
+	defCache    map[string]defEntry
+	defCacheGen uint64
+	defMisses   int64 // count of real round-trips (cache misses) — for tests/measurement
+
 	// diagnosticWait is the per-edit deadline for publishDiagnostics.
 	// 0 means use the default (1500ms). Tests set a smaller value to
 	// stay fast.

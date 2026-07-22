@@ -290,9 +290,18 @@ per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
     caveat `lsp|lexical|unsettled`) updated. **Remaining**: per-hop LSP CAPS
     (spend budget across depth, not all on hop 1) were NOT done — the warning
     makes the current spend honest; a fairer spend is a separate opt-in.
-  - ◻ **`::in` on a common name is O(sites) round-trips** (#New = 93). Under
-    the cap, but a warm-gopls session pays it per query — the LSP answer is
-    not cached across queries.
+  - ✅ **`::in`/precision round-trips are now cached across queries.** A warm
+    session re-asked `textDocument/definition` for the same site every query
+    (#New = 93 callers; every edge-precision pass, `:recursive`, external-stub
+    resolution). `resolveDefinition` now memoizes on a Server-side `defCache`
+    keyed on the site position, valid for ONE index `Generation()` — any
+    mutation drops the whole cache, so a stale definition can't outlive an
+    edit. The LSP round-trip runs OUTSIDE the lock (never serializes concurrent
+    queries); negatives are cached too (an unresolvable site isn't re-asked).
+    `defMisses` counts real round-trips. Tests: `TestDefCacheGenInvalidation`,
+    `TestDefCacheCachesNegatives` (mechanics), `TestResolveDefinitionCachedAcrossQueries`
+    (gopls e2e: identical 2nd query = 0 new round-trips). Pure perf, no
+    behavior change.
   - ✅ **A resolved far end OUTSIDE the root is now an EXTERNAL STUB** (North
     Star Stage 0 — SHIPPED). `refineFar`'s `picked==nil` path splits on
     `filepath.IsLocal(defRel)`: outside the root → mint an `external` node

@@ -109,16 +109,69 @@ func (s *Server) resolveDefinition(abs string, line, col int) (defAbs string, de
 	if s.manager == nil {
 		return "", 0, false
 	}
+	// A warm session asks about the same site many times (an ::in target's
+	// N callers, a :recursive self-call). Memoize per index generation.
+	gen := uint64(0)
+	if idx := s.getIndex(); idx != nil {
+		gen = idx.Generation()
+	}
+	key := fmt.Sprintf("%s\x00%d\x00%d", abs, line, col)
+	if d, hit := s.defCacheGet(gen, key); hit {
+		return d.defAbs, d.defLine, d.found
+	}
+	d := s.resolveDefinitionUncached(abs, line, col)
+	s.defCachePut(gen, key, d)
+	return d.defAbs, d.defLine, d.found
+}
+
+// defEntry is one memoized textDocument/definition answer. found mirrors
+// resolveDefinition's ok — a no-answer is cached too, so a site that does
+// not resolve is not re-asked within the same generation.
+type defEntry struct {
+	defAbs  string
+	defLine int
+	found   bool
+}
+
+// defCacheGet returns the cached answer for key, dropping the whole cache
+// first if the index has moved on (a mutation ⇒ definitions may have
+// shifted). The LSP round-trip runs OUTSIDE this lock, so it never
+// serializes concurrent queries.
+func (s *Server) defCacheGet(gen uint64, key string) (defEntry, bool) {
+	s.defCacheMu.Lock()
+	defer s.defCacheMu.Unlock()
+	if s.defCacheGen != gen || s.defCache == nil {
+		s.defCache = map[string]defEntry{}
+		s.defCacheGen = gen
+		return defEntry{}, false
+	}
+	d, ok := s.defCache[key]
+	return d, ok
+}
+
+// defCachePut stores an answer, but only if the generation still matches —
+// a concurrent mutation may have dropped the cache while the round-trip
+// was in flight, and a stale-gen answer must not poison the fresh cache.
+func (s *Server) defCachePut(gen uint64, key string, d defEntry) {
+	s.defCacheMu.Lock()
+	defer s.defCacheMu.Unlock()
+	s.defMisses++ // one real round-trip happened to produce d
+	if s.defCacheGen == gen && s.defCache != nil {
+		s.defCache[key] = d
+	}
+}
+
+func (s *Server) resolveDefinitionUncached(abs string, line, col int) defEntry {
 	uri := pathToURI(abs)
 	child := s.manager.RouteByURI(uri)
 	if child == nil {
-		return "", 0, false // tree-sitter-only language
+		return defEntry{} // tree-sitter-only language
 	}
 	// gopls answers about files it has been told about. didOpen is
 	// idempotent per session (openDocs), so this is a no-op once warm.
 	content, err := os.ReadFile(abs)
 	if err != nil {
-		return "", 0, false
+		return defEntry{}
 	}
 	s.notifyChildOfOpen(child, uri, content)
 
@@ -130,9 +183,10 @@ func (s *Server) resolveDefinition(abs string, line, col int) (defAbs string, de
 		"position":     map[string]any{"line": line - 1, "character": col - 1},
 	})
 	if err != nil {
-		return "", 0, false
+		return defEntry{}
 	}
-	return firstDefinition(raw)
+	da, dl, ok := firstDefinition(raw)
+	return defEntry{defAbs: da, defLine: dl, found: ok}
 }
 
 // firstDefinition decodes whichever of the three legal reply shapes the

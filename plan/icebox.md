@@ -21,19 +21,6 @@ nondeterministic label. `SetQueryWorkBudget` and an `Nops` arg both force the
 deterministic path. Trade: the old restrictive 200k-op default (truncated many
 broad edge queries) is gone; broad queries now complete.
 
-## `return` as a node — the remaining trivia sibling
-
-Shipped `annotation` and `comment` as first-class child nodes (decorators,
-struct tags, joined doc blocks). `return` is the natural third: the return
-TYPE as a `.return` child, so `func:any(return#error)` = funcs returning
-error, `method:any(return#'*Server')`, etc. Needs per-language extraction of
-the return type node (Go `result` field, TS `type_annotation` after params,
-Python `->` annotation) — a `returnType(lang, node)` mirroring the decorator
-helpers. Not built yet; `argument` already covers the params side.
-
-Also noted: `argument` is a plain tag node, NOT `::arg` — `func > argument`
-and `func:any(argument#ctx)` already work.
-
 ## `:recursive` and other EDGE-semantic predicates — need call-target precision
 
 Prototyped `:recursive` (a callable that directly calls itself: a self-edge in
@@ -48,8 +35,7 @@ Ship only once the child-LSP precision pass resolves the self-call's target
 (then a self-edge is real). The same bar applies to any predicate built on
 edge SEMANTICS — "calls X", "reachable from X", cyclic/mutual recursion. Safe
 to build now (text/structure, no edge guessing): the shipped `:annotated`,
-`~=` regex, `:contains`, containment queries. Idea worth a slice: `:arity(m,n)`
-/ signature-size filters (count of `argument` children — structural, sound).
+`~=` regex, `:contains`, `:arity(m,n)`, containment queries.
 
 ## Ownership domains — crossing into libraries (the North Star chasm)
 
@@ -132,16 +118,14 @@ Three items from an agent driving poly-lsp-mcp across a full redline2 session
 again with startLine=" hints) were the wins and got used constantly; editing
 drifted to the host's built-in Edit + Bash. Why, filed as work:
 
-- **BUG — `search` blows the token budget instead of capping.** A broad regex
-  that hit generated files returned a **422 (~422k chars)** and force-dumped to
-  a scratch file with "read it in chunks" instructions — a hard stop mid-task.
-  Repro: `search "View as coach|View user record"` over redline2 matched
-  `ui/src/gql/*` (generated, ~40k-char lines). `grep --exclude` never does this.
-  Fix: a byte cap + truncation summary (`N more matches — narrow with
-  glob=/path=`), the way node_read / node_query already degrade; and/or
-  default-skip generated / huge-line files (the noise-dir set already skips
-  .git/node_modules/vendor — generated source with 40k-char lines is the same
-  hazard). Single sharpest edge — it cost a real detour.
+- ✅ **BUG (FIXED 2026-07-21) — `search` blew the token budget instead of
+  capping.** A broad regex over generated files dumped ~422k chars and hard-
+  stopped mid-task. Fixed BOTH surfaces via `symbols.CapHitLine` (rune-safe,
+  match-centred per-line cap, 500B, `(+N chars)` marker): the legacy `search`
+  tool AND the modern `::grep` path. Plus a default generated-file skip in
+  `symbols.Search` (a line >5000B ⇒ minified/generated ⇒ skipped whole,
+  COUNTED and reported as `skippedGeneratedFiles` + a note; `IncludeGenerated`
+  opts back in). Tests: `symbols/cap_test.go`, `TestModernQueryGrepCapsLongLine`.
 
 - **FEATURE (reinforces the existing "Child-LSP edge precision" item) — Go
   refs/rename read as lexical, so I never trusted them.** The host doc flags

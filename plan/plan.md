@@ -156,8 +156,7 @@ token premium is the thing to shave if this goes wide.
 call); `--run-tool` gate + toolset `baseArgs` (argument the base llm-bench-mcp,
 generalizing `cedeFileTools`); `--runs N` + per-run artifact naming (`_rN`); the
 `edit-safety-{pop,import,rename}` probes + `polylsp-validate`/`polylsp-norun*`
-toolsets. Also: the `scheduler.go` tech_lead user-turn fix (bonsai template) is a
-genuine agentkit-host bug fix, unrelated to poly-lsp.
+toolsets.
 
 ◐ **Adoption measurement — the existential question, now instrumented.**
 `llm-bench/` (own nested module, uses `agentkit` — `mcpmgr` spawns the server,
@@ -191,64 +190,10 @@ run (needs `AGENTKIT_API_KEY` + network). **next**:
     NATIVE, reflexively-trained tool inside a real agent. This bench is NEUTRAL
     ground, where node_query competes as a peer and wins on description alone.
     So: node_query is *competitive as a peer* (real result), but "does it beat
-    the model's native grep/read in a real agent" needs the REAL agent.
-  - ◐ **True adoption test = the real agent (autowork3) already exists.**
-    `services/autowork3` is a full agentkit worker that spawns poly-lsp-mcp as a
-    sidecar (`cmd/worker/mcp_child.go`) AND merges it with native grep/read/ls in
-    ONE session (`cmd/worker/main.go:174`) — the home-turf contest llm-bench
-    can't stage. Tool calls log to the `spans` table (`attributes.tool_name` +
-    `.role`). Query WIRED: `llm-bench/adoption_autowork3.sql` (+ `./pg.sh prod`)
-    runs graph-vs-native against the live DB (`postgres://aw3@127.0.0.1:1212`).
-    **Result today: EMPTY.** Prod has 3 sessions, all `product_owner`
-    (orchestration only — submit_chat/thread_set_title); ZERO `developer`/
-    `reviewer` sessions, so poly-lsp-mcp AND grep have never fired. The real
-    test still hasn't RUN — worse than the icebox's "0 calls / 8 runs" (this DB
-    lacks even those). llm-bench's remaining value: A/B descriptions as peers,
-    correctness, cost — not the native-vs-newcomer asymmetry.
-  - ❗ **Populating real dev spans = operating the whole autowork3 platform;
-    stopped at that boundary.** Attempted (user opted in): booted a HEALTHY
-    daemon (`aw daemon serve`, API :8401), confirmed `autowork3-worker-dev`
-    images exist. But staging one developer session needs, in sequence: a
-    context→repo→WORKTREE binding (the `projects` table that held `repo_path`
-    is GONE; `aw context create` has no repo flag; repo lands via a
-    `worktree.Manager` installed only in the PROD daemon config, `api.go:236`),
-    per-thread worker CONTAINERS, and the product_owner→tech_lead→developer
-    summon chain against a cold/flaky model (`Qwen3-6-27B-MPT` state=absent,
-    warms on demand). That's autowork3-internal operational setup, unsafe to
-    reverse-engineer blind against the prod DB. **Stopped clean: no thread/
-    session rows written (prod still 3/3), daemon killed.** `bonsai` is NOT a
-    registered autowork3 model nor corrallm-served — unresolved.
-  - ◐ **Live populate attempt (bonsai) — chain runs, breaks at tech_lead.**
-    `bonsai` = `ternary-bonsai-27b` (corrallm, state=ready; the ONE ready chat
-    model — Qwen/gemma absent). Registered it in autowork3 (`aw model add`),
-    created a repo-bound project (poly-lsp-mcp, `aw project create --repo-path`),
-    booted `aw daemon serve --no-vite` (worktrees auto-install), started a
-    thread on bonsai with a code-nav task. **product_owner RAN on bonsai +
-    called submit_plan** (pipeline is live). But **tech_lead FAILED**: bonsai's
-    GGUF chat template raises `No user query found in messages` → 400 (its
-    template asserts a user turn; autowork3 builds tech_lead from the PO plan =
-    system+assistant/tool only). So the summon chain dies BEFORE a developer is
-    spawned → still no poly-lsp-mcp/grep spans. **Blocker is now a
-    bonsai-template ↔ autowork3-message-shape incompatibility** (corrallm or
-    autowork3 side), not missing infra. Prod DB now holds: model `bonsai`,
-    project `13749f79`, thread `969c7fab` (PO closed, TL failed); daemon left up
-    on :8401 for retry.
-  - ✅ **tech_lead message-shape fix — DONE, verified.** Root cause: a freshly-
-    summoned transient role (tech_lead/dev/reviewer) had its task in the SYSTEM
-    prompt and an EMPTY conversation; agentkit's shaper never guarantees a user
-    turn, so bonsai's template raised. Fix (`internal/server/scheduler.go`,
-    runSession): for non-PO roles with zero prior events, seed one
-    `EventUserMessage` ("Proceed with the task…") before the Turn. Retest on a
-    fresh thread: **tech_lead failed→CLOSED** — seeded user turn present, it
-    decomposed into leaves. Chain advanced PO→TL→developer. (This is an
-    autowork3 code change — flag for their review/commit.)
-  - ◻ **Next blocker (operational, not code): developer needs a node-manager.**
-    developer session failed: `no live node-manager for thread … assign via aw
-    node-manager assign`. A node-manager is the long-running worker process that
-    orchestrates aw3-worker CONTAINERS (image `autowork3-worker-dev:latest`
-    exists). To finish: `aw node-manager register` + `serve` + assign to the
-    project → developer runs in a container → poly-lsp-mcp + grep fire →
-    `./pg.sh prod` prints the home-turf ratio. Separate operational layer.
+    the model's native grep/read in a real agent" needs a REAL agent — and the
+    one we had wired (autowork3) is a DEAD PROJECT (dropped 2026-07-21, user
+    call). The native-vs-newcomer asymmetry is now UNMEASURED with no vehicle;
+    llm-bench's standing value is A/B descriptions as peers, correctness, cost.
   - ◻ **Collision canary** (`collision*`): grep AND lexical node_query both
     return the merged set (verified) — flips to a graph win only when the LSP
     precision pass resolves the site. Re-run with precision ON to show the
@@ -257,11 +202,9 @@ run (needs `AGENTKIT_API_KEY` + network). **next**:
 sets × three variants, the shipped spec-first desc already saturates reach and
 graph-first. The wording is not the bottleneck on neutral ground; if `inspired`
 taught anything it's that MORE prose is worse, not better.
-**This gates further engine investment**: keep building the engine once
-adoption says agents reach for the graph at all — pause if it says they don't.
-**blocking decision (USER owns)**: if both variants stay low, the tool loses on
-merit at point-of-use and the roadmap reorders around discovery/triggering, not
-features.
+**blocking decision (USER owns)**: adoption can no longer be measured on
+home turf (autowork3 dead). Either find/build another real-agent vehicle, or
+accept the llm-bench peer result and let the roadmap ride on it.
 
 ◻ **Cost visibility + planning share an estimator.**
   - ◻ **Cardinality-order a descendant chain.** `A B` evaluates left-to-right;
@@ -315,7 +258,7 @@ only when a query needs an edge-tip reorder.
 ◐ **Edges: from coincidence toward reference.** Two of three steps done
 (→ done.md): lexical scope killed 99% of far ends (a local is not visible
 outside its function), and the child-LSP pass now settles what remains,
-per edge, with `conf: lsp|lexical` on every row. **next**:
+per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
   - ✅ **The CLI is lexical-only, and now SAYS so.** `bin/dev query` has no
     manager (a one-shot gopls spawn is seconds); its tree renders far ends with
     no conf column. Fixed by a footer caveat that fires whenever a selector uses
@@ -326,22 +269,37 @@ per edge, with `conf: lsp|lexical` on every row. **next**:
     but needs the manager the CLI deliberately skips; the footer is the honest
     minimum. (Live proof it's needed: `func#New::out.call` shows `engine.s,
     modSelParser.s` — lexical collisions on the field name `s`.)
-  - ◻ **Transitive queries still compound.** `::in.call{1,}` crosses many
-    edges; each hop past the 200-cap is lexical again. The cap is per QUERY,
-    so a deep walk spends it on hop 1. **blocking decision**: per-hop caps? a
-    "precise-only" mode that refuses to cross a lexical edge? Doing nothing
-    means the marquee feature stays the least trustworthy.
+  - ✅ **Transitive queries still compound — now they SAY where trust runs
+    out.** `::in.call{1,}` spends the per-query LSP cap shallowest-first, so
+    deep hops fall back to name-keying. **Decided (USER): not a refusal — a
+    WARNING. Say what IS precise and what wasn't.** Shipped: `conf` is now
+    TRI-STATE — the old `lexical` conflated two opposites, split into `lexical`
+    (name UNIQUE in workspace → certain without an LSP) and `unsettled` (≥2
+    same-named decls, no LSP settled it → a GUESS listing candidates).
+    `refineFar`/`refineIn` return `unsettled` on every ambiguous-unresolved
+    path (incl. the out-of-root `picked==nil` case — Stage 0 no longer reads as
+    a false-local `lexical`). `precisionNote` is hop-aware: `evalRepeat`→
+    `noteHop` tallies per-hop, and a transitive walk reports "crossed up to N
+    hops; M unsettled edges begin at hop K — distant nodes least certain" (or
+    "all LSP-resolved or name-unique" when clean). Tests (no-gopls, fast):
+    `TestTriStateConfSplitsCertainFromGuess`, `TestTransitiveNoteReportsUnsettledHop`,
+    `TestTransitiveNoteCleanWalkSaysSo`; `TestWithoutLSPEdges…` renamed to assert
+    `unsettled`. Docs (grammar CONF line, modern.go conf comment, query_text
+    caveat `lsp|lexical|unsettled`) updated. **Remaining**: per-hop LSP CAPS
+    (spend budget across depth, not all on hop 1) were NOT done — the warning
+    makes the current spend honest; a fairer spend is a separate opt-in.
   - ◻ **`::in` on a common name is O(sites) round-trips** (#New = 93). Under
     the cap, but a warm-gopls session pays it per query — the LSP answer is
     not cached across queries.
-  - ❓ **A resolved far end OUTSIDE the root has no node today** (North Star
-    Stage 0). `fileByRel` only holds workspace files, so when definition lands
-    in the stdlib/`node_modules` the edge drops it or falls back to a false
-    local match. **verify FIRST**: what does `refineFar` (precision.go) do with
-    an out-of-root definition location right now? Then mint an EXTERNAL STUB
-    (`module@version#sym`, `domain: external`, ro) instead — the honest
-    boundary marker. Owed by this slice, not deferrable: precision CREATES
-    these the moment it resolves a library call.
+  - ◐ **A resolved far end OUTSIDE the root has no node today** (North Star
+    Stage 0). **verify DONE**: `refineFar` (precision.go:170) hit `picked==nil`
+    when the LSP resolved outside the modelled tree and returned the lexical
+    candidates as `refLexical` — a FALSE-CERTAIN local match. **Half-fixed this
+    session**: that path now returns `refUnsettled`, so an out-of-root
+    resolution reads as a GUESS, never a certain local. **Still owed**: mint an
+    actual EXTERNAL STUB (`module@version#sym`, `domain: external`, ro) as the
+    named far end instead of leaving the local candidates standing — the honest
+    boundary marker. The conf is now honest; the NODE is not yet external.
 **Assumption made**: `textDocument/definition`'s first location is the
 declaration. True for gopls; unverified for tsserver/pylsp.
 
@@ -354,16 +312,33 @@ declaration. True for gopls; unverified for tsserver/pylsp.
     site dup); the old "4 on 2 uses" was fixed en route (likely the span-
     containment attribution that stopped name-only double-attribution). Pinned
     by `TestTSInTypeNoDoubleCount` so a real dup can't creep back.
-  - ◻ **`return`/`var` slot NODES** (icebox): the position AXIS ships, but a
-    `return`-type usage lands on the func (its far end), and `> return` as a
-    node does not exist. Adding `return`/`var` slot nodes needs COLUMN precision
-    in `treeNode.at` (param vs return share a signature line) — the infra step
-    the axis deliberately dodged. `::in.return.type` is the cheaper win that
-    covered the headline query.
+  - ✅ **`return` as a NODE — shipped.** The return TYPE is now a `return`
+    CHILD of every callable (`func:any(return#error)` = funcs returning error),
+    across Go/TS/Python (`appendReturnSymbols` + `returnTypeNodes`: Go `result`,
+    TS/Python `return_type`). Go's `(T, error)` tuple SPLITS into one child per
+    type so `return#error` matches it; a qualified type answers to its leaf
+    (`return#Writer`) and its full alias (`return#'io.Writer'`). Three
+    integration snags, all fixed + pinned: a `return` node's span is the
+    signature line, so `enclosingSymPath` must skip it (else it steals call/type
+    sites from the func — like `argument`); its name span sits ON the type
+    usage, so `isDeclSite` must skip it (else the ref is deleted); and it answers
+    to `#Type`, so it's excluded from `refNodes` edge-building (else
+    `#Type::in.type` doubles). Tests: `symbols/return_node_test.go` (Go/TS/Py),
+    `TestModernQueryReturnNode`. **Remaining** (icebox): `var` slot nodes, and
+    the return-VALUE slot (needs column precision — param vs return share a line).
+  - ✅ **`:arity(m,n)` — signature-size filter, shipped.** Sound/structural
+    (counts `argument` children, no edge guessing): `:arity(2)` exact,
+    `:arity(2,)` 2+, `:arity(0,0)` no-arg. `parseParenRange` mirrors the `{m,n}`
+    shape; `TestModernQueryArity`.
+  - ✅ **`search`/`::grep` long-line cap + generated-file skip, shipped** (icebox
+    field-report BUG). `symbols.CapHitLine` (rune-safe, match-centred, 500B)
+    caps every matched line on BOTH surfaces; `symbols.Search` skips files with
+    a >5000B line (reported as `skippedGeneratedFiles`, `IncludeGenerated` opts
+    back in). Tests: `symbols/cap_test.go`, `TestModernQueryGrepCapsLongLine`.
 
-Next candidates are opt-in, in icebox.md — most valuable: adoption
-measurement (does bonsai USE ::in/::out unprompted?), then the child-LSP
-edge-precision pass (refConf lexical → lsp).
+Next candidates are opt-in, in icebox.md — most valuable: a real-agent
+adoption vehicle (autowork3 is dead; needs a replacement), then the
+external-stub Stage 0 node (conf is now honest, the node is not yet).
 
 Known caveats (documented in code): edges are name-keyed via the lexical
 index, so same-named symbols share edges (the LSP pass is the fix);

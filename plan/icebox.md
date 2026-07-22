@@ -21,21 +21,22 @@ nondeterministic label. `SetQueryWorkBudget` and an `Nops` arg both force the
 deterministic path. Trade: the old restrictive 200k-op default (truncated many
 broad edge queries) is gone; broad queries now complete.
 
-## `:recursive` and other EDGE-semantic predicates — need call-target precision
+## `:recursive` — SHIPPED (LSP-confirmed), → plan.md/done
 
-Prototyped `:recursive` (a callable that directly calls itself: a self-edge in
-its own ::out.call). Removed unshipped: it is lexically UNSOUND for the common
-case. `func Write(w io.Writer)` calling `w.Write(body)` name-matches the local
-`func Write`, so a lexical self-edge appears and the func reads as recursive —
-and Write/Read/Close/String/Error (every io/fmt interface method) hit this. A
-boolean predicate cannot carry the lexical-vs-lsp caveat the edge rows do, so
-it would just be wrong.
+Direct self-recursion, gated on child-LSP confirmation (the icebox's
+soundness bar): a self-edge whose site the LSP resolves back INTO the func's
+own span. `func Write` calling `w.Write` (io.Writer's) is correctly NOT
+recursive; `fib` and method self-calls (`s.Loop()`) are. Without an LSP it
+confirms nothing and says so (`recursive` note / CLI caveat) rather than
+reading as "none found". See `isRecursive`/`confirmSelfEdge`.
 
-Ship only once the child-LSP precision pass resolves the self-call's target
-(then a self-edge is real). The same bar applies to any predicate built on
-edge SEMANTICS — "calls X", "reachable from X", cyclic/mutual recursion. Safe
-to build now (text/structure, no edge guessing): the shipped `:annotated`,
-`~=` regex, `:contains`, `:arity(m,n)`, containment queries.
+Remaining EDGE-semantic predicates (still parked — same LSP bar):
+- **Mutual / cyclic recursion** — a cycle over the call graph, not a self-
+  edge. `:recursive` rejects an argument today and points at `::out.call{1,}`.
+- **"calls X" / "reachable from X"** are already expressible as
+  `#'X'::in.call` / `::in.call{1,}` — no new predicate needed.
+Safe to build without the LSP (text/structure, no edge guessing): the shipped
+`:annotated`, `~=` regex, `:contains`, `:arity(m,n)`, containment queries.
 
 ## Ownership domains — crossing into libraries (the North Star chasm)
 

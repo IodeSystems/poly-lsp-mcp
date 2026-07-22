@@ -276,6 +276,12 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	if note := e.precisionNote(); note != "" {
 		payload["edges"] = note
 	}
+	// :recursive is edge-semantic — sound only with a child LSP. If one
+	// wasn't reachable, say the answer is UNDER-RESOLVED, so an empty or
+	// partial result never reads as "nothing is recursive".
+	if e.recursiveUnconfirmed {
+		payload["recursive"] = "no child LSP could confirm some self-call(s), so :recursive is UNDER-RESOLVED — a name-unique self-edge is only counted once the LSP says it really calls ITSELF (not, e.g., an interface method of the same name). Run via the MCP server with a language server; results here may miss real recursion."
+	}
 	// The work budget tripping is the OTHER partial-result path — same
 	// contract: flag it and name the fix, never trim quietly.
 	if e.workExceeded {

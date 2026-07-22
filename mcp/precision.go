@@ -322,6 +322,37 @@ func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambig
 	return false, refLSP // resolves to a different declaration
 }
 
+// confirmSelfEdge decides whether an out.call self-edge (far end == n) is a
+// REAL recursive call, not a name collision. If the precision pass already
+// resolved this edge to n (conf lsp), it is trusted. Otherwise — a
+// name-unique or unsettled self-edge, never LSP-checked at build — the site
+// is resolved now and confirmed only if the definition lands inside n's own
+// span. With no LSP to ask, it returns false and marks the query
+// under-resolved, so :recursive degrades to "cannot confirm", never to a
+// silent false negative dressed as a real answer.
+func (e *engine) confirmSelfEdge(n *treeNode, ref *treeNode) bool {
+	if ref.refConf == refLSP {
+		return true // the precision pass already resolved this edge to n
+	}
+	if e.lspLeft <= 0 || !e.s.lspAvailable(ref.abs) {
+		e.recursiveUnconfirmed = true
+		return false
+	}
+	e.lspLeft--
+	e.lspAsked++
+	defAbs, defLine, ok := e.s.resolveDefinition(ref.abs, ref.at[0], ref.refCol)
+	if !ok {
+		e.recursiveUnconfirmed = true
+		return false
+	}
+	defRel := relPath(defAbs, e.s.getRoot())
+	if defRel == n.file && defLine >= n.at[0] && defLine <= n.at[1] {
+		e.lspResolved++
+		return true
+	}
+	return false // resolves elsewhere (an interface method, another decl) — not itself
+}
+
 // precisionNote reports what this query's edges are made of, or "" when
 // there is nothing precision-relevant to say. Three facts can appear: how
 // many ambiguous edges an LSP settled (and whether the cap ran out), and

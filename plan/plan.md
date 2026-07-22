@@ -308,6 +308,18 @@ per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
     (`refineFar` skips len<2); a single local candidate that's actually external
     still fast-paths as `lexical` (asking the LSP per unambiguous edge is the
     cost the skip buys) — documented limitation, not this slice.
+  - ✅ **`:recursive` — the first edge-SEMANTIC predicate, LSP-confirmed.** A
+    callable with a self-call the child LSP resolves back into its OWN span.
+    Unblocked by the precision pass (the icebox parked it as lexically unsound:
+    `func Write` calling `w.Write` is io.Writer's, not itself). `isRecursive`
+    walks `::out.call` for a self far end; `confirmSelfEdge` trusts an edge the
+    precision pass already resolved to it (conf lsp), else re-resolves the site
+    (name-unique self-edges are never LSP-checked at build) via the stored
+    `refCol`. No LSP ⇒ confirms nothing and SAYS so (`recursive` note / CLI
+    caveat), never a silent false negative. Bare only — mutual/cyclic rejects
+    an arg and points at `::out.call{1,}`. Tests: `TestRecursivePredicateLSPConfirmed`
+    (gopls: fib + method self-call yes; Write/Plain/mutual no),
+    `TestRecursiveWithoutLSPIsUnderResolved`.
 **Assumption made**: `textDocument/definition`'s first location is the
 declaration. True for gopls; unverified for tsserver/pylsp.
 

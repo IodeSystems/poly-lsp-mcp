@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -203,6 +204,76 @@ func TestWithoutLSPEdgesStayUnsettledAndSaySo(t *testing.T) {
 	}
 	if e.lspAsked != 0 {
 		t.Errorf("no manager means no round-trips; asked=%d", e.lspAsked)
+	}
+}
+
+// :recursive is the edge-semantic predicate the icebox parked until the
+// precision pass existed. The soundness case: `fib` really recurses, but
+// `func Write` calling `w.Write` (io.Writer's method, same name) must NOT
+// read as recursive — the exact lexical false positive that blocked it.
+func writeRecursiveFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module rec\ngo 1.21\n")
+	write("main.go", `package main
+
+import "io"
+
+func fib(n int) int {
+	if n < 2 {
+		return n
+	}
+	return fib(n-1) + fib(n-2)
+}
+
+func Write(w io.Writer, b []byte) { w.Write(b) }
+
+func Plain() int { return 1 }
+
+func Ping() { Pong() }
+func Pong() { Ping() }
+
+type Server struct{}
+
+func (s *Server) Loop() { s.Loop() }
+`)
+	return dir
+}
+
+func TestRecursivePredicateLSPConfirmed(t *testing.T) {
+	requireGopls(t)
+	dir := writeRecursiveFixture(t)
+
+	s := startPrecisionSession(t, dir)
+	defer s.close()
+
+	// func:recursive — only fib. Write (w.Write is io.Writer's), Plain (no
+	// call), Ping/Pong (mutual, not DIRECT) must all be excluded.
+	q := query(t, s, map[string]any{"selector": `func:recursive`, "limit": 20})
+	got := nodes(q)
+	if !slices.Contains(got, "main.go#fib") {
+		t.Errorf("fib directly recurses — :recursive must match it; got %v", got)
+	}
+	for _, bad := range []string{"main.go#Write", "main.go#Plain", "main.go#Ping", "main.go#Pong"} {
+		if slices.Contains(got, bad) {
+			t.Errorf(":recursive false positive on %s (a name collision or mutual call); got %v", bad, got)
+		}
+	}
+
+	// Method self-recursion is real recursion — s.Loop() resolves to Loop.
+	m := query(t, s, map[string]any{"selector": `method:recursive`, "limit": 20})
+	if !slices.Contains(nodes(m), "main.go#Server.Loop") {
+		t.Errorf("Server.Loop calls itself — :recursive must match it; got %v", nodes(m))
 	}
 }
 

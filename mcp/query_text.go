@@ -90,12 +90,21 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 	// one. The tree renders far ends without a conf column, so without
 	// this line a lexical guess reads as a settled fact. Only the MCP
 	// server resolves (conf: lsp); say so whenever an edge was involved.
+	if strings.Contains(selector, ":recursive") {
+		_, err := fmt.Fprint(w, recursiveNote)
+		return err
+	}
 	if usesEdge(selector) {
 		_, err := fmt.Fprint(w, lexicalEdgeNote)
 		return err
 	}
 	return nil
 }
+
+const recursiveNote = "\nnote: :recursive needs a child LSP to tell a real self-call from a name\n" +
+	"collision (func Write calling w.Write is io.Writer's, not itself). `query`\n" +
+	"has none, so it can confirm nothing and matches nothing here — run the MCP\n" +
+	"server, which resolves via child LSPs.\n"
 
 // usesEdge reports whether a selector references a graph edge — the only
 // case the lexical-edge caveat applies to. `::in`/`::out` are the sole

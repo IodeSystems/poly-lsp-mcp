@@ -95,6 +95,7 @@ type treeNode struct {
 	refKind string      // "call" | "type" | "import" | ""  (the KIND axis)
 	refPos  string      // "return" | "param" | "field" | "var" | ""  (the POSITION axis)
 	refConf string      // refLexical (name-unique) | refLSP (child LSP settled it) | refUnsettled (ambiguous guess)
+	refCol  int         // the SITE's column — kept so :recursive can re-resolve the site via the LSP
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
 
 	// The node's generated ref children, materialized lazily and kept OUT
@@ -273,6 +274,13 @@ type engine struct {
 	unsettledFromHop int
 	transUnsettled   int
 	hopCounted       map[*treeNode]bool
+
+	// recursiveUnconfirmed records that a :recursive test hit a self-edge
+	// it could NOT confirm because no child LSP was reachable — so the
+	// answer is under-resolved (a real recursion may be missed, since a
+	// name-unique self-edge is trusted only once the LSP says it IS a
+	// self-call). The result says so rather than reading as "none found".
+	recursiveUnconfirmed bool
 
 	// fragCache: minted ::grep fragments per host per pattern, so the
 	// same host+pattern yields the SAME nodes across a query (set
@@ -702,6 +710,7 @@ const (
 	pseudoNot                            // :not(sel)         — the node ITSELF does not match (CSS-true)
 	pseudoIs                             // :is(sel)          — the node ITSELF matches (CSS-true)
 	pseudoArity                          // :arity(m,n)       — count of `argument` children in [m,n]
+	pseudoRecursive                      // :recursive        — a callable with an LSP-confirmed self-call
 )
 
 func (k selPseudoKind) isMove() bool  { return k == pseudoParents }
@@ -1664,6 +1673,17 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 		}
 		comp.pseudos = append(comp.pseudos, selPseudo{kind: pseudoArity, arityLo: lo, arityHi: hi})
 		return nil
+	case "recursive":
+		// A callable with a DIRECT self-call. Edge-semantic, so it is only
+		// sound once a child LSP resolves the self-call's target (a lexical
+		// self-edge is a name collision: `func Write` calling `w.Write` is
+		// io.Writer's, not itself). No argument — mutual/cyclic recursion is
+		// a separate, harder predicate.
+		if p.peek() == '(' {
+			return fmt.Errorf(":recursive takes no argument (direct self-recursion only); mutual/cyclic recursion is not yet a predicate — walk it with ::out.call{1,} for now")
+		}
+		comp.pseudos = append(comp.pseudos, selPseudo{kind: pseudoRecursive})
+		return nil
 	case "depth":
 		return fmt.Errorf(":depth is gone — {m,n} REPEATS (regex semantics): func{2} = func > func; 'within 1..3 levels' = \"> *{0,2} > func\". Pass selector \"?\" for the grammar.")
 	default:
@@ -2081,6 +2101,9 @@ SPEC
   SELF   :not(sel)/:is(sel) test the node ITSELF (CSS): func:not(#main), file > :is(func,method).
   ARITY  :arity(m,n) filters by argument-child count — :arity(2) exactly two, :arity(2,)
          two-or-more, :arity(0,0) no-arg. Structural (not edge-resolved). func:arity(4,).
+  RECUR  :recursive — a callable that DIRECTLY calls itself, CONFIRMED by a child LSP (a lexical
+         self-edge is a name collision: func Write calling w.Write is io.Writer's). func:recursive.
+         Sound only with a language server; the MCP server has one, the query CLI does not.
   ORDER  :first/:last — this position's matches, per anchor, document order.
   REP    {m,n} repeats an element or (group), child-joined: func{2} = func>func; within 1..3
          levels = "> *{0,2} > x". {m,} unbounded (safe: cycle-guarded + work budget).
@@ -3349,6 +3372,33 @@ func setsEqual(a, b map[*treeNode]bool) bool {
 	return true
 }
 
+// isRecursive reports whether a callable directly calls itself, confirmed
+// by a child LSP. It is edge-semantic and therefore ONLY sound with the
+// LSP: a lexical self-edge is a name collision (`func Write` calling
+// `w.Write` is io.Writer's method, not itself). A self-edge already
+// resolved to n by the precision pass (conf lsp) is trusted; a name-unique
+// self-edge (conf lexical — never LSP-checked at build) is re-resolved
+// here. When no LSP can confirm, the func is NOT flagged and the query
+// records that :recursive was under-resolved (see confirmSelfEdge).
+func (e *engine) isRecursive(n *treeNode) bool {
+	switch n.class {
+	case "func", "method", "ctor":
+	default:
+		return false // only callables call
+	}
+	for _, ref := range e.refNodes(n, "out") {
+		if ref.refKind != "call" {
+			continue
+		}
+		for _, far := range ref.refFar {
+			if far == n && e.confirmSelfEdge(n, ref) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // argCount returns how many `argument` children a node declares — the
 // structural signature size :arity filters on. A non-callable (no
 // argument children) is zero, so :arity(0,0) is a valid "no-arg" test on
@@ -3373,6 +3423,8 @@ func (e *engine) pseudoHolds(n *treeNode, ps *selPseudo) bool {
 	case pseudoArity:
 		c := e.argCount(n)
 		return c >= ps.arityLo && (ps.arityHi < 0 || c <= ps.arityHi)
+	case pseudoRecursive:
+		return e.isRecursive(n)
 	case pseudoAnnotated:
 		return e.nodeAnnotated(n, ps.grep)
 	case pseudoWhere, pseudoAny:
@@ -3560,7 +3612,8 @@ func (e *engine) buildOutRefs(n *treeNode) {
 		far, conf := e.refineFar(far, n.abs, site.line, site.col)
 		n.refsOut = append(n.refsOut, &treeNode{
 			class: "ref", refDir: "out", refKind: site.kind, refPos: site.pos, refConf: conf,
-			leaf: site.name, full: site.name,
+			refCol: site.col,
+			leaf:   site.name, full: site.name,
 			file: n.file, abs: n.abs, at: [2]int{site.line, site.line},
 			parent: n, depth: n.depth + 1, refFar: far,
 			fileOrd: n.fileOrd, symOrd: n.symOrd,
@@ -3632,7 +3685,8 @@ func (e *engine) buildInRefs(n *treeNode) {
 		}
 		n.refsIn = append(n.refsIn, &treeNode{
 			class: "ref", refDir: "in", refKind: hit.kind, refPos: hit.pos, refConf: conf,
-			leaf: n.leaf, full: n.leaf,
+			refCol: hit.col,
+			leaf:   n.leaf, full: n.leaf,
 			file: rel, abs: fnode.abs, at: [2]int{hit.line, hit.line},
 			parent: n, depth: n.depth + 1, refFar: []*treeNode{src},
 			fileOrd: n.fileOrd, symOrd: n.symOrd,

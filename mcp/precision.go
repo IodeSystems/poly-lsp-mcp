@@ -253,6 +253,108 @@ func (s *Server) resolveDefinitionUncached(abs string, line, col int) defEntry {
 	return defEntry{defAbs: da, defLine: dl, found: ok}
 }
 
+// implLoc is one resolved implementation target — a declaration's file and
+// 1-based line/col (col names an out-of-root target for its external stub).
+type implLoc struct {
+	abs  string
+	line int
+	col  int
+}
+
+// resolveImplementations asks the child LSP for textDocument/implementation
+// at a type's name — the concrete types implementing an interface, or the
+// interfaces a type satisfies (gopls answers whichever counterpart fits the
+// symbol). Unlike definition it returns MANY targets. Memoized per index
+// generation, same discipline as resolveDefinition. nil on any no-answer
+// path (no manager/child, timeout, unparseable) — .implements then degrades
+// to "unavailable, and says so".
+func (s *Server) resolveImplementations(abs string, line, col int) []implLoc {
+	if s.manager == nil {
+		return nil
+	}
+	gen := uint64(0)
+	if idx := s.getIndex(); idx != nil {
+		gen = idx.Generation()
+	}
+	key := fmt.Sprintf("impl\x00%s\x00%d\x00%d", abs, line, col)
+	if v, hit := s.implCacheGet(gen, key); hit {
+		return v
+	}
+	v := s.resolveImplementationsUncached(abs, line, col)
+	s.implCachePut(gen, key, v)
+	return v
+}
+
+func (s *Server) implCacheGet(gen uint64, key string) ([]implLoc, bool) {
+	s.implCacheMu.Lock()
+	defer s.implCacheMu.Unlock()
+	if s.implCacheGen != gen || s.implCache == nil {
+		s.implCache = map[string][]implLoc{}
+		s.implCacheGen = gen
+		return nil, false
+	}
+	v, ok := s.implCache[key]
+	return v, ok
+}
+
+func (s *Server) implCachePut(gen uint64, key string, v []implLoc) {
+	s.implCacheMu.Lock()
+	defer s.implCacheMu.Unlock()
+	if s.implCacheGen == gen && s.implCache != nil {
+		s.implCache[key] = v
+	}
+}
+
+func (s *Server) resolveImplementationsUncached(abs string, line, col int) []implLoc {
+	uri := pathToURI(abs)
+	child := s.manager.RouteByURI(uri)
+	if child == nil {
+		return nil
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil
+	}
+	s.notifyChildOfOpen(child, uri, content)
+	ctx, cancel := context.WithTimeout(context.Background(), lspResolveTimeout)
+	defer cancel()
+	raw, err := child.Call(ctx, "textDocument/implementation", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     map[string]any{"line": line - 1, "character": col - 1},
+	})
+	if err != nil {
+		return nil
+	}
+	return allLocations(raw)
+}
+
+// allLocations decodes every target from a Location / []Location /
+// []LocationLink reply (the multi-target sibling of firstDefinition).
+func allLocations(raw json.RawMessage) []implLoc {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var out []implLoc
+	var locs []lspLocation
+	if err := json.Unmarshal(raw, &locs); err == nil && len(locs) > 0 {
+		for _, l := range locs {
+			out = append(out, implLoc{uriToPath(l.URI), l.Range.Start.Line + 1, l.Range.Start.Character + 1})
+		}
+		return out
+	}
+	var one lspLocation
+	if err := json.Unmarshal(raw, &one); err == nil && one.URI != "" {
+		return []implLoc{{uriToPath(one.URI), one.Range.Start.Line + 1, one.Range.Start.Character + 1}}
+	}
+	var links []lspLocationLink
+	if err := json.Unmarshal(raw, &links); err == nil && len(links) > 0 {
+		for _, l := range links {
+			out = append(out, implLoc{uriToPath(l.TargetURI), l.TargetRange.Start.Line + 1, l.TargetRange.Start.Character + 1})
+		}
+	}
+	return out
+}
+
 // firstDefinition decodes whichever of the three legal reply shapes the
 // child sent and returns the first target.
 func firstDefinition(raw json.RawMessage) (string, int, bool) {

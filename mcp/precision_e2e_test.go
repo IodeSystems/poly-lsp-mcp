@@ -207,6 +207,74 @@ func TestWithoutLSPEdgesStayUnsettledAndSaySo(t *testing.T) {
 	}
 }
 
+// .implements is an LSP-native edge kind: gopls answers who implements an
+// interface (Go's structural typing has no lexical clause to key on).
+func writeImplementsFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module impl\ngo 1.21\n")
+	write("main.go", `package main
+
+type Animal interface {
+	Sound() string
+}
+
+type Dog struct{}
+
+func (d Dog) Sound() string { return "woof" }
+
+type Cat struct{}
+
+func (c Cat) Sound() string { return "meow" }
+
+type NotAnimal struct{}
+`)
+	return dir
+}
+
+func TestImplementsEdgeKind(t *testing.T) {
+	requireGopls(t)
+	dir := writeImplementsFixture(t)
+
+	s := startPrecisionSession(t, dir)
+	defer s.close()
+
+	// Who implements Animal → Dog, Cat (NOT NotAnimal).
+	q := query(t, s, map[string]any{"selector": `#'main.go#Animal'::in.implements > *`, "limit": 20})
+	got := nodes(q)
+	for _, want := range []string{"main.go#Dog", "main.go#Cat"} {
+		if !slices.Contains(got, want) {
+			t.Errorf(":in.implements must include the implementer %s; got %v", want, got)
+		}
+	}
+	if slices.Contains(got, "main.go#NotAnimal") {
+		t.Errorf("NotAnimal has no Sound() — must NOT implement Animal; got %v", got)
+	}
+
+	// What Dog implements → Animal (the interface it satisfies).
+	d := query(t, s, map[string]any{"selector": `#'main.go#Dog'::out.implements > *`, "limit": 20})
+	if !slices.Contains(nodes(d), "main.go#Animal") {
+		t.Errorf("Dog satisfies Animal — :out.implements must include it; got %v", nodes(d))
+	}
+
+	// Every implements edge is LSP-resolved.
+	for _, m := range q.Matches {
+		if m.Conf != "" && m.Conf != refLSP {
+			t.Errorf("implements edges are LSP-resolved; got conf %q", m.Conf)
+		}
+	}
+}
+
 // A warm session resolves each site ONCE: the second identical edge query
 // is served entirely from the definition cache — same answers, zero new
 // LSP round-trips.

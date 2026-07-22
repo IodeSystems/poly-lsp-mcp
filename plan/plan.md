@@ -347,6 +347,18 @@ per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
     an arg and points at `::out.call{1,}`. Tests: `TestRecursivePredicateLSPConfirmed`
     (gopls: fib + method self-call yes; Write/Plain/mutual no),
     `TestRecursiveWithoutLSPIsUnderResolved`.
+  - ✅ **`.implements` — the first LSP-NATIVE edge kind.** `interface#Foo::in.implements
+    > *` = implementers; `type#Bar::out.implements > *` = interfaces Bar
+    satisfies. Go's structural typing has NO lexical clause to key on, so
+    unlike .call/.type/.import this edge is resolved ENTIRELY by the child LSP
+    (`textDocument/implementation`, `resolveImplementations` + a gen-keyed
+    `implCache`), built ONLY when explicitly named (one round-trip per host,
+    never for a bare ::in/::out). `implementsRefs` maps each target via `declAt`
+    (in-root) or an external stub (out-of-root, e.g. a workspace type
+    satisfying `io.Reader`); needed the symbol NAME position, so `nameAt` is now
+    on treeNode. conf `lsp`; no-LSP ⇒ `implements` note / CLI caveat, never a
+    silent empty. Tests: `TestImplementsEdgeKind` (gopls: Animal→Dog/Cat, not
+    NotAnimal; Dog→Animal), `TestImplementsWithoutLSPIsUnavailable`, parse.
 **Assumption made**: `textDocument/definition`'s first location is the
 declaration. True for gopls; unverified for tsserver/pylsp.
 

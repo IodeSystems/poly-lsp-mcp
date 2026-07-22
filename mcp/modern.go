@@ -288,6 +288,11 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 	if e.recursiveUnconfirmed {
 		payload["recursive"] = "no child LSP could confirm some self-call(s), so :recursive is UNDER-RESOLVED — a name-unique self-edge is only counted once the LSP says it really calls ITSELF (not, e.g., an interface method of the same name). Run via the MCP server with a language server; results here may miss real recursion."
 	}
+	// .implements is LSP-native — there is no lexical fallback, so without a
+	// child LSP it is UNAVAILABLE (empty), not "nothing implements this".
+	if e.implementsUnavailable {
+		payload["implements"] = ".implements is resolved ENTIRELY by a child LSP (structural typing has no lexical clause to key on); none was reachable, so the result is UNAVAILABLE, not empty. Run via the MCP server with a language server."
+	}
 	// The work budget tripping is the OTHER partial-result path — same
 	// contract: flag it and name the fix, never trim quietly.
 	if e.workExceeded {

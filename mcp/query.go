@@ -60,6 +60,7 @@ type treeNode struct {
 	domain    string
 	commentAt [2]int // joined doc-comment span above this symbol (0 = none); ::comment reads it
 	bodyAt    int    // line a callable's body begins (0 = none); splits ::signature | ::body
+	nameAt    [2]int // [line, col] of the symbol's NAME — where an LSP is queried (.implements)
 	genText   string // inline source of a generated ::signature/::body node (empty otherwise)
 
 	file string // workspace-relative file path ("" for project/dir)
@@ -305,6 +306,15 @@ type engine struct {
 	// genPartCache: the generated ::signature/::body node per host per part.
 	genPartCache map[*treeNode]map[string]*treeNode
 
+	// implRefCache: `.implements` edges per host per direction, built on
+	// demand from the child LSP (textDocument/implementation). Separate
+	// from the site-based refsIn/refsOut because implements has no lexical
+	// site — it is a semantic relation only an LSP knows.
+	implRefCache map[*treeNode]map[string][]*treeNode
+	// implementsUnavailable records that a `.implements` query could not
+	// reach a child LSP, so the answer is "unavailable", never "none".
+	implementsUnavailable bool
+
 	// selfSetCache: full-workspace match sets for :not/:is chain inners,
 	// keyed by the inner AST's backing array.
 	selfSetCache map[string]map[*treeNode]bool
@@ -432,6 +442,7 @@ func (e *engine) loadFileSymbols(f *treeNode) {
 			alias:     sym.Alias,
 			commentAt: [2]int{sym.CommentStartLine, sym.CommentEndLine},
 			bodyAt:    sym.BodyStartLine,
+			nameAt:    [2]int{sym.NameStartLine, sym.NameStartCol},
 			file:      f.file,
 			sym:       sym.Sym,
 			at:        [2]int{sym.DeclStartLine, sym.DeclEndLine},
@@ -1361,7 +1372,7 @@ func parseFragmentSpec(text string) (*grepSpec, error) {
 
 func validRefClass(c string) bool {
 	switch c {
-	case "call", "type", "import": // the KIND axis
+	case "call", "type", "import", "implements": // the KIND axis
 		return true
 	}
 	return refClassIsPosition(c)
@@ -2134,7 +2145,9 @@ SPEC
          to:["strings#Split"], domain:"external" — nameable, read-only, [not indexed], never a
          false local.
   EDGES  ::in / ::out, on TWO orthogonal class axes (bare = any): KIND .call/.type/.import
-         (what it is) and POSITION .return/.param/.field/.var (where it sits). They compose:
+         (what it is) and POSITION .return/.param/.field/.var (where it sits). Plus .implements
+         (LSP-only): interface#Foo::in.implements > * = implementers, type#Bar::out.implements
+         > * = interfaces Bar satisfies. They compose:
          #'S'::in.return.type = S used as a return type, .param.type = as a param type. The
          ref IS the occurrence (its address is the site); its far end (via >) is the SOURCE
          symbol — #'S'::in.return.type > * :parents(func). Attached to the INNERMOST enclosing
@@ -3037,6 +3050,23 @@ func (e *engine) refMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed
 				cand[r] = true
 			}
 		}
+		// `.implements` is LSP-native and expensive, so it is built ONLY
+		// when explicitly named (never for a bare ::in/::out), alongside
+		// the site edges.
+		if compHasClass(comp, "implements") {
+			for _, r := range e.implementsRefs(h, comp.refDir) {
+				if !e.spend(1) {
+					break
+				}
+				if relaxed {
+					if refDirMatch(r, comp) {
+						cand[r] = true
+					}
+				} else if e.positionalMatch(r, comp) {
+					cand[r] = true
+				}
+			}
+		}
 		for n := range e.selectOrdered(cand, comp, relaxed) {
 			out[n] = true
 		}
@@ -3720,6 +3750,140 @@ func (e *engine) refNodes(n *treeNode, dir string) []*treeNode {
 		e.buildInRefs(n)
 	}
 	return n.refsIn
+}
+
+// implementsRefs builds `.implements` edges for a type-like host, on demand,
+// from the child LSP's textDocument/implementation. There is no lexical site
+// for this relation, so it lives apart from the site-based refsIn/refsOut and
+// is only built when a query NAMES `.implements` (one round-trip per host).
+// `::in.implements` on an interface = its implementers; `::out.implements` on
+// a concrete type = the interfaces it satisfies (gopls answers the fitting
+// counterpart either way). Every edge is conf `lsp`; a far end outside the
+// root becomes an external stub, like any resolved-out-of-root reference.
+func (e *engine) implementsRefs(h *treeNode, dir string) []*treeNode {
+	switch h.class {
+	case "type", "interface", "struct", "class", "enum":
+	default:
+		return nil // only type-like symbols implement / are implemented
+	}
+	if e.implRefCache == nil {
+		e.implRefCache = map[*treeNode]map[string][]*treeNode{}
+	}
+	if e.implRefCache[h] == nil {
+		e.implRefCache[h] = map[string][]*treeNode{}
+	}
+	if refs, ok := e.implRefCache[h][dir]; ok {
+		return refs
+	}
+	var refs []*treeNode
+	defer func() { e.implRefCache[h][dir] = refs }()
+
+	if h.nameAt[0] == 0 || !e.s.lspAvailable(h.abs) {
+		e.implementsUnavailable = true
+		return refs
+	}
+	e.ensureLSPCap()
+	if e.lspLeft <= 0 {
+		e.implementsUnavailable = true
+		return refs
+	}
+	e.lspLeft--
+	e.lspAsked++
+	locs := e.s.resolveImplementations(h.abs, h.nameAt[0], h.nameAt[1])
+	if len(locs) > 0 {
+		e.lspResolved++
+	}
+	for _, loc := range locs {
+		far := e.nodeForLoc(loc)
+		if far == nil {
+			continue
+		}
+		refs = append(refs, &treeNode{
+			class: "ref", refDir: dir, refKind: "implements", refConf: refLSP,
+			leaf: far.leaf, full: far.leaf,
+			file: far.file, abs: far.abs, at: [2]int{loc.line, loc.line},
+			parent: h, depth: h.depth + 1, refFar: []*treeNode{far},
+			fileOrd: h.fileOrd, symOrd: h.symOrd,
+		})
+	}
+	return refs
+}
+
+// nodeForLoc maps an implementation target location to a tree node — the
+// declared type at that line, or an external stub when it resolves outside
+// the git root (a workspace type satisfying io.Reader; a stdlib type).
+func (e *engine) nodeForLoc(loc implLoc) *treeNode {
+	rel := relPath(loc.abs, e.s.getRoot())
+	if !filepath.IsLocal(rel) {
+		return externalStub(loc.abs, loc.line, identAt(loc.abs, loc.line, loc.col))
+	}
+	return e.declAt(rel, loc.line)
+}
+
+// declAt returns the innermost declared node in rel whose span contains
+// line — how an implementation location resolves back to a workspace type.
+func (e *engine) declAt(rel string, line int) *treeNode {
+	f := e.fileByRel[rel]
+	if f == nil {
+		return nil
+	}
+	var best *treeNode
+	var walk func(n *treeNode)
+	walk = func(n *treeNode) {
+		for _, c := range e.kids(n) {
+			if c.sym == "" || c.at[0] > line || line > c.at[1] {
+				continue
+			}
+			if best == nil || (c.at[1]-c.at[0]) < (best.at[1]-best.at[0]) {
+				best = c
+			}
+			walk(c)
+		}
+	}
+	walk(f)
+	return best
+}
+
+// identAt reads the identifier at (line, col) — used to NAME an out-of-root
+// implementation target for its external stub. Falls back to the file's base
+// name (extension stripped) when the position doesn't sit on an identifier.
+func identAt(abs string, line, col int) string {
+	fallback := strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs))
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return fallback
+	}
+	lines := splitNodeReadLines(content)
+	if line < 1 || line > len(lines) {
+		return fallback
+	}
+	l := lines[line-1]
+	i := col - 1
+	if i < 0 || i >= len(l) {
+		return fallback
+	}
+	j := i
+	for j < len(l) && isIdentByte(l[j]) {
+		j++
+	}
+	if j > i {
+		return l[i:j]
+	}
+	return fallback
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+
+// compHasClass reports whether a ref compound explicitly names a KIND class.
+func compHasClass(comp *selCompound, kind string) bool {
+	for _, c := range comp.refClasses {
+		if c == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // buildOutRefs: sites in n's own file whose innermost enclosing symbol

@@ -101,9 +101,16 @@ parked here:
   site to its TRUE target via textDocument/definition when a child LSP
   (gopls/tsserver) is running, stamping refConf "lsp" per edge. The refConf
   field already exists on every edge node; no reshaping needed.
-- **More edge kinds.** .ptr / .read / .write / (ts) .implements — per-language
-  tree-sitter context. The class vocabulary is closed and validated, so new
-  kinds are additive.
+- ✅ **`.implements` — SHIPPED (LSP-native).** `interface#Foo::in.implements > *`
+  = implementers, `type#Bar::out.implements > *` = interfaces Bar satisfies.
+  Unlike site-based kinds it has NO lexical clause (Go structural typing), so
+  it's resolved entirely by the child LSP (`textDocument/implementation`,
+  cached like definition), built ONLY when explicitly named, conf `lsp`, far
+  ends outside the root become external stubs, unavailable-without-LSP says so.
+  See `implementsRefs`/`resolveImplementations`.
+- **More edge kinds.** .ptr / .read / .write — per-language tree-sitter
+  context (site-based, unlike .implements). The class vocabulary is closed and
+  validated, so new kinds are additive.
 - **`:with(project.go)` — scoped views.** A prelude that installs a global
   :root filtered to a language/subtree (user sketch, 2026-07-17; prior:
   CSS @scope, SQL WITH). Language classes (file.go) cover the per-compound

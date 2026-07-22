@@ -118,6 +118,12 @@ type Server struct {
 	defCacheGen uint64
 	defMisses   int64 // count of real round-trips (cache misses) — for tests/measurement
 
+	// implCache memoizes textDocument/implementation answers (.implements
+	// edges), same gen-keyed discipline as defCache.
+	implCacheMu  sync.Mutex
+	implCache    map[string][]implLoc
+	implCacheGen uint64
+
 	// diagnosticWait is the per-edit deadline for publishDiagnostics.
 	// 0 means use the default (1500ms). Tests set a smaller value to
 	// stay fast.

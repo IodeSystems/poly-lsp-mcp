@@ -254,6 +254,29 @@ taught anything it's that MORE prose is worse, not better.
 home turf (autowork3 dead). Either find/build another real-agent vehicle, or
 accept the llm-bench peer result and let the roadmap ride on it.
 
+✅ **Broader dogfood pass — 3 cliffs found + fixed, all invisible to tests.**
+Drove the real MCP server across ~20 queries. Edit/transaction UX + instructive
+help confirmed excellent. Three issues surfaced, all fixed:
+  1. `:recursive` broad exhausted the cap (see Edges) — 1 match → 10, complete.
+  2. **`:any`/`:empty` over a bare edge over-resolved → the FLAGSHIP dead-code
+     recipe (in the description) hit the cap and returned non-deterministic,
+     incomplete results.** Fixed with a SHORT-CIRCUIT: `bareEdge()` detects a
+     plain `::in`/`::out` existence test and routes it to `anyEdge`/`anyInEdge`/
+     `anyOutEdge`, which stop at the FIRST real edge instead of building+resolving
+     the whole set (out-edges need no LSP; in-edges resolve only ambiguous names,
+     until the first real caller). A live func stops at its first caller; only a
+     truly-uncalled one pays the full scan. Recipe now 2.0s, complete (3 real
+     dead non-test funcs; the other 482 "dead" were `Test*` funcs — no direct
+     caller by design). `bareEdge` deliberately REJECTS a bare-claim shape
+     (`::in:empty`, a positionClaim) — that path stays full/correct. Recipe in
+     description/README/grammar switched to the fast `:empty(::in)` form. Tests
+     `TestPositionClaims`/`TestNotAndIsAreSelfTests` pinned it (caught a
+     complement-inversion mid-fix).
+  3. **Addressing friction: `#'file#method'` silently matched nothing** (the sym
+     is `Type.method`). `nodeIDs` now also answers to `file#leaf` for nested
+     symbols, so the natural `#'precision.go#resolveDefinition'` matches the
+     method — a model rarely knows the receiver type.
+
 ✅ **Dogfooding wired: `.mcp.json` registers poly-lsp as a NATIVE tool** for
 Claude Code in this repo (`./bin/dev mcp --root . --validate` — build chatter
 is stderr, stdout is clean JSON-RPC, verified). So the project develops

@@ -67,7 +67,7 @@ TAGS are a FIXED set: project dir file func method type struct interface class c
 GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive.
 ::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E).
 FOOTGUNS: * NEVER matches ::edges or ::grep lines — name them or they're invisible. {m,n} elsewhere is regex REPETITION child-joined, NOT depth: func{2} = func>func, (a b){2} groups, within-3-levels = "> *{0,2} > x". :not/:is(sel) test the node ITSELF; :where/:any/:all/:empty(sel) test AROUND it (leading tag = a descendant, leading ::/pseudo = the node; bare :any/:all/:empty judge their position). :parents(sel) = ALL upstream (ancestors + incoming refs) — broader than callers. Edge/::grep addresses are file@line: node_read/node_edit hit that exact line.
-RECIPES: #'a.go#Save'::in.call callers | ::in.call{1,} > * transitive callers | #'main'::out.call > * callees | func:not(#main):not(#init):not([name^=Test]):where(::in:empty) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints | :root > * tour.
+RECIPES: #'a.go#Save'::in.call callers | ::in.call{1,} > * transitive callers | #'main'::out.call > * callees | func:not(#main):not(#init):not([name^=Test]):empty(::in) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints | :root > * tour.
 limit 20; offset pages; selector "?" = the full grammar.`
 
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +

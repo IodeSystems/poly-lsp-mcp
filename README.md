@@ -74,7 +74,7 @@ func:recursive                                         funcs that call themselve
 func:arity(0,0)                                         no-argument funcs
 func::signature                                        every function signature (one-query overview)
 interface#Reader::in.implements > *                    types that implement Reader (LSP-resolved)
-func:not(#main):not(#init):not([name^=Test]):where(::in:empty)   dead code
+func:not(#main):not(#init):not([name^=Test]):empty(::in)   dead code
 file:has(func:where(::out.call{15,16}))                files whose funcs call 15–16 deep
 import#huma::in.call::grep('-E (Get|Post)\(')          endpoints of a dependency
 :root > *                                              tour the workspace

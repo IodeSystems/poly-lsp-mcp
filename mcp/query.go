@@ -180,6 +180,13 @@ func (n *treeNode) nodeIDs() []string {
 		return []string{n.leaf, n.full}
 	}
 	ids := []string{n.leaf, n.full, n.file + "#" + n.sym}
+	// Also answer to file#leaf for a NESTED symbol, so the natural
+	// `#'app.go#Start'` matches the method `app.go#Server.Start` — a model
+	// rarely knows the receiver type, and the emitted address still carries
+	// the full path. (dogfooding: file#method silently returned nothing.)
+	if n.leaf != n.sym {
+		ids = append(ids, n.file+"#"+n.leaf)
+	}
 	if n.alias != "" {
 		ids = append(ids, n.alias) // an annotation's own name (app.route)
 	}
@@ -1034,7 +1041,7 @@ func validateGlobalComplex(cx *selComplex) error {
 			return fmt.Errorf("'&' names the node under test, so it only makes sense inside :where/:any/:all/:empty (e.g. :where(&:parents:empty))")
 		}
 		if len(el.comp.positionClaims) > 0 {
-			return fmt.Errorf("a bare claim judges a position inside :where/:any/:all/:empty — write func:where(::in:empty), or open a :parents excursion first")
+			return fmt.Errorf("a bare claim judges a position inside :where/:any/:all/:empty — write func:empty(::in), or open a :parents excursion first")
 		}
 	}
 	return nil
@@ -2111,7 +2118,7 @@ TASK → QUERY
   what does X call            #'store.go#Save'::out.call > *
   everything that reaches X   #'X'::in.call{1,} > *
   is X used at all            #'X'::in             (0 matches = unused)
-  dead code                   func:not(#main):not(#init):not([name^=Test]):where(::in:empty)
+  dead code                   func:not(#main):not(#init):not([name^=Test]):empty(::in)
   find TODOs / any text       func::grep('-w TODO')              each row IS the line, editable
   uses of a dependency        import#huma::in.call               externals resolve to the import node
   endpoints on a dependency   import#huma::in.call::grep('-E (Register|Get|Post)\(')
@@ -2123,7 +2130,7 @@ COMPOSING — one hop at a time, left to right:
   2. cross ONE edge:              ::in.call             ::in = toward me, ::out = away from me
   3. land on the far node:        > *                   the far end is the edge's child
   4. filter what you landed on:   > func[name^=Test]
-  A claim decides the ANCHOR, not the landing: func:where(::in:empty) returns funcs, judged
+  A claim decides the ANCHOR, not the landing: func:empty(::in) returns funcs, judged
   by their edges. To go deeper, STOP — run the query, then start the next one from its rows.
 
 SPEC
@@ -3581,6 +3588,141 @@ func (e *engine) isRecursive(n *treeNode) bool {
 	return false
 }
 
+// bareEdge returns the ref compound when `list` is exactly one bare edge
+// element (::in / ::out with an optional KIND, no id/attr/pseudo filter, no
+// far-end hop) — the shape an existence/emptiness test can SHORT-CIRCUIT.
+// Anything richer (a far end, an id, a repeat) needs the full set.
+func bareEdge(list selectorList) *selCompound {
+	if len(list) != 1 {
+		return nil
+	}
+	elems := list[0].elems
+	// A relative inner (`:empty(::in)`) leads with the implied self-anchor
+	// (`&`); the edge is the element after it. Strip a leading bare self.
+	if len(elems) == 2 && elems[0].comp != nil && elems[0].group == nil &&
+		(elems[0].comp.selfRef || elems[0].comp.implied) {
+		elems = elems[1:]
+	}
+	if len(elems) != 1 {
+		return nil
+	}
+	el := &elems[0]
+	if el.group != nil || el.comp == nil || el.min != 1 || el.max != 1 {
+		return nil
+	}
+	c := el.comp
+	// A trailing BARE CLAIM (`::in:empty` / `::in.call:any`) is a
+	// positionClaim, not a pseudo — it changes the meaning, so this shape is
+	// NOT a plain edge existence test; leave it to the full claim path.
+	if !c.isRef || len(c.attrs) > 0 || c.ordSel != 0 || len(c.pseudos) > 0 || len(c.positionClaims) > 0 {
+		return nil
+	}
+	return c
+}
+
+// siteMatchesRefClasses tests a site's kind/position against a ref
+// compound's KIND classes (mirrors positionalMatch's ref half). Empty
+// classes match any kind.
+func siteMatchesRefClasses(kind, pos string, comp *selCompound) bool {
+	for _, c := range comp.refClasses {
+		if refClassIsPosition(c) {
+			if pos != c {
+				return false
+			}
+		} else if kind != c {
+			return false
+		}
+	}
+	return true
+}
+
+// anyEdge short-circuits an edge existence test: does n have ANY in/out edge
+// matching comp's KIND that is a REAL edge? It stops at the first one instead
+// of building and resolving the whole set — which is what made :empty / :any
+// over a broad selector (the dead-code recipe) exhaust the LSP cap. Only a
+// node with NO such edge pays the full scan.
+func (e *engine) anyEdge(n *treeNode, comp *selCompound) bool {
+	if comp.refDir == "out" {
+		return e.anyOutEdge(n, comp)
+	}
+	return e.anyInEdge(n, comp)
+}
+
+// anyOutEdge: does n's body reference anything of the requested kind? An
+// out-edge is LEXICAL by nature (the site is right there), so existence needs
+// no LSP resolution — the first matching out-site with a far end wins.
+func (e *engine) anyOutEdge(n *treeNode, comp *selCompound) bool {
+	switch n.class {
+	case "project", "dir", "file", "ref":
+		return false
+	}
+	for _, site := range e.fileSites(n.file) {
+		if !e.spend(1) {
+			return false
+		}
+		if site.encl != n.sym || site.line < n.at[0] || site.line > n.at[1] {
+			continue
+		}
+		if !siteMatchesRefClasses(site.kind, site.pos, comp) {
+			continue
+		}
+		if len(e.scopeDecls(e.declsOf(site.name), n.file, site.encl)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// anyInEdge: does anything reference n? A name-unique target's lexical
+// in-sites are already real (no LSP); an ambiguous one resolves each site
+// only until the FIRST that is really n — so a live func stops at its first
+// caller and only a truly-uncalled one pays the full scan.
+func (e *engine) anyInEdge(n *treeNode, comp *selCompound) bool {
+	if n.sym == "" {
+		return false
+	}
+	idx := e.s.getIndex()
+	if idx == nil {
+		return false
+	}
+	owner, isLocal := localOwner(n)
+	ambiguous := len(e.declsOf(n.leaf)) > 1
+	for _, site := range idx.LookupExisting(n.leaf) {
+		if !e.spend(1) {
+			return false
+		}
+		rel := relPath(site.File, e.s.getRoot())
+		if n.class == "import" && rel != n.file {
+			continue
+		}
+		if isLocal && rel != n.file {
+			continue
+		}
+		sites := e.fileSites(rel)
+		var hit *refSite
+		for i := range sites {
+			if sites[i].name == n.leaf && sites[i].line == site.Line && sites[i].col == site.Col {
+				hit = &sites[i]
+				break
+			}
+		}
+		if hit == nil || (isLocal && !inScopeOf(hit.encl, owner)) {
+			continue
+		}
+		if !siteMatchesRefClasses(hit.kind, hit.pos, comp) {
+			continue
+		}
+		fnode := e.fileByRel[rel]
+		if fnode == nil {
+			continue
+		}
+		if keep, _ := e.refineIn(n, fnode.abs, hit.line, hit.col, ambiguous); keep {
+			return true
+		}
+	}
+	return false
+}
+
 // argCount returns how many `argument` children a node declares — the
 // structural signature size :arity filters on. A non-callable (no
 // argument children) is zero, so :arity(0,0) is a valid "no-arg" test on
@@ -3614,8 +3756,14 @@ func (e *engine) pseudoHolds(n *treeNode, ps *selPseudo) bool {
 		// :where is documented as the filter (subset flows on), :any as
 		// the ∃ claim. Kept distinct so path-level filtering can later
 		// diverge without a grammar change.
+		if c := bareEdge(ps.inner); c != nil {
+			return e.anyEdge(n, c) // short-circuit: existence, not the full set
+		}
 		return len(e.evalList(ps.inner, n, false)) > 0
 	case pseudoEmpty:
+		if c := bareEdge(ps.inner); c != nil {
+			return !e.anyEdge(n, c)
+		}
 		return len(e.evalList(ps.inner, n, false)) == 0
 	case pseudoNot:
 		return !e.selfMatches(n, ps.inner)

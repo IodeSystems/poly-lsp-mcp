@@ -137,8 +137,12 @@ func (n *treeNode) addr() string {
 		return n.full
 	case "dir", "file":
 		return n.file
-	case "ref", "fragment", "comment", "signature", "body":
+	case "ref", "fragment", "comment":
 		return fmt.Sprintf("%s@%d", n.file, n.at[0])
+	case "signature", "body":
+		// A RANGE address so node_read/node_edit hit the whole span (these
+		// are multi-line, unlike a ref/grep line).
+		return fmt.Sprintf("%s@%d-%d", n.file, n.at[0], n.at[1])
 	case "external":
 		return n.full // module@version#sym — the external identity, not a workspace path
 	}
@@ -2159,8 +2163,9 @@ SPEC
          to *). func:any(::comment) = documented; func:not(:any(::comment)) = undocumented;
          ::comment:contains('TODO'). Address = file@line.
   ::signature / ::body  a callable split into its decl HEAD (no doc, no body) and its BODY
-         block — GENERATED nodes carrying their source INLINE, so func::signature is a one-query
-         signature overview. func#F::body:contains('TODO'). Address = file@line.
+         (the statements between the braces) — GENERATED nodes carrying their source INLINE, so
+         func::signature is a one-query signature overview. EDITABLE: node_edit #'F'::body
+         newText:'…' rewrites just the body (address = file@start-end, a range).
   :annotated('…')  boolean grep over the decorator/annotation/doc block ON the decl —
          the symbol CARRYING the mark, not the line. func:annotated('@app.route'),
          class:annotated('@Component'), func:annotated('-w Deprecated'). Same flags as :contains.
@@ -3317,7 +3322,15 @@ func (e *engine) genPartOf(h *treeNode, part string) *treeNode {
 	}
 	class, span, text := "signature", [2]int{startLine + sigIdx, h.bodyAt}, lines[sigIdx:bodyIdx+1]
 	if part == "body" {
-		class, span, text = "body", [2]int{h.bodyAt, h.at[1]}, lines[bodyIdx:]
+		// The body is the STATEMENTS between the braces — the `{` line and
+		// the `}` line are the signature's / the decl's, not the body's — so
+		// a ::body REWRITE replaces just the implementation. Degenerate
+		// bodies (single-line, empty) have no such span and yield no node.
+		lastIdx := h.at[1] - startLine // index of the closing `}` line
+		if bodyIdx+1 >= lastIdx || lastIdx > len(lines) {
+			return nil
+		}
+		class, span, text = "body", [2]int{h.bodyAt + 1, h.at[1] - 1}, lines[bodyIdx+1:lastIdx]
 	}
 	g := &treeNode{
 		class: class,

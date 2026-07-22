@@ -334,11 +334,14 @@ type modernNode struct {
 // ordinalSuffix matches the "[n]" disambiguator renderSegment emits.
 var ordinalSuffix = regexp.MustCompile(`\[\d+\]`)
 
-// refSiteAddr matches a ref node's "<file>@<line>" site address.
-var refSiteAddr = regexp.MustCompile(`^(.+)@(\d+)$`)
+// refSiteAddr matches a generated node's site address: "<file>@<line>" (a
+// ref/::grep/::comment line) or "<file>@<start>-<end>" (a ::signature/::body
+// SPAN, node_read/node_edit hit the whole range).
+var refSiteAddr = regexp.MustCompile(`^(.+)@(\d+)(?:-(\d+))?$`)
 
-// resolveRefSiteAddr resolves "<file>@<line>" to that line of the file.
-func (s *Server) resolveRefSiteAddr(file, lineStr string) (*modernNode, error) {
+// resolveRefSiteAddr resolves "<file>@<line>" (one line) or
+// "<file>@<start>-<end>" (a span) to an editable range.
+func (s *Server) resolveRefSiteAddr(file, startStr, endStr string) (*modernNode, error) {
 	abs, err := s.resolveFileArg(file)
 	if err != nil {
 		return nil, err
@@ -347,14 +350,22 @@ func (s *Server) resolveRefSiteAddr(file, lineStr string) (*modernNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	line, _ := strconv.Atoi(lineStr)
 	lines := splitNodeReadLines(content)
-	if line < 1 || line > len(lines) {
-		return nil, fmt.Errorf("%s has no line %d", file, line)
+	start, _ := strconv.Atoi(startStr)
+	end := start
+	if endStr != "" {
+		end, _ = strconv.Atoi(endStr)
 	}
-	r := rangeArgs{File: file, StartLine: line, StartCol: 1, EndLine: line, EndCol: len(lines[line-1]) + 1}
+	if start < 1 || end < start || end > len(lines) {
+		return nil, fmt.Errorf("%s has no line range %d-%d", file, start, end)
+	}
+	addr := fmt.Sprintf("%s@%d", file, start)
+	if endStr != "" {
+		addr = fmt.Sprintf("%s@%d-%d", file, start, end)
+	}
+	r := rangeArgs{File: file, StartLine: start, StartCol: 1, EndLine: end, EndCol: len(lines[end-1]) + 1}
 	return &modernNode{
-		class: "ref", file: file, addr: fmt.Sprintf("%s@%d", file, line),
+		class: "ref", file: file, addr: addr,
 		exists: true, decl: r, name: r,
 	}, nil
 }
@@ -435,7 +446,7 @@ func (s *Server) resolveModernNode(node string) (*modernNode, error) {
 	// rows). Resolves to that whole line, so reading it shows the site
 	// and oldText/newText edits the call site.
 	if m := refSiteAddr.FindStringSubmatch(node); m != nil {
-		if rn, err := s.resolveRefSiteAddr(m[1], m[2]); err == nil {
+		if rn, err := s.resolveRefSiteAddr(m[1], m[2], m[3]); err == nil {
 			return rn, nil
 		}
 	}
@@ -487,6 +498,16 @@ func (s *Server) resolveModernNode(node string) (*modernNode, error) {
 			return &modernNode{class: "dir", file: m.file, addr: m.addr(), isDir: true, exists: true}, nil
 		case "project":
 			return nil, fmt.Errorf("%q matches the project root, which is not a file or a symbol", node)
+		case "ref", "fragment", "comment", "signature", "body":
+			// Generated nodes have no dotted sym; resolve them by their
+			// file@line / file@start-end address (a range for ::signature/
+			// ::body) so a `#'X'::body` selector edits the SPAN, not the file.
+			if am := refSiteAddr.FindStringSubmatch(m.addr()); am != nil {
+				return s.resolveRefSiteAddr(am[1], am[2], am[3])
+			}
+			return nil, fmt.Errorf("%q is a generated node with no editable span", node)
+		case "external":
+			return nil, fmt.Errorf("%q resolves to an EXTERNAL stub (%s) — read-only, outside the workspace", node, m.addr())
 		}
 		return s.resolveClassicAddr(m.file, m.sym)
 	default:
@@ -878,6 +899,14 @@ func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, err
 	}
 	if rn.isDir {
 		return nil, true, errors.New("node_edit doesn't recurse into directories")
+	}
+
+	// A generated-span address (::signature / ::body / a ref/::grep line)
+	// always EXISTS as a range — there is no "create" for a span — so
+	// newText ALONE replaces it. This is what makes `#'F'::body newText:…`
+	// rewrite just the body without repeating the old text.
+	if rn.class == "ref" && p.NewText != nil && p.OldText == nil && p.Delete == nil {
+		return s.applyRangeRewrite(rn.addr, rn.decl, *p.NewText, p.diagnosticOptions)
 	}
 
 	// ---- create: newText alone, and only where nothing resolves yet.

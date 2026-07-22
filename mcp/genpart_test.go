@@ -82,6 +82,55 @@ const Pi = 3
 	}
 }
 
+// ::body is EDITABLE: a rewrite replaces just the statements, leaving the
+// signature line and the braces intact — via the selector AND the range
+// address node_query emits.
+func TestGenPartBodyEditable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "m.go")
+	if err := os.WriteFile(path, []byte("package x\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// node_query emits a RANGE address for ::body.
+	q := query(t, s, map[string]any{"selector": `#'m.go#Add'::body`})
+	if q.TotalMatches != 1 {
+		t.Fatalf("want 1 body node; got %d", q.TotalMatches)
+	}
+	addr := q.Matches[0].Node
+	if !strings.Contains(addr, "@") || !strings.Contains(addr, "-") {
+		t.Errorf("::body address should be a range (file@start-end); got %q", addr)
+	}
+
+	// Edit via the SELECTOR — rewrites just the statements.
+	r := s.callTool("node_edit", map[string]any{"node": `#'m.go#Add'::body`, "oldText": "return a + b", "newText": "return a * b"})
+	if r.IsError {
+		t.Fatalf("::body edit errored: %s", r.Content[0].Text)
+	}
+	got, _ := os.ReadFile(path)
+	want := "package x\n\nfunc Add(a, b int) int {\n\treturn a * b\n}\n"
+	if string(got) != want {
+		t.Fatalf("::body edit must touch only the statements:\n got %q\nwant %q", got, want)
+	}
+
+	// Edit via the ADDRESS form (whole-span rewrite).
+	r = s.callTool("node_edit", map[string]any{"node": addr, "newText": "\treturn 0"})
+	if r.IsError {
+		t.Fatalf("::body address edit errored: %s", r.Content[0].Text)
+	}
+	got, _ = os.ReadFile(path)
+	if string(got) != "package x\n\nfunc Add(a, b int) int {\n\treturn 0\n}\n" {
+		t.Fatalf("address rewrite wrong:\n got %q", got)
+	}
+}
+
 // A multi-line signature is captured whole, and TS/Python resolve their
 // body field the same way.
 func TestGenPartMultilineAndLangs(t *testing.T) {

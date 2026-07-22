@@ -171,9 +171,21 @@ routes through the open batch; the handler is the state machine; semantic ops
 (rename/params/return) refuse staging (already coherent). One open batch per
 server, `editMu`-serialized. Tests: `TestEditBatchStageAndRollback` (mechanics,
 no-gopls), `TestEditBatchAtomicCommit` (gopls: sig+caller as one clean unit;
-lone breaking edit → rejected+help). **Not yet:** editable `::signature`/
-`::body` via a range address (the feature this grew out of) — `::body` is safe
-alone, `::signature` only inside a batch; both now unblocked by the txn.
+lone breaking edit → rejected+help).
+
+✅ **Editable `::signature` / `::body` — SHIPPED (on the txn).** `::body` is
+now the STATEMENTS between the braces (a rewrite replaces just the impl,
+leaving the sig line and `}` intact); it and `::signature` carry a RANGE
+address (`file@start-end`) so node_read/node_edit hit the whole span, and a
+generated-span address treats `newText` ALONE as replace-the-span (no need to
+repeat the old text): `node_edit #'F'::body newText:'…'`. Both the selector
+(`#'F'::body`) and the emitted address resolve to the span (the selector path
+now routes generated nodes — ref/comment/signature/body — through their
+address instead of collapsing to the whole file; an `external` stub is
+refused as read-only). `::body` edits alone (safe); `::signature` edits inside
+a `commit:false` batch with its counterpart (the broken-intermediate the txn
+exists for). Tests: `TestGenPartBodyEditable` (selector + address, statements
+only). Degenerate single-line/empty bodies yield no `::body` node.
 
 **⚑ corrallm-side changes (their repo, uncommitted — flag for review):**
 `services/corrallm` gained, to make the above measurable: the

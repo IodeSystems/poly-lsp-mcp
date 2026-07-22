@@ -205,3 +205,73 @@ func TestWithoutLSPEdgesStayUnsettledAndSaySo(t *testing.T) {
 		t.Errorf("no manager means no round-trips; asked=%d", e.lspAsked)
 	}
 }
+
+// The North Star Stage 0 case: a name that COLLIDES locally but whose real
+// target is the stdlib. Two packages declare Split; main.go calls
+// strings.Split. Lexical offers both local Splits; gopls resolves OUTSIDE
+// the root, so the edge must become an honest EXTERNAL STUB (strings#Split,
+// domain external, conf lsp) — never a false local.
+func writeExternalStubFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module extstub\ngo 1.21\n")
+	write("pkga/a.go", "package pkga\n\nfunc Split(s string) string { return s }\n")
+	write("pkgb/b.go", "package pkgb\n\nfunc Split(s string) string { return s }\n")
+	write("main.go", `package main
+
+import "strings"
+
+func Run() []string {
+	return strings.Split("a,b", ",")
+}
+`)
+	return dir
+}
+
+func TestPrecisionResolvesToExternalStub(t *testing.T) {
+	requireGopls(t)
+	dir := writeExternalStubFixture(t)
+
+	s := startPrecisionSession(t, dir)
+	defer s.close()
+
+	q := query(t, s, map[string]any{"selector": `#'main.go#Run'::out.call`, "limit": 20})
+	if q.TotalMatches == 0 {
+		t.Fatal("Run calls strings.Split — expected an outgoing call edge")
+	}
+	var saw bool
+	for _, m := range q.Matches {
+		joined := strings.Join(m.To, ",")
+		if !strings.Contains(joined, "Split") {
+			continue
+		}
+		saw = true
+		// The real target is external: the stub is named strings#Split,
+		// NOT either local pkg's Split.
+		if !strings.Contains(joined, "strings#Split") {
+			t.Errorf("Split edge far end = %v, want the external stub strings#Split", m.To)
+		}
+		if strings.Contains(joined, "pkga") || strings.Contains(joined, "pkgb") {
+			t.Errorf("edge fell back to a FALSE LOCAL: %v", m.To)
+		}
+		if m.Domain != "external" {
+			t.Errorf("an out-of-root far end must be domain=external; got %q", m.Domain)
+		}
+		if m.Conf != refLSP {
+			t.Errorf("gopls resolved it — conf must be %q; got %q", refLSP, m.Conf)
+		}
+	}
+	if !saw {
+		t.Fatal("no Split edge in the result; fixture or query is wrong")
+	}
+}

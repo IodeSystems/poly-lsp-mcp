@@ -46,13 +46,15 @@ a `refFar` can land OUTSIDE the git root, where `fileByRel` has no node and the
 edge silently falls back to a false local match (the `Write`/`Read` collision
 the icebox flags). So the single-`.project` assumption is already leaking, and
 "lib linking" is not a feature to add but a boundary already being crossed.
-Bridge is staged — Stage 0 (owed NOW by the active Edges work): a resolved
-far end outside the root becomes an honest EXTERNAL STUB (`module@version#sym`,
-`domain: external`, read-only, `[not indexed]`) — nameable, never a false
-local. Stages 1–2 (content-addressed lib partitions, on-demand, evictable) are
-deferred design in icebox ("Ownership domains"). **Rule until then: nothing new
-may hard-code the single-root assumption deeper** — a node's `domain` (owned rw
-/ vendored ro / external ro) is the axis that will gate mutation and budget.
+Bridge is staged — **Stage 0 SHIPPED**: a resolved far end outside the root is
+now an honest EXTERNAL STUB (`module@version#sym`, `domain: external`,
+read-only, `[not indexed]`) — nameable, never a false local (see the Edges
+slice below). Stages 1–2 (content-addressed lib partitions, on-demand,
+evictable) are deferred design in icebox ("Ownership domains"). **Rule until
+then: nothing new may hard-code the single-root assumption deeper** — a node's
+`domain` (owned rw / vendored ro / external ro) is the axis that will gate
+mutation and budget; the field now EXISTS on treeNode (`"" `=owned,
+`"external"`), populated by Stage 0.
 **Decided: crossing into libs is opt-IN** (`:with(libs)` / drill into a stub),
 the default stays workspace-bounded — revisit only if adoption data shows
 agents actually want the cross-lib answer unprompted.
@@ -291,15 +293,21 @@ per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
   - ◻ **`::in` on a common name is O(sites) round-trips** (#New = 93). Under
     the cap, but a warm-gopls session pays it per query — the LSP answer is
     not cached across queries.
-  - ◐ **A resolved far end OUTSIDE the root has no node today** (North Star
-    Stage 0). **verify DONE**: `refineFar` (precision.go:170) hit `picked==nil`
-    when the LSP resolved outside the modelled tree and returned the lexical
-    candidates as `refLexical` — a FALSE-CERTAIN local match. **Half-fixed this
-    session**: that path now returns `refUnsettled`, so an out-of-root
-    resolution reads as a GUESS, never a certain local. **Still owed**: mint an
-    actual EXTERNAL STUB (`module@version#sym`, `domain: external`, ro) as the
-    named far end instead of leaving the local candidates standing — the honest
-    boundary marker. The conf is now honest; the NODE is not yet external.
+  - ✅ **A resolved far end OUTSIDE the root is now an EXTERNAL STUB** (North
+    Star Stage 0 — SHIPPED). `refineFar`'s `picked==nil` path splits on
+    `filepath.IsLocal(defRel)`: outside the root → mint an `external` node
+    (`module@version#sym`, `domain:"external"`, ro, `[not indexed]`, conf `lsp`)
+    as the far end; inside-but-unmatched stays `unsettled`. `externalIdentity`
+    derives the identity best-effort per ecosystem (Go mod cache `@version`,
+    stdlib/`node_modules`/`site-packages` package path, dir-base fallback) — always
+    nameable, never a false local. `addr()`/`nodeIDs()` handle the class;
+    node_query flags the row `domain:"external"`. Tests: `TestExternalIdentity`,
+    `TestExternalStubShape` (fast), `TestPrecisionResolvesToExternalStub`
+    (gopls e2e: two local `Split` + a `strings.Split` call → `strings#Split`, no
+    false local). **Scope note**: only fires on the ≥2-candidate ambiguous path
+    (`refineFar` skips len<2); a single local candidate that's actually external
+    still fast-paths as `lexical` (asking the LSP per unambiguous edge is the
+    cost the skip buys) — documented limitation, not this slice.
 **Assumption made**: `textDocument/definition`'s first location is the
 declaration. True for gopls; unverified for tsserver/pylsp.
 

@@ -225,13 +225,23 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 			// CANDIDATE LIST, not a fact.
 			m["conf"] = n.refConf
 			far := make([]string, 0, len(n.refFar))
+			external := false
 			for _, f := range n.refFar {
 				far = append(far, f.addr())
+				if f.domain == "external" {
+					external = true
+				}
 			}
 			if n.refDir == "out" {
 				m["to"] = far
 			} else {
 				m["from"] = far
+			}
+			// An external far end (module@version#sym) is a read-only STUB
+			// outside the git root — resolved (conf: lsp) but NOT indexed.
+			// Flag it so the identity never reads as a workspace symbol.
+			if external {
+				m["domain"] = "external"
 			}
 		case "fragment":
 			// A fragment row IS its matched line: text (plus -A/-B/-C

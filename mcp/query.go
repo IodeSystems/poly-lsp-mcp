@@ -49,10 +49,15 @@ import (
 //   - full — a symbol's dotted path, or a dir/file's workspace-relative
 //     path.
 type treeNode struct {
-	class     string // "project"|"dir"|"file"|<symbol class>|"argument"|"annotation"
-	leaf      string
-	full      string
-	alias     string // extra id (an annotation's own name, e.g. app.route)
+	class string // "project"|"dir"|"file"|<symbol class>|"argument"|"annotation"|"external"
+	leaf  string
+	full  string
+	alias string // extra id (an annotation's own name, e.g. app.route)
+	// domain gates ownership: "" = owned (workspace, rw). "external" = a
+	// child-LSP resolved this far end OUTSIDE the git root (stdlib, a dep)
+	// — a read-only STUB, nameable but [not indexed]. The North Star axis
+	// that will later gate mutation/budget; today it just marks the boundary.
+	domain    string
 	commentAt [2]int // joined doc-comment span above this symbol (0 = none); ::comment reads it
 
 	file string // workspace-relative file path ("" for project/dir)
@@ -130,6 +135,8 @@ func (n *treeNode) addr() string {
 		return n.file
 	case "ref", "fragment", "comment":
 		return fmt.Sprintf("%s@%d", n.file, n.at[0])
+	case "external":
+		return n.full // module@version#sym — the external identity, not a workspace path
 	}
 	if n.sym == "" {
 		return n.file
@@ -160,6 +167,10 @@ func (n *treeNode) nodeIDs() []string {
 		return ids
 	case "fragment", "comment":
 		return nil // generated source region: no name to match by #id
+	case "external":
+		// The bare symbol (#Writer) and the full external identity
+		// (#'io@go1.21#Writer'); no workspace address.
+		return []string{n.leaf, n.full}
 	}
 	ids := []string{n.leaf, n.full, n.file + "#" + n.sym}
 	if n.alias != "" {
@@ -2043,6 +2054,9 @@ SPEC
          #id spans both axes and adds the "<file>#<sym>" address; it is never a regex.
   CONF   edge conf: "lsp" = LSP-resolved; "lexical" = name UNIQUE (certain); "unsettled" =
          several same-named decls, no LSP — a GUESS whose to:/from: is a CANDIDATE LIST, not a fact.
+         A far end the LSP resolves OUTSIDE the git root (stdlib, a dep) is an external STUB —
+         to:["strings#Split"], domain:"external" — nameable, read-only, [not indexed], never a
+         false local.
   EDGES  ::in / ::out, on TWO orthogonal class axes (bare = any): KIND .call/.type/.import
          (what it is) and POSITION .return/.param/.field/.var (where it sits). They compose:
          #'S'::in.return.type = S used as a return type, .param.type = as a param type. The

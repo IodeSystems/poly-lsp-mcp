@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -177,14 +179,111 @@ func (e *engine) refineFar(far []*treeNode, siteAbs string, line, col int) ([]*t
 	defRel := relPath(defAbs, e.s.getRoot())
 	picked := pickByDefinition(far, defRel, defLine)
 	if picked == nil {
-		// The LSP pointed outside the modelled tree (stdlib, vendor,
-		// generated). Narrowing to nothing would DELETE a real edge, so
-		// the candidates stand — but which one (if any) is right is
-		// unknown, so this is unsettled, not certain.
+		if !filepath.IsLocal(defRel) {
+			// The LSP resolved OUTSIDE the git root — the stdlib, a
+			// dependency, a vendored module. The real target is external,
+			// so none of the local candidates is right. Mint an honest
+			// EXTERNAL STUB (nameable, read-only, [not indexed]) as the far
+			// end instead of leaving a false local. This is a CONFIDENT
+			// resolution (conf: lsp) to a boundary node (North Star Stage 0).
+			e.lspResolved++
+			return []*treeNode{externalStub(defAbs, defLine, far[0].leaf)}, refLSP
+		}
+		// Inside the root but no candidate span matched (a decl the tree
+		// did not model): genuinely unsettled, not certain.
 		return far, refUnsettled
 	}
 	e.lspResolved++
 	return []*treeNode{picked}, refLSP
+}
+
+// externalStub mints a read-only far-end node for a symbol a child LSP
+// resolved OUTSIDE the git root. Its identity is `module@version#sym`
+// (version omitted when unknown), derived best-effort from the resolved
+// path — always nameable so an external edge is never a false local. It
+// is domain:"external", never indexed, and carries the real path in `abs`
+// for a potential read.
+func externalStub(defAbs string, defLine int, name string) *treeNode {
+	module, version := externalIdentity(defAbs)
+	id := name
+	if module != "" {
+		id = module
+		if version != "" {
+			id += "@" + version
+		}
+		id += "#" + name
+	}
+	return &treeNode{
+		class:  "external",
+		domain: "external",
+		leaf:   name,
+		full:   id,
+		abs:    defAbs,
+		at:     [2]int{defLine, defLine},
+	}
+}
+
+// externalIdentity derives a `module`, `version` pair from an absolute
+// path a child LSP resolved outside the workspace. Best-effort per
+// ecosystem (Go module cache carries @version; stdlib / node_modules /
+// site-packages carry the package path), with a last-resort fallback to
+// the containing directory — so the result is ALWAYS nameable and clearly
+// not a workspace file.
+func externalIdentity(defAbs string) (module, version string) {
+	p := filepath.ToSlash(defAbs)
+	if i := strings.LastIndex(p, "/pkg/mod/"); i >= 0 {
+		return splitModuleVersion(path.Dir(p[i+len("/pkg/mod/"):]))
+	}
+	if i := strings.LastIndex(p, "/node_modules/"); i >= 0 {
+		return firstNodePackage(p[i+len("/node_modules/"):]), ""
+	}
+	if i := strings.LastIndex(p, "/site-packages/"); i >= 0 {
+		return firstSegment(p[i+len("/site-packages/"):]), ""
+	}
+	if i := strings.LastIndex(p, "/src/"); i >= 0 {
+		// GOROOT/GOPATH stdlib-shaped: .../src/<pkg>/file.go. No version
+		// on disk here, so leave it blank (still nameable: strings#Split).
+		return path.Dir(p[i+len("/src/"):]), ""
+	}
+	return path.Base(path.Dir(p)), "" // last resort — the containing dir
+}
+
+// splitModuleVersion parses a Go module-cache subpath
+// (`github.com/foo/bar@v1.2.3/sub`) into module + version, folding any
+// subpackage back onto the module path.
+func splitModuleVersion(s string) (module, version string) {
+	at := strings.Index(s, "@")
+	if at < 0 {
+		return s, ""
+	}
+	module = s[:at]
+	rest := s[at+1:]
+	if slash := strings.Index(rest, "/"); slash >= 0 {
+		version = rest[:slash]
+		module += "/" + rest[slash+1:]
+	} else {
+		version = rest
+	}
+	return module, version
+}
+
+// firstNodePackage returns the package name from a node_modules subpath,
+// keeping a leading @scope (@babel/core), else the first segment.
+func firstNodePackage(s string) string {
+	parts := strings.SplitN(s, "/", 3)
+	if len(parts) >= 2 && strings.HasPrefix(parts[0], "@") {
+		return parts[0] + "/" + parts[1]
+	}
+	return parts[0]
+}
+
+// firstSegment returns the first path segment (or the file's base name,
+// extension stripped, when there is no separator).
+func firstSegment(s string) string {
+	if i := strings.Index(s, "/"); i >= 0 {
+		return s[:i]
+	}
+	return strings.TrimSuffix(s, path.Ext(s))
 }
 
 // refineIn settles an INCOMING edge, where the ambiguity has a different

@@ -50,10 +50,10 @@ func TestGatGreeterFixture(t *testing.T) {
 	if _, err := os.Stat(protoPath); err != nil {
 		t.Skipf("fixture missing: %v", err)
 	}
-	// Soft-guard: replace directive points at ../../../../gwag from the
-	// fixture. If that checkout isn't present, the test environment
-	// can't satisfy the dep.
-	if _, err := os.Stat(filepath.Join(fixtureDir, "..", "..", "..", "..", "gwag")); err != nil {
+	// Soft-guard: the fixture go.mod replaces gwag with ../../../../libs/gwag
+	// (iodesystems/libs/gwag, a sibling of this repo). If that checkout
+	// isn't present, the test environment can't satisfy the dep.
+	if _, err := os.Stat(filepath.Join(fixtureDir, "..", "..", "..", "..", "libs", "gwag")); err != nil {
 		t.Skipf("gwag checkout missing at sibling path: %v", err)
 	}
 

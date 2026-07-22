@@ -1058,6 +1058,9 @@ func (s *Server) applyRangeRewrite(node string, a rangeArgs, newText string, opt
 	if err != nil {
 		return nil, true, err
 	}
+	if c, isErr, handled := batchResponse(oc); handled {
+		return c, isErr, nil
+	}
 	// The lines are part of the target here: a range rewrite did NOT touch the
 	// whole file, and a note that said "updated app.go" would overstate it.
 	label := fmt.Sprintf("%s:%d-%d", a.File, a.StartLine, a.EndLine)
@@ -1108,6 +1111,9 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 	if err != nil {
 		return nil, true, err
 	}
+	if c, isErr, handled := batchResponse(oc); handled {
+		return c, isErr, nil
+	}
 	if oc.Rejected {
 		return jsonContent(oc.rejection(file)), true, nil
 	}
@@ -1152,6 +1158,9 @@ func (s *Server) applyDiffRewrite(file, diff string, opts diagnosticOptions) ([]
 	oc, err := s.applyBytes(abs, content, out, info.Mode().Perm(), opts)
 	if err != nil {
 		return nil, true, err
+	}
+	if c, isErr, handled := batchResponse(oc); handled {
+		return c, isErr, nil
 	}
 	if oc.Rejected {
 		return jsonContent(oc.rejection(file)), true, nil

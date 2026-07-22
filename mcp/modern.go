@@ -690,6 +690,14 @@ type modernEditArgs struct {
 	Return  *string          `json:"return,omitempty"`
 	Delete  *bool            `json:"delete,omitempty"`
 
+	// commit / rollback drive the staged-edit transaction. HIDDEN — kept
+	// out of the schema on purpose; the rejection help reveals them when a
+	// multi-stage edit is actually needed. commit:false stages (unvalidated);
+	// the first edit without it commits the batch atomically; rollback:true
+	// discards the batch. commit defaults to true.
+	Commit   *bool `json:"commit,omitempty"`
+	Rollback bool  `json:"rollback,omitempty"`
+
 	IncludeComments bool `json:"includeComments,omitempty"`
 	Resolution      *struct {
 		Mode   string `json:"mode"`
@@ -786,6 +794,37 @@ func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, err
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
+
+	// The staged-edit transaction (commit:false) serializes on editMu and
+	// is handled here, before the per-edit machinery.
+	s.editMu.Lock()
+	defer s.editMu.Unlock()
+	commit := p.Commit == nil || *p.Commit
+
+	if p.Rollback {
+		if s.editBatch == nil {
+			return jsonContent(map[string]any{"rolledBack": false, "note": "no open batch to roll back"}), false, nil
+		}
+		oc := editOutcome{}
+		n := s.editBatch.count
+		s.editBatch.revertAll(&oc)
+		s.editBatch = nil
+		res := map[string]any{"rolledBack": true, "discarded": n,
+			"note": fmt.Sprintf("discarded %d staged edit(s); reverted to last committed", n)}
+		if oc.RevertFailed {
+			res["revertFailed"], res["revertError"] = true, oc.RevertErr
+		}
+		return jsonContent(res), false, nil
+	}
+
+	// commit-only (the noop): no edit op, a batch is open → validate and
+	// commit what's staged.
+	if len(p.ops()) == 0 && s.editBatch != nil && commit {
+		oc := s.editBatch.commit()
+		s.editBatch = nil
+		return jsonContent(batchCommitPayload(oc)), oc.Rejected, nil
+	}
+
 	if strings.TrimSpace(p.Node) == "" {
 		return nil, true, errors.New("node is required")
 	}
@@ -815,6 +854,22 @@ func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, err
 		if p.Resolution != nil {
 			return nil, true, errors.New("resolution only applies to rename")
 		}
+	}
+
+	// Semantic refactors are already atomic and coherent — they must not be
+	// staged (renaming keeps callers in sync; params/return rebuild the
+	// signature). Only raw text edits (oldText/newText, ::body/::signature,
+	// delete) need the batch to cross a broken intermediate.
+	if !commit && (p.Rename != nil || p.Params != nil || p.Return != nil) {
+		return nil, true, errors.New("rename/params/return are already atomic and coherent — don't stage them; stage raw oldText/newText/::body edits with commit:false instead")
+	}
+	// Open the batch when staging; flag the edit that closes it.
+	if !commit {
+		if s.editBatch == nil {
+			s.editBatch = s.openBatch(p.diagnosticOptions)
+		}
+	} else if s.editBatch != nil {
+		p.commitBatch = true // this edit stages then validates+commits the union
 	}
 
 	rn, err := s.resolveModernNode(p.Node)

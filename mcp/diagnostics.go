@@ -120,6 +120,11 @@ type diagnosticOptions struct {
 	// false: zero value of bool would force the caller to write
 	// `siblingDiagnostics: true` for current behavior.
 	SiblingDiagnostics *bool `json:"siblingDiagnostics,omitempty"`
+
+	// commitBatch is set INTERNALLY by the node_edit handler (not JSON): the
+	// edit that closes an open commit:false batch — stage it, then validate
+	// and commit the union. See editBatch.
+	commitBatch bool
 }
 
 const (

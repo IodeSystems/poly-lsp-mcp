@@ -152,6 +152,29 @@ pre-touch baseline for never-analyzed files (an unanalyzed file with prior
 errors could false-revert its first edit — documented limitation); the ~3×
 token premium is the thing to shave if this goes wide.
 
+✅ **Staged-edit transaction (`commit:false`) — SHIPPED.** `--validate` reverts
+any edit that breaks the build, which BLOCKS a refactor that must pass through
+a broken intermediate (change a signature AND its body/callers). The
+transaction lets those commit atomically: `commit:false` stages an edit
+(applied but NOT validated); the FIRST `node_edit` WITHOUT `commit:false` (or
+`commit:true` with no op — the noop) validates the whole batch's UNION and
+persists, or reverts ALL; `rollback:true` discards to the last committed state.
+**INSTRUCTIVE by design** — the three flags are HIDDEN from the schema; a
+plain edit that's valid alone but breaks the build gets `rejected` + a `help`
+string that teaches the multi-stage path exactly when it's needed.
+Implementation: `editBatch` (validate.go) is a long-lived `validationTxn` —
+on-disk staging (each staged edit is written so later edits/resolves see it;
+the intermediate reverts on rollback/fail-commit; chosen over an in-memory
+buffer because it reuses the existing atomicWrite/revert machinery, node_edit
+fires no PostToolUse hooks, and the file-watch WANTS to see it). `applyBytes`
+routes through the open batch; the handler is the state machine; semantic ops
+(rename/params/return) refuse staging (already coherent). One open batch per
+server, `editMu`-serialized. Tests: `TestEditBatchStageAndRollback` (mechanics,
+no-gopls), `TestEditBatchAtomicCommit` (gopls: sig+caller as one clean unit;
+lone breaking edit → rejected+help). **Not yet:** editable `::signature`/
+`::body` via a range address (the feature this grew out of) — `::body` is safe
+alone, `::signature` only inside a batch; both now unblocked by the txn.
+
 **⚑ corrallm-side changes (their repo, uncommitted — flag for review):**
 `services/corrallm` gained, to make the above measurable: the
 `broken_intermediates` metric + task `safetyCheck` field (run after each mutating

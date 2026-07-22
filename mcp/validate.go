@@ -34,6 +34,109 @@ type editOutcome struct {
 	NewErrors    []string // the error diagnostics THIS edit added (code∷message)
 	Validated    bool     // proven clean: LSP answered, no new errors
 	Skipped      string   // "" | "no-lsp" | "lsp-timeout" — safety not provable
+
+	// Batch (commit:false transaction) signals — set only when an edit
+	// runs inside an open batch (see editBatch).
+	Staged         bool // applied to the open batch, NOT validated, NOT committed
+	BatchCommitted bool // this edit closed the batch (validate the union then persist/revert)
+	Pending        int  // edits in the batch (staged count, or the number just committed)
+}
+
+// editBatch is the commit:false transaction: staged edits accumulate on
+// disk (each written normally so later edits and resolves see them), and
+// the WHOLE batch validates as one unit at commit — the union's error
+// fingerprint vs the baseline captured when the batch opened. Any new
+// error reverts EVERY touched file to its pre-batch bytes; rollback:true
+// discards the same way. This is how a multi-step refactor that passes
+// through a broken intermediate (change a signature AND its body) commits
+// atomically without the per-edit --validate reverting the first half.
+//
+// On-disk (not an in-memory buffer): the staged intermediate is briefly on
+// disk between calls. That is deliberate — every read/resolve/parse then
+// sees the staged state for free, node_edit fires no PostToolUse hooks, and
+// the file-watch WANTS to see it; the intermediate is reverted on rollback
+// or a failed commit.
+type editBatch struct {
+	s         *Server
+	validate  bool
+	baseline  map[string]int    // workspace error fingerprint at open (if validating)
+	originals map[string][]byte // uri → pre-batch bytes (first write wins) — for revert
+	count     int
+}
+
+func (s *Server) openBatch(opts diagnosticOptions) *editBatch {
+	b := &editBatch{
+		s:         s,
+		validate:  (opts.Validate || s.validateEdits) && s.manager != nil,
+		originals: map[string][]byte{},
+	}
+	if b.validate {
+		b.baseline = s.errorFingerprintAll()
+	}
+	return b
+}
+
+// stage writes one edit into the batch: record the file's pre-batch bytes
+// (first write wins), write to disk, refresh the index, and feed the child
+// LSP — but do NOT validate. Later edits and resolves see it on disk.
+func (b *editBatch) stage(abs string, orig, out []byte, mode os.FileMode, opts diagnosticOptions) error {
+	uri := pathToURI(abs)
+	if _, seen := b.originals[uri]; !seen {
+		b.originals[uri] = orig
+	}
+	if err := b.s.atomicWrite(abs, out, mode); err != nil {
+		return err
+	}
+	b.s.refreshFileInIndex(abs, out)
+	// Feed the child LSP the staged content (so the commit's union
+	// validation sees it) only when we're actually validating — no manager
+	// means nothing to feed.
+	if b.validate {
+		b.s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
+	}
+	b.count++
+	return nil
+}
+
+// commit validates the whole batch: if the union introduced no new error
+// the staged bytes stand; otherwise EVERY touched file reverts to its
+// pre-batch bytes (all-or-nothing). Validation off / no LSP → persist as-is
+// (fail-open, flagged via Skipped).
+func (b *editBatch) commit() editOutcome {
+	oc := editOutcome{BatchCommitted: true, Pending: b.count}
+	if !b.validate {
+		return oc // nothing to prove; staged bytes stand
+	}
+	introduced := fingerprintMinus(b.s.settleErrorFingerprint(3*time.Second), b.baseline)
+	if len(introduced) == 0 {
+		oc.Validated = true
+		return oc
+	}
+	oc.Rejected, oc.NewErrors = true, introduced
+	b.revertAll(&oc)
+	return oc
+}
+
+// revertAll restores every touched file to its pre-batch bytes.
+func (b *editBatch) revertAll(oc *editOutcome) {
+	for uri, orig := range b.originals {
+		abs := uriToPath(uri)
+		mode := os.FileMode(0o644)
+		if info, err := os.Stat(abs); err == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := b.s.atomicWrite(abs, orig, mode); err != nil {
+			oc.RevertFailed, oc.RevertErr = true, err.Error()
+			continue
+		}
+		b.s.refreshFileInIndex(abs, orig)
+		if b.s.manager != nil {
+			if child := b.s.manager.RouteByURI(uri); child != nil {
+				b.s.notifyChildOfEdit(child, uri, orig)
+			}
+		}
+	}
+	oc.Reverted = !oc.RevertFailed
 }
 
 // applyBytes writes `out` to abs (atomic temp+rename), refreshes the index, and
@@ -42,6 +145,22 @@ type editOutcome struct {
 // reports a rejection. orig==nil means a CREATE (revert = delete the new file).
 func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts diagnosticOptions) (editOutcome, error) {
 	uri := pathToURI(abs)
+
+	// A commit:false batch is open — stage into it instead of validating
+	// this edit alone. opts.commitBatch marks the edit that CLOSES the batch
+	// (the first without commit:false): stage it, then validate the union.
+	if b := s.currentBatch(); b != nil {
+		if err := b.stage(abs, orig, out, mode, opts); err != nil {
+			return editOutcome{}, err
+		}
+		if opts.commitBatch {
+			oc := b.commit()
+			s.closeBatch()
+			return oc, nil
+		}
+		return editOutcome{Staged: true, Pending: b.count}, nil
+	}
+
 	// Server-wide --validate (s.validateEdits) OR a per-call validate:true.
 	validate := (opts.Validate || s.validateEdits) && s.manager != nil
 
@@ -183,6 +302,61 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 	return oc
 }
 
+// currentBatch / closeBatch access the open batch. The node_edit handler
+// holds editMu for the whole operation, so these are unlocked reads/writes
+// of state only it touches.
+func (s *Server) currentBatch() *editBatch { return s.editBatch }
+func (s *Server) closeBatch()              { s.editBatch = nil }
+
+// stageHelp / rejectHelp are the INSTRUCTIVE strings — the transaction is
+// undocumented in the schema and revealed here, at the moment it's needed.
+const stageHelp = "staged · not validated · disk holds the intermediate. Add more with commit:false; " +
+	"the next node_edit WITHOUT commit:false validates and commits the whole batch atomically; " +
+	"rollback:true discards it back to the last committed state."
+
+const rejectHelp = "If this edit is correct but needs COUNTERPART edits to be valid (change a signature AND its " +
+	"body/callers together), stage them as one atomic batch: pass commit:false on each (applied but NOT " +
+	"validated), then the first node_edit WITHOUT commit:false validates and commits the union; rollback:true reverts."
+
+// batchResponse turns a staged / committed batch outcome into the node_edit
+// response. handled=false when the edit wasn't part of a batch (the caller
+// then builds its normal response).
+func batchResponse(oc editOutcome) (content []Content, isErr, handled bool) {
+	if oc.Staged {
+		return jsonContent(map[string]any{"staged": true, "pending": oc.Pending, "help": stageHelp}), false, true
+	}
+	if oc.BatchCommitted {
+		return jsonContent(batchCommitPayload(oc)), oc.Rejected, true
+	}
+	return nil, false, false
+}
+
+func batchCommitPayload(oc editOutcome) map[string]any {
+	if !oc.Rejected {
+		p := map[string]any{
+			"committed": true,
+			"edits":     oc.Pending,
+			"note":      fmt.Sprintf("committed %d edit(s) atomically", oc.Pending),
+		}
+		oc.annotate(p)
+		return p
+	}
+	p := map[string]any{
+		"committed": false,
+		"pending":   oc.Pending,
+		"newErrors": oc.NewErrors,
+	}
+	if oc.RevertFailed {
+		p["revertFailed"], p["revertError"] = true, oc.RevertErr
+		p["note"] = "batch REJECTED and revert FAILED — disk may be inconsistent"
+	} else {
+		p["reverted"] = true
+		p["note"] = fmt.Sprintf("batch REJECTED — the union introduced errors; reverted all %d edit(s)", oc.Pending)
+		p["help"] = "keep fixing with commit:false edits then commit, or rollback:true to discard."
+	}
+	return p
+}
+
 // atomicWrite is the temp+rename the apply* paths all share.
 func (s *Server) atomicWrite(abs string, data []byte, mode os.FileMode) error {
 	tmp := abs + ".poly-lsp-mcp.tmp"
@@ -321,6 +495,7 @@ func (oc editOutcome) rejection(label string) map[string]any {
 	} else {
 		p["reverted"] = true
 		p["note"] = "REJECTED — reverted; edit introduced errors (" + label + ")"
+		p["help"] = rejectHelp
 	}
 	return p
 }

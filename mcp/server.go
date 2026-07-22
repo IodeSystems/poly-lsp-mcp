@@ -124,6 +124,11 @@ type Server struct {
 	implCache    map[string][]implLoc
 	implCacheGen uint64
 
+	// editMu serializes node_edit operations (and thus the editBatch state):
+	// one edit — or one staged batch step — at a time.
+	editMu    sync.Mutex
+	editBatch *editBatch // the open commit:false transaction, if any
+
 	// diagnosticWait is the per-edit deadline for publishDiagnostics.
 	// 0 means use the default (1500ms). Tests set a smaller value to
 	// stay fast.

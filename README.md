@@ -61,7 +61,7 @@ Speaks MCP (newline-delimited JSON-RPC) over stdio. The **default surface is thr
 
 ### Selector language
 
-CSS selectors, but the document is your codebase. `func` is a tag, `#name` an id, `>` is child, space is descendant, `,` is union; `:has()` / `:not()` / `:where()` behave as in CSS, `:first` / `:last` as in jQuery. One new idea: the reference **graph** rides on pseudo-element syntax — `::in` / `::out` are edges the way `::before` is generated content.
+CSS selectors, but the document is your codebase. `func` is a tag, `#name` an id, `>` is child, space is descendant, `,` is union; `:has()` / `:not()` / `:where()` behave as in CSS, `:first` / `:last` as in jQuery. One new idea: the reference **graph** rides on pseudo-element syntax — `::in` / `::out` are edges the way `::before` is generated content, and `::grep` / `::comment` / `::signature` / `::body` are other generated views of a node.
 
 ```
 #'store.go#Save'::in.call                              who calls Save (callers, with call sites)
@@ -72,6 +72,7 @@ struct:has(field[name$=ID])                            structs that declare an *
 func:any(return#error)                                 funcs that return an error
 func:recursive                                         funcs that call themselves (LSP-confirmed)
 func:arity(0,0)                                         no-argument funcs
+func::signature                                        every function signature (one-query overview)
 func:not(#main):not(#init):not([name^=Test]):where(::in:empty)   dead code
 file:has(func:where(::out.call{15,16}))                files whose funcs call 15–16 deep
 import#huma::in.call::grep('-E (Get|Post)\(')          endpoints of a dependency

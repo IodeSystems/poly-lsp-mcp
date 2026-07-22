@@ -50,6 +50,13 @@ type Symbol struct {
 	// `*` and the containment walk.
 	CommentStartLine, CommentStartCol int
 	CommentEndLine, CommentEndCol     int
+
+	// BodyStartLine is the 1-based line where a callable's body block
+	// begins (0 = no body / not a callable). It splits the declaration
+	// into a SIGNATURE (decl start .. here) and a BODY (here .. decl end)
+	// that ::signature / ::body generate on demand — like the comment
+	// span, metadata rather than a child symbol.
+	BodyStartLine int
 }
 
 // symRole classifies a node during the FileSymbols walk.
@@ -164,6 +171,13 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 			// The doc block above the declaration, as METADATA — ::comment
 			// generates the node from it, so it stays out of the tree.
 			sym.CommentStartLine, sym.CommentStartCol, sym.CommentEndLine, sym.CommentEndCol = docCommentSpan(in.node)
+			// The signature/body split point, for callables that have a
+			// body block (::signature / ::body generate from it).
+			if classTakesParams(in.class) {
+				if body := in.node.ChildByFieldName("body"); body != nil {
+					sym.BodyStartLine = int(body.StartPoint().Row) + 1
+				}
+			}
 			out = append(out, sym)
 
 			// Parameter DECLARATIONS become addressable `.argument`

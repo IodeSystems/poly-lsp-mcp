@@ -364,6 +364,15 @@ declaration. True for gopls; unverified for tsserver/pylsp.
     caps every matched line on BOTH surfaces; `symbols.Search` skips files with
     a >5000B line (reported as `skippedGeneratedFiles`, `IncludeGenerated` opts
     back in). Tests: `symbols/cap_test.go`, `TestModernQueryGrepCapsLongLine`.
+  - ✅ **`::signature` / `::body` pseudo-elements — shipped.** A callable split
+    into its decl HEAD (doc- and body-excluded) and body block, GENERATED nodes
+    (invisible to `*`) carrying source INLINE so `func::signature` is a one-query
+    overview. `Symbol.BodyStartLine` (tree-sitter `body` field) is the split;
+    the doc is skipped via the stored `commentAt`. `genPartOf`/`genPartMatches`
+    mirror `::comment`; `isGenerated()` folds them into the planner guards.
+    Known imprecision (line-granular): the `{` line shows in both halves on a
+    single-line signature — column precision is v2. Tests: `mcp/genpart_test.go`
+    (Go/TS/Python, invisibility to `*`, non-callables excluded).
 
 Next candidates are opt-in, in icebox.md — most valuable: a real-agent
 adoption vehicle (autowork3 is dead; needs a replacement), then the

@@ -59,6 +59,8 @@ type treeNode struct {
 	// that will later gate mutation/budget; today it just marks the boundary.
 	domain    string
 	commentAt [2]int // joined doc-comment span above this symbol (0 = none); ::comment reads it
+	bodyAt    int    // line a callable's body begins (0 = none); splits ::signature | ::body
+	genText   string // inline source of a generated ::signature/::body node (empty otherwise)
 
 	file string // workspace-relative file path ("" for project/dir)
 	sym  string // dotted sym path ("" for project/dir/file)
@@ -134,7 +136,7 @@ func (n *treeNode) addr() string {
 		return n.full
 	case "dir", "file":
 		return n.file
-	case "ref", "fragment", "comment":
+	case "ref", "fragment", "comment", "signature", "body":
 		return fmt.Sprintf("%s@%d", n.file, n.at[0])
 	case "external":
 		return n.full // module@version#sym — the external identity, not a workspace path
@@ -166,7 +168,7 @@ func (n *treeNode) nodeIDs() []string {
 			ids = append(ids, f.nodeIDs()...)
 		}
 		return ids
-	case "fragment", "comment":
+	case "fragment", "comment", "signature", "body":
 		return nil // generated source region: no name to match by #id
 	case "external":
 		// The bare symbol (#Writer) and the full external identity
@@ -289,6 +291,9 @@ type engine struct {
 
 	// commentCache: the generated ::comment node per host (see commentOf).
 	commentCache map[*treeNode]*treeNode
+
+	// genPartCache: the generated ::signature/::body node per host per part.
+	genPartCache map[*treeNode]map[string]*treeNode
 
 	// selfSetCache: full-workspace match sets for :not/:is chain inners,
 	// keyed by the inner AST's backing array.
@@ -416,6 +421,7 @@ func (e *engine) loadFileSymbols(f *treeNode) {
 			full:      sym.Sym,
 			alias:     sym.Alias,
 			commentAt: [2]int{sym.CommentStartLine, sym.CommentEndLine},
+			bodyAt:    sym.BodyStartLine,
 			file:      f.file,
 			sym:       sym.Sym,
 			at:        [2]int{sym.DeclStartLine, sym.DeclEndLine},
@@ -649,6 +655,12 @@ type selCompound struct {
 	// generated node — never a tree child.
 	isComment bool
 
+	// genPart marks a `::signature` / `::body` pseudo-element ("sig" |
+	// "body"): a callable split into its declaration head and its body
+	// block, generated from the stored body-start line. Same generated-
+	// element contract as ::comment.
+	genPart string
+
 	// langClass scopes a real-node compound to one language: file.go,
 	// func.ts. Languages are a closed vocabulary (the registry), which
 	// is what makes a class selector safe here.
@@ -672,6 +684,14 @@ type selCompound struct {
 	// decide the enclosing :where/:any(...) subject. Terminal, and only
 	// legal inside a relative list.
 	positionClaims []selPseudoKind
+}
+
+// isGenerated reports whether the compound names a GENERATED pseudo-element
+// (::grep line, ::comment block, ::signature/::body split) — nodes minted
+// on demand, invisible to `*`, that the cardinality planner and containment
+// walk must not treat as ordinary tree nodes.
+func (c *selCompound) isGenerated() bool {
+	return c.isFrag || c.isComment || c.genPart != ""
 }
 
 // selElem is one chain element — a compound or a parenthesized group —
@@ -1126,10 +1146,12 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 		return p.parseFragmentElement()
 	case "comment":
 		return p.parseCommentElement()
+	case "signature", "body":
+		return p.parseGenPartElement(name)
 	case "ref":
 		return comp, fmt.Errorf("the reference elements are named by DIRECTION: ::in (who points here) and ::out (what this points at) — e.g. ::out.call, ::in.type")
 	default:
-		return comp, fmt.Errorf("unknown pseudo-element ::%s — ::in / ::out (edges), ::grep('pattern') (matched lines), ::comment (doc block) exist", name)
+		return comp, fmt.Errorf("unknown pseudo-element ::%s — ::in / ::out (edges), ::grep('pattern') (matched lines), ::comment (doc block), ::signature / ::body (a callable's decl head / body) exist", name)
 	}
 	comp.isRef = true
 	comp.class = "ref"
@@ -1188,6 +1210,32 @@ func (p *modSelParser) parseCommentElement() (selCompound, error) {
 			}
 		case '.', '#', '[':
 			return comp, fmt.Errorf("::comment has no kind, id or attr — it IS the doc block; filter it with :contains('…')")
+		default:
+			return comp, nil
+		}
+	}
+}
+
+// parseGenPartElement parses ::signature / ::body — no argument (it IS the
+// decl head / body block), but it accepts trailing filter pseudos so
+// ::body:contains('TODO') works. Like ::comment it has no kind/id/attr.
+func (p *modSelParser) parseGenPartElement(name string) (selCompound, error) {
+	part := "sig"
+	if name == "body" {
+		part = "body"
+	}
+	comp := selCompound{genPart: part, class: name}
+	for {
+		switch p.peek() {
+		case ':':
+			if p.peekIsPseudoElement() {
+				return comp, nil // chained: ::body::grep is a new element
+			}
+			if err := p.parsePseudo(&comp); err != nil {
+				return comp, err
+			}
+		case '.', '#', '[':
+			return comp, fmt.Errorf("::%s has no kind, id or attr — it IS the callable's %s; filter it with :contains('…')", name, name)
 		default:
 			return comp, nil
 		}
@@ -2089,6 +2137,9 @@ SPEC
   ::comment  the doc block above a decl, contiguous lines joined, a GENERATED node (invisible
          to *). func:any(::comment) = documented; func:not(:any(::comment)) = undocumented;
          ::comment:contains('TODO'). Address = file@line.
+  ::signature / ::body  a callable split into its decl HEAD (no doc, no body) and its BODY
+         block — GENERATED nodes carrying their source INLINE, so func::signature is a one-query
+         signature overview. func#F::body:contains('TODO'). Address = file@line.
   :annotated('…')  boolean grep over the decorator/annotation/doc block ON the decl —
          the symbol CARRYING the mark, not the line. func:annotated('@app.route'),
          class:annotated('@Component'), func:annotated('-w Deprecated'). Same flags as :contains.
@@ -2373,7 +2424,7 @@ func (e *engine) declsNamed(name string) []*treeNode {
 // Never classCounts: the planner runs on every query and must not force
 // the full-symbol walk that the exact tally needs.
 func (e *engine) estCardCheap(c *selCompound) (int, bool) {
-	if c == nil || c.isRef || c.isFrag || c.isComment {
+	if c == nil || c.isRef || c.isGenerated() {
 		return 0, false
 	}
 	idx := e.s.getIndex()
@@ -2423,7 +2474,7 @@ func plainDescendantElem(el *selElem, i int) bool {
 		return false
 	}
 	c := el.comp
-	if c.isRef || c.isFrag || c.isComment || c.root || c.selfRef {
+	if c.isRef || c.isGenerated() || c.root || c.selfRef {
 		return false
 	}
 	if len(c.pseudos) > 0 || len(c.positionClaims) > 0 || c.ordSel != 0 {
@@ -2577,7 +2628,7 @@ func (e *engine) estElem(el *selElem) string {
 // classCounts. ok=false when there is no cheap estimate (an edge, `*`, a
 // pseudo-only compound) — the caller must not reorder on an unknown.
 func (e *engine) estCard(c *selCompound) (int, bool) {
-	if c == nil || c.isRef || c.isFrag || c.isComment {
+	if c == nil || c.isRef || c.isGenerated() {
 		return 0, false
 	}
 	if idx := e.s.getIndex(); idx != nil {
@@ -2646,6 +2697,8 @@ func renderElem(el *selElem) string {
 			b.WriteString("::grep")
 		case c.isComment:
 			b.WriteString("::comment")
+		case c.genPart != "":
+			b.WriteString("::" + c.class) // signature | body
 		case c.root:
 			b.WriteString(":root")
 		case c.anyType:
@@ -2919,6 +2972,9 @@ func (e *engine) evalInstance(tips map[*treeNode]bool, el *selElem, min, max int
 	if comp.isComment {
 		return e.commentMatches(tips, comp, relaxed)
 	}
+	if comp.genPart != "" {
+		return e.genPartMatches(tips, comp, relaxed)
+	}
 	out := map[*treeNode]bool{}
 	for _, t := range ordered(tips) {
 		// A subject with a :parents move keeps its positional part even
@@ -3164,6 +3220,76 @@ func (e *engine) commentOf(h *treeNode) *treeNode {
 	}
 	e.commentCache[h] = c
 	return c
+}
+
+// genPartMatches returns each host's ::signature or ::body node, filtered
+// by the compound's pseudos. Mirrors commentMatches — the generated node
+// is invisible to `*` and the containment walk.
+func (e *engine) genPartMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
+	out := map[*treeNode]bool{}
+	for _, h := range ordered(hosts) {
+		g := e.genPartOf(h, comp.genPart)
+		if g == nil {
+			continue
+		}
+		for n := range e.selectOrdered(map[*treeNode]bool{g: true}, comp, relaxed) {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// genPartOf materializes (once per host+part) a callable's ::signature
+// ("sig") or ::body node from its stored body-start line, or nil when the
+// host has no body (not a callable, or a bodyless decl). The node carries
+// its source INLINE (genText) so a broad `func::signature` returns every
+// signature in one query — the token-lean overview — and reads its own span
+// so :contains greps it and node_read returns it.
+func (e *engine) genPartOf(h *treeNode, part string) *treeNode {
+	if h.bodyAt == 0 {
+		return nil
+	}
+	lines, startLine, ok := e.nodeSource(h)
+	if !ok {
+		return nil
+	}
+	bodyIdx := h.bodyAt - startLine // 0-based index of the body-start line
+	if bodyIdx < 0 || bodyIdx >= len(lines) {
+		return nil
+	}
+	if e.genPartCache == nil {
+		e.genPartCache = map[*treeNode]map[string]*treeNode{}
+	}
+	if e.genPartCache[h] == nil {
+		e.genPartCache[h] = map[string]*treeNode{}
+	}
+	if g, ok := e.genPartCache[h][part]; ok {
+		return g
+	}
+	// The signature starts at the DECLARATION head, not the doc block: the
+	// symbol's span is doc-inclusive, but the doc has its own ::comment, so
+	// skip past it (commentAt) to keep ::signature a lean overview.
+	sigStart := h.at[0]
+	if h.commentAt[0] > 0 && h.commentAt[1] >= h.at[0] {
+		sigStart = h.commentAt[1] + 1
+	}
+	sigIdx := sigStart - startLine
+	if sigIdx < 0 || sigIdx > bodyIdx {
+		sigIdx = 0
+	}
+	class, span, text := "signature", [2]int{startLine + sigIdx, h.bodyAt}, lines[sigIdx:bodyIdx+1]
+	if part == "body" {
+		class, span, text = "body", [2]int{h.bodyAt, h.at[1]}, lines[bodyIdx:]
+	}
+	g := &treeNode{
+		class: class,
+		file:  h.file, abs: h.abs, at: span,
+		parent: h, depth: h.depth + 1,
+		fileOrd: h.fileOrd, symOrd: h.symOrd,
+		genText: strings.Join(text, "\n"),
+	}
+	e.genPartCache[h][part] = g
+	return g
 }
 
 // refHop crosses each ref to its far end(s) and takes the far ends'

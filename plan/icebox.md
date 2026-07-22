@@ -108,9 +108,16 @@ parked here:
   :root filtered to a language/subtree (user sketch, 2026-07-17; prior:
   CSS @scope, SQL WITH). Language classes (file.go) cover the per-compound
   case today; :with is query-wide state and needs its own design pass.
-- **More pseudo-elements, same contract.** ::doc / ::signature / ::body as
-  generated readable/editable sub-parts of a symbol — invisible to `*`,
-  addressable like edge sites.
+- ✅ **`::signature` / `::body` — SHIPPED.** A callable split into its decl
+  HEAD (doc- and body-excluded) and its body block, generated nodes carrying
+  their source INLINE so `func::signature` is a one-query overview. `::doc` is
+  already `::comment`. Body-start comes from `Symbol.BodyStartLine`
+  (tree-sitter `body` field); the doc is excluded via the stored `commentAt`.
+  Known imprecision (line-granular): the `{` line appears in both halves when
+  the signature is single-line — column precision is a v2 refinement.
+- **More pseudo-elements, same contract.** Anything else generated/editable —
+  invisible to `*`, addressable like edge sites — follows the ::comment/::grep/
+  ::signature template.
 
 ## Field reports — redline2 dogfooding (2026-07-20)
 

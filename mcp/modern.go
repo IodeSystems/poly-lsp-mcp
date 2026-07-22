@@ -255,6 +255,12 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 			if len(n.frag.After) > 0 {
 				m["after"] = n.frag.After
 			}
+		case "signature", "body":
+			// A generated decl-head / body node carries its source INLINE,
+			// so a broad `func::signature` is a one-query overview.
+			m["type"] = "::" + n.class
+			m["in"] = n.parent.addr()
+			m["text"] = n.genText
 		}
 		matches = append(matches, m)
 	}

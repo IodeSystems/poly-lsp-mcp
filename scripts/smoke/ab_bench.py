@@ -70,10 +70,12 @@ TASKS: dict[str, dict] = {
         ),
         "setup": None,
         "verify": r"""
-set -u
+set -uo pipefail
 fail() { echo "VERIFY-FAIL: $1" >&2; exit 1; }
 
 # 1. Build/interface satisfaction end-to-end (also proves llm still compiles).
+#    pipefail is required: without it the pipeline's exit is tail's (0), so a
+#    go vet failure would slip through unnoticed.
 go vet ./... 2>&1 | tail -5 || fail "go vet did not pass"
 
 # 2. The payments interface method was actually renamed.
@@ -95,6 +97,39 @@ il=$(grep -c "IsLive" internal/api/admin_settings.go)
 mr=$(grep -c "MovesRealMoney" internal/api/admin_settings.go)
 test "$il" -eq 1 || fail "admin_settings.go IsLive lines = $il != 1"
 test "$mr" -eq 1 || fail "admin_settings.go MovesRealMoney lines = $mr != 1"
+
+echo "VERIFY-OK"
+""",
+    },
+    "phone-region-param": {
+        "fixture": "redline",
+        "instruction": (
+            "internal/api/validation.go's `normalizePhone(raw string) string` currently "
+            "assumes US phone numbers. Add a `region string` parameter (the caller's "
+            "country code, e.g. \"US\") and thread it through EVERY call site — pass \"US\" "
+            "at each existing call so behavior is unchanged. The call sites are in "
+            "internal/api (validation.go, user.go, donate.go, handlers.go, member_profile.go, "
+            "user_admin_contacts.go) plus the test in validation_test.go.\n\n"
+            "Do NOT modify the unrelated `normalizePhoneSearch` function in "
+            "internal/api/user.go — it is a different function that merely shares the prefix.\n\n"
+            "When finished, make sure the build vets clean."
+        ),
+        "setup": None,
+        "verify": r"""
+set -uo pipefail
+fail() { echo "VERIFY-FAIL: $1" >&2; exit 1; }
+
+# 1. The signature actually gained a region parameter.
+grep -qE "func normalizePhone\(.*\bregion\b" internal/api/validation.go \
+  || fail "normalizePhone signature has no region parameter"
+
+# 2. The prefix-sharing decoy is untouched.
+grep -q "func normalizePhoneSearch(s string) string" internal/api/user.go \
+  || fail "normalizePhoneSearch signature was modified (the decoy)"
+
+# 3. Build vets clean — proves EVERY call site was updated to the new arity;
+#    a missed one is an arg-count mismatch and go vet fails.
+go vet ./... 2>&1 | tail -5 || fail "go vet failed — a call site was likely not updated"
 
 echo "VERIFY-OK"
 """,

@@ -28,6 +28,62 @@ const maxHitLineBytes = 500
 // reports the count, so the skip is loud, never silent.
 const maxSearchLineBytes = 5000
 
+// maxHitTotalBytes bounds the WHOLE rendered hit — the matched line PLUS
+// its context — so a result stays token-lean (~125 tokens/hit) even with
+// context on. The matched line is rendered first (already CapHitLine'd);
+// context fills whatever bytes remain. A search of 20 hits then costs
+// ~2.5k tokens — cheap enough to run live, mid-task.
+const maxHitTotalBytes = 500
+
+// BudgetHitContext trims already-sliced, already-capped context so the
+// whole hit fits maxHitTotalBytes. matchLen is the rendered matched
+// line's byte length. Context is kept NEAREST-first and stays CONTIGUOUS
+// with the match (the near end inward): sides are filled outward, after
+// then before alternating so a tight budget is shared, and once a line
+// won't fit that side stops (everything further out is dropped too).
+func BudgetHitContext(matchLen int, before, after []string) (outBefore, outAfter []string) {
+	remaining := maxHitTotalBytes - matchLen
+	if remaining <= 0 {
+		return nil, nil
+	}
+	keepAfter, keepBefore := 0, 0
+	ai := 0               // nearest after line is first
+	bi := len(before) - 1 // nearest before line is last
+	for ai < len(after) || bi >= 0 {
+		progressed := false
+		if ai < len(after) {
+			if cost := len(after[ai]) + 1; cost <= remaining {
+				remaining -= cost
+				keepAfter++
+				ai++
+				progressed = true
+			} else {
+				ai = len(after) // this side is done
+			}
+		}
+		if bi >= 0 {
+			if cost := len(before[bi]) + 1; cost <= remaining {
+				remaining -= cost
+				keepBefore++
+				bi--
+				progressed = true
+			} else {
+				bi = -1 // this side is done
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	if keepAfter > 0 {
+		outAfter = after[:keepAfter]
+	}
+	if keepBefore > 0 {
+		outBefore = before[len(before)-keepBefore:]
+	}
+	return outBefore, outAfter
+}
+
 // CapHitLine returns a rune-safe rendering of `line` no longer than
 // maxHitLineBytes, centred on the match span [matchStart,matchEnd) (byte
 // offsets into line), with a "(+N chars)" marker standing in for the
@@ -259,17 +315,22 @@ func searchFile(path string, content []byte, pattern *regexp.Regexp, contextLine
 			continue
 		}
 		for _, span := range spans {
+			// Text is display-only; Col/MatchEndCol keep the true file
+			// offsets. A long line is elided around the match so one
+			// generated line can't blow the token budget.
+			text := CapHitLine(line, span[0], span[1])
+			before := capContextLines(contextBefore(lines, lineIdx, contextLines))
+			after := capContextLines(contextAfter(lines, lineIdx, contextLines))
+			// Bound the WHOLE hit: context fills what the match leaves.
+			before, after = BudgetHitContext(len(text), before, after)
 			out = append(out, SearchHit{
 				File:        path,
 				Line:        lineIdx + 1,
 				Col:         span[0] + 1,
 				MatchEndCol: span[1] + 1,
-				// Text is display-only; Col/MatchEndCol keep the true
-				// file offsets. A long line is elided around the match so
-				// one generated line can't blow the token budget.
-				Text:   CapHitLine(line, span[0], span[1]),
-				Before: capContextLines(contextBefore(lines, lineIdx, contextLines)),
-				After:  capContextLines(contextAfter(lines, lineIdx, contextLines)),
+				Text:        text,
+				Before:      before,
+				After:       after,
 			})
 		}
 	}

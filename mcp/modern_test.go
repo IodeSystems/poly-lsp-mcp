@@ -80,12 +80,13 @@ func startModern(t *testing.T) (*mcpSession, string) {
 }
 
 type queryResult struct {
-	TotalMatches int      `json:"totalMatches"`
-	Returned     int      `json:"returned"`
-	Truncated    bool     `json:"truncated"`
-	Note         string   `json:"note"`
-	Edges        string   `json:"edges"`
-	Cost         []string `json:"cost"`
+	TotalMatches int            `json:"totalMatches"`
+	Returned     int            `json:"returned"`
+	Truncated    bool           `json:"truncated"`
+	Note         string         `json:"note"`
+	Edges        string         `json:"edges"`
+	Cost         []string       `json:"cost"`
+	Rollup       map[string]int `json:"rollup"`
 	Matches      []struct {
 		Node   string   `json:"node"`
 		Class  string   `json:"type"`
@@ -399,6 +400,30 @@ func TestModernQueryGrepFragmentsWithContext(t *testing.T) {
 	}
 	if len(m.After) != 1 || !strings.Contains(m.After[0], "return nil") {
 		t.Errorf("-A1 should carry one following line; got %+v", m.After)
+	}
+}
+
+// Default ::grep (no -A/-B/-C) returns the matched LINE and NO context —
+// context is the token sink, so it is opt-in. The result carries a
+// per-file rollup counting matches across the WHOLE set, so a wide search
+// shows WHERE a term concentrates without paying for any line body.
+func TestModernQueryGrepDefaultNoContextHasRollup(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	q := query(t, s, map[string]any{"selector": `method#Start::grep('fmt.Println')`})
+	if q.TotalMatches != 1 {
+		t.Fatalf("want 1 fragment, got %d (%v)", q.TotalMatches, nodes(q))
+	}
+	m := q.Matches[0]
+	if !strings.Contains(m.Text, "fmt.Println") {
+		t.Errorf("the matched line is always present; got text=%q", m.Text)
+	}
+	if len(m.Before) != 0 || len(m.After) != 0 {
+		t.Errorf("default grep must carry NO context; got before=%v after=%v", m.Before, m.After)
+	}
+	if q.Rollup["main.go"] != 1 {
+		t.Errorf("rollup should count matches per file across the whole set; got %v", q.Rollup)
 	}
 }
 
@@ -1171,12 +1196,78 @@ func TestModernNodeEditRename(t *testing.T) {
 	s, dir := startModern(t)
 	defer s.close()
 
-	if r := s.callTool("node_edit", map[string]any{"node": "main.go#Free", "rename": "Freed"}); r.IsError {
+	r := s.callTool("node_edit", map[string]any{"node": "main.go#Free", "rename": "Freed"})
+	if r.IsError {
 		t.Fatalf("rename errored: %s", r.Content[0].Text)
 	}
 	got, _ := os.ReadFile(filepath.Join(dir, "main.go"))
 	if !strings.Contains(string(got), "func Freed(") || strings.Contains(string(got), "func Free(") {
 		t.Errorf("rename didn't apply:\n%s", got)
+	}
+	// The result must read as TERMINAL: a model that sees it should not
+	// re-rename per-file or hand-patch afterwards (the dogfood failure).
+	if !strings.Contains(r.Content[0].Text, "DONE") || !strings.Contains(r.Content[0].Text, "ONE call") {
+		t.Errorf("rename result should state it is workspace-wide and done; got %s", r.Content[0].Text)
+	}
+}
+
+// A rename needs a SYMBOL: a whole-file address (or a ref/::grep/span) has
+// no identifier, so renaming one must ERROR with a pointer to the symbol
+// form — not silently rewrite whatever token sits on the span's first line
+// and report filesChanged:0 (the dogfood bug).
+func TestModernNodeEditRenameRejectsNonSymbol(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	r := s.callTool("node_edit", map[string]any{"node": "main.go", "rename": "Whatever"})
+	if !r.IsError {
+		t.Fatalf("rename on a whole file should error; got %s", r.Content[0].Text)
+	}
+	if !strings.Contains(r.Content[0].Text, "SYMBOL address") {
+		t.Errorf("error should point at the symbol form; got %s", r.Content[0].Text)
+	}
+}
+
+// A LEXICAL rename of a name declared in more than one package by unrelated
+// symbols must be BLOCKED, not silently applied to all of them — the guard
+// against the ab_bench islive-rename corruption (renaming payments.Gateway.
+// IsLive also rewrote the unrelated llm interfaces). Names declared in ONE
+// package (an interface + its impls) are unaffected and still rename.
+func TestModernNodeEditRenameBlocksCrossPackageCollision(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module x\ngo 1.26\n")
+	// Two unrelated packages that each declare a method named Ping.
+	write("gw/gw.go", "package gw\n\ntype A struct{}\n\nfunc (A) Ping() bool { return true }\n")
+	write("llm/llm.go", "package llm\n\ntype B struct{}\n\nfunc (B) Ping() bool { return false }\n")
+
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_edit", map[string]any{"node": "gw/gw.go#A.Ping", "rename": "Pong"})
+	if !r.IsError {
+		t.Fatalf("cross-package name collision must block, not apply; got %s", r.Content[0].Text)
+	}
+	if !strings.Contains(r.Content[0].Text, "rename-blocked") ||
+		!strings.Contains(r.Content[0].Text, "llm/llm.go") {
+		t.Errorf("block should name the colliding declaration; got %s", r.Content[0].Text)
+	}
+	// And nothing was written — Ping survives in BOTH files.
+	for _, f := range []string{"gw/gw.go", "llm/llm.go"} {
+		got, _ := os.ReadFile(filepath.Join(dir, f))
+		if !strings.Contains(string(got), "Ping") || strings.Contains(string(got), "Pong") {
+			t.Errorf("%s was mutated by a blocked rename:\n%s", f, got)
+		}
 	}
 }
 

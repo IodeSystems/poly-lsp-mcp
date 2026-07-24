@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,9 +14,86 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 )
 
+// The type-scoped fix for the lexical-rename collision: when a language
+// server serves the file, renaming one type's method must touch ONLY that
+// method, never an unrelated same-named method in another package. This is
+// the ab_bench islive-rename bug (renaming payments.Gateway.IsLive also hit
+// llm.Rewriter.IsLive), reduced to a hermetic fixture.
+func TestRefactorRenameTypeScopedViaGopls(t *testing.T) {
+	if testing.Short() {
+		t.Skip("gopls rename e2e skipped under -short")
+	}
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not on PATH")
+	}
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module x\n\ngo 1.21\n")
+	// Two unrelated packages, each with a method named Ping. No shared type.
+	write("gw/gw.go", "package gw\n\ntype A struct{}\n\nfunc (A) Ping() bool { return true }\n\nfunc UseA() bool { return A{}.Ping() }\n")
+	write("llm/llm.go", "package llm\n\ntype B struct{}\n\nfunc (B) Ping() bool { return false }\n")
+
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(reg, dir, nil, nil)
+	srv.SetManager(multiplex.NewManager(reg))
+	srv.SetDiagnosticWait(8 * time.Second)
+
+	sIn, cOut := io.Pipe()
+	cIn, sOut := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(sIn, sOut) }()
+	sess := &mcpSession{t: t, srv: srv, srvIn: cOut, clientR: json.NewDecoder(cIn), clientW: cOut, done: done}
+	defer sess.close()
+	sess.request("initialize", map[string]any{})
+	sess.notify("notifications/initialized", map[string]any{})
+
+	r := sess.callTool("node_edit", map[string]any{"node": "gw/gw.go#A.Ping", "rename": "Pong"})
+	if r.IsError {
+		t.Fatalf("type-scoped rename should succeed; got %s", r.Content[0].Text)
+	}
+	var m map[string]any
+	json.Unmarshal([]byte(r.Content[0].Text), &m)
+	if m["resolvedBy"] != "lsp" {
+		t.Errorf("expected resolvedBy=lsp (gopls path); got %v", m["resolvedBy"])
+	}
+	// A.Ping and its caller renamed; B.Ping in the other package UNTOUCHED.
+	gw := string(mustRead(t, filepath.Join(dir, "gw/gw.go")))
+	if !strings.Contains(gw, "func (A) Pong()") || !strings.Contains(gw, "A{}.Pong()") || strings.Contains(gw, "Ping") {
+		t.Errorf("gw.go not correctly renamed:\n%s", gw)
+	}
+	llm := string(mustRead(t, filepath.Join(dir, "llm/llm.go")))
+	if !strings.Contains(llm, "func (B) Ping()") || strings.Contains(llm, "Pong") {
+		t.Errorf("llm.go was wrongly touched (lexical over-reach):\n%s", llm)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // A workspace-wide rename that INTRODUCES an error (renaming Foo → Bar where
-// Bar already exists = redeclaration) must revert EVERY file the refactor
-// touched — the multi-file all-or-nothing contract of validationTxn.
+// Bar already exists = redeclaration) must NEVER leave the workspace partially
+// written. With a language server the rename is type-scoped and gopls
+// front-stops the redeclaration before any file is touched (rename-error);
+// without one, the validationTxn applies-then-reverts. Either way the invariant
+// is the same: the colliding rename is refused and every file is byte-for-byte
+// its original.
 func TestRefactorRenameValidateRevertsAllFiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("validate rename e2e skipped under -short")
@@ -70,8 +148,14 @@ func TestRefactorRenameValidateRevertsAllFiles(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.Content[0].Text), &m); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if m["rejected"] != true || m["reverted"] != true {
-		t.Fatalf("expected rejected+reverted; got %+v", m)
+	// Accept either safety mechanism: gopls declining upfront (rename-error)
+	// or the validationTxn applying-then-reverting (rejected+reverted). Both
+	// leave the workspace pristine, which the byte checks below prove.
+	switch {
+	case m["kind"] == "rename-error":
+	case m["rejected"] == true && m["reverted"] == true:
+	default:
+		t.Fatalf("expected a rename-error OR rejected+reverted; got %+v", m)
 	}
 	// Every touched file must be back to its original bytes.
 	if got, _ := os.ReadFile(aPath); string(got) != origA {

@@ -229,7 +229,7 @@ func registerLegacyTools() map[string]Tool {
 				"`path` (default: workspace root) scopes the walk. " +
 				"`glob` (filepath.Match pattern over file basenames, e.g. `*.go`) filters which files get scanned. " +
 				"`limit` (default 100) caps hits; overflow surfaces as `droppedMatches`. " +
-				"`contextLines` (default 0) returns N lines before AND after each match for previewing. " +
+				"`contextLines` (default 0 = off; a hit is the matched line) returns up to N lines before AND after each match for previewing; the WHOLE hit (match + context) is then byte-bounded, so short lines show all N and long lines fewer. " +
 				"Matches are grouped by file, reusing the structure file shape: {\"matches\":[ {\"file\":…,\"lang\":…,\"#\":[ {\"sym\":\"<enclosing symbol or empty>\",\"class\":\"match\",\"@\":[line,line],\"col\":N,\"text\":\"<matched line>\"}, … ]}, … ]}. `sym` names the enclosing symbol when one is resolvable (so you can node_read it via \"<file>#<sym>\"); `class` is always \"match\". " +
 				"Use this for full-text search — comment hunting, finding stringly-typed magic values, etc. " +
 				"For symbol/file-NAME search use structure(grep=…) instead — it's tree-sitter aware. " +
@@ -241,7 +241,7 @@ func registerLegacyTools() map[string]Tool {
     "path":         {"type": "string", "description": "Workspace-relative or absolute. Default: workspace root."},
     "glob":         {"type": "string", "description": "filepath.Match pattern over basenames. Default: every file."},
     "limit":        {"type": "integer", "minimum": 1, "description": "Max hits. Default 100."},
-    "contextLines": {"type": "integer", "minimum": 0, "description": "Lines before/after each match. Default 0."}
+    "contextLines": {"type": "integer", "minimum": 0, "description": "Lines before/after each match for a preview window; whole hit byte-bounded. Default 0 (off): a hit is the matched line."}
   },
   "required": ["pattern"]
 }`),
@@ -354,6 +354,10 @@ func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
 		}
 		limit = *p.Limit
 	}
+	// Context is OFF by default: a hit is the matched line (grep's signal,
+	// paginated so cheap). contextLines>0 opts into a preview window, and
+	// the whole hit is then byte-bounded (symbols.BudgetHitContext) —
+	// short lines show all N, long lines fewer, min(bytes, lines).
 	ctxLines := 0
 	if p.ContextLines != nil {
 		if *p.ContextLines < 0 {
@@ -556,6 +560,22 @@ type nodeReadArgs struct {
 // usually 30-60 lines of code, well under typical context budgets.
 const defaultReadCharBudget = 2048
 
+// readGeneratedLineLen is the length past which a single line is treated
+// as generated/minified (a JSON/data blob, a bundled JS line) rather than
+// hand-written source. Mirrors symbols.maxSearchLineBytes (search.go),
+// which skips such lines for the same reason. It sits FAR above any real
+// source line (measured max in this repo: 742) so a normal read is NEVER
+// clipped — only a genuine blob is. A line below this is returned WHOLE:
+// feeding an LLM a mid-content clip of real prose is worse than the extra
+// few hundred chars.
+const readGeneratedLineLen = 5000
+
+// readLongLinePreview is how much of a generated line we preview when
+// clipping one — enough to identify what it is, not enough to blow the
+// char budget. A caller that truly wants the whole blob passes an
+// explicit lineLength.
+const readLongLinePreview = 500
+
 func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var a nodeReadArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -686,6 +706,25 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	totalLines := len(lines)
 	totalChars := len(content)
 
+	// renderLine decides how a single line is emitted. Two regimes:
+	//   - caller SET lineLength: clip every line to it (explicit request).
+	//   - caller did NOT: return normal lines WHOLE (no strange mid-prose
+	//     clips fed to the model); only a pathological generated line
+	//     (> readGeneratedLineLen) is previewed, so the always-appended
+	//     first line can't dump megabytes in one read.
+	renderLine := func(ln string) (out string, clipped bool) {
+		if lineLength > 0 {
+			if len(ln) > lineLength {
+				return ln[:lineLength] + "…", true
+			}
+			return ln, false
+		}
+		if len(ln) > readGeneratedLineLen {
+			return ln[:readLongLinePreview] + "…", true
+		}
+		return ln, false
+	}
+
 	// Maximum line length in the SOURCE (pre-truncation). Useful
 	// signal that the agent is asking about a file with very long
 	// lines (minified JS, generated code).
@@ -720,10 +759,11 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	autoLimit := lineLimit == 0
 	budget := defaultReadCharBudget
 	endLine := startLine - 1
+	anyLineClipped := false
 	for i := startLine - 1; i < totalLines; i++ {
-		ln := lines[i]
-		if lineLength > 0 && len(ln) > lineLength {
-			ln = ln[:lineLength] + "…"
+		ln, clipped := renderLine(lines[i])
+		if clipped {
+			anyLineClipped = true
 		}
 		// Per-line "+1" accounts for the rejoining \n.
 		cost := len(ln) + 1
@@ -751,12 +791,24 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	out["endLine"] = endLine
 	out["text"] = text
 
-	// Classify the truncation: did the line count get clipped?
-	// Did individual lines get truncated by lineLength?
+	// Classify the truncation: did the line count get clipped, and was
+	// any RETURNED line itself clipped (an explicit lineLength, or a
+	// generated line previewed)?
 	clippedByCount := endLine < totalLines
-	clippedByLength := lineLength > 0 && maxLineLen > lineLength
+	clippedByLength := anyLineClipped
 	if !clippedByCount && !clippedByLength {
 		return out
+	}
+
+	// lineNote describes an in-line clip for the hint — different wording
+	// for an explicit lineLength vs an auto-previewed generated line.
+	lineNote := ""
+	if clippedByLength {
+		if lineLength > 0 {
+			lineNote = fmt.Sprintf("lines truncated to %d chars (max source line was %d). Pass a larger lineLength to keep full lines.", lineLength, maxLineLen)
+		} else {
+			lineNote = fmt.Sprintf("a generated/minified line (%d chars) was previewed to %d. Pass lineLength=N to read more of it, or search(pattern=) to target within it.", maxLineLen, readLongLinePreview)
+		}
 	}
 
 	// Choose the dominant reason for the agent's primary signal.
@@ -786,7 +838,7 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	case "auto":
 		fmt.Fprintf(&hint, "Returned lines %d-%d of %d (auto-capped at ~%d chars; ~%d more read(s) to page the rest). "+
 			"Avoid paging chunk-by-chunk: re-read with lineLimit=%d to get the whole file in ONE call, "+
-			"or use the search tool (pattern=<regex>, contextLines=3) to jump straight to the code you need. "+
+			"or use the search tool (pattern=<regex>) to jump straight to the code you need. "+
 			"To keep paging anyway, call again with startLine=%d.",
 			startLine, endLine, totalLines, defaultReadCharBudget, morePages, totalLines, endLine+1)
 	case "lineLimit":
@@ -795,11 +847,11 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 			"or call again with startLine=%d to continue.",
 			startLine, endLine, totalLines, lineLimit, morePages, totalLines, endLine+1)
 	case "lineLength":
-		fmt.Fprintf(&hint, "Lines truncated to %d chars (max source line was %d chars). Pass a larger lineLength to keep full lines.",
-			lineLength, maxLineLen)
+		// Capitalize the standalone lineNote sentence.
+		fmt.Fprintf(&hint, "%s%s", strings.ToUpper(lineNote[:1]), lineNote[1:])
 	}
 	if clippedByLength && reason != "lineLength" {
-		fmt.Fprintf(&hint, " Also: lines truncated to %d chars (max source line was %d).", lineLength, maxLineLen)
+		fmt.Fprintf(&hint, " Also: %s", lineNote)
 	}
 
 	out["truncated"] = true
@@ -1661,7 +1713,54 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 		}
 	}
 
-	resolved, candidates := s.buildRenameEdits(name, newName, applyCandidates)
+	// Prefer a TYPE-SCOPED rename from the child language server: it resolves
+	// the symbol by its declaring type, so renaming payments.Gateway.IsLive
+	// touches only that method's decl/impls/usages, never the unrelated
+	// llm.Rewriter.IsLive. Only a tree-sitter-only language (no child LSP)
+	// falls through to the lexical path and its collision guard.
+	lspEdits, triedLSP, lspErr := s.goplsRenameEdits(a, newName)
+	if triedLSP && lspErr != nil {
+		// A server serves this file but refused — surface it. Do NOT fall
+		// back to lexical: that is the unsafe path this replaces.
+		return jsonContent(map[string]any{
+			"kind": "rename-error", "oldName": name, "newName": newName, "error": lspErr.Error(),
+		}), true, nil
+	}
+
+	var resolved []resolvedEdit
+	var candidates []symbols.Site
+	resolvedBy := "lsp"
+	if triedLSP {
+		resolved = lspEdits
+	} else {
+		resolvedBy = "lexical"
+		resolved, candidates = s.buildRenameEdits(name, newName, applyCandidates)
+		// GUARDRAIL (lexical path only): a lexical rename rewrites every
+		// occurrence of `name` workspace-wide. When the name is DECLARED in
+		// more than one package with no authoritative site coupling them,
+		// those declarations are almost certainly UNRELATED symbols that
+		// merely share the name — renaming all corrupts the ones the caller
+		// didn't mean (dogfood: ab_bench islive-rename). Refuse, show the
+		// collision, rather than silently damage code.
+		if collisions := s.lexicalRenameCollision(name, resolved, idx.LookupExisting(name)); len(collisions) > 0 {
+			pkgs := map[string]struct{}{}
+			for _, c := range collisions {
+				pkgs[c.Package] = struct{}{}
+			}
+			return jsonContent(map[string]any{
+				"kind":       "rename-blocked",
+				"reason":     "lexical-collision",
+				"oldName":    name,
+				"newName":    newName,
+				"packages":   len(pkgs),
+				"collisions": collisions,
+				"note": fmt.Sprintf(
+					"BLOCKED: %q is declared in %d packages by symbols that share the name but are probably UNRELATED. This rename is lexical (name-keyed, not type-scoped, because no language server serves this file), so applying it would rewrite EVERY %q across the workspace — including the declarations you did NOT mean — and corrupt them. Inspect `collisions`. To rename only the one you intend, edit its declaration and usages with scoped node_edit oldText/newText (unique per node).",
+					name, len(pkgs), name),
+			}), true, nil
+		}
+	}
+
 	if includeComments {
 		// Workspace-wide word-boundary scan picks up positions the
 		// index intentionally doesn't see — most commonly comments,
@@ -1731,9 +1830,28 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 		"newName":              newName,
 		"filesChanged":         len(results),
 		"results":              results,
+		"resolvedBy":           resolvedBy,
 		"diagnosticsAvailable": diags.Available,
 		"diagnosticsTimedOut":  diags.TimedOut,
 		"diagnostics":          diags.Items,
+	}
+	// State that the job is DONE and workspace-wide, in the RESULT — models
+	// act on results, not tool descriptions. Dogfood: after ONE rename that
+	// reported filesChanged:9, the model re-ran it per-file (hitting "no such
+	// symbol" errors) and hand-patched comments, ~6 wasted calls after the
+	// task was already complete. This note closes the loop.
+	if len(results) > 0 {
+		scope := "type-scoped by the language server (only this symbol's declaration, implementations, and usages)"
+		if resolvedBy != "lsp" {
+			scope = "name-matched (no language server for this file; collision-guarded)"
+		}
+		note := fmt.Sprintf(
+			"DONE — rename %q → %q, %s, across %d file(s) in this ONE call. Do NOT rename per-file or search/replace to \"finish\".",
+			name, newName, scope, len(results))
+		if !includeComments {
+			note += " Any occurrences left are in comments/strings/prose (not identifiers) and were intentionally skipped — pass includeComments:true to rename those too."
+		}
+		payload["note"] = note
 	}
 	if diags.DroppedDiagnostics > 0 {
 		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
@@ -1900,6 +2018,75 @@ type applyResult struct {
 // held back unless applyCandidates is set — see chooseRenameSites). Aliasing safety:
 // per-site on-disk text must equal name; mismatches are skipped so aliasing bindings
 // don't substitute the wrong token.
+// renameDecl is one declaration of a name found by the lexical-collision
+// guard: which package it lives in, the owning symbol path, and where.
+type renameDecl struct {
+	Package string `json:"package"`
+	Owner   string `json:"owner"`
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+}
+
+// lexicalRenameCollision reports the colliding declarations when a LEXICAL
+// rename of `name` would be unsafe: the name is declared in MORE THAN ONE
+// package and no authoritative (declared-binding / child-LSP) site couples
+// those declarations. That is the signature of a coincidental name clash
+// (e.g. IsLive on three unrelated interfaces) rather than one symbol's
+// declaration plus its implementations — which stay within a package and so
+// don't trip this. Returns nil when the rename is safe to apply lexically.
+// Removed once semantic rename scopes edits by declaring type. Cheap: only
+// runs on the purely-lexical path, and only parses the touched files.
+func (s *Server) lexicalRenameCollision(name string, resolved []resolvedEdit, sites []symbols.Site) []renameDecl {
+	for _, st := range sites {
+		if st.Confidence >= symbols.ConfidenceDeclared {
+			return nil // a declared binding / LSP result couples these — intentional
+		}
+	}
+	byPkg := map[string][]renameDecl{}
+	seen := map[string]bool{}
+	for _, e := range resolved {
+		if seen[e.AbsFile] {
+			continue
+		}
+		seen[e.AbsFile] = true
+		lang := s.languageForFile(e.AbsFile)
+		if lang == "" {
+			continue
+		}
+		content, err := os.ReadFile(e.AbsFile)
+		if err != nil {
+			continue
+		}
+		syms, err := symbols.FileSymbols(lang, content)
+		if err != nil {
+			continue
+		}
+		pkg := filepath.Dir(e.RelFile)
+		for _, sym := range syms {
+			if lastSeg(sym.Sym) != name {
+				continue
+			}
+			byPkg[pkg] = append(byPkg[pkg], renameDecl{
+				Package: pkg, Owner: sym.Sym, File: e.RelFile, Line: sym.NameStartLine,
+			})
+		}
+	}
+	if len(byPkg) <= 1 {
+		return nil
+	}
+	var out []renameDecl
+	for _, ds := range byPkg {
+		out = append(out, ds...)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].File != out[j].File {
+			return out[i].File < out[j].File
+		}
+		return out[i].Line < out[j].Line
+	})
+	return out
+}
+
 func (s *Server) buildRenameEdits(name, newName string, applyCandidates bool) ([]resolvedEdit, []symbols.Site) {
 	idx := s.getIndex()
 	if idx == nil {

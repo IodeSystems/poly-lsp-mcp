@@ -65,7 +65,7 @@ func registerModernTools() map[string]Tool {
 const modernNodeQueryDescription = `CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements. Files are nodes; no separate filesystem API.
 TAGS are a FIXED set: project dir file func method type struct interface class const var field enum ctor module import argument, *. Workspace NAMES are NEVER tags, always #ids: #cache, #'store.go#Save' (quote with '). Language as class: file.go. space=descendant >=child ,=union.
 GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive.
-::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E).
+::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E); no ctx by default (hit=the line), -A/-B/-C adds it, byte-bounded; result carries a per-file rollup.
 FOOTGUNS: * NEVER matches ::edges or ::grep lines — name them or they're invisible. {m,n} elsewhere is regex REPETITION child-joined, NOT depth: func{2} = func>func, (a b){2} groups, within-3-levels = "> *{0,2} > x". :not/:is(sel) test the node ITSELF; :where/:any/:all/:empty(sel) test AROUND it (leading tag = a descendant, leading ::/pseudo = the node; bare :any/:all/:empty judge their position). :parents(sel) = ALL upstream (ancestors + incoming refs) — broader than callers. Edge/::grep addresses are file@line: node_read/node_edit hit that exact line.
 RECIPES: #'a.go#Save'::in.call callers | ::in.call{1,} > * transitive callers | #'main'::out.call > * callees | func:not(#main):not(#init):not([name^=Test]):empty(::in) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints | :root > * tour.
 limit 20; offset pages; selector "?" = the full grammar.`
@@ -270,6 +270,12 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 		"returned":     len(paged),
 		"matches":      matches,
 	}
+	// ::grep recon: a per-file count over ALL matches (not just the page),
+	// so a truncated result still shows WHERE the term concentrates —
+	// which files to narrow into next. Cheap: one int per file, no text.
+	if rollup := fragmentRollup(rows); len(rollup) > 0 {
+		payload["rollup"] = rollup
+	}
 	// Never cut off silently: say there's more, and how to reach it.
 	if end < total {
 		payload["truncated"] = true
@@ -307,6 +313,23 @@ func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, er
 		payload["cost"] = e.costTrace(list)
 	}
 	return jsonContent(payload), false, nil
+}
+
+// fragmentRollup counts ::grep matches per file across the WHOLE result
+// set. Nil when there are no fragment rows (a structural query has
+// nothing to roll up), so the field only appears for grep.
+func fragmentRollup(rows []*treeNode) map[string]int {
+	var rollup map[string]int
+	for _, n := range rows {
+		if n.class != "fragment" {
+			continue
+		}
+		if rollup == nil {
+			rollup = map[string]int{}
+		}
+		rollup[n.file]++
+	}
+	return rollup
 }
 
 // --------------------------------------------------------- addressing
@@ -965,6 +988,22 @@ func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, err
 
 	switch {
 	case p.Rename != nil:
+		// Rename needs a SYMBOL declaration — it renames an identifier and
+		// every usage. A whole-file address (sym == "") or a generated span
+		// (ref/::grep/::signature/::body, also sym == "") has no identifier;
+		// renaming one used to silently rewrite whatever token sat at the
+		// span's first line (dogfood: `node_edit(worker.py, rename:…)` renamed
+		// the docstring and reported filesChanged:0). Refuse, and point at the
+		// symbol form.
+		if rn.sym == "" {
+			what := "a whole file"
+			if rn.class == "ref" {
+				what = "a source line/span"
+			}
+			return nil, true, fmt.Errorf(
+				"rename needs a SYMBOL address (file#Name): %s is %s, which has no identifier to rename. Address the declaration you mean (e.g. %s#TheName) and rename THAT",
+				rn.addr, what, rn.file)
+		}
 		mode, target := "", ""
 		if p.Resolution != nil {
 			mode, target = p.Resolution.Mode, p.Resolution.Target

@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -547,6 +549,15 @@ func (e *engine) walkDir(abs string, parent *treeNode) {
 			continue
 		}
 		childAbs := filepath.Join(abs, de.Name())
+		// A binary file (ELF, image, compiled test binary) is never a
+		// useful node — no symbols, no readable source, and node_read of
+		// it dumps megabytes of garbage. Skip it before it takes an
+		// ordinal, becomes a file node, or gets its 13 MB read by
+		// countFileLines. Same null-byte probe symbols.Search uses
+		// (search.go). Directories are never probed.
+		if !de.IsDir() && looksBinaryFile(childAbs) {
+			continue
+		}
 		rel := relPath(childAbs, e.s.getRoot())
 		e.ordSeq++
 		if de.IsDir() {
@@ -568,6 +579,22 @@ func (e *engine) walkDir(abs string, parent *treeNode) {
 		parent.children = append(parent.children, f)
 		e.fileByRel[rel] = f
 	}
+}
+
+// looksBinaryFile reports whether abs appears to be a binary file, using
+// the same heuristic as symbols.Search (search.go): a null byte in the
+// first 8 KB. Reads only the prefix — a 13 MB ELF is never slurped whole
+// just to be rejected. A missing/unreadable file is treated as non-binary
+// so the caller's own read reports the real error.
+func looksBinaryFile(abs string) bool {
+	f, err := os.Open(abs)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var probe [8192]byte
+	n, _ := io.ReadFull(f, probe[:])
+	return bytes.IndexByte(probe[:n], 0) >= 0
 }
 
 func countFileLines(abs string) int {
@@ -3187,10 +3214,15 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 		}
 		capped := symbols.CapHitLine(l, ms, me)
 		hit := &grepHit{Line: startLine + i, Text: capped}
+		// Context is OFF unless -A/-B/-C asks for it: the matched line is
+		// grep's signal and is paginated, so it is cheap; context multiplies
+		// every hit and is the token sink, so it is opt-in. When requested,
+		// the whole hit is still byte-bounded below (a ceiling, not a size).
+		before, after := g.before, g.after
 		// Context is clipped to the host's own span — a fragment never
 		// leaks its neighbours' lines.
-		if g.before > 0 {
-			lo := i - g.before
+		if before > 0 {
+			lo := i - before
 			if lo < 0 {
 				lo = 0
 			}
@@ -3198,8 +3230,8 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 				hit.Before = capGrepContext(lines[lo:i])
 			}
 		}
-		if g.after > 0 {
-			hi := i + 1 + g.after
+		if after > 0 {
+			hi := i + 1 + after
 			if hi > len(lines) {
 				hi = len(lines)
 			}
@@ -3207,6 +3239,9 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 				hit.After = capGrepContext(lines[i+1 : hi])
 			}
 		}
+		// Bound the WHOLE hit to maxHitTotalBytes: context fills whatever
+		// the matched line leaves. Grep-style min(bytes, lines).
+		hit.Before, hit.After = symbols.BudgetHitContext(len(capped), hit.Before, hit.After)
 		frags = append(frags, &treeNode{
 			class: "fragment", leaf: strings.TrimSpace(capped), full: strings.TrimSpace(capped),
 			file: h.file, abs: h.abs, at: [2]int{hit.Line, hit.Line},
@@ -4483,7 +4518,7 @@ type grepSpec struct {
 	ignoreCase    bool // -i
 	word          bool // -w
 	invert        bool // -v
-	before, after int  // -B / -A / -C
+	before, after int  // -B / -A / -C (0 = no context, the default)
 
 	re *regexp.Regexp
 }

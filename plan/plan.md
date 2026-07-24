@@ -289,6 +289,159 @@ use, `:recursive` broad was noisy+incomplete, now fixed. "Complete" = the
 natural queries a model reaches for are cheap, quiet, and complete; tests
 prove correctness, dogfooding proves usability, and they diverge exactly at
 cost cliffs like this one.
+  - ✅ **Binary files polluted the projection (DOGFOOD, 2026-07-21).** The very
+    first `:root > *` tour surfaced `mcp.test` (56916 "lines") and
+    `poly-lsp-mcp` (45616) — gitignored ELF binaries — as file nodes.
+    `node_read mcp.test` returned **12.9M chars** of garbage and the hint
+    *invited* reading all 56916 lines (context-nuking footgun); `countFileLines`
+    slurped the whole 13 MB binary on every query build. `walkDir` (query.go)
+    made a file node for every regular file with NO binary/ignore filter — the
+    other two projection walkers (node_query.go) already skip non-source via
+    `languageForFile==""`. Fixed: `looksBinaryFile` (prefix-only null-byte
+    probe, same heuristic as `symbols.Search`/search.go — never slurps the
+    binary whole) gates `walkDir`. Tour 22→20, all text files retained. Chose
+    binary-only skip over honoring `.gitignore` (USER call) — narrow,
+    unambiguous, keeps gitignored-but-text files queryable. Tests:
+    `TestWalkDirSkipsBinaryFiles`, `TestLooksBinaryFile`. Invisible to the
+    existing suite (tests use clean temp fixtures; a real repo has build
+    artifacts) — the exact tests-vs-dogfooding divergence noted above.
+    **Decided (USER, 2026-07-21): do NOT honor `.gitignore`** — hiding files
+    loses context and it's hard to tell what's missing; only binary encodings
+    and extremely-large files are no-gos, and only for the OPS, not visibility.
+  - ✅ **`node_read` unbounded on a pathological long line (DOGFOOD follow-on,
+    2026-07-21).** The binary skip fixed the PROJECTION, but a direct
+    `node_read file.min.js` still dumped megabytes: `buildReadPayload`'s auto
+    char budget (2048) is defeated because the FIRST line is appended BEFORE
+    the budget check, and with no caller `lineLength` there was NO per-line cap
+    — a 5 MB line-1 returned all 5 MB. Worse, the truncation hint then advised
+    "re-read with lineLimit=N for the whole file in ONE call", walking the model
+    straight into the dump. Fixed with `renderLine`, TWO regimes: an explicit
+    `lineLength` clips every line (legacy); with NONE, normal lines return
+    WHOLE and only a GENERATED line (> `readGeneratedLineLen` = 5000, mirrors
+    search.go's `maxSearchLineBytes`) is previewed to `readLongLinePreview` =
+    500. **Why not a flat 500 cap (USER pushed): a mid-content clip of real
+    prose fed to an LLM is strange, and 500 is wrong by DATA** — this repo has
+    13 lines > 500, ZERO > 800, longest legit 742 (plan/done.md); a 5000
+    threshold clips zero real lines, 500 clips 13 (incl. markdown paragraphs).
+    The cap must sit in the 3-orders-of-magnitude GAP between legit (hundreds)
+    and pathological (millions). The blob preview is honestly labeled
+    ("a generated/minified line (N chars) was previewed to 500; pass lineLength
+    or search(pattern=) to target"), not a silent box. VISIBLE (`truncated` +
+    true `maxLineLength`); ops bounded. Verified e2e on the real server: 5 MB
+    blob → 515 chars + generated hint; real 742-char line → returned WHOLE, no
+    ellipsis. Tests: `TestReadPayloadBoundsPathologicalLongLine`,
+    `TestReadPayloadLegitLongLineNotClipped`, `TestReadPayloadNormalFileUnaffected`.
+    (Whole-file BROWSE path only; an addressed-symbol read stays byte-exact.)
+  - ✅ **Search/`::grep` context is byte-budgeted, not line-counted (DOGFOOD
+    design, USER-driven, 2026-07-22).** Same bytes-not-lines theme: search
+    context was N whole neighbour LINES (`-A/-B/-C`), so match + 2×N context
+    could be multiple KB/hit — token-heavy across many hits, though already
+    bounded (each line ≤500B, generated files skipped). Reframed to grep-style
+    **min(bytes, lines)**: `symbols.BudgetHitContext` trims already-capped,
+    already-sliced context so the WHOLE hit ≤ `maxHitTotalBytes` = 500B
+    (~125 tokens/hit), match rendered FIRST (CapHitLine) and context filling
+    the remainder nearest-first + contiguous. Shared helper in symbols, called
+    from `searchFile` + `fragmentsOf` (one source of truth). Tests:
+    `TestBudgetHitContext`, `TestBudgetHitContextStopsSideOnOverflow`.
+  - ✅ **Default context is now OFF; a hit is the matched line + a per-file
+    rollup (DOGFOOD, USER-driven, 2026-07-22).** Reverses the "default ON"
+    above after dogfooding the funnel (grep wide → refine → read the *symbol*).
+    The realization: the matched LINE is grep's signal and is paginated (≤20
+    rows), so it's cheap; CONTEXT (before/after) multiplies every hit 3–7× and
+    is the real token sink. So flipped: **context opt-in** (`-A/-B/-C` on
+    `::grep`, `contextLines` on the search tool; both default 0), matched line
+    always shown, still byte-bounded when context IS requested. Removed the
+    now-dead `DefaultContextLines`/`grepSpec.ctxSet`. **Added `rollup`**: a
+    per-file match count over the WHOLE result set (pre-pagination), so a wide
+    search shows WHERE a term concentrates without paying for any line body —
+    `fragmentRollup(rows)` in modern.go, only present for grep. USER chose
+    "line + rollup, context opt-in" over pure address-only (address-only forces
+    a read to tell hits apart; the paginated line disambiguates for free).
+    Token-budget guardrail caught the new ::grep doc line 1 token over —
+    tightened, not bumped. Test: `TestModernQueryGrepDefaultNoContextHasRollup`.
+    Deferred to icebox: `-c` counts-only mode (rollup already gives the
+    distribution; -c only saves the 20-row page's line text — marginal).
+  - ✅ **LLM e2e bench (`scripts/smoke/llm_e2e.py`) drove out two rename
+    friction bugs + a harness drift (DOGFOOD, 2026-07-22).** Fired the bench
+    (real Qwen-27B, cross-language `UserID`→`PersonID` rename on a temp fixture
+    copy). PASSED but took **11 tool calls**: the model did the atomic rename
+    (`filesChanged:9`) then DIDN'T TRUST it — re-ran per-file (errors) and
+    hand-patched comments. Fixes: **(A)** `node_edit` rename on a non-symbol
+    node (whole file, or a ref/::grep/span — all `sym==""`) used to silently
+    rename whatever token sat on the span's first line and report
+    `filesChanged:0`; now ERRORS pointing at the `file#Name` form
+    (`TestModernNodeEditRenameRejectsNonSymbol`). **(B)** the rename RESULT now
+    carries a terminal `note` ("DONE — workspace-wide … in this ONE call; do
+    NOT rename per-file"); models act on results, not descriptions
+    (`TestModernNodeEditRename` asserts it). **(C)** the harness `SYSTEM_PROMPT`
+    had drifted to the legacy surface (`structure`/`node_refactor`); rewrote to
+    the modern 3-tool flow. Re-ran: **4 tool calls**, 0 hand-patches, model's
+    own words "the first rename already handled everything workspace-wide."
+    11→4. NOTE (USER): the only baseline worth running is vs vanilla
+    grep/read/edit-style tools, not the legacy surface.
+  - ✅ **Vanilla A/B baseline arm (`scripts/smoke/vanilla_e2e.py`).** Same
+    model/fixture/task as `llm_e2e.py`, but the model gets ONLY structure-blind
+    tools — `grep` / `read_file` / `str_replace` (unique-match), implemented
+    locally over the temp fixture copy, no MCP. Measures the tool-call cost of
+    the same cross-language rename WITHOUT the structural surface, to quantify
+    the delta vs poly-lsp's 4 calls. Self-contained (KISS>DRY — does not touch
+    the poly arm). Same PASS criteria (changed≥8, PersonID≥15).
+  - ✅ **Task-registry A/B harness (`scripts/smoke/ab_bench.py`) + first real-repo
+    task, which EXPOSED a correctness bug (DOGFOOD, 2026-07-23).** Generalized
+    the one-off demos into a registry (id → instruction, optional setup patch,
+    static verify predicate, fixture); reuses the MCP + vanilla plumbing by
+    import (no refactor of the working scripts). Fixture = a fresh copy of a
+    sibling repo (redline: 529 .go files, 0.4s copy, no `replace` dirs so
+    `go vet` runs in-copy); verify is deterministic shell (go vet + grep counts),
+    validated on both PASS and FAIL paths before any LLM spend. First task
+    `islive-rename` (rename `payments.Gateway.IsLive` while two unrelated `llm`
+    interfaces share the name). Result: **poly 56 calls / PASS, vanilla 22 / FAIL**
+    — but the story is the bug: poly's lexical rename corrupted the `llm` package
+    (`filesChanged:15`), the model brute-forced a 20-edit manual repair. See the
+    escalated icebox item "Go refs/rename lexical → CORRECTNESS bug." Harness is
+    the reusable repro; more tasks (mined from redline) drop into the registry.
+    Mined catalog of 10 candidate tasks lives in this session's history (6
+    statically verifiable; controls where grep wins included for honesty).
+  - ✅ **Rename collision guardrail SHIPPED (stopgap for the lexical-rename bug,
+    2026-07-23).** `lexicalRenameCollision` (tools.go) blocks a rename when the
+    name is DECLARED in >1 package with no authoritative site coupling them —
+    the coincidental-clash signature — returning `kind:"rename-blocked"` + the
+    collision list instead of applying. The authority check (`Confidence >=
+    ConfidenceDeclared`) is the discriminator that keeps schema-coupled cross-
+    language renames (polyglot `UserID`, which has declared bindings) working
+    while blocking pure-lexical clashes (`IsLive` across payments/llm). Only
+    runs on the lexical path, only parses touched files. Tests:
+    `TestModernNodeEditRenameBlocksCrossPackageCollision` (+ Free→Freed and the
+    schema path still pass). Bench-validated: the `filesChanged:15` corruption is
+    now blocked at call 1; model went straight to safe scoped edits, llm never
+    touched. **NEXT (owns the real fix): gopls `textDocument/rename`** — type-
+    scoped correctness, removes the guard's false-positives on legit cross-
+    package interface renames and restores one-call ergonomics. See icebox
+    "Go refs/rename lexical → CORRECTNESS bug."
+  - ✅ **gopls type-scoped rename SHIPPED — the real fix for the lexical-rename
+    bug (2026-07-23).** `refactorRename` now tries the child LSP first
+    (`mcp/rename_gopls.go`: `goplsRenameEdits` routes the file via
+    `manager.RouteByURI`, calls `textDocument/rename`, converts the WorkspaceEdit
+    to byte-ranged resolvedEdits, and reuses the existing apply/txn/diagnostics
+    pipeline unchanged). Correct on collisions: renames only the addressed
+    symbol's decl/impls/usages by declaring TYPE, so `payments.Gateway.IsLive`
+    no longer touches `llm.Rewriter.IsLive`. Stamps `resolvedBy:"lsp"`; the DONE
+    note now states the scope (type-scoped vs name-matched). Fallback: only a
+    tree-sitter-only file (no child LSP) takes the lexical path + collision
+    guard; a server that refuses returns `rename-error` (never silently degrades
+    to lexical). Tests: `TestRefactorRenameTypeScopedViaGopls` (gopls-guarded),
+    reconciled the revert test (gopls front-stops conflicts). Caveat: LSP
+    `character` is UTF-16; `lineColToByteOffset` treats it as bytes — correct for
+    ASCII identifiers, a known edge for non-ASCII (noted, not yet handled).
+    **Bench-validated on the real bug**: `ab_bench islive-rename` now does the
+    rename in ONE correct call (`filesChanged:9`, the right scope; llm package
+    untouched; verify PASS) vs the lexical `filesChanged:15` corruption. Residual
+    overhead: the model still spent ~30 calls grep-auditing AFTER the correct
+    rename (didn't trust `filesChanged:9`/DONE) → 39 total. That's model over-
+    verification, not tool cost — the "models don't trust the rename result"
+    theme again; a note/UX follow-up, not a correctness gap. ◻ OPTIONAL next:
+    make the rename result even harder to distrust (e.g. echo the touched
+    symbols so an audit is unnecessary), and the UTF-16 column fix.
 
 ◻ **Cost visibility + planning share an estimator.**
   - ◻ **Cardinality-order a descendant chain.** `A B` evaluates left-to-right;

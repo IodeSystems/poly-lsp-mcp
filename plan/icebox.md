@@ -150,6 +150,39 @@ drifted to the host's built-in Edit + Bash. Why, filed as work:
   textDocument/definition, stamp refConf `lsp`) is the answer; this is field
   evidence it gates ADOPTION, not just precision. For a tool named *LSP*,
   lexical rename is the expectation-gap that most undersells it.
+  - **ESCALATED to CORRECTNESS bug w/ deterministic repro (2026-07-23).** The
+    `ab_bench.py islive-rename` task (rename `payments.Gateway.IsLive`, while
+    two UNRELATED `llm` interfaces also declare `IsLive`) proves lexical rename
+    doesn't just under-sell — it produces WRONG cross-file edits: `node_edit(
+    payments.go#Gateway.IsLive, rename:…)` returned `filesChanged:15` and
+    renamed the `llm` package too (openrouter/rewrite/translate). The model
+    caught it by grep-auditing, tried to undo — but lexical rename ISN'T
+    invertible per-scope (renaming the llm copies back reverted the payments
+    ones too), so it abandoned `rename` and hand-repaired via 20+ scoped
+    oldText/newText edits: 56 calls to do a "one-call" rename. Two lessons:
+    (1) rename MUST be type-scoped (gopls textDocument/rename, or at minimum
+    detect that the name resolves to multiple distinct decls and refuse with a
+    candidate list rather than blindly rename all). (2) our "DONE — workspace-
+    wide, filesChanged:N" note now MASKS corruption: it reads as success on a
+    damaging edit. Bench + verify are the reusable repro.
+  - **GUARDRAIL SHIPPED (stopgap, 2026-07-23) → plan.md.** `lexicalRenameCollision`
+    now BLOCKS a lexical rename when the name is declared in >1 package with no
+    authoritative (declared-binding / child-LSP) site coupling them — refuses
+    with the collision list instead of corrupting. Validated on the bench: the
+    islive-rename `filesChanged:15` corruption is now a `rename-blocked` error at
+    the first call; the model went straight to scoped edits, llm never touched.
+  - **RESOLVED — gopls `textDocument/rename` SHIPPED (2026-07-23) → plan.md.**
+    `refactorRename` now tries the child LSP FIRST (`goplsRenameEdits` →
+    `child.Call("textDocument/rename")` → WorkspaceEdit → byte-ranged
+    resolvedEdits through the existing apply/txn pipeline). Type-scoped: renames
+    only the addressed symbol's decl/impls/usages, never an unrelated same-named
+    method. Result stamps `resolvedBy:"lsp"`. A tree-sitter-only file (no child
+    LSP) still falls through to the lexical path + collision guard (kept as the
+    safety net there); a server that serves the file but refuses returns
+    `rename-error` and does NOT fall back to the unsafe lexical path. Tests:
+    `TestRefactorRenameTypeScopedViaGopls` (A.Ping renamed, B.Ping untouched),
+    reconciled `TestRefactorRenameValidateRevertsAllFiles` (gopls now front-stops
+    the conflict). This closes the CORRECTNESS bug above.
 
 - **NOTE (mostly host-side) — node_edit doesn't fire the project's custom
   post-edit checks, so built-in Edit won.** node_edit already returns LSP
@@ -161,3 +194,12 @@ drifted to the host's built-in Edit + Bash. Why, filed as work:
   harness concern, not poly-lsp's to fix — but it's the #1 reason node_edit went
   unused here. Recorded as the honest adoption blocker; the safe-edit thesis
   competes directly against it.
+
+- **FEATURE — `::grep('-c ...')` counts-only mode.** When even the 20-row
+  page of matched lines is unwanted (a pure "how many, where" recon), `-c`
+  would return the `rollup` alone, no per-hit text. Deferred: the rollup
+  already ships by default alongside the line, so `-c` only saves the page's
+  line bodies — marginal. Parse `c` in `parseFragmentSpec` (grep-only, not
+  `applyBoolFlag` which is shared with `:contains`), set `grepSpec.countOnly`,
+  and suppress fragment text at render (propagate the flag or empty the
+  frag text in `fragmentsOf`). Real grep semantics (`grep -c`).

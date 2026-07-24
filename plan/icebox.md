@@ -203,3 +203,15 @@ drifted to the host's built-in Edit + Bash. Why, filed as work:
   `applyBoolFlag` which is shared with `:contains`), set `grepSpec.countOnly`,
   and suppress fragment text at render (propagate the flag or empty the
   frag text in `fragmentsOf`). Real grep semantics (`grep -c`).
+
+- **ADOPTION — `node_edit params:`/`return:` refactor ops are unused (2026-07-23).**
+  `ab_bench phone-region-param` (add a `region` param to `normalizePhone`,
+  thread through 7 call sites) NEVER triggered the dedicated `params` op — the
+  model changed the signature with `oldText/newText` and hand-edited each call
+  site, driven by the `WrongArgCount` diagnostic. So `params`/`return` (which
+  rebuild the param/return list) sit unreached like the old `structure`/refs
+  tools did. Options: fold their capability into the description/recipes so a
+  model reaches for them on "add a param", or drop them from the surface and
+  reclaim the schema tokens. Note they also DON'T cascade to call sites (they
+  rewrite the declaration only), so on this task they'd have saved just the one
+  signature edit — marginal. Measure adoption before investing.

@@ -97,6 +97,193 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+◻ **Daemon mode — ONE shared poly-lsp per user, many clients (agreed 2026-07-23).**
+Today every client runs `poly-lsp-mcp mcp --root <dir>` as its own process, and
+each one owns: a symbol index built by walking the workspace, a `ParseCache`
+persisted to `<root>/.poly-lsp-mcp/cache.gob`, an fsnotify watcher over the
+tree, git prewarm, and a `multiplex.Manager` spawning CHILD LSPs (main.go:84-100,
+mcp/server.go). Every Claude session, every editor, and every future
+non-interactive consumer pays for all five. gopls alone is hundreds of MB and
+tens of seconds of warmup, and N copies fight over the same module cache. This
+is raglit's "single writer + single worker pool" argument plus a child-LSP
+fleet, which is the expensive part.
+
+**Second consumer, and why it forces the design:** raglit wants `FileSymbols`
+for structural fragmentation (symbol path + class + doc-comment span +
+`BodyStartLine` = fragment atoms with titles, no LLM). raglit builds
+CGO_ENABLED=0 today; `smacker/go-tree-sitter` needs cgo, so importing `symbols`
+would forfeit its pure-Go build, and shelling out costs a fork per file. A
+daemon removes both problems — raglit becomes a client hitting a warm,
+content-keyed parse cache over the generated OpenAPI client: no cgo, no fork
+per file. A non-MCP, non-editor consumer is a first-class caller, not an
+afterthought.
+
+**Shape (deliberately mirrors raglit; copy, don't invent):**
+- **Transport: gat/huma, served on a UNIX SOCKET** (DECIDED, USER,
+  2026-07-23). The house stack — huma handlers through gat for REST + GraphQL +
+  gRPC + OpenAPI, exactly as raglit's `buildGatHandler` — bound to
+  `$XDG_RUNTIME_DIR/poly-lsp/daemon.sock` (fallback `~/.poly-lsp/daemon.sock`),
+  dir 0700 / socket 0600, instead of a TCP port. **Protocol and listener are
+  orthogonal**: gat yields an `http.Handler`, and an `http.Handler` serves on
+  any `net.Listener`, so the trust decision below costs nothing in stack
+  consistency. (An earlier draft proposed JSON-RPC-over-socket to make the MCP
+  proxy a pipe swap; that saves only the tool-call→HTTP translation
+  `raglit/cmd/raglit/serveclient.go` already shows how to write, and is not
+  worth diverging from every other service we run.)
+  - `http.Server{ConnContext: …}` stashes the accepted conn's peer creds
+    (uid/pid) in the request context — the mechanism that makes per-CONNECTION
+    policy (read-only / validate) enforceable at the boundary.
+  - Clients dial `http.Transport{DialContext: unix}` and use the generated
+    OpenAPI client; `curl --unix-socket` debugs it.
+  - Accepted consequences: no cross-host clients and no browser pointing at it
+    (we have no review UI; an opt-in TCP listener can be added later without
+    touching the trust model).
+  - ⚠ **Server→client PUSH does not fit request/response.** LSP
+    `publishDiagnostics`/progress need SSE, a websocket, or LSP-mode proxying
+    stays out of scope. MCP tool calls are all request/response, so steps 1-3
+    are unaffected — decide this when the LSP proxy is actually built.
+- **Registry keyed by ABSOLUTE workspace root**, not by a name. raglit
+  namespaces because "default" collides across projects; our roots are already
+  unique paths. Closest analogue: raglit's `OpenScopedRegistry`.
+- **Client = thin proxy.** `poly-lsp-mcp mcp` keeps its stdio JSON-RPC surface
+  and forwards tool calls to the daemon — exactly what `raglit serve` does
+  today. LSP mode can proxy the same way later; editors keep speaking stdio.
+- **Lifecycle copied from raglit** `cmd/raglit/{runtime,daemon,httpd}.go`:
+  a state file at `~/.poly-lsp/daemon.json` (pid / socket path / started_at /
+  version — NOTE: "root" there means raglit's storage root, ours is per-DAEMON,
+  not per-workspace) for discovery, auto-start detached (Setsid, output to
+  `daemon.log`), `--stop`, and `--restart` (SIGTERM → wait for the pid to
+  actually exit → relaunch detached replaying the invocation's flags). A
+  successful CONNECT plus a ping is the authority on "is it up" (raglit uses an
+  HTTP health probe for the same purpose); a stale socket file whose owner is
+  gone gets unlinked and replaced, the way raglit drops a stale `daemon.json`.
+- **ParseCache becomes daemon-wide.** It is ALREADY content-keyed
+  (`symbols/cache.go`: `Language + Hash[32]byte → []Hit`, LRU, version-tagged
+  gob) — it just lives per-root. Promote it to one shared store and identical
+  file content across five worktrees parses once. This is raglit's pool move
+  (`(recipe_hash, file_hash)`), and the cache comment already anticipates "a
+  long-running agent walking many branches".
+- **Branches = git worktrees, COW over the parent index.** A worktree shares
+  ~95% of its content with the parent checkout, and git names the difference for
+  free (`diff --name-only`). Overlay the parent's warm index and re-parse only
+  the divergent files, so a fresh worktree starts warm instead of rebuilding.
+  raglit's branch overlay (branch-over-parent at document grain, tombstones for
+  deletes) is the model.
+- **Child LSPs pool by ROOT, not by content.** gopls is bound to a module root,
+  so it can't be shared across worktrees — but it CAN be shared across every
+  session on the same root: keyed by root, ref-counted, idle-evicted LRU (same
+  policy shape as raglit's `GCPolicy`, different key). This is the single
+  biggest resource win.
+
+**next** (each step independently useful; 1-3 deliver the raglit consumer):
+  1. ◻ Daemon skeleton: gat/huma handler on a unix listener, peer-cred check +
+     root-prefix gate in `ConnContext`/middleware, registry keyed by abs root,
+     health, `daemon.json`, auto-start detached, `--stop`/`--restart`. Mostly a
+     straight port from raglit; the socket/creds/gate part is new.
+  2. ◻ Daemon-wide content-keyed ParseCache (lift it out of per-root gob).
+  3. ◻ `mcp` client-proxy mode + a read-only query surface a non-MCP caller
+     (raglit) can hit.
+  4. ◻ Per-session mutation: batch state keyed by session, per-file claims,
+     stage-time hashes + commit-time conflict report, commit serialized per
+     root, auto-rollback on disconnect. The one slice with no raglit analogue —
+     budget for it accordingly.
+  5. ◻ Child-LSP pooling: ref-count + idle eviction per root.
+  6. ◻ Worktree overlay (COW index over a parent root).
+
+**risks**
+- **Mutation is the hard part, and raglit never had to solve it.**
+  `node_edit`/`node_refactor`/`--validate` write the user's real source and
+  revert on new diagnostics; the staged-edit batch is "one open batch per
+  server, `editMu`-serialized". Concurrent agents already race today with stale
+  indexes — the daemon is the fix only if it owns apply→diagnose→revert
+  serially per root. **DECIDED (USER, 2026-07-23): one open batch per CLIENT
+  SESSION, and a commit whose underlying file changed underneath it must SAY
+  SO.** Consequences, in order of how much they change the code:
+  - **Staging is ON DISK** (a deliberate earlier choice — reuses
+    atomicWrite/revert, fires no PostToolUse hooks, and the file-watch wants to
+    see it), so per-session isolation is BOOKKEEPING, not filesystem
+    isolation. Two sessions with disjoint file sets are genuinely independent;
+    two sessions staging the SAME file are not, and a naive revert would
+    restore session A's original over session B's staged edit — silent data
+    loss. So a staged file is CLAIMED by its session: a second session staging
+    it gets `rejected` + help naming the holder. A per-FILE claim, not the
+    per-root lease we considered — far less restrictive and it falls out of the
+    originals map the batch already keeps. (Derived, not user-stated — flag on
+    review.)
+  - **Stage-time hash, commit-time recheck.** The batch already records each
+    touched file's pre-edit bytes for revert; hash them at stage time and
+    re-hash at commit. If the on-disk bytes are neither the original nor what
+    we staged, something else wrote the file — another session, the user's
+    editor, a formatter, `git checkout`. Report the conflict; never silently
+    overwrite it and never silently revert it away. Content hashing is already
+    idiomatic here (`ParseCache` is content-keyed; raglit hashes documents the
+    same way).
+  - **Commits serialize per root** (short exclusive hold across
+    apply→diagnose→verify; commits are brief). Even so, `--validate`'s
+    fingerprint is WORKSPACE-WIDE, so a concurrent session's staged broken
+    intermediate can make another session's commit look like it introduced
+    errors. A false reject, not a corruption — but the report must be able to
+    say "these errors are in files you didn't touch, and session X has an open
+    batch" instead of blaming the committer. (Derived — flag on review.)
+  - **A dropped connection must not strand a batch.** Today the batch dies with
+    the process because server and client are the same lifetime; in a daemon a
+    client can vanish mid-batch and leave a BROKEN INTERMEDIATE on disk. This
+    is a failure mode the daemon INTRODUCES: auto-rollback on disconnect is the
+    safe default. (Derived — flag on review.)
+  - The file watcher sees staged edits and refreshes the index, which other
+    sessions' queries then observe. That is arguably correct — the working tree
+    really did change — but it is a behavior change worth naming.
+- **Trust boundary — DECIDED (USER, 2026-07-23): peer creds + declared root
+  prefixes.** A daemon that opens any root a client names lets any client read
+  and EDIT any file on the machine (raglit answered the equivalent with
+  namespaces — "a project can't reach an arbitrary project's indexes by
+  guessing"). Two gates, both cheap:
+  - **Peer credentials on accept** — `SO_PEERCRED` (Linux) / `getpeereid`
+    (macOS); reject any uid but the daemon's own. Redundant with 0600 socket
+    mode in the normal case, which is the point: it still holds if the mode
+    bits are ever wrong.
+  - **Declared root prefixes** — a client may only address roots UNDER a
+    configured prefix (`--allow <dir>`, repeatable, plus a config list;
+    default `$HOME`). The check is the part that goes wrong in practice:
+    compare `filepath.EvalSymlinks`'d, `filepath.Clean`'d ABSOLUTE paths, and
+    match on PATH COMPONENTS — `/home/u/local` must not admit
+    `/home/u/localsecrets`, and `..` must not walk out. Test the bypasses, not
+    just the happy path.
+  - ◻ **Optional strengthening (Linux-only, later):** peer creds carry the
+    client PID, so `/proc/<pid>/cwd` can bind a connection to its ACTUAL
+    working directory — kernel-verified instead of self-declared. No portable
+    macOS equivalent, so it can only ever be a bonus tier, never the base.
+- **Per-client policy.** `--read-only`, `--validate`, `--legacy-tools` are
+  process-global flags today; in a shared daemon they are per-CONNECTION
+  attributes and must be enforced at the daemon boundary. A read-only client
+  must not be able to mutate because some other client asked for write access.
+- **Generation-keyed caches** (`defCache` is valid for one index
+  `Generation()`) must be per-root and invalidate for all clients of that root
+  at once — a stale definition surviving another client's edit is the failure.
+- One watcher per root instead of N is strictly better; no risk, just the win.
+
+**blocking decisions**
+- ✅ **Transport** — gat/huma on a unix-socket listener (USER, 2026-07-23).
+  See Shape. Stack consistency and peer creds are not in tension.
+- ✅ **Trust model** — peer creds + declared root prefixes (USER, 2026-07-23).
+  See risks.
+- ✅ **Concurrent staged batches on one root** — one open batch per CLIENT
+  SESSION, with commit-time change detection (USER, 2026-07-23). See the
+  mutation risk above for the four consequences; three of them are derived
+  rather than user-stated and want a review pass.
+
+No open blocking decisions. Steps 1-2 are unblocked and independent of the
+mutation design.
+
+**optional extensions** (explicitly out of scope now): LSP-mode proxy for
+editors; a `poly-lsp-mcp status` CLI over the daemon; extracting the daemon
+scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
+
+**Decided (USER, 2026-07-23): COPY raglit's daemon scaffolding, do not extract
+a shared module yet.** raglit's version is battle-tested but has exactly one
+user; extracting now is speculative, extracting after a second real copy is
+refactoring against two known cases. Revisit once this daemon runs.
+
 ✅ **`--validate` (revert-on-new-diagnostics) + the safe-edit-loop thesis,
 shipped, tested, and MEASURED.** The whole arc — reframe → build → benchmark →
 tune → measure with error bars.
@@ -656,7 +843,9 @@ unbounded `{m,}` collects nodes at their shortest hop; `:where(sel)` ≡
 
 ## Non-goals (for now)
 
-- Indexing the entire host filesystem; we only index inside the git root.
+- Indexing the entire host filesystem; we only index inside the git root. (The
+  daemon serving MANY roots does not change this — each workspace stays
+  single-rooted; the daemon is a process-sharing move, not a scope change.)
 - Replacing any single child LSP. We multiplex, we don't reimplement.
 - Sandboxing child LSPs. They run as the user.
 - Windows support until someone asks.

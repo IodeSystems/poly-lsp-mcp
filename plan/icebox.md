@@ -5,6 +5,18 @@ graph-selector design record this used to hold.
 
 ---
 
+## `iodesystems/daemonkit` — extract the shared daemon scaffolding
+
+Deferred by decision (USER, 2026-07-23): COPY raglit's daemon machinery into
+poly-lsp first (see plan.md "Daemon mode"), extract later or never. raglit's
+`cmd/raglit/{runtime,daemon,httpd}.go` — `daemon.json` discovery, `pidAlive`,
+auto-start-detached, `--stop`/`--restart`, project namespacing, LRU pool GC —
+is battle-tested but has exactly ONE user. Extracting now is speculative;
+extracting after poly-lsp's copy is refactoring against two known cases, with
+the differences (root-keyed vs name-keyed registry, mutation serialization,
+per-connection policy) already discovered rather than guessed. Revisit only
+once poly-lsp's daemon runs and the shared surface is obvious.
+
 ## Wall-clock budget — SHIPPED as ms/ops-suffixed, → done.md
 
 `budget` now carries a unit: `Nops` deterministic work units, `Nms` (and a bare

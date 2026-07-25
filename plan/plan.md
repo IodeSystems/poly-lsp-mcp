@@ -97,7 +97,11 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
-◻ **Daemon mode — ONE shared poly-lsp per user, many clients (agreed 2026-07-23).**
+◐ **Daemon mode — ONE shared poly-lsp per user, many clients (agreed 2026-07-23).**
+Steps 1-3 SHIPPED this session (skeleton + proxy + persisted shared cache +
+FileSymbols op — the raglit consumer surface; see "SHIPPED" + steps below);
+remaining: per-connection policy, mutation isolation (step 4), child-LSP
+pooling (5), worktree COW overlay (6).
 Today every client runs `poly-lsp-mcp mcp --root <dir>` as its own process, and
 each one owns: a symbol index built by walking the workspace, a `ParseCache`
 persisted to `<root>/.poly-lsp-mcp/cache.gob`, an fsnotify watcher over the
@@ -175,14 +179,48 @@ afterthought.
   policy shape as raglit's `GCPolicy`, different key). This is the single
   biggest resource win.
 
+**SHIPPED this session (steps 1, 3-proxy, 2-share; all in `daemon/`):** the
+daemon runs — `poly-lsp-mcp daemon --allow <dir>` hosts many roots over a unix
+socket; `poly-lsp-mcp mcp --root X --daemon` is the thin stdio proxy that
+auto-starts it and forwards tools/list + tools/call. Verified end-to-end
+against the real binary (health, open=6965 names, /call, 403 on out-of-allow +
+sibling-prefix bypass, stop/restart replaying flags, stale-socket reclaim).
+Files: `paths/state/trust/peercred_{linux,other}/registry/server/spawn/client/proxy.go`;
+mcp gained `Init`/`Shutdown`/`CallTool`/`Tools`/`IndexedNames`/`SetParseCache`
+(`mcp/daemon_api.go`) — the exported seams the daemon drives a Server through
+without the stdio handshake. Tests: `daemon/{trust,daemon}_test.go`
+(bypass matrix, symlink escape, e2e round-trip, stale/live socket).
+
 **next** (each step independently useful; 1-3 deliver the raglit consumer):
-  1. ◻ Daemon skeleton: gat/huma handler on a unix listener, peer-cred check +
-     root-prefix gate in `ConnContext`/middleware, registry keyed by abs root,
-     health, `daemon.json`, auto-start detached, `--stop`/`--restart`. Mostly a
-     straight port from raglit; the socket/creds/gate part is new.
-  2. ◻ Daemon-wide content-keyed ParseCache (lift it out of per-root gob).
-  3. ◻ `mcp` client-proxy mode + a read-only query surface a non-MCP caller
-     (raglit) can hit.
+  1. ✅ Daemon skeleton: gat/huma handler on a unix listener, peer-cred check
+     (`SO_PEERCRED` on Linux via a cred-filtering `net.Listener` + `ConnContext`
+     stash; mode-bit-only fallback on `!linux`) + root-prefix gate (`AllowList`,
+     EvalSymlinks/Clean + component-wise `filepath.Rel`, default `$HOME`),
+     registry keyed by canonical abs root (lazy, per-root serialized build),
+     health, `daemon.json`, auto-start detached (Setsid → `daemon.log`),
+     `--stop`/`--restart` (replays flags via `stripBoolFlags`). Straight port of
+     raglit's lifecycle; the socket/creds/gate part was new, as predicted.
+  2. ✅ Daemon-wide content-keyed ParseCache. One `symbols.NewParseCache()` on
+     the `Registry`, injected into every hosted Server via `SetParseCache`, so
+     identical bytes across roots parse once (safe: content-keyed, own mutex).
+     Persistence is daemon-OWNED — `Registry.LoadCache` at `Serve` start,
+     `SaveCache` (temp+rename) on shutdown, one load/save at
+     `~/.poly-lsp/cache.gob`, not the N racing per-root gobs the stdio path
+     does. Verified e2e: 172 entries saved on stop, reloaded on restart. Test:
+     `TestRegistryCachePersistence`.
+  3. ✅ Client-proxy (`daemon/proxy.go`: stdio MCP ⇄ socket, warms the root on
+     initialize so the trust-gate 403 surfaces early; shutdown is local, the
+     daemon keeps the root warm) + the typed read-only **`/filesymbols`** op
+     (`POST` content → structural atoms; language derived from `path` ext or
+     given). Content-first, NO root/file access + NO trust gate (the caller
+     owns the bytes; peer-cred + 0600 bound callers) — the "no cgo, no
+     fork-per-file" path the plan wants for raglit. Clean json-tagged
+     `FileSymbol` DTO (decoupled from `symbols.Symbol`) carries sym/class/decl+
+     name ranges/doc-comment span/body-start — fragment atoms with titles.
+     `Client.FileSymbols` + `TestDaemonEndToEnd` cover it; e2e-verified.
+     **Deferred (measure-first):** a content-keyed cache of `[]Symbol` results
+     (the existing `ParseCache` stores `[]Hit`, a different shape) — parse is
+     one tree-sitter pass/call; cache only if raglit re-ingest shows it hot.
   4. ◻ Per-session mutation: batch state keyed by session, per-file claims,
      stage-time hashes + commit-time conflict report, commit serialized per
      root, auto-rollback on disconnect. The one slice with no raglit analogue —

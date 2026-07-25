@@ -9,10 +9,20 @@ import (
 	"strings"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/daemon"
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/server"
 )
+
+// multiFlag collects a repeatable string flag (e.g. --allow a --allow b).
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
 
 func main() {
 	log.SetOutput(os.Stderr)
@@ -30,6 +40,11 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "query" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 		runQuery()
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "daemon" {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+		runDaemon()
 		return
 	}
 	runLSP()
@@ -61,13 +76,30 @@ func runMCP() {
 	legacyTools := flag.Bool("legacy-tools", false, "expose the legacy 9-tool MCP surface instead of the 3-tool surface")
 	readOnly := flag.Bool("read-only", false, "hide every mutating tool (node_edit/node_delete/node_refactor/node_rename_file); navigation + reading only")
 	validate := flag.Bool("validate", false, "revert-on-new-diagnostics: an edit that introduces a new error is rolled back instead of landing (needs a child LSP)")
+	daemonMode := flag.Bool("daemon", false, "proxy tool calls to the shared per-user poly-lsp daemon (auto-starting it) instead of building the index in-process; one warm index + child-LSP fleet is shared across every client")
 	flag.Parse()
 
-	cfg, reg := loadConfigOrDie(*configPath)
 	root, err := filepath.Abs(*rootPath)
 	if err != nil {
 		log.Fatalf("root: %v", err)
 	}
+
+	// Daemon proxy mode: keep the stdio MCP surface, forward tool calls
+	// to the shared daemon over its unix socket. The workspace index,
+	// child LSPs, and parse cache live once in the daemon.
+	if *daemonMode {
+		client, err := daemon.EnsureRunning(nil)
+		if err != nil {
+			log.Fatalf("mcp: daemon: %v", err)
+		}
+		log.Printf("mcp: proxying root %s to shared daemon", root)
+		if err := daemon.RunProxy(client, root, os.Stdin, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	cfg, reg := loadConfigOrDie(*configPath)
 	log.Printf("mcp: workspace root %s", root)
 
 	if cfg.AutoSchemas {
@@ -147,6 +179,79 @@ func runQuery() {
 	if err := srv.QueryText(selector, *limit, *offset, *budget, os.Stdout); err != nil {
 		log.Fatalf("query: %v", err)
 	}
+}
+
+// runDaemon runs (or controls) the shared per-user daemon: one process
+// hosting many workspace roots over a unix socket, gated by peer
+// credentials and declared root prefixes. --stop / --restart control an
+// already-running daemon and exit.
+func runDaemon() {
+	// Capture the daemon flags before parsing so --restart can replay
+	// them into the relaunched process.
+	daemonFlags := append([]string{}, os.Args[1:]...)
+
+	configPath := flag.String("config", "poly-lsp-mcp.yaml", "language registry config file")
+	socket := flag.String("socket", "", "unix socket path (default $XDG_RUNTIME_DIR/poly-lsp/daemon.sock)")
+	readOnly := flag.Bool("read-only", false, "host every root read-only (mutating tools hidden)")
+	validate := flag.Bool("validate", false, "revert-on-new-diagnostics for every hosted root's edits")
+	stop := flag.Bool("stop", false, "stop the running daemon and exit")
+	restart := flag.Bool("restart", false, "restart the running daemon (replaying its flags) and exit")
+	var allow multiFlag
+	flag.Var(&allow, "allow", "directory prefix a client may address roots under (repeatable; default $HOME)")
+	flag.Parse()
+
+	if *stop {
+		if err := daemon.Stop(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *restart {
+		if err := daemon.Restart(stripBoolFlags(daemonFlags, "stop", "restart")); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	cfg, reg := loadConfigOrDie(*configPath)
+
+	prefixes := []string(allow)
+	if len(prefixes) == 0 {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			prefixes = []string{home}
+		}
+	}
+	al := daemon.NewAllowList(prefixes)
+	if len(al.Prefixes()) == 0 {
+		log.Fatal("daemon: no usable --allow prefix (and no home dir); refusing to start with an empty allow-list")
+	}
+
+	dreg := daemon.NewRegistry(cfg, reg, *readOnly, *validate)
+	if err := daemon.Serve(daemon.Config{Socket: *socket, Allow: al, Reg: dreg}); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// stripBoolFlags removes the named boolean flags (any of -f, --f, -f=v,
+// --f=v spellings) from an argument list — used to replay a daemon's
+// flags on --restart without the control flag itself.
+func stripBoolFlags(args []string, names ...string) []string {
+	drop := map[string]bool{}
+	for _, n := range names {
+		drop[n] = true
+	}
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		name := strings.TrimLeft(a, "-")
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		if drop[name] {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // loadConfigOrDie loads the config file (falling back to defaults) and

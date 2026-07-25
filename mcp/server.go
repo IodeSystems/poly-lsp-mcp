@@ -535,14 +535,12 @@ func (s *Server) BuildIndex() error {
 // Tier-2 and Tier-3 bindings, and advertises tool capability.
 func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	if s.getRoot() != "" {
-		if err := s.BuildIndex(); err != nil {
+		// Init is the shared workspace bring-up (index + manager +
+		// prewarm + watch); the daemon calls it directly. BuildIndex
+		// stays out of it deliberately — a one-shot query needs none of
+		// the lifecycle goroutines.
+		if err := s.Init(); err != nil {
 			log.Printf("mcp initialize: %v", err)
-		} else {
-			// Server-lifecycle only: a one-shot query needs none of
-			// these, so they stay out of BuildIndex.
-			s.startManagerIfPresent(s.getIndex())
-			s.kickGitPrewarm()
-			s.kickFileWatch()
 		}
 	} else {
 		log.Print("mcp initialize: no workspace root configured; tools will return errors")

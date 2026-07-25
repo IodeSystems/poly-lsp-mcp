@@ -98,10 +98,10 @@ position axis. Common dev queries are NOT pathological at the default budget.
 Open frontier:
 
 ◐ **Daemon mode — ONE shared poly-lsp per user, many clients (agreed 2026-07-23).**
-Steps 1-4 SHIPPED (skeleton + proxy + persisted shared cache + FileSymbols op
-+ per-session mutation isolation; see "SHIPPED" + steps below); remaining:
-per-connection policy (deferred out of step 4), child-LSP pooling (5),
-worktree COW overlay (6).
+Steps 1-5 SHIPPED (skeleton + proxy + persisted shared cache + FileSymbols op
++ per-session mutation isolation + ref-counted child-LSP pooling; see
+"SHIPPED" + steps below); remaining: per-connection policy (deferred out of
+step 4), worktree COW overlay (6).
 Today every client runs `poly-lsp-mcp mcp --root <dir>` as its own process, and
 each one owns: a symbol index built by walking the workspace, a `ParseCache`
 persisted to `<root>/.poly-lsp-mcp/cache.gob`, an fsnotify watcher over the
@@ -248,7 +248,20 @@ batch isolation, claim conflict, external-write conflict).
      cross-session false-reject REPORT ("these errors are in files you didn't
      touch; session X has an open batch") — a reporting nicety, not a
      correctness gap; commit hashing + claims already prevent the corruption.
-  5. ◻ Child-LSP pooling: ref-count + idle eviction per root.
+  5. ✅ Child-LSP pooling: ref-count + idle eviction per root. Child LSPs were
+     ALREADY shared per-root across sessions (one *Server per root); the gap
+     was EVICTION — a root, once opened, pinned its gopls (hundreds of MB)
+     forever. Now `entry` carries `holders` (sessions keeping it warm) +
+     `evictTimer`: `Registry.Acquire(session,root)` holds + cancels any pending
+     evict, `Release(session)` (called on the SAME /session/watch disconnect
+     that rolls back the batch) drops the ref and, at zero holders, arms an
+     idle timer; `evict` shuts the server down IFF still unheld (re-checked
+     under mu, so a reconnect races safely). `idleTimeout` default 5m, 0
+     disables. The daemon-owned shared parse cache survives eviction, so a
+     re-open comes up warm on parses. Wired: `/open` Acquires (session header
+     on `openIn`), `/call`+`/tools` use the non-holding `Get`. Tests:
+     `TestRegistryRefCountEviction` (two holders keep it, last release evicts),
+     `TestRegistryReacquireCancelsEviction`; `-race` clean.
   6. ◻ Worktree overlay (COW index over a parent root).
 
 **risks**

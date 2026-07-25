@@ -98,10 +98,10 @@ position axis. Common dev queries are NOT pathological at the default budget.
 Open frontier:
 
 ◐ **Daemon mode — ONE shared poly-lsp per user, many clients (agreed 2026-07-23).**
-Steps 1-3 SHIPPED this session (skeleton + proxy + persisted shared cache +
-FileSymbols op — the raglit consumer surface; see "SHIPPED" + steps below);
-remaining: per-connection policy, mutation isolation (step 4), child-LSP
-pooling (5), worktree COW overlay (6).
+Steps 1-4 SHIPPED (skeleton + proxy + persisted shared cache + FileSymbols op
++ per-session mutation isolation; see "SHIPPED" + steps below); remaining:
+per-connection policy (deferred out of step 4), child-LSP pooling (5),
+worktree COW overlay (6).
 Today every client runs `poly-lsp-mcp mcp --root <dir>` as its own process, and
 each one owns: a symbol index built by walking the workspace, a `ParseCache`
 persisted to `<root>/.poly-lsp-mcp/cache.gob`, an fsnotify watcher over the
@@ -186,10 +186,12 @@ auto-starts it and forwards tools/list + tools/call. Verified end-to-end
 against the real binary (health, open=6965 names, /call, 403 on out-of-allow +
 sibling-prefix bypass, stop/restart replaying flags, stale-socket reclaim).
 Files: `paths/state/trust/peercred_{linux,other}/registry/server/spawn/client/proxy.go`;
-mcp gained `Init`/`Shutdown`/`CallTool`/`Tools`/`IndexedNames`/`SetParseCache`
-(`mcp/daemon_api.go`) — the exported seams the daemon drives a Server through
-without the stdio handshake. Tests: `daemon/{trust,daemon}_test.go`
-(bypass matrix, symlink escape, e2e round-trip, stale/live socket).
+mcp gained `Init`/`Shutdown`/`CallTool`/`Tools`/`IndexedNames`/`SetParseCache`/
+`Root`/`RollbackSession` (`mcp/daemon_api.go`, `mcp/session.go`) — the exported
+seams the daemon drives a Server through without the stdio handshake. Tests:
+`daemon/{trust,daemon}_test.go` (bypass matrix, symlink escape, e2e round-trip,
+stale/live socket, disconnect auto-rollback), `mcp/session_test.go` (per-session
+batch isolation, claim conflict, external-write conflict).
 
 **next** (each step independently useful; 1-3 deliver the raglit consumer):
   1. ✅ Daemon skeleton: gat/huma handler on a unix listener, peer-cred check
@@ -221,10 +223,31 @@ without the stdio handshake. Tests: `daemon/{trust,daemon}_test.go`
      **Deferred (measure-first):** a content-keyed cache of `[]Symbol` results
      (the existing `ParseCache` stores `[]Hit`, a different shape) — parse is
      one tree-sitter pass/call; cache only if raglit re-ingest shows it hot.
-  4. ◻ Per-session mutation: batch state keyed by session, per-file claims,
-     stage-time hashes + commit-time conflict report, commit serialized per
-     root, auto-rollback on disconnect. The one slice with no raglit analogue —
-     budget for it accordingly.
+  4. ✅ Per-session mutation isolation. **Session identity = a client-minted
+     id (X-Poly-Session header) + a watched connection** (USER, 2026-07-24):
+     the proxy mints a random id, sends it on every `/call`, and holds one
+     long-lived `GET /session/watch` open; when it drops the daemon
+     auto-rolls-back that session's batch (`Registry.RollbackSession` sweeps
+     hosted roots). mcp side (`mcp/session.go`): the single `editBatch` field
+     became `batches map[sessionID]*editBatch` + a `claims map[uri]sessionID`,
+     all under `editMu` (the per-root commit serializer). The session reaches
+     the shared write funnels via an `editMu`-guarded `activeSession` field
+     (the node_edit handler sets it) rather than threading `sess` through every
+     apply signature; only the tool-handler dispatch type + `CallTool` gained
+     the param. **Per-file claim** (as predicted, not per-root lease): a second
+     session staging a held file is rejected naming the holder. **Stage-time
+     hash + commit-time recheck** (`editBatch.staged` + `externalWrites`): a
+     staged file written underneath the batch (another session/editor/
+     formatter/git) aborts the commit with a `conflict` + `changedFiles`,
+     leaving the batch OPEN — never silently overwritten or reverted. Tests:
+     `mcp/session_test.go` (isolation, claim conflict, external-write conflict),
+     `daemon TestDaemonRollsBackBatchOnDisconnect` (e2e auto-rollback).
+     **Scope note (batch isolation only, USER 2026-07-24):** per-CONNECTION
+     policy (read-only/validate/legacy per client) stays Server-global — a
+     follow-up. **Derived, still deferred:** the workspace-wide `--validate`
+     cross-session false-reject REPORT ("these errors are in files you didn't
+     touch; session X has an open batch") — a reporting nicety, not a
+     correctness gap; commit hashing + claims already prevent the corruption.
   5. ◻ Child-LSP pooling: ref-count + idle eviction per root.
   6. ◻ Worktree overlay (COW index over a parent root).
 

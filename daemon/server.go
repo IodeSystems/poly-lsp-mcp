@@ -167,7 +167,11 @@ type healthOut struct {
 }
 
 type openIn struct {
-	Body struct {
+	// Session holds this root warm for the client's lifetime (ref-counted;
+	// released when its /session/watch drops). Empty = a one-shot open with
+	// no hold, eligible for idle eviction immediately.
+	Session string `header:"X-Poly-Session"`
+	Body    struct {
 		Root string `json:"root"`
 	}
 }
@@ -297,7 +301,7 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 
 	gat.Register(api, g, op("open", http.MethodPost, "/open", "Open (warm) a workspace root."),
 		func(_ context.Context, in *openIn) (*openOut, error) {
-			srv, canonical, err := resolveServer(allow, reg, in.Body.Root)
+			srv, canonical, err := resolveServer(allow, reg, in.Body.Root, in.Session)
 			if err != nil {
 				return nil, err
 			}
@@ -309,7 +313,7 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 
 	gat.Register(api, g, op("tools", http.MethodGet, "/tools", "List the MCP tool catalog for a root."),
 		func(_ context.Context, in *toolsIn) (*toolsOut, error) {
-			srv, _, err := resolveServer(allow, reg, in.Root)
+			srv, _, err := resolveServer(allow, reg, in.Root, "")
 			if err != nil {
 				return nil, err
 			}
@@ -320,7 +324,7 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 
 	gat.Register(api, g, op("call", http.MethodPost, "/call", "Invoke an MCP tool against a root."),
 		func(_ context.Context, in *callIn) (*callOut, error) {
-			srv, _, err := resolveServer(allow, reg, in.Body.Root)
+			srv, _, err := resolveServer(allow, reg, in.Body.Root, "")
 			if err != nil {
 				return nil, err
 			}
@@ -354,6 +358,9 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 			if rolled := reg.RollbackSession(in.Session); len(rolled) > 0 {
 				log.Printf("daemon: session %s dropped — rolled back %v", in.Session, rolled)
 			}
+			// Drop the session's root refs; a root left with no holders is
+			// idle-evicted (its child LSPs freed) after idleTimeout.
+			reg.Release(in.Session)
 			out := &watchOut{}
 			out.Body.Released = true
 			return out, nil
@@ -387,16 +394,24 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 	return router, nil
 }
 
-// resolveServer runs the trust gate (declared-prefix check) and returns
-// the warm server for the canonical root. A root outside every allowed
-// prefix is a 403; a build failure is a 500.
-func resolveServer(allow *AllowList, reg *Registry, root string) (*mcp.Server, string, error) {
+// resolveServer runs the trust gate (declared-prefix check) and returns the
+// warm server for the canonical root. When holder != "" the session takes a
+// ref on the root (ref-counted eviction; the /open path). A root outside
+// every allowed prefix is a 403; a build failure is a 500.
+func resolveServer(allow *AllowList, reg *Registry, root, holder string) (*mcp.Server, string, error) {
 	if root == "" {
 		return nil, "", huma.Error400BadRequest("root is required")
 	}
 	canonical, err := allow.Resolve(root)
 	if err != nil {
 		return nil, "", huma.Error403Forbidden(err.Error())
+	}
+	if holder != "" {
+		srv, err := reg.Acquire(holder, canonical)
+		if err != nil {
+			return nil, "", huma.Error500InternalServerError("open root", err)
+		}
+		return srv, canonical, nil
 	}
 	srv, err := reg.Get(canonical)
 	if err != nil {

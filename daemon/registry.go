@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
@@ -34,6 +35,11 @@ type Registry struct {
 	readOnly  bool
 	validate  bool
 
+	// idleTimeout is how long a root with zero holders lingers before its
+	// server (index + child LSPs + watcher) is evicted. 0 disables eviction
+	// (a root, once opened, stays warm forever — the pre-step-5 behavior).
+	idleTimeout time.Duration
+
 	mu      sync.Mutex
 	servers map[string]*entry
 }
@@ -42,6 +48,12 @@ type entry struct {
 	srv   *mcp.Server
 	err   error
 	ready chan struct{}
+	// holders are the sessions currently keeping this root warm (ref count =
+	// len). A root is built on first acquire and evicted idleTimeout after the
+	// last holder leaves — child LSPs (gopls et al., hundreds of MB) are the
+	// expensive thing this frees. Guarded by Registry.mu.
+	holders   map[string]struct{}
+	evictTimer *time.Timer
 }
 
 // NewRegistry builds the host registry. cfg/reg come from the daemon's
@@ -49,15 +61,22 @@ type entry struct {
 // every hosted server (per-connection policy overrides are a later slice).
 func NewRegistry(cfg *config.Config, reg *config.Registry, readOnly, validate bool) *Registry {
 	return &Registry{
-		cfg:       cfg,
-		reg:       reg,
-		cache:     symbols.NewParseCache(),
-		cachePath: filepath.Join(ConfigHome(), "cache.gob"),
-		readOnly:  readOnly,
-		validate:  validate,
-		servers:   map[string]*entry{},
+		cfg:         cfg,
+		reg:         reg,
+		cache:       symbols.NewParseCache(),
+		cachePath:   filepath.Join(ConfigHome(), "cache.gob"),
+		readOnly:    readOnly,
+		validate:    validate,
+		idleTimeout: defaultIdleTimeout,
+		servers:     map[string]*entry{},
 	}
 }
+
+// defaultIdleTimeout is how long an unheld root stays warm before eviction.
+// Long enough that a client reconnecting (a new agent turn, an editor
+// restart) finds it warm; short enough that abandoned roots don't pin a
+// gopls fleet.
+const defaultIdleTimeout = 5 * time.Minute
 
 // LoadCache seeds the shared parse cache from disk at daemon startup so a
 // restarted daemon comes up warm instead of re-parsing every file. A
@@ -121,16 +140,36 @@ func (r *Registry) SaveCache() {
 }
 
 // Get returns the warm server for a canonical root, building it on first
-// use. root MUST already be resolved+allow-checked by the caller (the
-// AllowList) — the registry trusts its key.
-func (r *Registry) Get(root string) (*mcp.Server, error) {
+// use, WITHOUT taking a ref (for read/call paths whose session already holds
+// the root via Acquire). root MUST already be resolved+allow-checked by the
+// caller (the AllowList) — the registry trusts its key.
+func (r *Registry) Get(root string) (*mcp.Server, error) { return r.get(root, "") }
+
+// Acquire is Get plus a ref: it records that `holder` (a session) is keeping
+// root warm and cancels any pending eviction. The /open path calls it so a
+// client formally holds its root for the session's lifetime; Release drops
+// the ref on disconnect.
+func (r *Registry) Acquire(holder, root string) (*mcp.Server, error) {
+	return r.get(root, holder)
+}
+
+// get fetches-or-builds the server for root. When holder != "" it also
+// registers the hold and cancels eviction (under the same lock as the
+// fetch, so it can't race an in-flight evict of the same entry).
+func (r *Registry) get(root, holder string) (*mcp.Server, error) {
 	r.mu.Lock()
 	if e, ok := r.servers[root]; ok {
+		if holder != "" {
+			r.holdLocked(e, holder)
+		}
 		r.mu.Unlock()
 		<-e.ready
 		return e.srv, e.err
 	}
-	e := &entry{ready: make(chan struct{})}
+	e := &entry{ready: make(chan struct{}), holders: map[string]struct{}{}}
+	if holder != "" {
+		e.holders[holder] = struct{}{}
+	}
 	r.servers[root] = e
 	r.mu.Unlock()
 
@@ -150,6 +189,70 @@ func (r *Registry) Get(root string) (*mcp.Server, error) {
 	}
 	log.Printf("daemon: opened root %s", root)
 	return e.srv, nil
+}
+
+// holdLocked adds a holder and cancels any pending eviction. Caller holds mu.
+func (r *Registry) holdLocked(e *entry, holder string) {
+	if e.holders == nil {
+		e.holders = map[string]struct{}{}
+	}
+	e.holders[holder] = struct{}{}
+	if e.evictTimer != nil {
+		e.evictTimer.Stop()
+		e.evictTimer = nil
+	}
+}
+
+// Release drops `holder`'s ref on every root it holds. A root whose last
+// holder just left is scheduled for eviction after idleTimeout (a
+// reconnecting client cancels it via Acquire). Called when a client's
+// /session/watch connection drops.
+func (r *Registry) Release(holder string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for root, e := range r.servers {
+		if _, ok := e.holders[holder]; !ok {
+			continue
+		}
+		delete(e.holders, holder)
+		if len(e.holders) == 0 {
+			r.scheduleEvictLocked(root, e)
+		}
+	}
+}
+
+// scheduleEvictLocked arms the idle-eviction timer for an unheld root. Caller
+// holds mu. idleTimeout <= 0 disables eviction.
+func (r *Registry) scheduleEvictLocked(root string, e *entry) {
+	if r.idleTimeout <= 0 {
+		return
+	}
+	if e.evictTimer != nil {
+		e.evictTimer.Stop()
+	}
+	e.evictTimer = time.AfterFunc(r.idleTimeout, func() { r.evict(root) })
+}
+
+// evict shuts down a root's server (index + child LSPs + watcher) IF it is
+// still unheld. Re-checks under mu, so an Acquire that landed after the timer
+// fired (but before this ran) safely cancels the eviction. The shared parse
+// cache is daemon-owned, so a re-open still comes up warm on parses.
+func (r *Registry) evict(root string) {
+	r.mu.Lock()
+	e, ok := r.servers[root]
+	if !ok || len(e.holders) > 0 {
+		r.mu.Unlock()
+		return // gone already, or re-acquired
+	}
+	delete(r.servers, root)
+	e.evictTimer = nil
+	r.mu.Unlock()
+
+	<-e.ready
+	if e.srv != nil {
+		e.srv.Shutdown()
+	}
+	log.Printf("daemon: evicted idle root %s", root)
 }
 
 // build constructs (but does not Init) a server for root with the shared
@@ -236,6 +339,9 @@ func (r *Registry) Close() {
 	r.mu.Lock()
 	servers := make([]*entry, 0, len(r.servers))
 	for _, e := range r.servers {
+		if e.evictTimer != nil {
+			e.evictTimer.Stop()
+		}
 		servers = append(servers, e)
 	}
 	r.servers = map[string]*entry{}

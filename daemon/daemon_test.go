@@ -233,6 +233,106 @@ func TestRegistryCachePersistence(t *testing.T) {
 	}
 }
 
+func testRegistryDeps(t *testing.T) (*config.Config, *config.Registry) {
+	t.Helper()
+	cfg, _, err := config.LoadOrDefault("nonexistent.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := cfg.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg, reg
+}
+
+func hasRoot(r *Registry, root string) bool {
+	for _, x := range r.Roots() {
+		if x == root {
+			return true
+		}
+	}
+	return false
+}
+
+func waitRootGone(r *Registry, root string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if !hasRoot(r, root) {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// A root stays warm while ANY session holds it and is evicted (its server —
+// index + child LSPs + watcher — shut down) idleTimeout after the LAST holder
+// leaves. This is step 5's resource win: an abandoned root stops pinning a
+// gopls fleet.
+func TestRegistryRefCountEviction(t *testing.T) {
+	cfg, reg := testRegistryDeps(t)
+	r := NewRegistry(cfg, reg, false, false)
+	r.idleTimeout = 80 * time.Millisecond
+	defer r.Close()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := resolvePath(root)
+
+	if _, err := r.Acquire("s1", resolved); err != nil {
+		t.Fatalf("acquire s1: %v", err)
+	}
+	if _, err := r.Acquire("s2", resolved); err != nil {
+		t.Fatalf("acquire s2: %v", err)
+	}
+	if !hasRoot(r, resolved) {
+		t.Fatal("root not open after acquire")
+	}
+
+	// One holder leaves — s2 still holds it, so no eviction even past idle.
+	r.Release("s1")
+	time.Sleep(3 * r.idleTimeout)
+	if !hasRoot(r, resolved) {
+		t.Fatal("evicted while still held by s2")
+	}
+
+	// Last holder leaves — evicted after idle.
+	r.Release("s2")
+	if !waitRootGone(r, resolved, 3*time.Second) {
+		t.Fatal("root not evicted after last holder left")
+	}
+}
+
+// Re-acquiring an unheld root before its idle timer fires cancels the pending
+// eviction — a client reconnecting keeps its warm index.
+func TestRegistryReacquireCancelsEviction(t *testing.T) {
+	cfg, reg := testRegistryDeps(t)
+	r := NewRegistry(cfg, reg, false, false)
+	r.idleTimeout = 100 * time.Millisecond
+	defer r.Close()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := resolvePath(root)
+
+	if _, err := r.Acquire("s1", resolved); err != nil {
+		t.Fatalf("acquire s1: %v", err)
+	}
+	r.Release("s1")               // schedules eviction
+	if _, err := r.Acquire("s2", resolved); err != nil {
+		t.Fatalf("re-acquire s2: %v", err)
+	}
+	time.Sleep(3 * r.idleTimeout) // past the original deadline
+	if !hasRoot(r, resolved) {
+		t.Fatal("re-acquire did not cancel the pending eviction")
+	}
+}
+
 // TestListenUnixReclaimsStaleSocket confirms a leftover socket file with
 // no listener is removed and rebound (the kill -9 recovery path).
 func TestListenUnixReclaimsStaleSocket(t *testing.T) {

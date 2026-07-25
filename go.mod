@@ -6,7 +6,7 @@ require (
 	github.com/danielgtaylor/huma/v2 v2.39.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-chi/chi/v5 v5.3.1
-	github.com/iodesystems/gwag v0.0.0-00010101000000-000000000000
+	github.com/iodesystems/gwag v1.2.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -35,5 +35,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 )
-
-replace github.com/iodesystems/gwag => ../gwag

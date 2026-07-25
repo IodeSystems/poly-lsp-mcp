@@ -9,4 +9,8 @@
 *.out
 .idea/
 .vscode/
-/.poly-lsp-mcp/
+# poly-lsp's own cache dir — at the root or nested in a test fixture
+.poly-lsp-mcp/
+# Python bytecode cache for the smoke scripts
+__pycache__/
+*.pyc

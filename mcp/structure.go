@@ -66,7 +66,7 @@ func (e entry) toMap() map[string]any {
 
 // -------------------------------------------------------------- structure
 
-func handleStructure(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleStructure(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Path      string `json:"path"`
 		Depth     *int   `json:"depth"`

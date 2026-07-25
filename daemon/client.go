@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,17 +15,27 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 )
 
+// sessionHeader carries the client's session id so the daemon isolates its
+// edit batch from other clients on the same root, and so /session/watch can
+// bind the session's lifetime.
+const sessionHeader = "X-Poly-Session"
+
 // Client dials a daemon over its unix socket. The URL host is irrelevant
 // (the transport always dials the socket); "poly-lsp" is a placeholder.
+// One Client per proxy process = one session; the id is minted once and
+// sent on every request.
 type Client struct {
-	socket string
-	hc     *http.Client
+	socket  string
+	session string
+	hc      *http.Client
 }
 
-// NewClient builds a client for the given socket path.
+// NewClient builds a client for the given socket path with a fresh random
+// session id.
 func NewClient(socket string) *Client {
 	return &Client{
-		socket: socket,
+		socket:  socket,
+		session: newSessionID(),
 		hc: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -33,6 +45,41 @@ func NewClient(socket string) *Client {
 			},
 		},
 	}
+}
+
+// newSessionID returns a random hex token. crypto/rand failure is fatal to
+// randomness, so fall back to a fixed marker rather than an empty id (which
+// would collide with the daemon's implicit local session).
+func newSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "session-randfail"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// Session is the client's session id.
+func (c *Client) Session() string { return c.session }
+
+// WatchSession opens the long-lived /session/watch request and blocks until
+// the daemon closes it. The proxy runs it in a goroutine for its whole
+// lifetime; when the proxy process exits, the connection drops and the
+// daemon auto-rolls-back this session's staged batch. Returns the daemon's
+// error, if any (a lost daemon is not fatal to the proxy — the batch, if
+// any, is already gone with the daemon).
+func (c *Client) WatchSession(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://poly-lsp/session/watch", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(sessionHeader, c.session)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 // Healthy reports whether the daemon answers /health.
@@ -98,7 +145,12 @@ func (c *Client) get(path string, q url.Values, out any) error {
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	resp, err := c.hc.Get(u)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(sessionHeader, c.session)
+	resp, err := c.hc.Do(req)
 	if err != nil {
 		return err
 	}
@@ -110,7 +162,13 @@ func (c *Client) postJSON(path string, body, out any) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.hc.Post("http://poly-lsp"+path, "application/json", bytes.NewReader(buf))
+	req, err := http.NewRequest(http.MethodPost, "http://poly-lsp"+path, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(sessionHeader, c.session)
+	resp, err := c.hc.Do(req)
 	if err != nil {
 		return err
 	}

@@ -118,7 +118,7 @@ var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 // model to narrow its selector rather than page through noise.
 const defaultQueryLimit = 20
 
-func handleModernNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Selector string          `json:"selector"`
 		Grep     string          `json:"grep"`
@@ -646,7 +646,7 @@ func (s *Server) nodeCurrentText(rn *modernNode) (string, error) {
 
 // ---------------------------------------------------------- node_read
 
-func handleModernNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Node      string `json:"node"`
 		StartLine *int   `json:"startLine"`
@@ -833,26 +833,32 @@ func oldTextAmbiguousErr(addr, cur, oldText string, offs []int) error {
 	return errors.New(b.String())
 }
 
-func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p modernEditArgs
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
 	}
 
 	// The staged-edit transaction (commit:false) serializes on editMu and
-	// is handled here, before the per-edit machinery.
+	// is handled here, before the per-edit machinery. activeSession names the
+	// batch this edit belongs to; the shared write funnels read it (see
+	// session.go). Reset on exit so a later un-threaded caller defaults to
+	// localSession.
 	s.editMu.Lock()
 	defer s.editMu.Unlock()
+	s.activeSession = sess
+	defer func() { s.activeSession = localSession }()
 	commit := p.Commit == nil || *p.Commit
 
 	if p.Rollback {
-		if s.editBatch == nil {
+		b := s.currentBatch()
+		if b == nil {
 			return jsonContent(map[string]any{"rolledBack": false, "note": "no open batch to roll back"}), false, nil
 		}
 		oc := editOutcome{}
-		n := s.editBatch.count
-		s.editBatch.revertAll(&oc)
-		s.editBatch = nil
+		n := b.count
+		b.revertAll(&oc)
+		s.closeBatch()
 		res := map[string]any{"rolledBack": true, "discarded": n,
 			"note": fmt.Sprintf("discarded %d staged edit(s); reverted to last committed", n)}
 		if oc.RevertFailed {
@@ -863,10 +869,12 @@ func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, err
 
 	// commit-only (the noop): no edit op, a batch is open → validate and
 	// commit what's staged.
-	if len(p.ops()) == 0 && s.editBatch != nil && commit {
-		oc := s.editBatch.commit()
-		s.editBatch = nil
-		return jsonContent(batchCommitPayload(oc)), oc.Rejected, nil
+	if b := s.currentBatch(); len(p.ops()) == 0 && b != nil && commit {
+		oc := b.commit()
+		if !oc.Conflict {
+			s.closeBatch() // a conflict leaves the batch open to resolve
+		}
+		return jsonContent(batchCommitPayload(oc)), oc.Rejected || oc.Conflict, nil
 	}
 
 	if strings.TrimSpace(p.Node) == "" {
@@ -904,13 +912,15 @@ func handleModernNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, err
 	// that joins the batch — a raw text edit OR a params/return/rename
 	// refactor — counts as one pending operation.
 	if !commit {
-		if s.editBatch == nil {
-			s.editBatch = s.openBatch(p.diagnosticOptions)
+		b := s.currentBatch()
+		if b == nil {
+			b = s.openBatch(p.diagnosticOptions)
+			s.setBatch(b)
 		}
-		s.editBatch.count++
-	} else if s.editBatch != nil {
+		b.count++
+	} else if b := s.currentBatch(); b != nil {
 		p.commitBatch = true // this edit stages then validates+commits the union
-		s.editBatch.count++
+		b.count++
 	}
 
 	rn, err := s.resolveModernNode(p.Node)

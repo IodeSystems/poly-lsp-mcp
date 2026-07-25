@@ -29,7 +29,7 @@ var importSpecRe = regexp.MustCompile(`(?m)(?:\bfrom\s*|\bimport\s*\(\s*|\brequi
 // tsResolveExts are tried (in order) when a specifier omits the extension.
 var tsResolveExts = []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"}
 
-func handleNodeRenameFile(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeRenameFile(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p nodeRenameFileArgs
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)

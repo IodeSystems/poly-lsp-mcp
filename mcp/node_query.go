@@ -578,7 +578,7 @@ type fileNodes struct {
 
 // ----------------------------------------------------------- tool handler
 
-func handleLegacyNodeQuery(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleLegacyNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Select string `json:"select"`
 		Path   string `json:"path"`

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,23 @@ func RunProxy(client *Client, root string, in io.Reader, out io.Writer) error {
 		send(&jsonrpc.Message{JSONRPC: "2.0", ID: req.ID, Error: &jsonrpc.Error{Code: code, Message: msg}})
 	}
 
+	// watchStarted guards the single long-lived /session/watch request that
+	// binds this proxy's lifetime to the daemon: when the proxy exits, that
+	// connection drops and the daemon rolls back any batch this session left
+	// open. Started on initialize (after the daemon is confirmed reachable).
+	var watchStarted bool
+	startWatch := func() {
+		if watchStarted {
+			return
+		}
+		watchStarted = true
+		go func() {
+			if err := client.WatchSession(context.Background()); err != nil {
+				log.Printf("proxy: session watch ended: %v", err)
+			}
+		}()
+	}
+
 	var shutdown bool
 	for {
 		var msg jsonrpc.Message
@@ -63,6 +81,7 @@ func RunProxy(client *Client, root string, in io.Reader, out io.Writer) error {
 				log.Printf("proxy: open root %s: %v", root, err)
 			} else {
 				log.Printf("proxy: root %s warm (%d names)", root, n)
+				startWatch()
 			}
 			reply(&msg, map[string]any{
 				"protocolVersion": protocolVersion,

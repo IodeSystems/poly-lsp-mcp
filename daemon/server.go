@@ -188,10 +188,23 @@ type toolsOut struct {
 }
 
 type callIn struct {
-	Body struct {
+	// Session isolates this client's edit batch from other clients on the
+	// same root (see mcp session.go). The proxy mints it once and sends it on
+	// every call; empty maps to the implicit local session.
+	Session string `header:"X-Poly-Session"`
+	Body    struct {
 		Root      string          `json:"root"`
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+	}
+}
+
+type watchIn struct {
+	Session string `header:"X-Poly-Session"`
+}
+type watchOut struct {
+	Body struct {
+		Released bool `json:"released"`
 	}
 }
 type callOut struct {
@@ -311,7 +324,7 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 			if err != nil {
 				return nil, err
 			}
-			content, isError, cerr := srv.CallTool(in.Body.Name, in.Body.Arguments)
+			content, isError, cerr := srv.CallTool(in.Session, in.Body.Name, in.Body.Arguments)
 			if cerr != nil {
 				// Mirror stdio handleToolsCall: a handler error becomes an
 				// isError text result, not an HTTP error.
@@ -321,6 +334,28 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 			out := &callOut{}
 			out.Body.Content = content
 			out.Body.IsError = isError
+			return out, nil
+		})
+
+	// A long-lived liveness channel: the client holds this request open for
+	// its whole lifetime. When the client vanishes (crash, kill, network
+	// drop), net/http cancels the request context, and we auto-roll-back that
+	// session's open batch on every root — the disconnect safety the daemon
+	// introduces (server and client no longer share a process lifetime, so a
+	// dropped client could otherwise strand a broken staged intermediate on
+	// disk). No trust gate: it names no root and only affects its OWN batches;
+	// peer-cred + 0600 already bound the caller.
+	gat.Register(api, g, op("sessionWatch", http.MethodGet, "/session/watch", "Hold open to bind a session's lifetime; on disconnect its staged batch is rolled back."),
+		func(ctx context.Context, in *watchIn) (*watchOut, error) {
+			if in.Session == "" {
+				return nil, huma.Error400BadRequest("X-Poly-Session header is required")
+			}
+			<-ctx.Done() // blocks until the client disconnects
+			if rolled := reg.RollbackSession(in.Session); len(rolled) > 0 {
+				log.Printf("daemon: session %s dropped — rolled back %v", in.Session, rolled)
+			}
+			out := &watchOut{}
+			out.Body.Released = true
 			return out, nil
 		})
 

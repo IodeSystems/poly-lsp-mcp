@@ -31,7 +31,10 @@ type Tool struct {
 	Name        string
 	Description string
 	InputSchema json.RawMessage
-	Handler     func(s *Server, args json.RawMessage) ([]Content, bool, error)
+	// Handler runs the tool. sess names the calling client session (for
+	// per-session edit-batch isolation in the daemon); stdio passes
+	// localSession. Non-mutating handlers ignore it.
+	Handler func(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error)
 }
 
 // registerTools returns the 9-tool surface poly-lsp-mcp exposes. Each tool
@@ -322,7 +325,7 @@ func (a rangeArgs) validate() error {
 
 // -------------------------------------------------------------- search
 
-func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleSearch(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Pattern      string `json:"pattern"`
 		Path         string `json:"path"`
@@ -451,7 +454,7 @@ func contentEndPosition(content []byte) (int, int) {
 
 // -------------------------------------------------------------- node_references
 
-func handleNodeReferences(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeReferences(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var a rangeArgs
 	var wrap struct {
 		Node string `json:"node"`
@@ -576,7 +579,7 @@ const readGeneratedLineLen = 5000
 // explicit lineLength.
 const readLongLinePreview = 500
 
-func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var a nodeReadArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -900,7 +903,7 @@ type nodeEditArgs struct {
 	diagnosticOptions
 }
 
-func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p nodeEditArgs
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -975,7 +978,7 @@ type nodeDeleteArgs struct {
 	diagnosticOptions
 }
 
-func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeDelete(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p nodeDeleteArgs
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -1285,7 +1288,7 @@ func (r refactorOps) nonEmpty() bool {
 	return r.Rename != "" || r.Params != nil || r.Return != ""
 }
 
-func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeRefactor(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		rangeArgs
 		diagnosticOptions

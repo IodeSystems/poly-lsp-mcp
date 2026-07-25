@@ -124,10 +124,26 @@ type Server struct {
 	implCache    map[string][]implLoc
 	implCacheGen uint64
 
-	// editMu serializes node_edit operations (and thus the editBatch state):
-	// one edit — or one staged batch step — at a time.
-	editMu    sync.Mutex
-	editBatch *editBatch // the open commit:false transaction, if any
+	// editMu serializes node_edit operations (and thus all batch/claim
+	// state): one edit — or one staged batch step — at a time, across every
+	// session. Commits are brief, so a single per-root serializer is enough
+	// (correctness over cross-session edit concurrency).
+	editMu sync.Mutex
+	// batches holds each session's open commit:false transaction. stdio has
+	// one implicit session (localSession); the daemon keys by the client's
+	// X-Poly-Session id so two clients on one root can't commit or revert
+	// each other's staged edits. See session.go.
+	batches map[sessionID]*editBatch
+	// claims records which session has a file staged (uri → owner), so a
+	// second session staging the same file is rejected instead of silently
+	// clobbering the first's staged bytes on revert.
+	claims map[string]sessionID
+	// activeSession is the session of the edit currently holding editMu. Set
+	// by the node_edit handler right after it locks; read by the shared write
+	// funnels (applyBytes / beginValidationTxn → currentBatch / closeBatch)
+	// so the session need not be threaded through every apply signature. Only
+	// meaningful under editMu; the zero value is localSession.
+	activeSession sessionID
 
 	// diagnosticWait is the per-edit deadline for publishDiagnostics.
 	// 0 means use the default (1500ms). Tests set a smaller value to
@@ -660,7 +676,7 @@ func (s *Server) handleToolsCall(req *jsonrpc.Message) {
 		s.replyError(req, errInvalidParams, fmt.Sprintf("unknown tool: %s", p.Name))
 		return
 	}
-	content, isError, err := tool.Handler(s, p.Arguments)
+	content, isError, err := tool.Handler(s, localSession, p.Arguments)
 	if err != nil {
 		content = []Content{{Type: "text", Text: err.Error()}}
 		isError = true
@@ -707,6 +723,10 @@ func (s *Server) getRoot() string {
 	defer s.rootMu.RUnlock()
 	return s.root
 }
+
+// Root is the exported workspace root, for the daemon host (logging,
+// per-root bookkeeping).
+func (s *Server) Root() string { return s.getRoot() }
 
 func (s *Server) reply(req *jsonrpc.Message, result any) {
 	raw, err := json.Marshal(result)

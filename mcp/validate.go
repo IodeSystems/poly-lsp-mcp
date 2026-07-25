@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"sort"
@@ -40,6 +41,14 @@ type editOutcome struct {
 	Staged         bool // applied to the open batch, NOT validated, NOT committed
 	BatchCommitted bool // this edit closed the batch (validate the union then persist/revert)
 	Pending        int  // edits in the batch (staged count, or the number just committed)
+
+	// Conflict signals a commit ABORTED because a staged file changed on
+	// disk underneath the batch (another session, the user's editor, a
+	// formatter, git checkout) — neither its pre-batch nor its staged bytes.
+	// The batch is left OPEN and untouched: never silently overwrite the
+	// outside change, never silently revert it away. Conflicts names them.
+	Conflict  bool
+	Conflicts []string
 }
 
 // editBatch is the commit:false transaction: staged edits accumulate on
@@ -58,17 +67,21 @@ type editOutcome struct {
 // or a failed commit.
 type editBatch struct {
 	s         *Server
+	sess      sessionID         // owning session (for per-file claims)
 	validate  bool
-	baseline  map[string]int    // workspace error fingerprint at open (if validating)
-	originals map[string][]byte // uri → pre-batch bytes (first write wins) — for revert
+	baseline  map[string]int      // workspace error fingerprint at open (if validating)
+	originals map[string][]byte   // uri → pre-batch bytes (first write wins) — for revert
+	staged    map[string][32]byte // uri → hash of the LAST bytes we staged — for commit-time conflict detection
 	count     int
 }
 
 func (s *Server) openBatch(opts diagnosticOptions) *editBatch {
 	b := &editBatch{
 		s:         s,
+		sess:      s.activeSession,
 		validate:  (opts.Validate || s.validateEdits) && s.manager != nil,
 		originals: map[string][]byte{},
+		staged:    map[string][32]byte{},
 	}
 	if b.validate {
 		b.baseline = s.errorFingerprintAll()
@@ -81,12 +94,19 @@ func (s *Server) openBatch(opts diagnosticOptions) *editBatch {
 // LSP — but do NOT validate. Later edits and resolves see it on disk.
 func (b *editBatch) stage(abs string, orig, out []byte, mode os.FileMode, opts diagnosticOptions) error {
 	uri := pathToURI(abs)
+	// Claim the file for this session before touching disk. A file already
+	// staged by ANOTHER session is refused, so a later revert can't restore
+	// this session's original over the other's staged edit (silent loss).
+	if holder, ok := b.s.claimFile(uri, b.sess); !ok {
+		return fmt.Errorf("%s is staged by another client session (%q) — commit or roll back that batch, or edit a different file", relPath(abs, b.s.getRoot()), string(holder))
+	}
 	if _, seen := b.originals[uri]; !seen {
 		b.originals[uri] = orig
 	}
 	if err := b.s.atomicWrite(abs, out, mode); err != nil {
 		return err
 	}
+	b.staged[uri] = sha256.Sum256(out)
 	b.s.refreshFileInIndex(abs, out)
 	// Feed the child LSP the staged content (so the commit's union
 	// validation sees it) only when we're actually validating — no manager
@@ -103,6 +123,15 @@ func (b *editBatch) stage(abs string, orig, out []byte, mode os.FileMode, opts d
 // (fail-open, flagged via Skipped).
 func (b *editBatch) commit() editOutcome {
 	oc := editOutcome{BatchCommitted: true, Pending: b.count}
+	// Before anything, check nobody wrote a staged file underneath us. If the
+	// on-disk bytes are neither our staged bytes nor the pre-batch original,
+	// an outside writer (another session, the editor, a formatter, git) got
+	// there — abort WITHOUT validating or reverting, leaving the batch open so
+	// the outside change is neither overwritten nor silently discarded.
+	if conflicts := b.externalWrites(); len(conflicts) > 0 {
+		oc.Conflict, oc.Conflicts = true, conflicts
+		return oc
+	}
 	if !b.validate {
 		return oc // nothing to prove; staged bytes stand
 	}
@@ -114,6 +143,32 @@ func (b *editBatch) commit() editOutcome {
 	oc.Rejected, oc.NewErrors = true, introduced
 	b.revertAll(&oc)
 	return oc
+}
+
+// externalWrites returns the batch's files whose current on-disk bytes are
+// neither what we staged nor the pre-batch original — evidence something
+// outside this batch wrote them since we staged. A missing/unreadable staged
+// file also counts (it was removed underneath us). Sorted, workspace-relative.
+func (b *editBatch) externalWrites() []string {
+	var out []string
+	for uri, wantHash := range b.staged {
+		abs := uriToPath(uri)
+		cur, err := os.ReadFile(abs)
+		if err != nil {
+			out = append(out, relPath(abs, b.s.getRoot()))
+			continue
+		}
+		h := sha256.Sum256(cur)
+		if h == wantHash {
+			continue // still our staged bytes
+		}
+		if orig, ok := b.originals[uri]; ok && sha256.Sum256(orig) == h {
+			continue // reverted to the pre-batch original — not a foreign write
+		}
+		out = append(out, relPath(abs, b.s.getRoot()))
+	}
+	sort.Strings(out)
+	return out
 }
 
 // revertAll restores every touched file to its pre-batch bytes.
@@ -154,7 +209,9 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 		}
 		if opts.commitBatch {
 			oc := b.commit()
-			s.closeBatch()
+			if !oc.Conflict {
+				s.closeBatch() // a conflict leaves the batch open to resolve
+			}
 			return oc, nil
 		}
 		return editOutcome{Staged: true, Pending: b.count}, nil
@@ -241,8 +298,8 @@ type validationTxn struct {
 func (s *Server) beginValidationTxn(opts diagnosticOptions) *validationTxn {
 	// A commit:false batch is open — a refactor run now joins it instead of
 	// validating on its own; opts.commitBatch marks the edit that closes it.
-	if s.editBatch != nil {
-		return &validationTxn{s: s, active: s.editBatch.validate, batch: s.editBatch, committing: opts.commitBatch}
+	if b := s.currentBatch(); b != nil {
+		return &validationTxn{s: s, active: b.validate, batch: b, committing: opts.commitBatch}
 	}
 	return &validationTxn{
 		s:      s,
@@ -293,7 +350,9 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 			return editOutcome{Diags: diags, Staged: true, Pending: t.batch.count}
 		}
 		bc := t.batch.commit()
-		t.s.closeBatch()
+		if !bc.Conflict {
+			t.s.closeBatch() // a conflict leaves the batch open to resolve
+		}
 		return bc
 	}
 	if !t.active {
@@ -331,11 +390,9 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 	return oc
 }
 
-// currentBatch / closeBatch access the open batch. The node_edit handler
-// holds editMu for the whole operation, so these are unlocked reads/writes
-// of state only it touches.
-func (s *Server) currentBatch() *editBatch { return s.editBatch }
-func (s *Server) closeBatch()              { s.editBatch = nil }
+// currentBatch / setBatch / closeBatch are session-keyed — see session.go.
+// The node_edit handler holds editMu for the whole operation and sets
+// s.activeSession, so those accessors read/write only the state it owns.
 
 // stageHelp / rejectHelp are the INSTRUCTIVE strings — the transaction is
 // undocumented in the schema and revealed here, at the moment it's needed.
@@ -355,12 +412,22 @@ func batchResponse(oc editOutcome) (content []Content, isErr, handled bool) {
 		return jsonContent(map[string]any{"staged": true, "pending": oc.Pending, "help": stageHelp}), false, true
 	}
 	if oc.BatchCommitted {
-		return jsonContent(batchCommitPayload(oc)), oc.Rejected, true
+		return jsonContent(batchCommitPayload(oc)), oc.Rejected || oc.Conflict, true
 	}
 	return nil, false, false
 }
 
 func batchCommitPayload(oc editOutcome) map[string]any {
+	if oc.Conflict {
+		return map[string]any{
+			"committed": false,
+			"conflict":  true,
+			"pending":   oc.Pending,
+			"changedFiles": oc.Conflicts,
+			"note": fmt.Sprintf("commit ABORTED — %d staged file(s) changed on disk since you staged them; nothing was overwritten or reverted", len(oc.Conflicts)),
+			"help": "the batch is still OPEN. Inspect the outside changes, then either re-stage over them (commit:false) and commit, or rollback:true to discard your staged edits back to the pre-batch state.",
+		}
+	}
 	if !oc.Rejected {
 		p := map[string]any{
 			"committed": true,

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -142,6 +143,59 @@ func TestDaemonEndToEnd(t *testing.T) {
 	if _, _, err := c.FileSymbols("plain", "", "x.unknownext"); err == nil {
 		t.Error("FileSymbols accepted content with no derivable language")
 	}
+}
+
+// TestDaemonRollsBackBatchOnDisconnect: a client stages an edit (commit:
+// false, so it's on disk but uncommitted) and then vanishes. The daemon
+// watches the client's /session/watch connection; when it drops, the
+// session's open batch is auto-rolled-back so the broken intermediate does
+// not stay stranded on disk — the failure mode the daemon introduces by
+// splitting the client and server lifetimes.
+func TestDaemonRollsBackBatchOnDisconnect(t *testing.T) {
+	root := t.TempDir()
+	mainPath := filepath.Join(root, "main.go")
+	orig := []byte("package main\n\nfunc Hello() string { return \"hi\" }\n")
+	if err := os.WriteFile(mainPath, orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := resolvePath(root)
+	c, stop := startTestDaemon(t, resolved)
+	defer stop()
+
+	if _, err := c.Open(root); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	// Stage an edit — lands on disk, not yet committed.
+	_, isErr, err := c.Call(root, "node_edit",
+		json.RawMessage(`{"node":"main.go#Hello","oldText":"return \"hi\"","newText":"return \"bye\"","commit":false}`))
+	if err != nil || isErr {
+		t.Fatalf("stage: isErr=%v err=%v", isErr, err)
+	}
+	if b, _ := os.ReadFile(mainPath); string(b) == string(orig) {
+		t.Fatal("staged edit is not on disk")
+	}
+
+	// Open the watch, let it register server-side, then drop it (the client
+	// vanishing).
+	ctx, cancel := context.WithCancel(context.Background())
+	watchDone := make(chan struct{})
+	go func() { _ = c.WatchSession(ctx); close(watchDone) }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-watchDone
+
+	// The daemon rolls back asynchronously once it sees the drop; poll for
+	// the restore.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, _ := os.ReadFile(mainPath); string(b) == string(orig) {
+			return // rolled back
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(mainPath)
+	t.Fatalf("batch not rolled back on disconnect; file still %q", b)
 }
 
 // TestRegistryCachePersistence checks the daemon-owned load/save of the

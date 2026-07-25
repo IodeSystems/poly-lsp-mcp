@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -196,6 +197,37 @@ func (r *Registry) Roots() []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// RollbackSession discards any open edit batch the session holds on ANY
+// hosted root, reverting its staged files to their pre-batch bytes. Called
+// when a client's /session/watch connection drops, so a vanished client
+// can't strand a broken intermediate on disk. A session's batches are few
+// (one per root it edited) and roots are few, so a sweep over built servers
+// is cheap; unbuilt roots hold no batch. Returns the roots actually rolled
+// back, for logging.
+func (r *Registry) RollbackSession(sess string) []string {
+	r.mu.Lock()
+	servers := make([]*entry, 0, len(r.servers))
+	for _, e := range r.servers {
+		servers = append(servers, e)
+	}
+	r.mu.Unlock()
+	var rolled []string
+	for _, e := range servers {
+		select {
+		case <-e.ready:
+		default:
+			continue // still building — no batch to strand yet
+		}
+		if e.srv == nil {
+			continue
+		}
+		if n, ok := e.srv.RollbackSession(sess); ok {
+			rolled = append(rolled, fmt.Sprintf("%s(%d)", e.srv.Root(), n))
+		}
+	}
+	return rolled
 }
 
 // Close tears down every hosted server (child LSPs + watchers). Called on

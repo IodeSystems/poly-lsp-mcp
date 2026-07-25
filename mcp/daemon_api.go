@@ -59,13 +59,15 @@ func (s *Server) Shutdown() {
 // the daemon uses in place of the stdio tools/call path. Dispatch and
 // error shaping mirror handleToolsCall exactly (a handler error becomes
 // an isError text result there; here the raw error is returned so the
-// caller can choose the wire shape).
-func (s *Server) CallTool(name string, args json.RawMessage) (content []Content, isError bool, err error) {
+// caller can choose the wire shape). sess is the client's session id
+// (X-Poly-Session), used to isolate its edit batch from other clients on
+// the same root; "" maps to the implicit local session.
+func (s *Server) CallTool(sess, name string, args json.RawMessage) (content []Content, isError bool, err error) {
 	tool, ok := s.tools[name]
 	if !ok {
 		return nil, true, fmt.Errorf("unknown tool: %s", name)
 	}
-	return tool.Handler(s, args)
+	return tool.Handler(s, normSession(sess), args)
 }
 
 // IndexedNames reports how many symbol names the current index holds

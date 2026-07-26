@@ -97,6 +97,64 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+◐ **Java + Android XML — the JVM/Android blind spot (started 2026-07-26).**
+Motivating measurement, termux-app: **17 of 291 source files were visible**
+(yml/md/json only) — 197 `.java` and 67 `.xml` were invisible, i.e. the index
+saw 6% of the repo and none of the code. Any agent using us as its code tool on
+an Android repo degrades to grep.
+
+**Slice 1 SHIPPED — Java via tree-sitter.** `config.Default()` entry
+(treesitter-only; jdtls is opt-in via yaml, it is too heavy to default),
+`javaIdentifierQuery`, `LanguageByName`, `classifyJava`, `refinedClass` java
+arm (module/import/class/interface/enum/struct(record)/ctor/method/field/var/
+const), `returnTypeNodes` (`type` field), `javaParamInfos` (formal_parameter,
+spread_parameter, receiver_parameter). Verified live on termux-app: 8,099 names
+indexed, `class#X > method` and nested field paths
+(`TermuxPreferenceConstants.TERMUX_APP.KEY_SCROLL_BEHAVIOUR`) resolve. Tests:
+`TestFileSymbolsJavaClassMembers`, `TestFileSymbolsJavaArguments`.
+Package declarations answer to the LEAF segment (`view`, not
+`com.termux.view`) — deliberate, matches Go's `package_clause`.
+
+**Slice 2 SHIPPED — the Android binding (`internal/bindings/android.go`).**
+`ApplyAndroid` sits alongside `ApplyDerived` / `ApplyDerivedSQL`, wired into
+both `mcp/server.go` and `server/lsp.go`. The structural problem it solves:
+**the Java side of an Android binding is a STRING LITERAL, which the
+tree-sitter extractor drops by design** — right for Go, wrong for Android.
+Widening the Java query to capture all literals would flood the index, so this
+takes the same want-set gate ApplyDerived uses:
+
+1. Collect resource names from XML (`name="x"`, `@+id/x`, `@string/x`, and the
+   read-by-code attributes `app:key` / `defaultValue` / `entryValues` /
+   `fragment` / `android:name`).
+2. Collect Java string literals via tree-sitter, keeping only values the XML
+   side already declares.
+3. Declare sites **only for names present on BOTH sides** — a resource nothing
+   in Java addresses carries no cross-language information and the lexical tier
+   already has it.
+
+**Precision is tiered**, and it had to be: binding every XML name first gave
+46,595 sites of mostly noise. Read-by-code attributes bind unconditionally;
+generic `name="x"` / `@res/x` additionally require the name to look chosen
+(`_`, `.`, an uppercase letter, or ≥12 chars), which drops coincidental
+collisions on `color` / `key` / `layout` / `content`. Result on termux-app:
+**42 bound names**, including the motivating case
+(`scroll_behaviour`: 2 XML + 3 Java sites), every AndroidManifest
+`android:name` ↔ activity/service class, the extra-keys names
+(ALT/CTRL/SHIFT), and preference keys (`log_level`, `current_session`,
+`crash_report_notifications_enabled`).
+
+Tests: `internal/bindings/android_test.go` — cross-language pair, unpaired
+resource NOT bound, unpaired Java literal NOT bound, noise filter.
+
+- **risks**: only direct literals are read (no constant folding, so
+  `KEY = PREFIX + "x"` is invisible); the tier-2 distinctiveness heuristic is
+  lexical, so a genuinely short lowercase resource name paired with a real Java
+  literal is dropped as noise.
+- **optional extensions**: kotlin + groovy grammars are already vendored in
+  smacker/go-tree-sitter (`.kt`, `.gradle`); jdtls as an opt-in child LSP for
+  resolved edges and safe rename; `R.id.x` is currently bound via the `@+id/`
+  declaration side only, since R.java is generated and not in the tree.
+
 ◐ **Daemon mode — ONE shared poly-lsp per user, many clients (agreed 2026-07-23).**
 Steps 1-5 SHIPPED (skeleton + proxy + persisted shared cache + FileSymbols op
 + per-session mutation isolation + ref-counted child-LSP pooling; see

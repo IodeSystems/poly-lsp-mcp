@@ -137,6 +137,10 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 			if roots := resolver.ApplyDerivedSQL(idx); len(roots) > 0 {
 				log.Printf("initialize: applied %d sqlc @derived column binding(s)", len(roots))
 			}
+			// Tier-3 auto: Android resource names → the Java string literals that address them.
+			if roots := resolver.ApplyAndroid(idx); len(roots) > 0 {
+				log.Printf("initialize: applied %d Android resource binding(s)", len(roots))
+			}
 		}
 	} else {
 		log.Print("initialize: no workspace root; symbol index disabled")

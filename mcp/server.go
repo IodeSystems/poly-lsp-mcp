@@ -560,6 +560,10 @@ func (s *Server) BuildIndex() error {
 		derivRoots = append(derivRoots, roots...)
 		log.Printf("index: applied %d sqlc @derived column binding(s)", len(roots))
 	}
+	if roots := resolver.ApplyAndroid(idx); len(roots) > 0 {
+		derivRoots = append(derivRoots, roots...)
+		log.Printf("index: applied %d Android resource binding(s)", len(roots))
+	}
 	s.setDerivRoots(derivRoots)
 	return nil
 }

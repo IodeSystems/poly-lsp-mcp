@@ -254,3 +254,74 @@ func TestFileSymbolsArgumentsNestUnderOwner(t *testing.T) {
 		t.Errorf("arg range %+v not contained in owner range %+v", arg, owner)
 	}
 }
+
+func TestFileSymbolsJavaClassMembers(t *testing.T) {
+	src := []byte(`package com.termux.view;
+
+import android.view.KeyEvent;
+
+public interface TerminalViewClient {
+    int SCROLL_KEYS_ARROWS = 0;
+
+    int getScrollKeysBehaviour();
+}
+
+class TerminalView {
+    private int mTopRow;
+    private static final String KEY = "scroll_behaviour";
+
+    TerminalView(Context context) {}
+
+    public void scrollOneUnit(boolean up, int keys) {}
+}
+
+enum Mode { ARROWS, PAGES }
+`)
+	syms, err := FileSymbols("java", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		// Leaf segment, matching Go's package_clause: the bare package
+		// name, not the fully-qualified path.
+		"view":                                  "module",
+		"KeyEvent":                              "import",
+		"TerminalViewClient":                    "interface",
+		"TerminalViewClient.SCROLL_KEYS_ARROWS": "field",
+		"TerminalViewClient.getScrollKeysBehaviour": "method",
+		"TerminalView":               "class",
+		"TerminalView.mTopRow":       "field",
+		"TerminalView.KEY":           "field",
+		"TerminalView.TerminalView":  "ctor",
+		"TerminalView.scrollOneUnit": "method",
+		"Mode":                       "enum",
+		"Mode.ARROWS":                "const",
+	}
+	for sym, class := range cases {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != class {
+			t.Errorf("%q class = %q, want %q", sym, got.Class, class)
+		}
+	}
+}
+
+func TestFileSymbolsJavaArguments(t *testing.T) {
+	src := []byte(`class A {
+    void scroll(boolean up, int keys) {}
+    void varargs(String... parts) {}
+}
+`)
+	syms, err := FileSymbols("java", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"A.scroll.up", "A.scroll.keys", "A.varargs.parts"} {
+		if symByPath(syms, want) == nil {
+			t.Errorf("missing argument %q; have %+v", want, syms)
+		}
+	}
+}

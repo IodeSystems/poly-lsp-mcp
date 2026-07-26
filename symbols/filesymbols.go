@@ -387,6 +387,14 @@ func returnTypeNodes(lang string, node *sitter.Node) []*sitter.Node {
 			return nil
 		}
 		return []*sitter.Node{rt}
+	case "java":
+		// method_declaration carries the return type in `type`.
+		// Constructors have none, which is correctly nil here.
+		rt := node.ChildByFieldName("type")
+		if rt == nil {
+			return nil
+		}
+		return []*sitter.Node{rt}
 	}
 	return nil
 }
@@ -601,8 +609,33 @@ func paramInfos(lang string, p *sitter.Node, content []byte) []paramInfo {
 		return tsParamInfos(p, content)
 	case "python":
 		return pyParamInfos(p, content)
+	case "java":
+		return javaParamInfos(p, content)
 	}
 	return nil
+}
+
+// javaParamInfos handles Java's formal_parameter, spread_parameter
+// (`String... args`) and receiver_parameter. Java names exactly one
+// parameter per declaration, so there is no Go-style `a, b int` case.
+func javaParamInfos(p *sitter.Node, content []byte) []paramInfo {
+	switch p.Type() {
+	case "formal_parameter", "spread_parameter", "receiver_parameter":
+	default:
+		return nil
+	}
+	if name := p.ChildByFieldName("name"); name != nil {
+		return []paramInfo{{name: name.Content(content), nameNode: name, decl: p}}
+	}
+	// spread_parameter wraps its declarator rather than naming a field.
+	for i := 0; i < int(p.NamedChildCount()); i++ {
+		if c := p.NamedChild(i); c.Type() == "variable_declarator" {
+			if name := c.ChildByFieldName("name"); name != nil {
+				return []paramInfo{{name: name.Content(content), nameNode: name, decl: p}}
+			}
+		}
+	}
+	return []paramInfo{{decl: p}}
 }
 
 // goParamInfos handles Go's parameter_declaration /
@@ -764,6 +797,31 @@ func classify(lang, t, parent string) symRole {
 		return classifyPython(t, parent)
 	case "sql":
 		return classifySQL(t, parent)
+	case "java":
+		return classifyJava(t, parent)
+	}
+	return roleSkip
+}
+
+// classifyJava maps Java declarations onto the shared role vocabulary.
+// Fields and locals follow the TypeScript shape: the declaration is the
+// container and each variable_declarator is the symbol, so
+// `int a, b;` yields two nodes rather than one.
+func classifyJava(t, parent string) symRole {
+	switch t {
+	case "class_body", "interface_body", "enum_body",
+		"enum_body_declarations", "annotation_type_body",
+		"field_declaration", "local_variable_declaration",
+		"constant_declaration":
+		return roleContainer
+	case "package_declaration", "import_declaration",
+		"class_declaration", "interface_declaration",
+		"enum_declaration", "record_declaration",
+		"annotation_type_declaration", "annotation_type_element_declaration",
+		"method_declaration", "constructor_declaration",
+		"compact_constructor_declaration",
+		"variable_declarator", "enum_constant":
+		return roleSymbol
 	}
 	return roleSkip
 }
@@ -868,6 +926,36 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 				}
 			}
 			return "type", false
+		}
+	case "java":
+		switch t {
+		case "package_declaration":
+			return "module", false
+		case "import_declaration":
+			return "import", false
+		case "class_declaration":
+			return "class", true
+		case "record_declaration":
+			return "struct", true
+		case "interface_declaration", "annotation_type_declaration":
+			return "interface", true
+		case "enum_declaration":
+			return "enum", true
+		case "enum_constant":
+			return "const", false
+		case "constructor_declaration", "compact_constructor_declaration":
+			return "ctor", false
+		case "method_declaration", "annotation_type_element_declaration":
+			return "method", false
+		case "variable_declarator":
+			// A declarator under a field_declaration is a field; under a
+			// local_variable_declaration it is a local var. constant_declaration
+			// is an interface field, which is implicitly static final.
+			switch parentClass {
+			case "class", "interface", "enum", "struct":
+				return "field", false
+			}
+			return "var", false
 		}
 	case "typescript":
 		switch t {

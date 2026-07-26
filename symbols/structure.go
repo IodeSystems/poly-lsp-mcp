@@ -6,6 +6,7 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/sql"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
@@ -25,6 +26,8 @@ func LanguageByName(name string) *sitter.Language {
 		return python.GetLanguage()
 	case "sql":
 		return sql.GetLanguage()
+	case "java":
+		return java.GetLanguage()
 	}
 	return nil
 }

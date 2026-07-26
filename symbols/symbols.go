@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/sql"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
@@ -40,6 +41,18 @@ const goIdentifierQuery = `[
   (field_identifier)
   (type_identifier)
   (package_identifier)
+] @name`
+
+// javaIdentifierQuery covers Java names: variables, fields, methods,
+// classes, interfaces, enums, annotations and type parameters. Java's
+// grammar splits plain names (identifier) from type positions
+// (type_identifier), and scoped names like com.termux.view come through
+// as nested identifiers, so each segment is indexed on its own — which
+// is what makes a fully-qualified class name written inside an Android
+// XML attribute findable from the Java side.
+const javaIdentifierQuery = `[
+  (identifier)
+  (type_identifier)
 ] @name`
 
 // tsxIdentifierQuery covers TypeScript (and TSX/JSX) names: variables,
@@ -653,8 +666,20 @@ var defaultExtractors = map[string]Extractor{
 		"set", "frozenset", "type", "object", "print", "len", "range",
 		"True", "False", "None",
 	)),
-	"yaml":     &LexicalExtractor{},
-	"json":     &LexicalExtractor{},
+	// Java via tree-sitter. The keyword filter only subtracts the
+	// java.lang types the grammar surfaces as type_identifier —
+	// `int`/`boolean`/etc. are primitive-type nodes and never match the
+	// query, and annotations (@Override) are deliberately kept so they
+	// stay queryable.
+	"java": mustTreeSitterExtractor(java.GetLanguage(), javaIdentifierQuery, keywordSet(
+		"String", "Object", "Integer", "Boolean", "Long", "Double",
+		"Float", "Byte", "Short", "Character", "Void",
+	)),
+	"yaml": &LexicalExtractor{},
+	"json": &LexicalExtractor{},
+	// XML is lexical on purpose: on Android the cross-language edge is
+	// a resource NAME in an attribute value, not a syntax node.
+	"xml":      &LexicalExtractor{},
 	"markdown": &LexicalExtractor{},
 	// Proto and GraphQL SDL deliberately use the lexical extractor —
 	// not the bindings-side proto schema parser. The walker's job is

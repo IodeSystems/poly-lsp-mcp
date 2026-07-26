@@ -152,6 +152,27 @@ func Default() *Config {
 				Extensions: []string{"graphql", "gql"},
 				TreeSitter: "graphql",
 			},
+			{
+				// Java: tree-sitter only by default. jdtls is a heavy
+				// child LSP (workspace build, hundreds of MB) — users who
+				// want LSP-resolved edges wire it via poly-lsp-mcp.yaml;
+				// the lexical + tree-sitter tiers work without it.
+				Name:       "java",
+				Extensions: []string{"java"},
+				TreeSitter: "java",
+			},
+			{
+				// XML: lexical, same rationale as yaml/json — the value
+				// is the string-literal site, not an AST. On Android the
+				// whole cross-language graph is string-keyed: a resource
+				// `@+id/foo` answers to Java's `R.id.foo`, and a
+				// preference `app:key="x"` answers to a Java constant
+				// holding "x". Neither is compiler-checked, so the index
+				// is the only thing that can see the pair.
+				Name:       "xml",
+				Extensions: []string{"xml"},
+				TreeSitter: "xml",
+			},
 		},
 	}
 }

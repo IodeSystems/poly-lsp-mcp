@@ -102,8 +102,10 @@ Steps 1-5 SHIPPED (skeleton + proxy + persisted shared cache + FileSymbols op
 + per-session mutation isolation + ref-counted child-LSP pooling; see
 "SHIPPED" + steps below). Step 6 (worktree COW) MEASURED and iceboxed — its
 goal is already met by the shared ParseCache; a true index COW isn't worth the
-core refactor (see below + icebox). Only remaining daemon item: per-connection
-policy (deferred out of step 4).
+core refactor (see below + icebox). Per-connection policy (read-only/validate)
+SHIPPED. **The planned daemon arc (steps 1-5 + per-connection policy) is
+COMPLETE**; the only daemon non-goal left is per-connection LEGACY surface (the
+daemon serves modern only) and the LSP-mode proxy (optional extension).
 Today every client runs `poly-lsp-mcp mcp --root <dir>` as its own process, and
 each one owns: a symbol index built by walking the workspace, a `ParseCache`
 persisted to `<root>/.poly-lsp-mcp/cache.gob`, an fsnotify watcher over the
@@ -248,8 +250,8 @@ batch isolation, claim conflict, external-write conflict).
      `mcp/session_test.go` (isolation, claim conflict, external-write conflict),
      `daemon TestDaemonRollsBackBatchOnDisconnect` (e2e auto-rollback).
      **Scope note (batch isolation only, USER 2026-07-24):** per-CONNECTION
-     policy (read-only/validate/legacy per client) stays Server-global — a
-     follow-up. **Derived, still deferred:** the workspace-wide `--validate`
+     policy (read-only/validate) was a follow-up — now SHIPPED (see the
+     per-connection policy entry below). **Derived, still deferred:** the workspace-wide `--validate`
      cross-session false-reject REPORT ("these errors are in files you didn't
      touch; session X has an open batch") — a reporting nicety, not a
      correctness gap; commit hashing + claims already prevent the corruption.
@@ -342,10 +344,21 @@ batch isolation, claim conflict, external-write conflict).
     client PID, so `/proc/<pid>/cwd` can bind a connection to its ACTUAL
     working directory — kernel-verified instead of self-declared. No portable
     macOS equivalent, so it can only ever be a bonus tier, never the base.
-- **Per-client policy.** `--read-only`, `--validate`, `--legacy-tools` are
-  process-global flags today; in a shared daemon they are per-CONNECTION
-  attributes and must be enforced at the daemon boundary. A read-only client
-  must not be able to mutate because some other client asked for write access.
+- ✅ **Per-client policy — SHIPPED (read-only + validate).** These were
+  process-global flags; in a shared daemon they are per-CONNECTION attributes,
+  now enforced at the daemon boundary and TIGHTEN-ONLY (a client may add
+  read-only/validate on top of the daemon baseline, never remove it — a
+  read-only daemon stays locked for everyone). The proxy sends
+  `X-Poly-Read-Only`/`X-Poly-Validate` (from its `--read-only`/`--validate`
+  flags); `CallTool(sess, name, args, CallOptions)` rejects mutating tools
+  (`mcp.IsMutatingTool`, one source of truth with `applyReadOnly`) for a
+  read-only call and injects `validate:true` into edit args for a validate
+  call; `/tools` returns a filtered catalog per connection. The shared *Server*
+  stays read-write for other clients — enforcement is at the boundary, not on
+  the Server. `--legacy-tools` has NO daemon path (the daemon serves the modern
+  surface only; the proxy logs that it's ignored) — the one piece deliberately
+  left out. Tests: `mcp` (`TestCallToolReadOnlyPolicy`, `TestWithValidateInjects`),
+  `daemon TestDaemonReadOnlyIsPerConnection` (per-connection catalog + reject).
 - **Generation-keyed caches** (`defCache` is valid for one index
   `Generation()`) must be per-root and invalidate for all clients of that root
   at once — a stale definition surviving another client's edit is the failure.

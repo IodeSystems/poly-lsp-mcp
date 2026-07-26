@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/mcp"
 )
 
 // startTestDaemon boots a daemon on a short temp socket (os.MkdirTemp is
@@ -196,6 +198,60 @@ func TestDaemonRollsBackBatchOnDisconnect(t *testing.T) {
 	}
 	b, _ := os.ReadFile(mainPath)
 	t.Fatalf("batch not rolled back on disconnect; file still %q", b)
+}
+
+// TestDaemonReadOnlyIsPerConnection: the same shared, read-write daemon serves
+// a read-write catalog and lets edits through, but a connection that declares
+// read-only gets a filtered catalog and is refused mutating tools — the policy
+// is per-connection, enforced at the boundary, not global.
+func TestDaemonReadOnlyIsPerConnection(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"),
+		[]byte("package main\n\nfunc Hello() string { return \"hi\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := resolvePath(root)
+	c, stop := startTestDaemon(t, resolved) // daemon baseline is read-WRITE
+	defer stop()
+	if _, err := c.Open(root); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	hasEdit := func(tools []mcp.ToolDescriptor) bool {
+		for _, tl := range tools {
+			if tl.Name == "node_edit" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Read-WRITE connection (default policy): node_edit is in the catalog.
+	tools, err := c.Tools(root)
+	if err != nil {
+		t.Fatalf("tools: %v", err)
+	}
+	if !hasEdit(tools) {
+		t.Fatal("read-write catalog should list node_edit")
+	}
+
+	// Same connection turned read-only: catalog filtered, node_edit refused.
+	c.SetPolicy(true, false)
+	tools, err = c.Tools(root)
+	if err != nil {
+		t.Fatalf("tools (read-only): %v", err)
+	}
+	if hasEdit(tools) {
+		t.Fatal("read-only catalog must not list node_edit")
+	}
+	content, isErr, err := c.Call(root, "node_edit",
+		json.RawMessage(`{"node":"main.go#Hello","newText":"x"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if !isErr || len(content) == 0 || !strings.Contains(content[0].Text, "read-only") {
+		t.Fatalf("read-only connection must be refused node_edit; got isErr=%v %+v", isErr, content)
+	}
 }
 
 // TestRegistryCachePersistence checks the daemon-owned load/save of the

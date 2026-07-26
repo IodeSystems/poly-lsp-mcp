@@ -17,17 +17,44 @@ import (
 
 // sessionHeader carries the client's session id so the daemon isolates its
 // edit batch from other clients on the same root, and so /session/watch can
-// bind the session's lifetime.
-const sessionHeader = "X-Poly-Session"
+// bind the session's lifetime. readOnlyHeader / validateHeader carry the
+// per-connection policy the daemon enforces at its boundary.
+const (
+	sessionHeader  = "X-Poly-Session"
+	readOnlyHeader = "X-Poly-Read-Only"
+	validateHeader = "X-Poly-Validate"
+)
 
 // Client dials a daemon over its unix socket. The URL host is irrelevant
 // (the transport always dials the socket); "poly-lsp" is a placeholder.
 // One Client per proxy process = one session; the id is minted once and
 // sent on every request.
 type Client struct {
-	socket  string
-	session string
-	hc      *http.Client
+	socket   string
+	session  string
+	readOnly bool
+	validate bool
+	hc       *http.Client
+}
+
+// SetPolicy declares this client's per-connection policy (from the proxy's
+// --read-only / --validate flags). Sent as headers on every request; the
+// daemon enforces it at its boundary and can only tighten, never loosen, its
+// own baseline.
+func (c *Client) SetPolicy(readOnly, validate bool) {
+	c.readOnly = readOnly
+	c.validate = validate
+}
+
+// setHeaders stamps the session + policy headers on a request.
+func (c *Client) setHeaders(req *http.Request) {
+	req.Header.Set(sessionHeader, c.session)
+	if c.readOnly {
+		req.Header.Set(readOnlyHeader, "true")
+	}
+	if c.validate {
+		req.Header.Set(validateHeader, "true")
+	}
 }
 
 // NewClient builds a client for the given socket path with a fresh random
@@ -72,7 +99,7 @@ func (c *Client) WatchSession(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set(sessionHeader, c.session)
+	c.setHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return err
@@ -149,7 +176,7 @@ func (c *Client) get(path string, q url.Values, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set(sessionHeader, c.session)
+	c.setHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return err
@@ -167,7 +194,7 @@ func (c *Client) postJSON(path string, body, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(sessionHeader, c.session)
+	c.setHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return err

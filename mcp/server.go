@@ -274,16 +274,33 @@ func (s *Server) SetReadOnly(enabled bool) {
 	s.SetLegacyTools(s.legacyTools) // re-register, then re-filter
 }
 
-// applyReadOnly strips mutating tools from whatever surface is registered. It
-// filters by NAME rather than a flag on Tool: the legacy and modern surfaces
-// share handlers, and a name list makes "what can write" auditable in one line.
+// mutatingToolNames is the single source of truth for "what can write" — the
+// tools SetReadOnly hides and the daemon boundary rejects for a read-only
+// connection. Filtered by NAME rather than a flag on Tool because the legacy
+// and modern surfaces share handlers, and a name list keeps it auditable in
+// one line.
+var mutatingToolNames = []string{
+	"node_edit", "node_delete", "node_refactor", "node_rename_file",
+}
+
+// IsMutatingTool reports whether a tool writes to the workspace. Exported so
+// the daemon can enforce a per-connection read-only policy at its boundary
+// (the shared Server stays read-write for other clients).
+func IsMutatingTool(name string) bool {
+	for _, m := range mutatingToolNames {
+		if m == name {
+			return true
+		}
+	}
+	return false
+}
+
+// applyReadOnly strips mutating tools from whatever surface is registered.
 func (s *Server) applyReadOnly() {
 	if !s.readOnly {
 		return
 	}
-	for _, name := range []string{
-		"node_edit", "node_delete", "node_refactor", "node_rename_file",
-	} {
+	for _, name := range mutatingToolNames {
 		delete(s.tools, name)
 	}
 }

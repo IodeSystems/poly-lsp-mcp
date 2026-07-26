@@ -55,19 +55,57 @@ func (s *Server) Shutdown() {
 	s.maybeSaveCache()
 }
 
+// CallOptions carries a per-CONNECTION policy the daemon enforces at its
+// boundary, because the hosted *Server is shared across clients and its own
+// read-only/validate flags are process-global. Policy can only TIGHTEN: a
+// client may add read-only or validation on top of the daemon baseline, never
+// remove it (a read-only daemon stays read-only for everyone).
+type CallOptions struct {
+	ReadOnly bool // reject mutating tools for this call
+	Validate bool // force revert-on-new-diagnostics for this edit
+}
+
 // CallTool invokes a registered MCP tool in-process — the exported seam
 // the daemon uses in place of the stdio tools/call path. Dispatch and
 // error shaping mirror handleToolsCall exactly (a handler error becomes
 // an isError text result there; here the raw error is returned so the
 // caller can choose the wire shape). sess is the client's session id
 // (X-Poly-Session), used to isolate its edit batch from other clients on
-// the same root; "" maps to the implicit local session.
-func (s *Server) CallTool(sess, name string, args json.RawMessage) (content []Content, isError bool, err error) {
+// the same root; "" maps to the implicit local session. opts is the
+// per-connection policy enforced HERE, at the boundary.
+func (s *Server) CallTool(sess, name string, args json.RawMessage, opts CallOptions) (content []Content, isError bool, err error) {
+	if opts.ReadOnly && IsMutatingTool(name) {
+		return nil, true, fmt.Errorf("read-only session: %s is not permitted", name)
+	}
 	tool, ok := s.tools[name]
 	if !ok {
 		return nil, true, fmt.Errorf("unknown tool: %s", name)
 	}
+	// A validate connection forces validate:true onto edits (the tool already
+	// honors a per-call validate flag); non-edit tools ignore the extra field.
+	if opts.Validate && IsMutatingTool(name) {
+		args = withValidate(args)
+	}
 	return tool.Handler(s, normSession(sess), args)
+}
+
+// withValidate merges "validate":true into a tool's JSON arguments, so a
+// validate connection's edits are checked even when the client didn't ask
+// per-call. Malformed/empty args degrade to a bare {"validate":true}; a real
+// parse error surfaces later in the handler's own unmarshal.
+func withValidate(args json.RawMessage) json.RawMessage {
+	m := map[string]json.RawMessage{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &m); err != nil {
+			return args // let the handler report the malformed args
+		}
+	}
+	m["validate"] = json.RawMessage("true")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return args
+	}
+	return out
 }
 
 // IndexedNames reports how many symbol names the current index holds

@@ -92,7 +92,14 @@ func runMCP() {
 		if err != nil {
 			log.Fatalf("mcp: daemon: %v", err)
 		}
-		log.Printf("mcp: proxying root %s to shared daemon", root)
+		// Carry this client's policy to the daemon (enforced per-connection at
+		// its boundary). --legacy-tools has no daemon surface — the daemon
+		// serves the modern surface only.
+		client.SetPolicy(*readOnly, *validate)
+		if *legacyTools {
+			log.Print("mcp: --legacy-tools is ignored in --daemon mode (the daemon serves the modern surface)")
+		}
+		log.Printf("mcp: proxying root %s to shared daemon (readOnly=%v validate=%v)", root, *readOnly, *validate)
 		if err := daemon.RunProxy(client, root, os.Stdin, os.Stdout); err != nil {
 			log.Fatal(err)
 		}

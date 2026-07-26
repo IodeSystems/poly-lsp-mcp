@@ -183,7 +183,8 @@ type openOut struct {
 }
 
 type toolsIn struct {
-	Root string `query:"root"`
+	Root     string `query:"root"`
+	ReadOnly bool   `header:"X-Poly-Read-Only"`
 }
 type toolsOut struct {
 	Body struct {
@@ -196,7 +197,11 @@ type callIn struct {
 	// same root (see mcp session.go). The proxy mints it once and sends it on
 	// every call; empty maps to the implicit local session.
 	Session string `header:"X-Poly-Session"`
-	Body    struct {
+	// ReadOnly / Validate are the per-connection policy. They can only TIGHTEN
+	// the daemon baseline (a read-only daemon stays read-only regardless).
+	ReadOnly bool `header:"X-Poly-Read-Only"`
+	Validate bool `header:"X-Poly-Validate"`
+	Body     struct {
 		Root      string          `json:"root"`
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -318,7 +323,19 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 				return nil, err
 			}
 			out := &toolsOut{}
-			out.Body.Tools = srv.Tools()
+			tools := srv.Tools()
+			// A read-only connection sees a read-only catalog even if the
+			// shared server is read-write for other clients.
+			if reg.readOnly || in.ReadOnly {
+				filtered := tools[:0:0]
+				for _, t := range tools {
+					if !mcp.IsMutatingTool(t.Name) {
+						filtered = append(filtered, t)
+					}
+				}
+				tools = filtered
+			}
+			out.Body.Tools = tools
 			return out, nil
 		})
 
@@ -328,7 +345,12 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 			if err != nil {
 				return nil, err
 			}
-			content, isError, cerr := srv.CallTool(in.Session, in.Body.Name, in.Body.Arguments)
+			// Per-connection policy TIGHTENS the daemon baseline (never loosens).
+			pol := mcp.CallOptions{
+				ReadOnly: reg.readOnly || in.ReadOnly,
+				Validate: reg.validate || in.Validate,
+			}
+			content, isError, cerr := srv.CallTool(in.Session, in.Body.Name, in.Body.Arguments, pol)
 			if cerr != nil {
 				// Mirror stdio handleToolsCall: a handler error becomes an
 				// isError text result, not an HTTP error.

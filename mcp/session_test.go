@@ -15,7 +15,7 @@ import (
 func callSession(t *testing.T, s *Server, sess string, args map[string]any) (map[string]any, bool, error) {
 	t.Helper()
 	raw, _ := json.Marshal(args)
-	content, isErr, err := s.CallTool(sess, "node_edit", raw)
+	content, isErr, err := s.CallTool(sess, "node_edit", raw, CallOptions{})
 	if err != nil {
 		return nil, isErr, err
 	}
@@ -81,6 +81,53 @@ func TestSessionBatchesAreIsolated(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(notesPath); string(b) == string(notesOrig) {
 		t.Fatal("A rollback must not touch B's committed file")
+	}
+}
+
+// A read-only connection is refused mutating tools at the CallTool boundary,
+// even though the shared server is read-write for other clients; read tools
+// still pass.
+func TestCallToolReadOnlyPolicy(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+	srv := s.srv
+
+	// read-only rejects a mutating tool, at the boundary (before the handler).
+	_, isErr, err := srv.CallTool("A", "node_edit",
+		json.RawMessage(`{"node":"main.go#Free","newText":"x"}`), CallOptions{ReadOnly: true})
+	if err == nil || !isErr || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("read-only must reject node_edit; isErr=%v err=%v", isErr, err)
+	}
+
+	// read-only allows a read tool.
+	if _, isErr, err := srv.CallTool("A", "node_query",
+		json.RawMessage(`{"selector":":root > *","limit":1}`), CallOptions{ReadOnly: true}); err != nil || isErr {
+		t.Fatalf("read-only must allow node_query; isErr=%v err=%v", isErr, err)
+	}
+
+	// WITHOUT the policy, node_edit reaches the handler (it errors for a
+	// missing op, NOT for policy) — proving the gate is the policy, not the tool.
+	if _, _, err := srv.CallTool("A", "node_edit", json.RawMessage(`{"node":"main.go#Free"}`), CallOptions{}); err != nil && strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("read-write must not hit the read-only gate; got %v", err)
+	}
+}
+
+// withValidate merges validate:true into edit args, preserves existing fields,
+// and degrades safely on empty/malformed input.
+func TestWithValidateInjects(t *testing.T) {
+	var m map[string]any
+	if err := json.Unmarshal(withValidate(json.RawMessage(`{"node":"x","newText":"y"}`)), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["validate"] != true || m["node"] != "x" || m["newText"] != "y" {
+		t.Fatalf("merge lost fields or validate flag: %+v", m)
+	}
+	m = nil
+	if err := json.Unmarshal(withValidate(nil), &m); err != nil || m["validate"] != true {
+		t.Fatalf("empty args must yield {validate:true}; got %+v err=%v", m, err)
+	}
+	if string(withValidate(json.RawMessage(`not json`))) != "not json" {
+		t.Fatal("malformed args must pass through untouched for the handler to report")
 	}
 }
 

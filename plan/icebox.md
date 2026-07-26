@@ -5,6 +5,39 @@ graph-selector design record this used to hold.
 
 ---
 
+## Worktree COW index overlay (daemon step 6) — MEASURED, not worth it now
+
+Deferred by MEASUREMENT (2026-07-25), not by decision-avoidance. Step 6's
+goal — "open a worktree, re-parse only the files git says differ" — is ALREADY
+delivered by the shared content-keyed `ParseCache` (daemon step 2): identical
+bytes across worktrees parse once. A TRUE in-memory index COW (clone the
+parent index, rebase paths, apply a git diff) would additionally skip the
+file-walk + read + hash + binding passes — but measurement shows that residual
+is small and off the critical path.
+
+Measured on THIS repo (`daemon/measure_test.go`, `-tags measure`; 7106 names,
+~50 go files):
+- cold index build (empty cache): **552ms**
+- warm worktree build (SHARED cache): **93ms** ← the COW's entire prize
+- cold worktree build (fresh cache): 569ms → the shared cache already saves **476ms (84%)** with zero new code
+- gopls workspace warmth (to 1st `workspace/symbol`): **355ms**, and it is
+  UNSHAREABLE (gopls binds per module root) — the real first-precision-query
+  critical path, larger than the whole index build.
+
+So the COW would shave ~90ms off a RARE operation (a worktree opens once, then
+step-5 ref-counting keeps it warm), on a path already dominated by gopls, at
+the cost of a risky refactor of the hottest struct: `symbols.Index` embeds
+ABSOLUTE paths in every `Site`, is name-keyed (not file-keyed), and has no
+clone/merge — a true overlay needs absolute→file-keyed/rebasable paths + a
+clone + git plumbing that doesn't exist (`--git-common-dir`, worktree
+detection, `git diff --name-only`, merge-base).
+
+**Gate to revisit:** re-run `measure_test.go` on a LARGE repo (thousands of go
+files / heavy deps). Build the COW only if warm-worktree index build grows
+large ENOUGH that it becomes a noticeable fraction of gopls warmth — i.e. the
+walk+hash residual, not the parse (already cached), starts to matter. Until
+then the shared ParseCache is the sanctioned mechanism.
+
 ## `iodesystems/daemonkit` — extract the shared daemon scaffolding
 
 Deferred by decision (USER, 2026-07-23): COPY raglit's daemon machinery into

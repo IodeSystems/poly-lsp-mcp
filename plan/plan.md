@@ -100,8 +100,10 @@ Open frontier:
 ◐ **Daemon mode — ONE shared poly-lsp per user, many clients (agreed 2026-07-23).**
 Steps 1-5 SHIPPED (skeleton + proxy + persisted shared cache + FileSymbols op
 + per-session mutation isolation + ref-counted child-LSP pooling; see
-"SHIPPED" + steps below); remaining: per-connection policy (deferred out of
-step 4), worktree COW overlay (6).
+"SHIPPED" + steps below). Step 6 (worktree COW) MEASURED and iceboxed — its
+goal is already met by the shared ParseCache; a true index COW isn't worth the
+core refactor (see below + icebox). Only remaining daemon item: per-connection
+policy (deferred out of step 4).
 Today every client runs `poly-lsp-mcp mcp --root <dir>` as its own process, and
 each one owns: a symbol index built by walking the workspace, a `ParseCache`
 persisted to `<root>/.poly-lsp-mcp/cache.gob`, an fsnotify watcher over the
@@ -172,7 +174,10 @@ afterthought.
   free (`diff --name-only`). Overlay the parent's warm index and re-parse only
   the divergent files, so a fresh worktree starts warm instead of rebuilding.
   raglit's branch overlay (branch-over-parent at document grain, tombstones for
-  deletes) is the model.
+  deletes) is the model. **UPDATE (MEASURED 2026-07-25): the shared ParseCache
+  already delivers this — re-parse-only-divergent falls out of content-keying;
+  the extra in-memory-clone win is ~90ms on a rare, gopls-bound open. Iceboxed;
+  see step 6 + icebox.**
 - **Child LSPs pool by ROOT, not by content.** gopls is bound to a module root,
   so it can't be shared across worktrees — but it CAN be shared across every
   session on the same root: keyed by root, ref-counted, idle-evicted LRU (same
@@ -262,7 +267,17 @@ batch isolation, claim conflict, external-write conflict).
      on `openIn`), `/call`+`/tools` use the non-holding `Get`. Tests:
      `TestRegistryRefCountEviction` (two holders keep it, last release evicts),
      `TestRegistryReacquireCancelsEviction`; `-race` clean.
-  6. ◻ Worktree overlay (COW index over a parent root).
+  6. ⏸ Worktree overlay (COW index over a parent root) — MEASURED, iceboxed
+     (2026-07-25). The goal (re-parse only divergent files on worktree open) is
+     already met by the shared content-keyed ParseCache (step 2). Measured
+     (`daemon/measure_test.go`, `-tags measure`, this repo): warm worktree index
+     build with the shared cache is **93ms** (cold is 552ms — the cache already
+     saves 84% for free), while gopls workspace warmth is **355ms** and
+     UNSHAREABLE (per module root). A true in-memory COW would shave ~90ms off a
+     RARE, gopls-bound operation at the cost of refactoring the hottest struct
+     (`symbols.Index` is absolute-path, name-keyed, no clone). Not worth it now;
+     re-measure on a large repo before revisiting — see icebox
+     "Worktree COW index overlay" for the gate.
 
 **risks**
 - **Mutation is the hard part, and raglit never had to solve it.**

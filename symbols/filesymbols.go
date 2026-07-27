@@ -127,6 +127,14 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 		counts := map[string]int{}
 		for _, k := range kids {
 			class, branch := refinedClass(language, k, parentClass, content)
+			if class == "" {
+				// A language arm may DECLINE a node it can only recognize
+				// by content, not by node type. Groovy needs this: its
+				// grammar parses the Jenkins DSL's `agent any` as a
+				// declaration, indistinguishable from `String x` until
+				// you look for an initializer.
+				continue
+			}
 			localName, nameNode := symbolLocalName(language, k, content)
 			override := parentOverride(language, k, content)
 			infos = append(infos, kidInfo{k, localName, class, override, nameNode, branch})
@@ -322,7 +330,7 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 	if !classTakesParams(class) {
 		return
 	}
-	nodes := returnTypeNodes(lang, node)
+	nodes := returnTypeNodes(lang, node, content)
 	if len(nodes) == 0 {
 		return
 	}
@@ -373,7 +381,7 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 // Go's result field may be a bare type or a parameter_list (the tuple
 // case, split into one node per element); TS/Python carry a single
 // return_type (unwrapped from TS's `: T` type_annotation).
-func returnTypeNodes(lang string, node *sitter.Node) []*sitter.Node {
+func returnTypeNodes(lang string, node *sitter.Node, content []byte) []*sitter.Node {
 	switch lang {
 	case "go":
 		res := node.ChildByFieldName("result")
@@ -439,6 +447,16 @@ func returnTypeNodes(lang string, node *sitter.Node) []*sitter.Node {
 			return nil
 		}
 		return []*sitter.Node{rt}
+	case "groovy":
+		// Callables carry their declared type in `type`. `def` lands in
+		// that field too, but it is the ABSENCE of a declared type — a
+		// `.return` node named def would answer `return#def` for every
+		// dynamically-typed method in the file.
+		rt := node.ChildByFieldName("type")
+		if rt == nil || rt.Content(content) == "def" {
+			return nil
+		}
+		return []*sitter.Node{rt}
 	case "kotlin":
 		// The return type is the type node AFTER the parameter list; a
 		// type before the name is the extension receiver, not a result.
@@ -481,6 +499,8 @@ func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string
 		marks = goStructTags(node, class, content)
 	case "kotlin":
 		marks = kotlinAnnotations(node, content)
+	case "groovy":
+		marks = groovyAnnotations(node, content)
 	}
 	if len(marks) == 0 {
 		return
@@ -688,6 +708,8 @@ func paramInfos(lang string, p *sitter.Node, content []byte) []paramInfo {
 		return cParamInfos(p, content)
 	case "kotlin":
 		return kotlinParamInfos(p, content)
+	case "groovy":
+		return groovyParamInfos(p, content)
 	}
 	return nil
 }
@@ -880,6 +902,37 @@ func classify(lang, t, parent string) symRole {
 		return classifyC(t, parent)
 	case "kotlin":
 		return classifyKotlin(t, parent)
+	case "groovy":
+		return classifyGroovy(t, parent)
+	}
+	return roleSkip
+}
+
+// classifyGroovy maps Groovy declarations onto the shared role
+// vocabulary. This grammar is the WEAKEST of the set and the arm is
+// shaped around that:
+//
+//   - A class body is a plain `closure`, not a dedicated node, so
+//     closures are containers. That also means a body the grammar
+//     DETACHES from its owner (see refinedClassGroovy for trait/enum)
+//     still surfaces its members — at file scope rather than under the
+//     type, which is a wrong PARENT but not an invented symbol.
+//   - `declaration` is genuinely ambiguous — `String x = "hi"`, `enum
+//     Mode`, and the Jenkins DSL's `agent any` are all the same node —
+//     so refinedClassGroovy decides by content and DECLINES the DSL
+//     case.
+//   - Constructors are not modeled at all (`Widget(String n) {}` parses
+//     as a function_call plus a detached closure), so Groovy emits no
+//     ctor nodes. Nothing here can recover that.
+func classifyGroovy(t, parent string) symRole {
+	switch t {
+	case "closure",
+		// A Jenkinsfile's whole body is one `pipeline` node.
+		"pipeline":
+		return roleContainer
+	case "groovy_package", "groovy_import", "class_definition",
+		"function_definition", "function_declaration", "declaration":
+		return roleSymbol
 	}
 	return roleSkip
 }
@@ -998,6 +1051,158 @@ func isCDeclarator(t string) bool {
 		return true
 	}
 	return false
+}
+
+// ------------------------------------------------------- groovy
+
+// refinedClassGroovy assigns the class for a Groovy symbol node, or
+// DECLINES (class "") when the node is only a declaration by accident of
+// the grammar. ok is false for node types this arm doesn't own.
+func refinedClassGroovy(node *sitter.Node, parentClass string, content []byte) (class string, branch, ok bool) {
+	switch node.Type() {
+	case "groovy_package":
+		return "module", false, true
+	case "groovy_import":
+		return "import", false, true
+	case "class_definition":
+		// `class` and `interface` are unnamed TOKENS whose node type is
+		// the keyword itself — there is no modifier node to read.
+		for i := range int(node.ChildCount()) {
+			if c := node.Child(i); !c.IsNamed() && c.Type() == "interface" {
+				return "interface", true, true
+			}
+		}
+		return "class", true, true
+	case "function_definition", "function_declaration":
+		switch parentClass {
+		case "class", "interface", "enum", "struct":
+			return "method", false, true
+		}
+		return "func", false, true
+	case "declaration":
+		return groovyDeclarationClass(node, parentClass, content), false, true
+	}
+	return "", false, false
+}
+
+// groovyDeclarationClass resolves Groovy's overloaded `declaration`
+// node, which is three different things wearing one node type:
+//
+//  1. `enum Mode` / `trait Loggable` — the grammar models NEITHER
+//     keyword, so it reads them as a type name and produces a
+//     declaration whose `type` is the keyword. Their bodies are parsed
+//     as a DETACHED sibling closure, so the members surface at file
+//     scope rather than under the type. Emitting the type is still
+//     right: it exists, and the name resolves.
+//  2. A real variable or field — recognized by an initializer, a
+//     modifier, or a primitive type.
+//  3. Neither. The Jenkins DSL's `agent any` and `branch "main"` parse
+//     as declarations because juxtaposition looks like `Type name`.
+//     Emitting those would invent a variable named `any` in every
+//     Jenkinsfile, so this DECLINES them.
+func groovyDeclarationClass(node *sitter.Node, parentClass string, content []byte) string {
+	ty := node.ChildByFieldName("type")
+	if ty != nil {
+		switch ty.Content(content) {
+		case "enum":
+			return "enum"
+		case "trait":
+			return "interface"
+		}
+	}
+	declares := node.ChildByFieldName("value") != nil ||
+		(ty != nil && ty.Type() == "builtintype")
+	if !declares {
+		for i := range int(node.NamedChildCount()) {
+			switch node.NamedChild(i).Type() {
+			case "modifier", "access_modifier":
+				declares = true
+			}
+		}
+	}
+	if !declares {
+		return "" // DSL juxtaposition, not a declaration
+	}
+	switch parentClass {
+	case "class", "interface", "enum", "struct":
+		return "field"
+	}
+	return "var"
+}
+
+// groovyName resolves a Groovy symbol node's local name. ok is false for
+// node types the generic path should handle.
+func groovyName(node *sitter.Node, content []byte) (string, *sitter.Node, bool) {
+	switch node.Type() {
+	case "groovy_package":
+		if q := firstNamedChildOfType(node, "qualified_name"); q != nil {
+			if leaf := lastNamedChildOfType(q, "identifier"); leaf != nil {
+				return leaf.Content(content), leaf, true
+			}
+		}
+		return "", nil, true
+	case "groovy_import":
+		if alias := node.ChildByFieldName("import_alias"); alias != nil {
+			return alias.Content(content), alias, true
+		}
+		if q := node.ChildByFieldName("import"); q != nil {
+			if leaf := lastNamedChildOfType(q, "identifier"); leaf != nil {
+				return leaf.Content(content), leaf, true
+			}
+		}
+		return "", nil, true
+	case "class_definition", "declaration", "function_definition", "function_declaration":
+		// The `name` field is not reliable on its own: a class with an
+		// `implements` clause parses that clause as an ERROR node
+		// carrying the SAME field name, so anything not spelled as an
+		// identifier is rejected and the first identifier child wins.
+		if n := node.ChildByFieldName("name"); n != nil && n.Type() == "identifier" {
+			return n.Content(content), n, true
+		}
+		// Callables name themselves through `function`, not `name`.
+		if n := node.ChildByFieldName("function"); n != nil && n.Type() == "identifier" {
+			return n.Content(content), n, true
+		}
+		if n := firstNamedChildOfType(node, "identifier"); n != nil {
+			return n.Content(content), n, true
+		}
+		return "", nil, true
+	}
+	return "", nil, false
+}
+
+// groovyParamInfos handles Groovy's `parameter` node. An untyped
+// parameter (`def f(a, b)`) still names itself through `name`.
+func groovyParamInfos(p *sitter.Node, content []byte) []paramInfo {
+	if p.Type() != "parameter" {
+		return nil
+	}
+	if n := p.ChildByFieldName("name"); n != nil {
+		return []paramInfo{{name: n.Content(content), nameNode: n, decl: p}}
+	}
+	if n := firstNamedChildOfType(p, "identifier"); n != nil {
+		return []paramInfo{{name: n.Content(content), nameNode: n, decl: p}}
+	}
+	return []paramInfo{{decl: p}}
+}
+
+// groovyAnnotations collects a declaration's `annotation` children
+// (@CompileStatic, @Grab(...)). The annotation's last identifier is the
+// leaf; a qualified spelling keeps the full form as the alias.
+func groovyAnnotations(node *sitter.Node, content []byte) []annMark {
+	var out []annMark
+	for i := range int(node.NamedChildCount()) {
+		ann := node.NamedChild(i)
+		if ann.Type() != "annotation" {
+			continue
+		}
+		leaf := findDescendantOfType(ann, "identifier", 3)
+		if leaf == nil {
+			continue
+		}
+		out = append(out, annMark{ann, leaf.Content(content), leaf.Content(content)})
+	}
+	return out
 }
 
 // ------------------------------------------------------- kotlin
@@ -1741,7 +1946,8 @@ func classifySQL(t, parent string) symRole {
 }
 
 // refinedClass returns the final class + whether the symbol has nested
-// children worth recursing into.
+// children worth recursing into. An empty class means DECLINE: the node
+// is not a symbol after all and is dropped along with its subtree.
 func refinedClass(lang string, node *sitter.Node, parentClass string, content []byte) (class string, branch bool) {
 	t := node.Type()
 	switch lang {
@@ -1780,6 +1986,10 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 		}
 	case "kotlin":
 		if class, branch, ok := refinedClassKotlin(node, parentClass, content); ok {
+			return class, branch
+		}
+	case "groovy":
+		if class, branch, ok := refinedClassGroovy(node, parentClass, content); ok {
 			return class, branch
 		}
 	case "java":
@@ -1911,6 +2121,11 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 	// declaration, not the thing being declared).
 	if lang == "c" || lang == "cpp" {
 		if name, node, ok := cSymbolName(node, content); ok {
+			return name, node
+		}
+	}
+	if lang == "groovy" {
+		if name, node, ok := groovyName(node, content); ok {
 			return name, node
 		}
 	}

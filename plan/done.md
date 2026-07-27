@@ -3,6 +3,58 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Groovy via tree-sitter (DONE 2026-07-26)
+
+- [x] `config.Default()` gains `groovy` (`.groovy`, `.gradle`, `.gvy`, `.gy`),
+  tree-sitter only. `.gradle` is the Groovy build DSL; `.gradle.kts` has
+  extension `.kts` and belongs to kotlin, so the two never collide.
+- **A Jenkinsfile is Groovy but has NO extension**, and the registry keys on
+  extension alone — claiming `""` would claim every LICENSE and Makefile in
+  the tree. Jenkinsfiles therefore stay unrouted. Filename-based matching
+  would be a `config.Registry` schema change (Build / LookupByExt /
+  languageForFile), which is its own slice.
+- **New shared capability: `refinedClass` may DECLINE a node** by returning an
+  empty class, dropping it and its subtree. Groovy is why. Its grammar parses
+  the Jenkins DSL's `agent any` as a `declaration` with type=agent name=any —
+  the same node as `String x = "hi"` — and only content tells them apart,
+  which classify (types only) cannot see. Without the decline, every
+  Jenkinsfile gains a phantom variable named `any`. Verified on a real
+  Jenkinsfile: 0 symbols as-is, and a `def buildVersion = "1.0"` inserted into
+  the same pipeline block DOES surface.
+- **This is the weakest grammar of the set, and the arm is shaped around it:**
+  - A class body is a plain `closure`, not a dedicated node → closures are
+    containers.
+  - `enum Mode` and `trait Loggable` are modeled as neither keyword: the
+    grammar reads the keyword as a TYPE NAME and the body becomes a DETACHED
+    sibling closure. The type is still emitted (it exists, the name resolves),
+    but its members land at FILE scope — a wrong parent, not an invented
+    symbol, and enum entries land inside an ERROR and are lost entirely.
+  - Constructors are not modeled at all (`Widget(String n) {}` parses as a
+    function_call plus a detached closure), so Groovy emits no ctor nodes.
+  - An `implements` clause parses as an ERROR node carrying the SAME `name`
+    field as the real identifier, so `groovyName` rejects anything not spelled
+    as an identifier before falling back.
+  - `def` occupies the `type` field but MEANS no declared type, so it is
+    filtered out of `.return` — otherwise `return#def` matches every
+    dynamically-typed method in the file. (`returnTypeNodes` took a `content`
+    parameter for this.)
+- ERROR nodes are NOT walked through here, unlike c/cpp: Groovy's ERRORs
+  contain clause fragments and enum entries, not whole recoverable
+  declarations, so descending would buy nothing and risk noise.
+- GString interpolation IS indexed: `"org.springframework:spring-core:$springVersion"`
+  yields `springVersion`, so a Gradle variable referenced inside a dependency
+  string is findable. The coordinate itself is a string literal and stays
+  invisible — the same tradeoff Java makes, with the Android binding as the
+  pattern for buying it back where it matters.
+- Measured live: the three Jenkinsfiles in ~/local/src produce 0 symbols,
+  which is correct — a declarative pipeline declares nothing. A realistic
+  `build.gradle` yields only its real `class BuildHelper` (the `ext { ... }`
+  block's contents are assignments, not declarations) while the extractor
+  still indexes all 18 distinct names in the file.
+- Tests: `TestFileSymbolsGroovyNestingAndClasses`,
+  `TestFileSymbolsGroovyDeclinesDSLJuxtaposition`,
+  `TestGroovyExtractorSkipsCommentsAndStrings`.
+
 ## Android bindings read Kotlin literals too (DONE 2026-07-26)
 
 - [x] `ApplyAndroid` step 2 now dispatches per language

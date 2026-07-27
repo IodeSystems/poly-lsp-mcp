@@ -684,3 +684,111 @@ class A {
 		}
 	}
 }
+
+func TestFileSymbolsGroovyNestingAndClasses(t *testing.T) {
+	src := []byte(`package com.example.app
+
+import groovy.transform.CompileStatic
+import java.util.List as JList
+
+String greeting = "hi"
+
+interface Client {
+    int onKey(String event)
+}
+
+// A widget.
+@CompileStatic
+class Widget implements Client {
+    static final int MAX = 10
+    private String name
+
+    int onKey(String event) { return 1 }
+
+    def scroll(boolean up, int keys = 0) {}
+}
+
+enum Mode { FAST, SLOW }
+`)
+	syms, err := FileSymbols("groovy", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"app":           "module",
+		"CompileStatic": "import",
+		// An aliased import answers to the alias.
+		"JList":    "import",
+		"greeting": "var",
+		// `class` and `interface` are unnamed keyword TOKENS here, not
+		// modifiers, so the kind is read off the unnamed children.
+		"Client":               "interface",
+		"Client.onKey":         "method",
+		"Client.onKey.event":   "argument",
+		"Client.onKey.int":     "return",
+		"Widget":               "class",
+		"Widget.CompileStatic": "annotation",
+		"Widget.MAX":           "field",
+		"Widget.name":          "field",
+		"Widget.onKey":         "method",
+		"Widget.scroll":        "method",
+		"Widget.scroll.up":     "argument",
+		"Widget.scroll.keys":   "argument",
+		// The grammar models neither `enum` nor `trait`, reading the
+		// keyword as a type name; the declaration is still real.
+		"Mode": "enum",
+	}
+	for sym, class := range cases {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != class {
+			t.Errorf("%q class = %q, want %q", sym, got.Class, class)
+		}
+	}
+	// `def` occupies the type field but means "no declared type"; a
+	// return node named def would answer return#def for every
+	// dynamically-typed method in the file.
+	for _, s := range syms {
+		if s.Class == "return" && strings.HasSuffix(s.Sym, ".def") {
+			t.Errorf("def was emitted as a return type: %+v", s)
+		}
+	}
+	// The class carries an `implements` clause, which this grammar
+	// parses as an ERROR node under the SAME `name` field as the real
+	// identifier. The name must still be the class.
+	if got := symByPath(syms, "Widget"); got != nil && got.DeclStartLine != 12 {
+		t.Errorf("Widget decl starts at line %d, want 12 (the doc comment)", got.DeclStartLine)
+	}
+}
+
+func TestFileSymbolsGroovyDeclinesDSLJuxtaposition(t *testing.T) {
+	// A declarative Jenkins pipeline has no declarations, only DSL
+	// calls — but `agent any` parses as a `declaration` with type=agent
+	// and name=any, exactly like `String x`. Emitting it would invent a
+	// variable named `any` in every Jenkinsfile.
+	src := []byte(`pipeline {
+  agent any
+  def buildVersion = "1.0"
+  stages {
+    stage('Build') {
+      steps { sh 'make' }
+    }
+  }
+}
+`)
+	syms, err := FileSymbols("groovy", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := symByPath(syms, "any"); got != nil {
+		t.Errorf("DSL juxtaposition emitted a symbol: %+v", got)
+	}
+	// A REAL declaration in the same block still surfaces.
+	got := symByPath(syms, "buildVersion")
+	if got == nil || got.Class != "var" {
+		t.Errorf("buildVersion = %+v, want a var; have %+v", got, syms)
+	}
+}

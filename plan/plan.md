@@ -97,6 +97,12 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **Groovy — shipped 2026-07-26** → done.md ("Groovy via tree-sitter"): the
+weakest grammar of the set. Brought a new shared capability with it —
+`refinedClass` may DECLINE a node (empty class), which is how the Jenkins
+DSL's `agent any` stops becoming a phantom variable. Jenkinsfiles themselves
+stay unrouted: they are extensionless and the registry keys on extension.
+
 ✅ **Android bindings read Kotlin literals — shipped 2026-07-26** → done.md.
 The Java arm's want-set gate is shared verbatim; the Kotlin-specific hazard is
 string INTERPOLATION, whose content fragments must never be read as a whole
@@ -167,8 +173,8 @@ resource NOT bound, unpaired Java literal NOT bound, noise filter.
   lexical, so a genuinely short lowercase resource name paired with a real Java
   literal is dropped as noise.
 - **optional extensions**: kotlin SHIPPED, and the Android binding reads
-  Kotlin literals as well as Java ones (both → done.md); groovy is still
-  vendored and unwired (`.gradle`); jdtls as an opt-in child LSP for
+  Kotlin literals as well as Java ones (both → done.md); groovy SHIPPED too;
+  jdtls as an opt-in child LSP for
   resolved edges and safe rename; `R.id.x` is currently bound via the `@+id/`
   declaration side only, since R.java is generated and not in the tree.
 

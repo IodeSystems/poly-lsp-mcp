@@ -8,6 +8,7 @@ import (
 	"github.com/smacker/go-tree-sitter/c"
 	"github.com/smacker/go-tree-sitter/cpp"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/groovy"
 	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/kotlin"
 	"github.com/smacker/go-tree-sitter/python"
@@ -37,6 +38,8 @@ func LanguageByName(name string) *sitter.Language {
 		return cpp.GetLanguage()
 	case "kotlin":
 		return kotlin.GetLanguage()
+	case "groovy":
+		return groovy.GetLanguage()
 	}
 	return nil
 }

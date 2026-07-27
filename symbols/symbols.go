@@ -27,6 +27,7 @@ import (
 	"github.com/smacker/go-tree-sitter/c"
 	"github.com/smacker/go-tree-sitter/cpp"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/groovy"
 	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/kotlin"
 	"github.com/smacker/go-tree-sitter/python"
@@ -68,6 +69,15 @@ const kotlinIdentifierQuery = `[
   (simple_identifier)
   (type_identifier)
 ] @name`
+
+// groovyIdentifierQuery — the Groovy grammar has ONE identifier node for
+// every name: declarations, types, call targets, property access, and the
+// segments of a package or import path. Primitive types are `builtintype`
+// nodes and never match. String CONTENTS are not names, which for a
+// build script is a real loss (a Gradle dependency coordinate lives in a
+// string literal) — the same tradeoff Java makes, and the Android
+// binding is the pattern for buying it back where it matters.
+const groovyIdentifierQuery = `(identifier) @name`
 
 // cIdentifierQuery covers C names: variables, functions, parameters,
 // struct/union/enum tags, field names, typedef names and goto labels.
@@ -741,6 +751,15 @@ var defaultExtractors = map[string]Extractor{
 		"String", "Int", "Long", "Short", "Byte", "Boolean", "Char",
 		"Float", "Double", "Unit", "Any", "Nothing", "Array",
 		"List", "Map", "Set", "Pair", "it", "true", "false", "null",
+	)),
+
+	// Groovy via tree-sitter. The filter subtracts the java.lang types
+	// the grammar reports as plain identifiers; `def`, `class` and the
+	// modifiers are distinct node types and never match.
+	"groovy": mustTreeSitterExtractor(groovy.GetLanguage(), groovyIdentifierQuery, keywordSet(
+		"String", "Object", "Integer", "Boolean", "Long", "Double",
+		"Float", "Byte", "Short", "Character", "List", "Map", "Set",
+		"true", "false", "null", "it", "this",
 	)),
 
 	"yaml": &LexicalExtractor{},

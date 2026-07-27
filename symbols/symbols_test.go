@@ -307,3 +307,22 @@ fun scroll(up: Boolean): Int = listOf(1).map { it + 1 }.first()
 		}
 	}
 }
+
+func TestGroovyExtractorSkipsCommentsAndStrings(t *testing.T) {
+	src := []byte(`package app
+// mentions ghostInComment
+def label = "ghostInString"
+class Widget { int onKey(String event) { return 1 } }
+`)
+	names := hitNames(DefaultExtractor("groovy").Extract(src))
+	for _, want := range []string{"Widget", "onKey", "event", "label"} {
+		if !names[want] {
+			t.Errorf("missing %q; have %v", want, names)
+		}
+	}
+	for _, unwanted := range []string{"ghostInComment", "ghostInString", "String"} {
+		if names[unwanted] {
+			t.Errorf("%q leaked into the index", unwanted)
+		}
+	}
+}

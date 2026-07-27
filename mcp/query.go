@@ -1432,7 +1432,7 @@ var languageClassAliases = map[string]string{
 	"python": "python", "py": "python", "markdown": "markdown", "md": "markdown",
 	"yaml": "yaml", "json": "json", "sql": "sql", "proto": "proto",
 	"graphql": "graphql", "gql": "graphql",
-	"java": "java", "xml": "xml", "kotlin": "kotlin", "kt": "kotlin",
+	"java": "java", "xml": "xml", "kotlin": "kotlin", "kt": "kotlin", "groovy": "groovy", "gradle": "groovy",
 	"c": "c", "cpp": "cpp", "c++": "cpp", "cxx": "cpp", "cc": "cpp",
 }
 

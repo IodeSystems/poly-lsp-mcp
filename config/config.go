@@ -173,6 +173,18 @@ func Default() *Config {
 				TreeSitter: "kotlin",
 			},
 			{
+				// Groovy: tree-sitter only, same rationale as java/kotlin.
+				// `.gradle` (the Groovy build DSL) is registered here;
+				// `.gradle.kts` has extension `.kts` and belongs to kotlin,
+				// so the two never collide. A Jenkinsfile is Groovy too but
+				// has NO extension, and the registry keys on extension
+				// alone — claiming "" would claim every LICENSE and
+				// Makefile in the tree, so Jenkinsfiles stay unrouted.
+				Name:       "groovy",
+				Extensions: []string{"groovy", "gradle", "gvy", "gy"},
+				TreeSitter: "groovy",
+			},
+			{
 				// C. clangd is the default child LSP: it works degraded
 				// without a compile_commands.json and simply fails to
 				// spawn when absent, exactly like gopls.

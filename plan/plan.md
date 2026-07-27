@@ -97,11 +97,14 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
-✅ **Groovy — shipped 2026-07-26** → done.md ("Groovy via tree-sitter"): the
-weakest grammar of the set. Brought a new shared capability with it —
-`refinedClass` may DECLINE a node (empty class), which is how the Jenkins
-DSL's `agent any` stops becoming a phantom variable. Jenkinsfiles themselves
-stay unrouted: they are extensionless and the registry keys on extension.
+✅ **Groovy — shipped 2026-07-26, SPECULATIVE** → done.md ("Groovy via
+tree-sitter"), whose header note explains why: this workspace has NO Groovy.
+Zero `.groovy`, zero `.gradle` (every Gradle project here is Kotlin DSL,
+already covered), and the only Groovy on disk is three Jenkinsfiles last
+edited June 2023 in repos that run to 2026. Kept by the user's call because
+it is written and tested, not because it was needed. The durable win is the
+capability it forced: `refinedClass` may now DECLINE a node (empty class),
+which any content-ambiguous grammar needs.
 
 ✅ **Android bindings read Kotlin literals — shipped 2026-07-26** → done.md.
 The Java arm's want-set gate is shared verbatim; the Kotlin-specific hazard is

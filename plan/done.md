@@ -5,22 +5,33 @@
 
 ## Groovy via tree-sitter (DONE 2026-07-26)
 
+> **Read this first: Groovy is SPECULATIVE coverage, not a measured need.**
+> This workspace has zero `.groovy` and zero `.gradle` files — every Gradle
+> project on the box (reposilite, kc-property, deploy) is Kotlin DSL, already
+> covered by the kotlin entry via `.kts`. The only Groovy on disk is three
+> Jenkinsfiles in the user's own repos, all last EDITED June 2023 while their
+> repos run to 2026, one of them under `_legacy/`. They do not use Jenkins.
+> So nothing below is validated against live code the user cares about, and
+> the slice's value rests entirely on a future third-party Groovy repo.
+> Kept (user's call, 2026-07-26) because it is written, tested and isolated.
+
 - [x] `config.Default()` gains `groovy` (`.groovy`, `.gradle`, `.gvy`, `.gy`),
   tree-sitter only. `.gradle` is the Groovy build DSL; `.gradle.kts` has
   extension `.kts` and belongs to kotlin, so the two never collide.
-- **A Jenkinsfile is Groovy but has NO extension**, and the registry keys on
-  extension alone — claiming `""` would claim every LICENSE and Makefile in
-  the tree. Jenkinsfiles therefore stay unrouted. Filename-based matching
-  would be a `config.Registry` schema change (Build / LookupByExt /
-  languageForFile), which is its own slice.
 - **New shared capability: `refinedClass` may DECLINE a node** by returning an
-  empty class, dropping it and its subtree. Groovy is why. Its grammar parses
-  the Jenkins DSL's `agent any` as a `declaration` with type=agent name=any —
-  the same node as `String x = "hi"` — and only content tells them apart,
-  which classify (types only) cannot see. Without the decline, every
-  Jenkinsfile gains a phantom variable named `any`. Verified on a real
-  Jenkinsfile: 0 symbols as-is, and a `def buildVersion = "1.0"` inserted into
-  the same pipeline block DOES surface.
+  empty class, dropping it and its subtree. This is the part worth keeping
+  regardless of Groovy's fate — it is language-agnostic, and any grammar that
+  can only be disambiguated by CONTENT needs it, since `classify` sees node
+  types alone. Groovy forced it: the grammar parses a build-DSL juxtaposition
+  like `agent any` as a `declaration` with type=agent name=any, the same node
+  as `String x = "hi"`. Without the decline, every such DSL block gains a
+  phantom variable.
+- A Jenkinsfile is Groovy but has NO extension, and the registry keys on
+  extension alone — claiming `""` would claim every LICENSE and Makefile in
+  the tree, so Jenkinsfiles stay unrouted. Filename matching would be a
+  `config.Registry` schema change (Build / LookupByExt / languageForFile).
+  Recorded as a fact about the registry, NOT as a gap worth closing: nobody
+  here uses Jenkins.
 - **This is the weakest grammar of the set, and the arm is shaped around it:**
   - A class body is a plain `closure`, not a dedicated node → closures are
     containers.
@@ -46,11 +57,16 @@
   string is findable. The coordinate itself is a string literal and stays
   invisible — the same tradeoff Java makes, with the Android binding as the
   pattern for buying it back where it matters.
-- Measured live: the three Jenkinsfiles in ~/local/src produce 0 symbols,
-  which is correct — a declarative pipeline declares nothing. A realistic
-  `build.gradle` yields only its real `class BuildHelper` (the `ext { ... }`
-  block's contents are assignments, not declarations) while the extractor
-  still indexes all 18 distinct names in the file.
+- **What the checks actually cover.** There was no live Groovy corpus to
+  measure against (see the note at the top), so this rests on fixtures plus
+  two weak observations: the three stale Jenkinsfiles produce 0 symbols, which
+  is right but proves little because a declarative pipeline declares nothing;
+  and a HAND-WRITTEN `build.gradle` yields only its real `class BuildHelper`
+  (an `ext { }` block's contents are assignments, not declarations) while the
+  extractor indexes all 18 distinct names in it. The decline path was checked
+  by inserting `def buildVersion = "1.0"` into a real pipeline block and
+  confirming it surfaces while `agent any` does not. Treat the whole slice as
+  unproven on real-world Groovy until someone opens such a repo.
 - Tests: `TestFileSymbolsGroovyNestingAndClasses`,
   `TestFileSymbolsGroovyDeclinesDSLJuxtaposition`,
   `TestGroovyExtractorSkipsCommentsAndStrings`.

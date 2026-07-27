@@ -296,6 +296,11 @@ func paramListNode(lang string, node *sitter.Node) *sitter.Node {
 		}
 		return fd.ChildByFieldName("parameters")
 	}
+	if lang == "kotlin" {
+		// Positional, like everything else in this grammar. A secondary
+		// constructor carries the same node as a function does.
+		return firstNamedChildOfType(node, "function_value_parameters")
+	}
 	return node.ChildByFieldName("parameters")
 }
 
@@ -335,6 +340,8 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 		alias := ""
 		if lang == "c" || lang == "cpp" {
 			seg, alias = cTypeSegment(full)
+		} else if lang == "kotlin" {
+			seg, alias = kotlinTypeSegment(full)
 		} else if i := strings.LastIndex(full, "."); i >= 0 {
 			// A qualified type (io.Writer): the path segment must be
 			// dot-free, so the leaf is the last component and the full
@@ -432,6 +439,14 @@ func returnTypeNodes(lang string, node *sitter.Node) []*sitter.Node {
 			return nil
 		}
 		return []*sitter.Node{rt}
+	case "kotlin":
+		// The return type is the type node AFTER the parameter list; a
+		// type before the name is the extension receiver, not a result.
+		// A constructor has neither, which is correctly nil here.
+		if _, _, rt := kotlinFuncParts(node); rt != nil {
+			return []*sitter.Node{rt}
+		}
+		return nil
 	}
 	return nil
 }
@@ -464,6 +479,8 @@ func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string
 		marks = tsDecorators(node, content)
 	case "go":
 		marks = goStructTags(node, class, content)
+	case "kotlin":
+		marks = kotlinAnnotations(node, content)
 	}
 	if len(marks) == 0 {
 		return
@@ -512,7 +529,7 @@ func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int
 	}
 	nextTop := int(anchor.StartPoint().Row) + 1 // 1-based line the block must butt against
 	found := false
-	for s := anchor.PrevNamedSibling(); s != nil && s.Type() == "comment"; s = s.PrevNamedSibling() {
+	for s := anchor.PrevNamedSibling(); s != nil && isCommentNode(s.Type()); s = s.PrevNamedSibling() {
 		sl, sc, el, ec := nodeLineCols(s)
 		if el != nextTop-1 {
 			break // a blank line (or code) breaks the doc block
@@ -525,6 +542,18 @@ func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int
 		nextTop = sl
 	}
 	return startLine, startCol, endLine, endCol
+}
+
+// isCommentNode reports whether a node type is a comment. Every grammar
+// here but Kotlin's spells it `comment`; Kotlin splits the two forms,
+// and without both a Kotlin declaration would silently lose the doc
+// block that ::comment, :contains and the decl range all depend on.
+func isCommentNode(t string) bool {
+	switch t {
+	case "comment", "line_comment", "multiline_comment", "block_comment":
+		return true
+	}
+	return false
 }
 
 // annMark is one resolved annotation: the AST node for its span, the
@@ -657,6 +686,8 @@ func paramInfos(lang string, p *sitter.Node, content []byte) []paramInfo {
 		return javaParamInfos(p, content)
 	case "c", "cpp":
 		return cParamInfos(p, content)
+	case "kotlin":
+		return kotlinParamInfos(p, content)
 	}
 	return nil
 }
@@ -818,7 +849,7 @@ func declLineCols(n *sitter.Node) (startLine, startCol, endLine, endCol int) {
 	startLine, startCol, endLine, endCol = nodeLineCols(n)
 	for cur := n; ; {
 		prev := cur.PrevSibling()
-		if prev == nil || prev.Type() != "comment" {
+		if prev == nil || !isCommentNode(prev.Type()) {
 			break
 		}
 		pStart, pCol, pEnd, _ := nodeLineCols(prev)
@@ -847,6 +878,39 @@ func classify(lang, t, parent string) symRole {
 		return classifyJava(t, parent)
 	case "c", "cpp":
 		return classifyC(t, parent)
+	case "kotlin":
+		return classifyKotlin(t, parent)
+	}
+	return roleSkip
+}
+
+// classifyKotlin maps Kotlin declarations onto the shared role
+// vocabulary.
+//
+// Two Kotlin-specific container choices carry the weight here:
+//
+//   - companion_object is walked THROUGH, so its members land directly
+//     on the enclosing class (Widget.MAX, Widget.create) — which is
+//     exactly how the code addresses them.
+//   - primary_constructor is walked through too, because its
+//     class_parameters are Kotlin's dominant way of declaring fields:
+//     `class Widget(val id: Int)` declares a property, not just a
+//     parameter.
+//
+// getter / setter are skipped: they are SIBLINGS of the property they
+// belong to in this grammar, and they carry no name of their own, so
+// emitting them would add anonymous "[n]" noise beside every custom
+// accessor.
+func classifyKotlin(t, parent string) symRole {
+	switch t {
+	case "class_body", "enum_class_body", "companion_object",
+		"import_list", "primary_constructor":
+		return roleContainer
+	case "package_header", "import_header",
+		"class_declaration", "object_declaration", "type_alias",
+		"property_declaration", "function_declaration",
+		"secondary_constructor", "enum_entry", "class_parameter":
+		return roleSymbol
 	}
 	return roleSkip
 }
@@ -934,6 +998,320 @@ func isCDeclarator(t string) bool {
 		return true
 	}
 	return false
+}
+
+// ------------------------------------------------------- kotlin
+//
+// The vendored tree-sitter-kotlin grammar exposes NO field names — every
+// child is positional. So where the Java arm reads
+// ChildByFieldName("name"), the Kotlin helpers below walk named children
+// and select by node TYPE and ORDER. That is also why a function's
+// receiver, name and return type all have to be resolved in one pass
+// (kotlinFuncParts): they are told apart only by which side of
+// function_value_parameters they sit on.
+
+// refinedClassKotlin assigns the class for a Kotlin symbol node. The ok
+// return is false for node types this arm doesn't own.
+func refinedClassKotlin(node *sitter.Node, parentClass string, content []byte) (class string, branch, ok bool) {
+	switch node.Type() {
+	case "package_header":
+		// Answers to the LEAF segment (app, not com.example.app),
+		// matching Go's package_clause and Java's package_declaration.
+		return "module", false, true
+	case "import_header":
+		return "import", false, true
+	case "type_alias":
+		return "type", false, true
+	case "enum_entry":
+		return "const", false, true
+	case "secondary_constructor":
+		return "ctor", false, true
+	case "object_declaration":
+		// A Kotlin `object` is a singleton class; there is no separate
+		// class for it and selectors written for class should find it.
+		return "class", true, true
+	case "class_declaration":
+		return kotlinClassKind(node, content), true, true
+	case "class_parameter":
+		// `class Widget(val id: Int, name: String)` — the val/var half
+		// declares a PROPERTY, the bare half is only a constructor
+		// parameter. Both are addressable under the class; only the
+		// first is a field.
+		if firstNamedChildOfType(node, "binding_pattern_kind") != nil {
+			return "field", false, true
+		}
+		return "argument", false, true
+	case "property_declaration":
+		switch parentClass {
+		case "class", "struct", "interface", "enum":
+			return "field", false, true
+		}
+		// Top-level: `val` is an immutable binding, the same distinction
+		// TypeScript's const/let draws.
+		if k := firstNamedChildOfType(node, "binding_pattern_kind"); k != nil && k.Content(content) == "val" {
+			return "const", false, true
+		}
+		return "var", false, true
+	case "function_declaration":
+		// An extension function is morally a method on its receiver, and
+		// parentOverride files it under that type (String.shout).
+		if recv, _, _ := kotlinFuncParts(node); recv != nil {
+			return "method", false, true
+		}
+		switch parentClass {
+		case "class", "struct", "interface", "enum":
+			return "method", false, true
+		}
+		return "func", false, true
+	}
+	return "", false, false
+}
+
+// kotlinClassKind tells class / interface / enum / struct apart. The
+// grammar spells `interface` as an ANONYMOUS token (no modifiers node,
+// no field), so the keyword is read off the unnamed children; `enum
+// class` is recognized by its body node instead, and a `data class` maps
+// to struct — the same call the Java arm makes for a record.
+func kotlinClassKind(node *sitter.Node, content []byte) string {
+	if firstNamedChildOfType(node, "enum_class_body") != nil {
+		return "enum"
+	}
+	for i := range int(node.ChildCount()) {
+		c := node.Child(i)
+		if c.IsNamed() {
+			continue
+		}
+		switch c.Content(content) {
+		case "interface":
+			return "interface"
+		case "class":
+			// keep looking only for modifiers, which precede it
+		}
+	}
+	if mods := firstNamedChildOfType(node, "modifiers"); mods != nil {
+		for i := range int(mods.NamedChildCount()) {
+			if m := mods.NamedChild(i); m.Content(content) == "data" {
+				return "struct"
+			}
+		}
+	}
+	return "class"
+}
+
+// isKotlinType reports whether a node is a TYPE expression. Used to pick
+// the receiver and return type out of a function_declaration's
+// positional children.
+func isKotlinType(t string) bool {
+	switch t {
+	case "user_type", "nullable_type", "function_type",
+		"parenthesized_type", "dynamic_type", "not_nullable_type":
+		return true
+	}
+	return false
+}
+
+// kotlinFuncParts resolves a function_declaration's three positional
+// pieces in one pass: the extension RECEIVER type (a type node before
+// the name), the NAME, and the RETURN type (a type node after the
+// parameter list). Any of them may be nil.
+func kotlinFuncParts(node *sitter.Node) (receiver, name, returnType *sitter.Node) {
+	seenParams := false
+	for i := range int(node.NamedChildCount()) {
+		c := node.NamedChild(i)
+		switch {
+		case c.Type() == "function_value_parameters":
+			seenParams = true
+		case c.Type() == "simple_identifier" && name == nil && !seenParams:
+			name = c
+		case isKotlinType(c.Type()):
+			if seenParams {
+				if returnType == nil {
+					returnType = c
+				}
+			} else if name == nil && receiver == nil {
+				// A type BEFORE the name is the extension receiver.
+				receiver = c
+			}
+		}
+	}
+	return receiver, name, returnType
+}
+
+// kotlinName resolves a Kotlin symbol node to its local name. ok is
+// false for node types the generic path should handle.
+func kotlinName(node *sitter.Node, content []byte) (string, *sitter.Node, bool) {
+	switch node.Type() {
+	case "package_header":
+		if id := firstNamedChildOfType(node, "identifier"); id != nil {
+			if leaf := lastNamedChildOfType(id, "simple_identifier"); leaf != nil {
+				return leaf.Content(content), leaf, true
+			}
+		}
+		return "", nil, true
+	case "import_header":
+		// An aliased import answers to the alias — that is the name the
+		// rest of the file actually writes.
+		if alias := firstNamedChildOfType(node, "import_alias"); alias != nil {
+			if n := firstNamedChildOfType(alias, "type_identifier"); n != nil {
+				return n.Content(content), n, true
+			}
+		}
+		if id := firstNamedChildOfType(node, "identifier"); id != nil {
+			if leaf := lastNamedChildOfType(id, "simple_identifier"); leaf != nil {
+				return leaf.Content(content), leaf, true
+			}
+		}
+		return "", nil, true
+	case "class_declaration", "object_declaration", "type_alias":
+		if n := firstNamedChildOfType(node, "type_identifier"); n != nil {
+			return n.Content(content), n, true
+		}
+		return "", nil, true
+	case "property_declaration":
+		// property_declaration > variable_declaration > simple_identifier.
+		// A destructuring `val (a, b) = p` answers to its first name.
+		if vd := firstNamedChildOfType(node, "variable_declaration"); vd != nil {
+			if n := firstNamedChildOfType(vd, "simple_identifier"); n != nil {
+				return n.Content(content), n, true
+			}
+		}
+		if mv := firstNamedChildOfType(node, "multi_variable_declaration"); mv != nil {
+			if vd := firstNamedChildOfType(mv, "variable_declaration"); vd != nil {
+				if n := firstNamedChildOfType(vd, "simple_identifier"); n != nil {
+					return n.Content(content), n, true
+				}
+			}
+		}
+		return "", nil, true
+	case "function_declaration":
+		_, name, _ := kotlinFuncParts(node)
+		if name != nil {
+			return name.Content(content), name, true
+		}
+		return "", nil, true
+	case "class_parameter", "enum_entry":
+		if n := firstNamedChildOfType(node, "simple_identifier"); n != nil {
+			return n.Content(content), n, true
+		}
+		return "", nil, true
+	case "secondary_constructor":
+		// Named after its class, matching Java's ctor path
+		// (Widget.Widget). There is no name TOKEN to point at — the
+		// declaration spells `constructor` — so the name range falls
+		// back to the declaration span, and rename correctly refuses to
+		// pin on a keyword.
+		return kotlinEnclosingTypeName(node, content), nil, true
+	}
+	return "", nil, false
+}
+
+// kotlinEnclosingTypeName returns the name of the class/object whose
+// body contains node, or "".
+func kotlinEnclosingTypeName(node *sitter.Node, content []byte) string {
+	for p := node.Parent(); p != nil; p = p.Parent() {
+		switch p.Type() {
+		case "class_declaration", "object_declaration":
+			if n := firstNamedChildOfType(p, "type_identifier"); n != nil {
+				return n.Content(content)
+			}
+			return ""
+		case "source_file":
+			return ""
+		}
+	}
+	return ""
+}
+
+// kotlinParamInfos handles Kotlin's `parameter` nodes. `vararg` arrives
+// as a parameter_modifiers SIBLING rather than a child, and a default
+// value as a trailing expression sibling, so both are skipped here and
+// only the parameter itself names anything.
+func kotlinParamInfos(p *sitter.Node, content []byte) []paramInfo {
+	if p.Type() != "parameter" {
+		return nil
+	}
+	if n := firstNamedChildOfType(p, "simple_identifier"); n != nil {
+		return []paramInfo{{name: n.Content(content), nameNode: n, decl: p}}
+	}
+	return []paramInfo{{decl: p}}
+}
+
+// kotlinAnnotations collects the `annotation` children of a
+// declaration's `modifiers` node. An annotation is written either bare
+// (@Composable) or as a call (@Suppress("unused")); both bottom out in a
+// user_type, whose last type_identifier is the leaf the index answers
+// to, with the type as written kept as the alias.
+func kotlinAnnotations(node *sitter.Node, content []byte) []annMark {
+	mods := firstNamedChildOfType(node, "modifiers")
+	if mods == nil {
+		return nil
+	}
+	var out []annMark
+	for i := range int(mods.NamedChildCount()) {
+		ann := mods.NamedChild(i)
+		if ann.Type() != "annotation" {
+			continue
+		}
+		ut := findDescendantOfType(ann, "user_type", 3)
+		if ut == nil {
+			continue
+		}
+		leaf := lastNamedChildOfType(ut, "type_identifier")
+		if leaf == nil {
+			continue
+		}
+		out = append(out, annMark{ann, leaf.Content(content), collapseType(nodeSlice(ut, content))})
+	}
+	return out
+}
+
+// lastNamedChildOfType returns n's last named child of type t, or nil.
+func lastNamedChildOfType(n *sitter.Node, t string) *sitter.Node {
+	var found *sitter.Node
+	for i := range int(n.NamedChildCount()) {
+		if c := n.NamedChild(i); c.Type() == t {
+			found = c
+		}
+	}
+	return found
+}
+
+// findDescendantOfType returns the first descendant of type t within
+// `depth` levels, or nil. Bounded so it can't wander into a body.
+func findDescendantOfType(n *sitter.Node, t string, depth int) *sitter.Node {
+	if n == nil || depth < 0 {
+		return nil
+	}
+	if n.Type() == t {
+		return n
+	}
+	if depth == 0 {
+		return nil
+	}
+	for i := range int(n.NamedChildCount()) {
+		if got := findDescendantOfType(n.NamedChild(i), t, depth-1); got != nil {
+			return got
+		}
+	}
+	return nil
+}
+
+// kotlinTypeSegment renders a Kotlin type as a path segment plus the
+// full spelling as an alias: generics and the package qualifier come off
+// (`List<Int>` → List, `kotlin.text.Regex` → Regex).
+func kotlinTypeSegment(full string) (seg, alias string) {
+	seg = full
+	if i := strings.Index(seg, "<"); i >= 0 {
+		seg = seg[:i]
+	}
+	if i := strings.LastIndex(seg, "."); i >= 0 {
+		seg = seg[i+1:]
+	}
+	seg = strings.TrimSpace(strings.TrimSuffix(seg, "?"))
+	if seg != full {
+		alias = full
+	}
+	return seg, alias
 }
 
 // refinedClassC assigns the class for a C/C++ symbol node. The ok
@@ -1400,6 +1778,10 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 		if class, branch, ok := refinedClassC(node, parentClass, content); ok {
 			return class, branch
 		}
+	case "kotlin":
+		if class, branch, ok := refinedClassKotlin(node, parentClass, content); ok {
+			return class, branch
+		}
 	case "java":
 		switch t {
 		case "package_declaration":
@@ -1532,6 +1914,13 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 			return name, node
 		}
 	}
+	// Kotlin's grammar has no field names at all, so every name is
+	// resolved positionally before the generic lookups.
+	if lang == "kotlin" {
+		if name, node, ok := kotlinName(node, content); ok {
+			return name, node
+		}
+	}
 	// SQL create_index names via the `column` field (index name).
 	if lang == "sql" && t == "create_index" {
 		if n := node.ChildByFieldName("column"); n != nil {
@@ -1586,6 +1975,14 @@ func parentOverride(lang string, node *sitter.Node, content []byte) string {
 		if name := cInnermostDeclarator(node); name != nil && name.Type() == "qualified_identifier" {
 			scope, _ := cQualifiedParts(name, content)
 			return scope
+		}
+	}
+	if lang == "kotlin" && node.Type() == "function_declaration" {
+		// An extension function is owned by its receiver type
+		// (String.shout), the Kotlin analogue of a Go receiver.
+		if recv, _, _ := kotlinFuncParts(node); recv != nil {
+			seg, _ := kotlinTypeSegment(collapseType(nodeSlice(recv, content)))
+			return seg
 		}
 	}
 	return ""

@@ -69,7 +69,7 @@ The project ships from `main` without semver tags today. This section captures t
 ### Configuration
 
 - `poly-lsp-mcp.yaml` schema: `languages`, `bindings`, `schemas`, `auto_schemas`. All sections optional; defaults cover the supported languages.
-- Default registry: go / typescript / python / java / c / c++ / sql / proto / graphql / yaml / json / xml / markdown. C and C++ default to `clangd` (which works degraded without a `compile_commands.json`); Java is tree-sitter only (jdtls is opt-in via `languages:`). `.h` is registered to C++, whose grammar is a superset — a C header still parses correctly, and a C++ header named `.h` doesn't lose its classes.
+- Default registry: go / typescript / python / java / kotlin / c / c++ / sql / proto / graphql / yaml / json / xml / markdown. C and C++ default to `clangd` (which works degraded without a `compile_commands.json`); Java and Kotlin are tree-sitter only (jdtls / kotlin-language-server are opt-in via `languages:`). `.h` is registered to C++, whose grammar is a superset — a C header still parses correctly, and a C++ header named `.h` doesn't lose its classes.
 - Defaults merge: partial configs (e.g., only `schemas:` declared) get the default `languages` registry folded in so the index doesn't silently break.
 
 ### Testing fixtures

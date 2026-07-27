@@ -3,6 +3,60 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Kotlin via tree-sitter (DONE 2026-07-26)
+
+- [x] `config.Default()` gains `kotlin` (`.kt`, `.kts`), tree-sitter only —
+  same call as java: kotlin-language-server wants a Gradle build and a JVM.
+  `.kts` parses with the same grammar, which is where an Android/Gradle repo
+  keeps its module names and dependency coordinates.
+- **The vendored tree-sitter-kotlin grammar exposes NO field names.** Every
+  child is positional, so where the Java arm reads
+  `ChildByFieldName("name")`, the Kotlin helpers select by node TYPE and
+  ORDER. `kotlinFuncParts` resolves receiver / name / return type in ONE
+  pass because they are told apart only by which side of
+  `function_value_parameters` they sit on: a type before the name is an
+  extension RECEIVER, a type after the parameter list is the RESULT.
+- **Two container calls carry the model.** `companion_object` is walked
+  through, so its members land directly on the enclosing class
+  (`Widget.MAX`, `Widget.create`) — how the code addresses them.
+  `primary_constructor` is walked through because its `class_parameter`s are
+  Kotlin's dominant field declaration: `class Widget(val id: Int)` declares a
+  property. A class_parameter WITH val/var is a `field`; without, it is only
+  an `argument`.
+- getter/setter are SIBLINGS of their property in this grammar and carry no
+  name, so they are skipped — emitting them would put an anonymous `[n]`
+  beside every custom accessor.
+- Class kind: `interface` is an ANONYMOUS token (no modifiers node, no
+  field) and is read off the unnamed children; `enum class` is recognized by
+  its `enum_class_body`; `data class` → struct (the call the Java arm makes
+  for a record); `object` → class.
+- Extension functions get a `parentOverride` — `fun String.shout()` lands at
+  `String.shout`, the Kotlin analogue of a Go receiver and of the C++
+  out-of-line rule.
+- `isCommentNode` replaces the hardcoded `"comment"` in `declLineCols` /
+  `docCommentSpan`: Kotlin splits `line_comment` / `multiline_comment`, and
+  without both every Kotlin decl range stopped short of its doc block.
+- Annotations ARE wired (`kotlinAnnotations` → `.annotation` children,
+  leaf + full-type alias), unlike the Java arm which still has none.
+- The `it` implicit lambda parameter is filtered from the extractor: it is
+  file-local by construction and would otherwise be one of the most frequent
+  names in any Kotlin repo.
+- **`.gradle` added to `skipDirs`** — a regression this slice surfaced rather
+  than caused. It was harmless while we indexed no C/C++; on reposilite that
+  directory holds a downloaded Node toolchain whose 2,290 bundled `.h` files
+  are 1.5M lexical sites, 35x the rest of the repo and none of it user code.
+  After: 43,693 → 10,489 names indexed.
+- Measured live on reposilite: 288 Kotlin files / 7,119 symbols, 4 files
+  empty — all `.gradle.kts`, verified to be clean parses of pure-DSL scripts
+  with genuinely no declarations (their identifiers still reach the index via
+  the extractor). Class distribution is sane: 2,496 import / 918 field / 914
+  argument / 885 method / 633 return / 476 annotation / 291 class; the 205
+  `[n]` segments are real overload and repeated-annotation disambiguation,
+  not anonymous junk.
+- Tests: `TestFileSymbolsKotlinNestingAndClasses`,
+  `TestFileSymbolsKotlinReturnsAndReceivers`,
+  `TestKotlinExtractorSkipsCommentsStringsAndIt`.
+
 ## C / C++ via tree-sitter (DONE 2026-07-26)
 
 - [x] `config.Default()` gains `c` (`.c`) and `cpp` (`.cpp/.cc/.cxx/.c++/.h/

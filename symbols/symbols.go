@@ -28,6 +28,7 @@ import (
 	"github.com/smacker/go-tree-sitter/cpp"
 	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/java"
+	"github.com/smacker/go-tree-sitter/kotlin"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/sql"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
@@ -54,6 +55,17 @@ const goIdentifierQuery = `[
 // XML attribute findable from the Java side.
 const javaIdentifierQuery = `[
   (identifier)
+  (type_identifier)
+] @name`
+
+// kotlinIdentifierQuery covers Kotlin names. The grammar has exactly two
+// identifier nodes: simple_identifier for everything that isn't a type
+// position (functions, properties, parameters, enum entries, call
+// targets, package/import segments) and type_identifier for the rest.
+// Keywords, modifiers and operators are distinct node types and never
+// match.
+const kotlinIdentifierQuery = `[
+  (simple_identifier)
   (type_identifier)
 ] @name`
 
@@ -721,6 +733,16 @@ var defaultExtractors = map[string]Extractor{
 	"c":   mustTreeSitterExtractor(c.GetLanguage(), cIdentifierQuery, cKeywords),
 	"cpp": mustTreeSitterExtractor(cpp.GetLanguage(), cppIdentifierQuery, cKeywords),
 
+	// Kotlin via tree-sitter. The filter subtracts the stdlib types the
+	// grammar reports as type_identifier plus `it` — the implicit lambda
+	// parameter, which is file-local by construction and would otherwise
+	// be one of the most frequent names in any Kotlin repo.
+	"kotlin": mustTreeSitterExtractor(kotlin.GetLanguage(), kotlinIdentifierQuery, keywordSet(
+		"String", "Int", "Long", "Short", "Byte", "Boolean", "Char",
+		"Float", "Double", "Unit", "Any", "Nothing", "Array",
+		"List", "Map", "Set", "Pair", "it", "true", "false", "null",
+	)),
+
 	"yaml": &LexicalExtractor{},
 	"json": &LexicalExtractor{},
 	// XML is lexical on purpose: on Android the cross-language edge is
@@ -754,6 +776,11 @@ var skipDirs = map[string]bool{
 	"build":        true,
 	".idea":        true,
 	".vscode":      true,
+	// Gradle's per-project cache. It was harmless while we indexed no
+	// C/C++: on reposilite it holds a downloaded Node toolchain whose
+	// 2,290 bundled .h files are 1.5M lexical sites — 35x the rest of
+	// the repo put together, none of it the user's code.
+	".gradle": true,
 }
 
 // maxFileSize caps any single file we'll index, in bytes. Files larger

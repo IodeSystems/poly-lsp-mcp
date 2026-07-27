@@ -198,6 +198,8 @@ func regexLanguage(path string) string {
 		return "sql"
 	case "java":
 		return "java"
+	case "kt", "kts":
+		return "kotlin"
 	case "xml":
 		return "xml"
 	case "c":

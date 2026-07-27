@@ -284,3 +284,26 @@ int app::Widget::area() const { return width; }
 		}
 	}
 }
+
+func TestKotlinExtractorSkipsCommentsStringsAndIt(t *testing.T) {
+	src := []byte(`package app
+// mentions ghostInComment
+val label = "ghostInString"
+fun scroll(up: Boolean): Int = listOf(1).map { it + 1 }.first()
+`)
+	names := hitNames(DefaultExtractor("kotlin").Extract(src))
+	for _, want := range []string{"scroll", "up", "label", "listOf", "map"} {
+		if !names[want] {
+			t.Errorf("missing %q; have %v", want, names)
+		}
+	}
+	// Comments and string literals are not names — the precision win
+	// over the lexical tier. `it` is filtered as noise: it is the
+	// implicit lambda parameter, file-local by construction, and one of
+	// the most frequent tokens in any Kotlin repo.
+	for _, unwanted := range []string{"ghostInComment", "ghostInString", "it", "Boolean"} {
+		if names[unwanted] {
+			t.Errorf("%q leaked into the index", unwanted)
+		}
+	}
+}

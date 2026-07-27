@@ -538,3 +538,149 @@ int App::counter = 5;
 		}
 	}
 }
+
+func TestFileSymbolsKotlinNestingAndClasses(t *testing.T) {
+	src := []byte(`package com.example.app
+
+import android.view.KeyEvent
+import kotlin.math.max as maximum
+
+const val TOP_LEVEL = 1
+
+typealias Handler = (String) -> Unit
+
+interface Client {
+    val scrollKeys: Int
+    fun onKey(event: KeyEvent): Boolean
+}
+
+// A widget.
+@Suppress("unused")
+class Widget(val id: Int, private var name: String) : Client {
+    companion object {
+        const val MAX = 10
+        fun create(): Widget = Widget(0, "")
+    }
+
+    private val items = mutableListOf<Int>()
+    var width: Int = 0
+        get() = field
+
+    constructor(id: Int) : this(id, "")
+
+    override fun onKey(event: KeyEvent): Boolean = true
+}
+
+enum class Mode { FAST, SLOW }
+
+object Registry {
+    fun get(): Int = 1
+}
+
+data class Pair2(val a: Int, val b: String)
+
+fun String.shout(): String = this.uppercase()
+
+fun freeFn(a: Int, vararg rest: String): Int = a
+`)
+	syms, err := FileSymbols("kotlin", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		// Leaf segment, matching Go's package_clause and Java's
+		// package_declaration.
+		"app": "module",
+		// An aliased import answers to the alias — the name the rest of
+		// the file writes.
+		"KeyEvent":  "import",
+		"maximum":   "import",
+		"TOP_LEVEL": "const",
+		"Handler":   "type",
+		// `interface` is an anonymous token in this grammar, read off
+		// the unnamed children.
+		"Client":            "interface",
+		"Client.scrollKeys": "field",
+		"Client.onKey":      "method",
+		"Widget":            "class",
+		// A primary-constructor `val` declares a PROPERTY, so it is a
+		// field on the class, not just a parameter.
+		"Widget.id":   "field",
+		"Widget.name": "field",
+		// companion object members land directly on the class — how the
+		// code addresses them (Widget.MAX).
+		"Widget.MAX":      "field",
+		"Widget.create":   "method",
+		"Widget.items":    "field",
+		"Widget.width":    "field",
+		"Widget.Widget":   "ctor",
+		"Widget.onKey":    "method",
+		"Mode":            "enum",
+		"Mode.FAST":       "const",
+		"Registry":        "class",
+		"Registry.get":    "method",
+		"Pair2":           "struct",
+		"Pair2.a":         "field",
+		"String.shout":    "method",
+		"freeFn":          "func",
+		"freeFn.a":        "argument",
+		"freeFn.rest":     "argument",
+		"Widget.Suppress": "annotation",
+	}
+	for sym, class := range cases {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != class {
+			t.Errorf("%q class = %q, want %q", sym, got.Class, class)
+		}
+	}
+	// A custom accessor is a SIBLING of its property in this grammar and
+	// carries no name; emitting it would add anonymous noise.
+	for _, s := range syms {
+		if strings.HasPrefix(s.Sym, "Widget.[") {
+			t.Errorf("anonymous node emitted for a getter/setter: %+v", s)
+		}
+	}
+	// Kotlin spells doc comments line_comment, so the shared comment
+	// logic has to accept both; without it the decl range stops at the
+	// annotation.
+	if got := symByPath(syms, "Widget"); got != nil && got.DeclStartLine != 15 {
+		t.Errorf("Widget decl starts at line %d, want 15 (the doc comment)", got.DeclStartLine)
+	}
+}
+
+func TestFileSymbolsKotlinReturnsAndReceivers(t *testing.T) {
+	src := []byte(`fun ids(): List<Int> = listOf()
+fun String.shout(): kotlin.text.Regex? = null
+class A {
+    fun plain() {}
+}
+`)
+	syms, err := FileSymbols("kotlin", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Generics and the package qualifier come off the segment; the full
+	// spelling is kept as the alias.
+	ret := symByPath(syms, "ids.List")
+	if ret == nil {
+		t.Fatalf("missing return node ids.List; have %+v", syms)
+	}
+	if ret.Class != "return" || ret.Alias != "List<Int>" {
+		t.Errorf("ids return = %+v, want class=return alias=List<Int>", ret)
+	}
+	// An extension function is filed under its receiver, and the type
+	// BEFORE the name must not be mistaken for a result.
+	if got := symByPath(syms, "String.shout.Regex"); got == nil {
+		t.Errorf("missing String.shout.Regex; have %+v", syms)
+	}
+	// No declared return type: no return node at all.
+	for _, s := range syms {
+		if s.Class == "return" && strings.HasPrefix(s.Sym, "A.plain") {
+			t.Errorf("synthesized a return node for an implicit-Unit function: %+v", s)
+		}
+	}
+}

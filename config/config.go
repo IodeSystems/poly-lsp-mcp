@@ -162,6 +162,17 @@ func Default() *Config {
 				TreeSitter: "java",
 			},
 			{
+				// Kotlin: tree-sitter only, same rationale as java —
+				// kotlin-language-server wants a Gradle build and a JVM,
+				// which is too heavy to spawn by default. `.kts` (Gradle
+				// build scripts) parses with the same grammar, and on an
+				// Android repo those scripts are where module names and
+				// dependency coordinates live.
+				Name:       "kotlin",
+				Extensions: []string{"kt", "kts"},
+				TreeSitter: "kotlin",
+			},
+			{
 				// C. clangd is the default child LSP: it works degraded
 				// without a compile_commands.json and simply fails to
 				// spawn when absent, exactly like gopls.

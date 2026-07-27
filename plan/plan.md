@@ -97,6 +97,12 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **Kotlin — shipped 2026-07-26** → done.md ("Kotlin via tree-sitter"): a
+FIELD-LESS grammar (everything positional), companion objects and primary
+constructors walked through, extension functions filed under their receiver.
+Also added `.gradle` to `skipDirs` — it was hiding 1.5M sites of vendored
+Node headers behind the new C/C++ support.
+
 ✅ **C / C++ — shipped 2026-07-26** → done.md ("C / C++ via tree-sitter") for
 the record: `.h` belongs to cpp, declarators (not declarations) are the
 symbols, ERROR nodes are walked through so a `__attribute__` the grammar
@@ -155,8 +161,10 @@ resource NOT bound, unpaired Java literal NOT bound, noise filter.
   `KEY = PREFIX + "x"` is invisible); the tier-2 distinctiveness heuristic is
   lexical, so a genuinely short lowercase resource name paired with a real Java
   literal is dropped as noise.
-- **optional extensions**: kotlin + groovy grammars are already vendored in
-  smacker/go-tree-sitter (`.kt`, `.gradle`); jdtls as an opt-in child LSP for
+- **optional extensions**: kotlin SHIPPED (see done.md); groovy is still
+  vendored and unwired (`.gradle`); the Android binding reads JAVA literals
+  only, so a Kotlin Android app has no Tier-2 resource pairing → icebox;
+  jdtls as an opt-in child LSP for
   resolved edges and safe rename; `R.id.x` is currently bound via the `@+id/`
   declaration side only, since R.java is generated and not in the tree.
 

@@ -97,6 +97,12 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **TypeScript verified on the redline frontend — 2026-07-27** → done.md.
+212 files / 5,797 symbols on live hand-written React. Fixed three real
+defects it exposed: `.d.ts` ambient files indexed as EMPTY, return segments
+kept generics (96% of TS returns unusable — worse than Java's 4.9%), and
+`declare module "react"` carried its quotes into the path.
+
 ✅ **Java verified on redline — 2026-07-27** → done.md. 492 files / 43,128
 symbols / 0 parse errors (the most robust grammar of the set — no ERROR
 remedy needed). But ALL 492 are jOOQ-generated; there is no hand-written Java

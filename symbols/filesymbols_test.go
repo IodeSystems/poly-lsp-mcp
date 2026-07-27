@@ -814,7 +814,7 @@ func TestClassifyKotlinWalksThroughParseErrors(t *testing.T) {
 	// flatten into the same ERROR and surface as fields of the class.
 }
 
-func TestJvmTypeSegmentStripsGenericsAndArrays(t *testing.T) {
+func TestTypeSegmentStripsGenericsAndArrays(t *testing.T) {
 	// A `.return` node answers to a bare NAME. Measured on a 492-file
 	// Java tree: 531 of 10,738 return nodes carried `<...>` or `[]` in
 	// their path segment with an EMPTY alias, so `return#Field` could
@@ -828,11 +828,15 @@ func TestJvmTypeSegmentStripsGenericsAndArrays(t *testing.T) {
 		{"java.util.Map.Entry", "Entry", "java.util.Map.Entry"},
 		{"kotlin.text.Regex?", "Regex", "kotlin.text.Regex?"},
 		{"List<Map<String, Int>>", "List", "List<Map<String, Int>>"},
+		{"RestResponse<DataSetResponse<AccountView>>", "RestResponse", "RestResponse<DataSetResponse<AccountView>>"},
+		// A union has no single leaf to answer to; inventing one would
+		// misstate which type the callable returns.
+		{"string | null", "string | null", ""},
 	}
 	for _, c := range cases {
-		seg, alias := jvmTypeSegment(c.in)
+		seg, alias := typeSegment(c.in)
 		if seg != c.seg || alias != c.alias {
-			t.Errorf("jvmTypeSegment(%q) = (%q, %q), want (%q, %q)", c.in, seg, alias, c.seg, c.alias)
+			t.Errorf("typeSegment(%q) = (%q, %q), want (%q, %q)", c.in, seg, alias, c.seg, c.alias)
 		}
 	}
 }

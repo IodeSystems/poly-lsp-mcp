@@ -3,6 +3,55 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## TypeScript verified on the redline frontend (DONE 2026-07-27)
+
+- [x] Ran the TypeScript arm over `_legacy/redline/web` — a live React/Vite
+  frontend (187 `.tsx` + 23 `.ts`, last changed 2026-07-10, hand-written, no
+  generated code). **212 files, 5,797 symbols, 1 empty, 2 files with ERROR
+  nodes.**
+- The 2 ERROR files are both a bare `&` in JSX text ("Msg & data rates may
+  apply."). Browsers and Babel tolerate it, the tsx grammar does not; the
+  damage is one line and both files still index fully. Not worth a remedy.
+  The 1 empty file is a service worker whose only top-level statement is
+  `self.addEventListener(...)` — genuinely declaration-free.
+- **Defect 1 — `.d.ts` files indexed as COMPLETELY EMPTY.** Everything in an
+  ambient declaration file sits under `ambient_declaration` (with a nested
+  `statement_block`), neither of which was a container, so `declare global
+  { … }` and `declare module "react" { … }` produced nothing. Those files are
+  precisely where a project states the contracts a cross-language index wants.
+  Both are containers now, `function_signature` (a bodyless function inside a
+  `declare module`) is a symbol classed func, and `custom.d.ts` went 0 → 10
+  symbols. statement_block is also a function BODY, but callables have
+  branch=false so the walk never enters one.
+- **Defect 2 — return segments kept their generics, and TS is the worst case
+  of it: 199 of 208 return nodes (96%) unusable**, versus 4.9% in Java.
+  `return#RestResponse` could not match
+  `RestResponse<DataSetResponse<AccountView>>`. `jvmTypeSegment` became
+  `typeSegment` and now serves java/kotlin/typescript. After: 213 of 214
+  clean. The one holdout is a TUPLE (`[number, number, number]`), left whole
+  on purpose for the same reason unions are — no single leaf name to answer
+  to, and inventing one would misstate the return.
+- **Defect 3 — `declare module "react"` was named `"react"`, quotes
+  included**, which would have to be quoted again in any selector. It now
+  goes through `importBase` like an import does, so an ambient module answers
+  to the same name an `import` of it would (`"*.svg"` → svg).
+- **A design question this corpus does NOT support acting on.** An arrow
+  component (`const Foo = () => …`) is classed const, not func, so it gets no
+  `.argument` / `.return` children — deliberate, but a real gap for React.
+  Measured here: only **9 of 331 (3%)** top-level declarators are callables.
+  This frontend uses `function Foo()` declarations (253 func symbols). Left
+  alone; revisit only against a codebase that actually writes arrow
+  components.
+- Spot-check: `AdminFeeStructureScreen.tsx` yields components as func, their
+  Props interfaces and fields, and named arguments; a destructured
+  `{ feeStructureId }: Props` parameter correctly renders as anonymous `[1]`.
+- Tests: `TestTypeSegmentStripsGenericsAndArrays` (now covering the nested
+  `RestResponse<DataSetResponse<…>>` case and asserting unions stay whole).
+- **Process note:** a mid-run measurement briefly showed returns collapsing
+  208 → 11 after the fix. That was a bug in the throwaway survey tool (a
+  `return nil` where `continue` was meant, exiting the file callback on the
+  first clean return), not a regression. Verified before reporting.
+
 ## Java verified on redline; JVM return-type segments fixed (DONE 2026-07-27)
 
 - [x] Ran the Java arm over `_legacy/redline`: **492 files, 43,128 symbols, 0

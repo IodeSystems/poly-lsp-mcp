@@ -348,8 +348,8 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 		alias := ""
 		if lang == "c" || lang == "cpp" {
 			seg, alias = cTypeSegment(full)
-		} else if lang == "kotlin" || lang == "java" {
-			seg, alias = jvmTypeSegment(full)
+		} else if lang == "kotlin" || lang == "java" || lang == "typescript" {
+			seg, alias = typeSegment(full)
 		} else if i := strings.LastIndex(full, "."); i >= 0 {
 			// A qualified type (io.Writer): the path segment must be
 			// dot-free, so the leaf is the last component and the full
@@ -1518,19 +1518,23 @@ func findDescendantOfType(n *sitter.Node, t string, depth int) *sitter.Node {
 	return nil
 }
 
-// jvmTypeSegment renders a Java or Kotlin type as a path segment plus
-// the full spelling as an alias. A `.return` node has to answer to a
-// bare NAME, so the type arguments, the array brackets, the package
-// qualifier and Kotlin's nullable `?` all come off: `List<Int>` → List,
-// `java.util.Map.Entry` → Entry, `Field<byte[]>` → Field, `Long[]` →
-// Long. The alias is "" when nothing was stripped.
+// typeSegment renders a Java, Kotlin or TypeScript type as a path
+// segment plus the full spelling as an alias. A `.return` node has to
+// answer to a bare NAME, so the type arguments, the array brackets, the
+// package qualifier and Kotlin's nullable `?` all come off:
+// `List<Int>` → List, `java.util.Map.Entry` → Entry, `Field<byte[]>` →
+// Field, `Long[]` → Long, `RestResponse<DataSetResponse<AccountView>>` →
+// RestResponse. The alias is "" when nothing was stripped.
 //
-// Measured on a 492-file Java tree before this covered Java: 531 of
-// 10,738 return nodes (4.9%) carried `<...>` or `[]` in their segment
-// with an EMPTY alias, so `return#Field` could not match a
-// `Field<String>` result and the full spelling was not recoverable
-// either.
-func jvmTypeSegment(full string) (seg, alias string) {
+// Measured before this existed: 531 of 10,738 Java return nodes (4.9%)
+// and 199 of 208 TypeScript ones (96%) carried `<...>` or `[]` in their
+// segment with an EMPTY alias, so `return#RestResponse` matched nothing
+// and the full spelling was not recoverable either.
+//
+// A UNION (`string | null`) is left whole on purpose: it has no single
+// leaf name to answer to, and inventing one would be a lie about which
+// type the callable returns.
+func typeSegment(full string) (seg, alias string) {
 	seg = full
 	if i := strings.Index(seg, "<"); i >= 0 {
 		seg = seg[:i]
@@ -1930,7 +1934,19 @@ func classifyGo(t, parent string) symRole {
 func classifyTS(t, parent string) symRole {
 	switch t {
 	case "export_statement", "class_body", "interface_body", "enum_body",
-		"lexical_declaration", "variable_declaration":
+		"lexical_declaration", "variable_declaration",
+		// `.d.ts` files wrap everything in ambient_declaration
+		// (`declare global { … }`, `declare module "react" { … }`),
+		// nesting a statement_block inside. Without descending, an
+		// ambient declaration file indexes as COMPLETELY EMPTY — which
+		// is what a module augmentation looks like today, and those
+		// files are precisely where a project states the contracts a
+		// cross-language index wants.
+		//
+		// statement_block is also a function BODY, but callables have
+		// branch=false so the walk never enters one; only these
+		// declaration-level blocks are ever reached.
+		"ambient_declaration", "statement_block":
 		return roleContainer
 	case "function_declaration", "generator_function_declaration",
 		"class_declaration", "abstract_class_declaration",
@@ -1938,7 +1954,9 @@ func classifyTS(t, parent string) symRole {
 		"enum_declaration", "method_definition",
 		"public_field_definition", "method_signature",
 		"property_signature", "variable_declarator",
-		"import_statement", "internal_module", "module":
+		"import_statement", "internal_module", "module",
+		// A bodyless function inside a `declare module` block.
+		"function_signature":
 		return roleSymbol
 	}
 	// Enum members appear as bare property_identifier / identifier under
@@ -2055,7 +2073,8 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 		}
 	case "typescript":
 		switch t {
-		case "function_declaration", "generator_function_declaration":
+		case "function_declaration", "generator_function_declaration",
+			"function_signature":
 			return "func", false
 		case "class_declaration", "abstract_class_declaration":
 			return "class", true
@@ -2139,6 +2158,15 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 			return importBase(path.Content(content)), path
 		}
 		return "", nil
+	}
+	// TS `declare module "react"` / `module "*.svg"`: the name node is a
+	// STRING, so the quotes would land in the path segment. Reuse the
+	// import spelling — the last meaningful path segment — so an ambient
+	// module answers to the same name an `import` of it would.
+	if lang == "typescript" && (t == "module" || t == "internal_module") {
+		if n := node.ChildByFieldName("name"); n != nil && n.Type() == "string" {
+			return importBase(n.Content(content)), n
+		}
 	}
 	// TS import: last segment of the source module string.
 	if lang == "typescript" && t == "import_statement" {
@@ -2227,7 +2255,7 @@ func parentOverride(lang string, node *sitter.Node, content []byte) string {
 		// An extension function is owned by its receiver type
 		// (String.shout), the Kotlin analogue of a Go receiver.
 		if recv, _, _ := kotlinFuncParts(node); recv != nil {
-			seg, _ := jvmTypeSegment(collapseType(nodeSlice(recv, content)))
+			seg, _ := typeSegment(collapseType(nodeSlice(recv, content)))
 			return seg
 		}
 	}

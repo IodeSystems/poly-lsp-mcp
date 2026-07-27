@@ -97,6 +97,13 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **Java verified on redline — 2026-07-27** → done.md. 492 files / 43,128
+symbols / 0 parse errors (the most robust grammar of the set — no ERROR
+remedy needed). But ALL 492 are jOOQ-generated; there is no hand-written Java
+corpus on this box, so idiomatic Java is untested. Fixed a real pre-existing
+defect found there: JVM return-type segments kept generics and `[]` with no
+alias, so `return#Field` missed `Field<String>` (4.9% of Java returns).
+
 ✅ **Kotlin verified on a live 504-file repo — 2026-07-27** → done.md. Found
 and fixed a real defect (a class could keep its name and lose every member to
 one unparsable statement in a method; ERROR is now a container, as in c/cpp).

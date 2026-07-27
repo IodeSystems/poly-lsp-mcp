@@ -3,6 +3,49 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Java verified on redline; JVM return-type segments fixed (DONE 2026-07-27)
+
+- [x] Ran the Java arm over `_legacy/redline`: **492 files, 43,128 symbols, 0
+  empty files, 0 files with ERROR nodes.** The Java grammar is by far the most
+  robust of the set — where Kotlin had 30 error files out of 504, Java had
+  none. So the ERROR-container remedy added for c/cpp and kotlin has NO
+  evidence of being needed here and was deliberately NOT added to
+  `classifyJava`.
+- **Caveat that matters more than the numbers: every one of those 492 files is
+  jOOQ-GENERATED** (`db/src/main/gen/...`). redline has ZERO hand-written
+  Java. So this measures the arm at scale on uniform machine output — table
+  classes, records, routines — and says little about idiomatic Java: no
+  lambdas or streams, no Spring annotation stacks, no anonymous inner classes,
+  no generics gymnastics. The whole box has only 17 non-generated `.java`
+  files, and even those are ANTLR-generated parsers plus small test DTOs.
+  There is effectively no hand-written Java corpus available here.
+- Complementary runs: `typescript-generator` test DTOs (4 files, 86 symbols)
+  and the ANTLR parser in `iodesystems/redline` (4 files, 568 symbols, 15
+  classes) — both 0 errors, and nested classes nest correctly
+  (`DataSetSearchParser.SearchContext.EOF` at path depth 3).
+- Disambiguation is legitimate: 1,929 `[n]` methods and 1,334 `[n]` ctors are
+  real Java overloads, with ZERO fully-anonymous nodes. (A first survey said
+  26% of symbols were disambiguated; that was a survey bug — it matched
+  brackets anywhere in the path, so `C.foo[1].x` counted as a disambiguated
+  ARGUMENT. Counting only the LAST segment gives 7.6%.)
+- **Found and fixed a real defect in the Java arm** (pre-existing, from the
+  original Java slice): return-type path segments kept their type arguments
+  and array brackets with an EMPTY alias. 531 of 10,738 return nodes (4.9%)
+  were affected — `return#Field` could not match a `Field<String>` result,
+  and the full spelling was not recoverable either. `kotlinTypeSegment`
+  became `jvmTypeSegment` and now serves both: `Field<String>` → Field,
+  `Long[]` → Long, `java.util.Map.Entry` → Entry, each with the full form as
+  the alias. Java is now 0% unusable segments, matching Kotlin.
+- Cross-language check on the same repo (the actual value proposition, on
+  live code): 22,975 names indexed across EIGHT languages
+  (java 160,512 sites / kotlin 99,276 / typescript 62,891 / json 75,536 /
+  sql 8,969 / markdown 8,115 / xml 845 / yaml 458). `Fundraiser` resolves in
+  java (131), kotlin (21), markdown (13) AND typescript (2) — one entity,
+  four languages, no configuration.
+- Tests: `TestJvmTypeSegmentStripsGenericsAndArrays`,
+  `TestFileSymbolsJavaGenericReturnAnswersToBareName` — both verified to FAIL
+  with the fix disabled, not assumed.
+
 ## Kotlin verified on a live 504-file repo; ERROR recovery added (DONE 2026-07-27)
 
 - [x] Asked to check Kotlin against a real ANDROID repo. There isn't one on

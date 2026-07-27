@@ -813,3 +813,45 @@ func TestClassifyKotlinWalksThroughParseErrors(t *testing.T) {
 	// when the broken region sits inside a method, that method's locals
 	// flatten into the same ERROR and surface as fields of the class.
 }
+
+func TestJvmTypeSegmentStripsGenericsAndArrays(t *testing.T) {
+	// A `.return` node answers to a bare NAME. Measured on a 492-file
+	// Java tree: 531 of 10,738 return nodes carried `<...>` or `[]` in
+	// their path segment with an EMPTY alias, so `return#Field` could
+	// not match a `Field<String>` result.
+	cases := []struct{ in, seg, alias string }{
+		{"String", "String", ""},
+		{"Field<String>", "Field", "Field<String>"},
+		{"Field<byte[]>", "Field", "Field<byte[]>"},
+		{"Long[]", "Long", "Long[]"},
+		{"String[][]", "String", "String[][]"},
+		{"java.util.Map.Entry", "Entry", "java.util.Map.Entry"},
+		{"kotlin.text.Regex?", "Regex", "kotlin.text.Regex?"},
+		{"List<Map<String, Int>>", "List", "List<Map<String, Int>>"},
+	}
+	for _, c := range cases {
+		seg, alias := jvmTypeSegment(c.in)
+		if seg != c.seg || alias != c.alias {
+			t.Errorf("jvmTypeSegment(%q) = (%q, %q), want (%q, %q)", c.in, seg, alias, c.seg, c.alias)
+		}
+	}
+}
+
+func TestFileSymbolsJavaGenericReturnAnswersToBareName(t *testing.T) {
+	src := []byte(`class Repo {
+    Field<String> nameField() { return null; }
+    Long[] ids() { return null; }
+}
+`)
+	syms, err := FileSymbols("java", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := symByPath(syms, "Repo.nameField.Field")
+	if got == nil || got.Alias != "Field<String>" {
+		t.Errorf("generic return = %+v, want path Repo.nameField.Field aliased Field<String>; have %+v", got, syms)
+	}
+	if got := symByPath(syms, "Repo.ids.Long"); got == nil || got.Alias != "Long[]" {
+		t.Errorf("array return = %+v, want path Repo.ids.Long aliased Long[]", got)
+	}
+}

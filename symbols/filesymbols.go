@@ -348,8 +348,8 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 		alias := ""
 		if lang == "c" || lang == "cpp" {
 			seg, alias = cTypeSegment(full)
-		} else if lang == "kotlin" {
-			seg, alias = kotlinTypeSegment(full)
+		} else if lang == "kotlin" || lang == "java" {
+			seg, alias = jvmTypeSegment(full)
 		} else if i := strings.LastIndex(full, "."); i >= 0 {
 			// A qualified type (io.Writer): the path segment must be
 			// dot-free, so the leaf is the last component and the full
@@ -1518,18 +1518,32 @@ func findDescendantOfType(n *sitter.Node, t string, depth int) *sitter.Node {
 	return nil
 }
 
-// kotlinTypeSegment renders a Kotlin type as a path segment plus the
-// full spelling as an alias: generics and the package qualifier come off
-// (`List<Int>` → List, `kotlin.text.Regex` → Regex).
-func kotlinTypeSegment(full string) (seg, alias string) {
+// jvmTypeSegment renders a Java or Kotlin type as a path segment plus
+// the full spelling as an alias. A `.return` node has to answer to a
+// bare NAME, so the type arguments, the array brackets, the package
+// qualifier and Kotlin's nullable `?` all come off: `List<Int>` → List,
+// `java.util.Map.Entry` → Entry, `Field<byte[]>` → Field, `Long[]` →
+// Long. The alias is "" when nothing was stripped.
+//
+// Measured on a 492-file Java tree before this covered Java: 531 of
+// 10,738 return nodes (4.9%) carried `<...>` or `[]` in their segment
+// with an EMPTY alias, so `return#Field` could not match a
+// `Field<String>` result and the full spelling was not recoverable
+// either.
+func jvmTypeSegment(full string) (seg, alias string) {
 	seg = full
 	if i := strings.Index(seg, "<"); i >= 0 {
 		seg = seg[:i]
 	}
+	seg = strings.TrimSpace(seg)
+	seg = strings.TrimSuffix(seg, "?")
+	for strings.HasSuffix(seg, "[]") {
+		seg = strings.TrimSuffix(seg, "[]")
+	}
+	seg = strings.TrimSpace(seg)
 	if i := strings.LastIndex(seg, "."); i >= 0 {
 		seg = seg[i+1:]
 	}
-	seg = strings.TrimSpace(strings.TrimSuffix(seg, "?"))
 	if seg != full {
 		alias = full
 	}
@@ -2213,7 +2227,7 @@ func parentOverride(lang string, node *sitter.Node, content []byte) string {
 		// An extension function is owned by its receiver type
 		// (String.shout), the Kotlin analogue of a Go receiver.
 		if recv, _, _ := kotlinFuncParts(node); recv != nil {
-			seg, _ := kotlinTypeSegment(collapseType(nodeSlice(recv, content)))
+			seg, _ := jvmTypeSegment(collapseType(nodeSlice(recv, content)))
 			return seg
 		}
 	}

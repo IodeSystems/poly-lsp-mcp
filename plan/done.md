@@ -3,6 +3,58 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Kotlin verified on a live 504-file repo; ERROR recovery added (DONE 2026-07-27)
+
+- [x] Asked to check Kotlin against a real ANDROID repo. There isn't one on
+  this box: the only Android project is `llama.cpp/examples/llama.android`
+  (15 Kotlin files), and `_legacy/redline` — the suggested candidate — is NOT
+  Android, it is a `kotlin.jvm` server app (Playwright, Flyway, Spring). It
+  IS live though (HEAD 2026-07-10, Kotlin edited that day, despite the
+  `_legacy/` path), and at 504 Kotlin files it is by far the best Kotlin
+  corpus available, so both were run.
+- **Found a real defect, now fixed: a class could keep its name and lose
+  EVERY member.** One unparsable statement deep inside a method re-labels the
+  whole enclosing `class_body` as ERROR. `E2ETestPlatform.kt` (134-line class)
+  yielded 22 symbols — the imports and the bare class node — while the ERROR
+  node still held all 4 properties, the companion object and all 4 methods as
+  recovered children. Same shape as the c/cpp case, same remedy: `ERROR` is
+  now a container in `classifyKotlin`, and the members reattach to their
+  CLASS (not to file scope, because the ERROR sits where the class_body was).
+  That file: 22 → 44 symbols.
+- **Corpus-wide the fix is small: +23 symbols over 504 files.** Only that one
+  file had the catastrophic form; the other 29 files with ERROR nodes have
+  LOCALIZED damage and were already yielding their content (Haproxy.kt 15
+  symbols, Infrastructure.kt 45). Their triggers are Kotlin 2.x `$$"""`
+  multi-dollar strings and a `() ->` position the grammar mismodels. So the
+  value is not volume, it is removing a rare-but-total per-file failure.
+- **Known cost, accepted:** when the broken region is inside a method, that
+  method's LOCALS flatten into the same ERROR and surface as fields of the
+  class. A few invented fields beat a class with no members — a missing
+  method is a hard failure for a code tool, a spurious field is one the
+  reader can check.
+- **The regression test asserts the ROUTING decision, not an end-to-end
+  recovery** (`TestClassifyKotlinWalksThroughParseErrors`), and says so. The
+  failure does not reduce to a minimal fixture: every construct extracted
+  from the real file — the chained `apply {}` with an indexed assignment, the
+  `while` + elvis-`break` + `else if`, labeled returns, anonymous object
+  expressions, even the whole `startUiServer` body verbatim — parses cleanly
+  on its own. The trigger needs whole-file context, and that file is the
+  user's private source, so it cannot be checked in. A first attempt at an
+  end-to-end test was a FALSE GREEN (passed with the fix disabled) and was
+  replaced.
+- Live numbers, redline (504 `.kt`/`.kts`): 13,608 symbols, 0 files lost to
+  parse failure, 23 files with no symbols — ALL of them `.kts` build scripts,
+  verified none is a `.kt`. Distribution: 3,406 import / 2,530 field / 2,033
+  argument / 1,797 method / 1,090 return / 839 annotation / 569 class / 468
+  module / 334 const / 324 struct (data classes) / 101 interface / 65 enum /
+  42 func / 2 ctor. Only 2 constructors in 504 files is right for Kotlin:
+  primary-constructor params are indexed as fields, secondary constructors
+  are rare.
+- Live numbers, llama.android (15 Kotlin files, the real Android app): 526
+  symbols, 0 ERROR files, 4 empty (all `.kts`). `MainActivity` extracts
+  cleanly — every view field, the engine/job/state fields, and every method
+  with its arguments.
+
 ## Groovy via tree-sitter (DONE 2026-07-26)
 
 > **Read this first: Groovy is SPECULATIVE coverage, not a measured need.**

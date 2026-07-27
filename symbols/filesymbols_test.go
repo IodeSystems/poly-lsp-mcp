@@ -792,3 +792,24 @@ func TestFileSymbolsGroovyDeclinesDSLJuxtaposition(t *testing.T) {
 		t.Errorf("buildVersion = %+v, want a var; have %+v", got, syms)
 	}
 }
+
+func TestClassifyKotlinWalksThroughParseErrors(t *testing.T) {
+	// A single unparsable statement deep inside a method re-labels the
+	// whole enclosing class_body as ERROR, and the class then keeps its
+	// name and loses EVERY member — while the ERROR node still holds all
+	// of them as recovered children. Walking through ERROR reattaches
+	// them.
+	//
+	// This asserts the routing decision, not an end-to-end recovery: the
+	// failure was found on a live 504-file Kotlin repo
+	// (E2ETestPlatform.kt, 22 -> 44 symbols with this in place) and does
+	// NOT reduce to a minimal fixture — every candidate construct
+	// extracted from that file parses cleanly on its own, so the trigger
+	// needs whole-file context that cannot be checked in here.
+	if got := classifyKotlin("ERROR", "class_declaration"); got != roleContainer {
+		t.Errorf("classifyKotlin(ERROR) = %v, want roleContainer", got)
+	}
+	// The cost of that choice, stated so it is not mistaken for a bug:
+	// when the broken region sits inside a method, that method's locals
+	// flatten into the same ERROR and surface as fields of the class.
+}

@@ -957,7 +957,24 @@ func classifyGroovy(t, parent string) symRole {
 func classifyKotlin(t, parent string) symRole {
 	switch t {
 	case "class_body", "enum_class_body", "companion_object",
-		"import_list", "primary_constructor":
+		"import_list", "primary_constructor",
+		// ERROR is walked through, for the same reason c/cpp does it: the
+		// parser recovers the DECLARATIONS and only mislabels the node
+		// that holds them. One unparsable statement deep inside a method
+		// re-labels the whole enclosing class_body as ERROR, so a class
+		// keeps its name and loses every member. Measured on a live
+		// 504-file Kotlin repo: 30 files parse with an ERROR somewhere,
+		// and in the worst case a 134-line class body was reduced to
+		// nothing while the ERROR still held all 4 properties, the
+		// companion object and all 4 methods as children.
+		//
+		// The cost, accepted knowingly: when the broken region is inside
+		// a method, that method's LOCALS flatten into the same ERROR and
+		// surface as fields of the class. A few invented fields beat a
+		// class with no members at all — a missing method is a hard
+		// failure for a code tool, a spurious field is one the reader
+		// can check.
+		"ERROR":
 		return roleContainer
 	case "package_header", "import_header",
 		"class_declaration", "object_declaration", "type_alias",

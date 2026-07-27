@@ -97,6 +97,12 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **Kotlin verified on a live 504-file repo — 2026-07-27** → done.md. Found
+and fixed a real defect (a class could keep its name and lose every member to
+one unparsable statement in a method; ERROR is now a container, as in c/cpp).
+No Android Kotlin repo exists on this box beyond llama.cpp's 15-file example
+— `_legacy/redline` is `kotlin.jvm`, not Android, but it is live and large.
+
 ✅ **Groovy — shipped 2026-07-26, SPECULATIVE** → done.md ("Groovy via
 tree-sitter"), whose header note explains why: this workspace has NO Groovy.
 Zero `.groovy`, zero `.gradle` (every Gradle project here is Kotlin DSL,

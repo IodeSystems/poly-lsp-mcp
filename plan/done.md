@@ -3,6 +3,39 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Android bindings read Kotlin literals too (DONE 2026-07-26)
+
+- [x] `ApplyAndroid` step 2 now dispatches per language
+  (`codeStringLiteralSites`): `.java` → the existing tree-sitter query,
+  `.kt`/`.kts` → `kotlinStringLiteralSites`. Steps 1 and 3 (the XML want-set,
+  the both-sides gate, the distinctiveness heuristic) are untouched and shared,
+  so Kotlin inherits the thresholds already measured on termux-app.
+- **Interpolation is the Kotlin-specific hazard, and the reason this is not a
+  one-line change.** Kotlin models `"prefix_only$suffix"` as a string_literal
+  whose `string_content` children are FRAGMENTS. Reading one would bind the
+  resource `prefix_only` to a literal whose runtime value never equals it — a
+  cross-language identity that is simply false, which is the worst thing the
+  declared tier can emit. So only a literal whose SOLE child is one
+  string_content counts. That also drops the empty literal (no children), and
+  raw `"""x"""` strings pass with a correct column because the position comes
+  from the content node rather than the quote.
+- Measured on llama.cpp/examples/llama.android (a real Kotlin Android app):
+  31 XML resource names × 132 Kotlin literals → **0 bindings, correctly**.
+  That app addresses every resource through generated `R.*` symbols
+  (`R.layout.item_message_user`, `R.id.msg_content`) and has no preference
+  screen, so it has no string-keyed contract to bind. This is the
+  false-POSITIVE measurement the icebox entry asked for; the positive path is
+  covered by fixtures, since no local Kotlin app uses string-keyed
+  preferences (termux-app, the Java measurement, is no longer on disk).
+- The `R.id.x` ↔ `@+id/x` pairing needs no binding for Kotlin either — it
+  already resolves through the LEXICAL tier, verified live on that app
+  (`msg_content`: 1 kotlin site + 2 xml sites, conf=lexical).
+- Tests: `TestApplyAndroidBindsKotlinLiterals`,
+  `TestApplyAndroidIgnoresUnpairedKotlinLiterals`,
+  `TestApplyAndroidSkipsInterpolatedKotlinLiterals`,
+  `TestKotlinStringLiteralSitesShapes`. The Java assertions were extended to
+  fail if adding Kotlin ever drops a side.
+
 ## Kotlin via tree-sitter (DONE 2026-07-26)
 
 - [x] `config.Default()` gains `kotlin` (`.kt`, `.kts`), tree-sitter only —

@@ -9,7 +9,7 @@ import (
 )
 
 // writeFixture lays out a miniature Android project: a preference screen, a
-// values file, and the two Java files that address them by string.
+// values file, and the Java and Kotlin sources that address them by string.
 func writeFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -30,6 +30,21 @@ func writeFixture(t *testing.T) string {
 		"app/src/main/res/layout/main.xml": `<LinearLayout>
     <Button android:id="@+id/scroll_settings_button" />
 </LinearLayout>
+`,
+		"app/src/main/res/values/strings.xml": `<resources>
+    <string name="prefix_only">Prefix</string>
+</resources>
+`,
+		"app/SettingsFragment.kt": `package com.example
+
+class SettingsFragment {
+    companion object {
+        const val KEY_SCROLL = "scroll_behaviour"
+        const val UNRELATED_KT = "some-random-kotlin-literal"
+    }
+
+    fun tag(suffix: String) = "prefix_only$suffix"
+}
 `,
 		"shared/Constants.java": `package com.example;
 
@@ -135,5 +150,83 @@ func TestAndroidBindableValuesFiltersNoise(t *testing.T) {
 	got := androidBindableValues("com.example.app.SettingsFragment")
 	if len(got) != 2 || got[0] != "com.example.app.SettingsFragment" || got[1] != "SettingsFragment" {
 		t.Errorf("fragment value = %v, want [full, leaf]", got)
+	}
+}
+
+func TestApplyAndroidBindsKotlinLiterals(t *testing.T) {
+	root := writeFixture(t)
+	idx := symbols.NewIndex()
+	r := NewResolver(root)
+	r.ApplyAndroid(idx)
+
+	// New Android code is Kotlin; the preference key is addressed from a
+	// Kotlin constant exactly the way it is from a Java one.
+	sites := idx.Lookup("scroll_behaviour")
+	byLang := languagesOf(sites)
+	if byLang["kotlin"] < 1 {
+		t.Errorf("scroll_behaviour: no kotlin site; have %+v", sites)
+	}
+	if byLang["xml"] < 1 || byLang["java"] < 2 {
+		t.Errorf("scroll_behaviour: adding Kotlin dropped the existing sides; have %+v", sites)
+	}
+	for _, s := range sites {
+		if s.Confidence != symbols.ConfidenceDeclared {
+			t.Errorf("scroll_behaviour site %+v is not declared", s)
+		}
+	}
+}
+
+func TestApplyAndroidIgnoresUnpairedKotlinLiterals(t *testing.T) {
+	root := writeFixture(t)
+	idx := symbols.NewIndex()
+	r := NewResolver(root)
+	r.ApplyAndroid(idx)
+
+	if sites := idx.Lookup("some-random-kotlin-literal"); len(sites) != 0 {
+		t.Errorf("unpaired Kotlin literal was bound: %+v", sites)
+	}
+}
+
+func TestApplyAndroidSkipsInterpolatedKotlinLiterals(t *testing.T) {
+	root := writeFixture(t)
+	idx := symbols.NewIndex()
+	r := NewResolver(root)
+	r.ApplyAndroid(idx)
+
+	// `"prefix_only$suffix"` contains the resource name as a string_content
+	// FRAGMENT. Its runtime value never equals `prefix_only`, so binding it
+	// would assert a cross-language identity that does not hold.
+	if got := languagesOf(idx.Lookup("prefix_only"))["kotlin"]; got != 0 {
+		t.Errorf("interpolated Kotlin literal was bound as a resource name, got %d site(s)", got)
+	}
+}
+
+func TestKotlinStringLiteralSitesShapes(t *testing.T) {
+	src := []byte(`val plain = "scroll_behaviour"
+val empty = ""
+val interp = "prefix_$x"
+val braced = "a${x}b"
+val raw = """raw_name"""
+`)
+	got := map[string]androidHit{}
+	for _, h := range kotlinStringLiteralSites(src) {
+		got[h.value] = h
+	}
+	if _, ok := got["scroll_behaviour"]; !ok {
+		t.Errorf("plain literal missed; have %v", got)
+	}
+	// A raw string is a resource name like any other, and its column comes
+	// from the content node so the triple quote does not skew it.
+	raw, ok := got["raw_name"]
+	if !ok {
+		t.Fatalf("raw literal missed; have %v", got)
+	}
+	if raw.line != 5 || raw.col != 14 {
+		t.Errorf("raw literal at %d:%d, want 5:14", raw.line, raw.col)
+	}
+	for _, unwanted := range []string{"", "prefix_", "a", "b"} {
+		if _, bad := got[unwanted]; bad {
+			t.Errorf("interpolation fragment %q was returned as a literal", unwanted)
+		}
 	}
 }

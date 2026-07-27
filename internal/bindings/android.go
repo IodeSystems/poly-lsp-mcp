@@ -9,12 +9,14 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/java"
+	"github.com/smacker/go-tree-sitter/kotlin"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
-// ApplyAndroid binds Android resource names to the Java sites that address
-// them. On Android the cross-language contract is a STRING, not a symbol:
+// ApplyAndroid binds Android resource names to the Java and Kotlin sites that
+// address them. On Android the cross-language contract is a STRING, not a
+// symbol:
 //
 //	TermuxPreferenceConstants.java     KEY_SCROLL_BEHAVIOUR = "scroll_behaviour"
 //	termux_terminal_io_preferences.xml app:key="scroll_behaviour"
@@ -25,12 +27,13 @@ import (
 // ships, and the setting silently never applies — exactly the class of bug the
 // declared tier exists to make visible.
 //
-// The Java side is invisible to the normal index by design: the tree-sitter
+// The code side is invisible to the normal index by design: the tree-sitter
 // extractor drops identifier-shaped tokens inside string literals, which is
-// right for Go and wrong for Android. Rather than widening the Java query to
-// capture every literal (which would flood the index with "UTF-8" and ""), this
-// binds only literals whose value is a resource name the XML side already
-// declares — the same want-set gate ApplyDerived uses for gat operationIds.
+// right for Go and wrong for Android. Rather than widening the Java/Kotlin
+// query to capture every literal (which would flood the index with "UTF-8" and
+// ""), this binds only literals whose value is a resource name the XML side
+// already declares — the same want-set gate ApplyDerived uses for gat
+// operationIds.
 //
 // Returns the resource roots that were declared, for the caller's log.
 func (r *Resolver) ApplyAndroid(idx *symbols.Index) []DerivRoot {
@@ -51,33 +54,34 @@ func (r *Resolver) ApplyAndroid(idx *symbols.Index) []DerivRoot {
 		return nil
 	}
 
-	// 2. Java string literals naming one of them.
-	javaSites := map[string][]symbols.Site{}
+	// 2. Java / Kotlin string literals naming one of them.
+	codeSites := map[string][]symbols.Site{}
 	walkFiles(r.root, func(path string, data []byte) {
-		if !hasSuffix(path, ".java") {
+		lang, hits := codeStringLiteralSites(path, data)
+		if lang == "" {
 			return
 		}
-		for _, h := range javaStringLiteralSites(data) {
+		for _, h := range hits {
 			if _, ok := xmlSites[h.value]; !ok {
 				continue
 			}
-			javaSites[h.value] = append(javaSites[h.value], symbols.Site{
+			codeSites[h.value] = append(codeSites[h.value], symbols.Site{
 				File: path, Line: h.line, Col: h.col,
-				Language: "java", Confidence: symbols.ConfidenceDeclared,
+				Language: lang, Confidence: symbols.ConfidenceDeclared,
 			})
 		}
 	})
 
 	// 3. Only a name that appears on BOTH sides is a cross-language binding.
-	// A resource nothing in Java addresses is just a resource, and the lexical
-	// tier already has it — declaring it here would add tens of thousands of
-	// sites that carry no cross-language information.
+	// A resource no code addresses is just a resource, and the lexical tier
+	// already has it — declaring it here would add tens of thousands of sites
+	// that carry no cross-language information.
 	var roots []DerivRoot
-	for name, jsites := range javaSites {
+	for name, csites := range codeSites {
 		for _, s := range xmlSites[name] {
 			idx.InsertDeclared(name, s.File, s.Language, s.Line, s.Col)
 		}
-		for _, s := range jsites {
+		for _, s := range csites {
 			idx.InsertDeclared(name, s.File, s.Language, s.Line, s.Col)
 		}
 		roots = append(roots, DerivRoot{
@@ -185,6 +189,19 @@ func isNumeric(s string) bool {
 	return true
 }
 
+// codeStringLiteralSites dispatches to the per-language literal extractor for
+// a source file and returns the language tag to record with each site. An
+// unhandled extension returns "" and is skipped.
+func codeStringLiteralSites(path string, data []byte) (string, []androidHit) {
+	switch {
+	case hasSuffix(path, ".java"):
+		return "java", javaStringLiteralSites(data)
+	case hasSuffix(path, ".kt", ".kts"):
+		return "kotlin", kotlinStringLiteralSites(data)
+	}
+	return "", nil
+}
+
 var javaStringLiteralQuery = mustQuery(`(string_literal) @s`, java.GetLanguage())
 
 // javaStringLiteralSites returns every string literal in a Java file with the
@@ -218,6 +235,61 @@ func javaStringLiteralSites(content []byte) []androidHit {
 				value: value,
 				line:  int(pt.Row) + 1,
 				col:   int(pt.Column) + 2, // skip the opening quote
+			})
+		}
+	}
+	return out
+}
+
+var kotlinStringLiteralQuery = mustQuery(`(string_literal) @s`, kotlin.GetLanguage())
+
+// kotlinStringLiteralSites returns every NON-INTERPOLATED Kotlin string
+// literal with the position of its first character.
+//
+// The interpolation check is what makes this safe. Kotlin models `"a${x}b"` as
+// a string_literal with several children, of which the string_content pieces
+// are only FRAGMENTS: reading one would bind the resource `prefix_only` to
+// `"prefix_only$suffix"`, a value that never equals it at runtime. So only a
+// literal whose sole child is one string_content counts, which also drops the
+// empty literal (no children at all). Raw `"""x"""` strings pass and report
+// the right column, because the position comes from the content node rather
+// than from the quote.
+func kotlinStringLiteralSites(content []byte) []androidHit {
+	p := sitter.NewParser()
+	p.SetLanguage(kotlin.GetLanguage())
+	tree, err := p.ParseCtx(context.Background(), nil, content)
+	if err != nil || tree == nil {
+		return nil
+	}
+	defer tree.Close()
+
+	cur := sitter.NewQueryCursor()
+	defer cur.Close()
+	cur.Exec(kotlinStringLiteralQuery, tree.RootNode())
+
+	var out []androidHit
+	for {
+		m, ok := cur.NextMatch()
+		if !ok {
+			break
+		}
+		for _, c := range m.Captures {
+			if c.Node.NamedChildCount() != 1 {
+				continue
+			}
+			body := c.Node.NamedChild(0)
+			if body.Type() != "string_content" {
+				continue
+			}
+			value := body.Content(content)
+			if value == "" {
+				continue
+			}
+			pt := body.StartPoint()
+			out = append(out, androidHit{
+				value: value,
+				line:  int(pt.Row) + 1,
+				col:   int(pt.Column) + 1,
 			})
 		}
 	}

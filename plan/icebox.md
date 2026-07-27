@@ -5,26 +5,6 @@ graph-selector design record this used to hold.
 
 ---
 
-## Android bindings for Kotlin sources (opt-in)
-
-`internal/bindings/android.go` pairs XML resource names with the Java STRING
-LITERALS that address them (a resource `@+id/x` ↔ `R.id.x`, a preference
-`app:key="x"` ↔ the Java constant holding `"x"`). It reads Java literals only.
-Now that Kotlin is indexed, a Kotlin Android app gets the lexical + symbol
-tiers but NOT that Tier-2 binding, so the string-keyed half of its
-cross-language graph stays invisible — and new Android code is mostly Kotlin.
-
-The work is small and shaped exactly like the Java arm: a Kotlin
-string-literal query (`(string_literal (string_content) @v)`), `.kt`/`.kts`
-added to the collection walk, same want-set gate and same distinctiveness
-heuristic (bind read-by-code attributes unconditionally; require a chosen-
-looking name for generic `name="x"` / `@res/x`). Deferred only because it
-touches the bindings subsystem, not the language registry, and wants its own
-measurement on a real Kotlin Android repo before the noise thresholds are
-trusted.
-
----
-
 ## Worktree COW index overlay (daemon step 6) — MEASURED, not worth it now
 
 Deferred by MEASUREMENT (2026-07-25), not by decision-avoidance. Step 6's

@@ -859,3 +859,65 @@ func TestFileSymbolsJavaGenericReturnAnswersToBareName(t *testing.T) {
 		t.Errorf("array return = %+v, want path Repo.ids.Long aliased Long[]", got)
 	}
 }
+
+func TestFileSymbolsPythonIndexesBindings(t *testing.T) {
+	// Python declares its module constants and its dataclass/pydantic
+	// model fields as plain assignments. Measured on a live 194-file
+	// tree: 891 such declarations were invisible while every other
+	// language arm indexed its consts and fields.
+	src := []byte(`import os
+
+MAX_SIZE = 128
+logger = get_logger(__name__)
+a, b = compute()
+
+class Settings(BaseSettings):
+    api_title: str = "TTS API"
+    port: int = 8880
+
+    def reload(self) -> None:
+        scratch = 1
+        self.port = 0
+`)
+	syms, err := FileSymbols("python", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"MAX_SIZE":           "var",
+		"logger":             "var",
+		"Settings":           "class",
+		"Settings.api_title": "field",
+		"Settings.port":      "field",
+		"Settings.reload":    "method",
+	}
+	for sym, class := range cases {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != class {
+			t.Errorf("%q class = %q, want %q", sym, got.Class, class)
+		}
+	}
+	// No `const` class: Python has no const keyword, and UPPER_CASE is a
+	// convention the parser cannot verify.
+	if got := symByPath(syms, "MAX_SIZE"); got != nil && got.Class == "const" {
+		t.Errorf("MAX_SIZE was guessed to be a const from its casing")
+	}
+	// Tuple unpacking binds no single name — DECLINED rather than given
+	// a made-up segment.
+	for _, s := range syms {
+		if strings.HasPrefix(s.Sym, "a,") || s.Sym == "a" || s.Sym == "b" {
+			t.Errorf("tuple unpacking emitted a symbol: %+v", s)
+		}
+	}
+	// A function body is not walked, so its locals and its self-attribute
+	// writes must not surface as module vars or class fields.
+	for _, bad := range []string{"scratch", "Settings.reload.scratch", "Settings.port[2]"} {
+		if got := symByPath(syms, bad); got != nil {
+			t.Errorf("function-body statement leaked as a declaration: %+v", got)
+		}
+	}
+}

@@ -1976,6 +1976,14 @@ func classifyPython(t, parent string) symRole {
 			return roleContainer
 		}
 		return roleSkip
+	case "expression_statement":
+		// The wrapper around a module-level binding or a class
+		// attribute. Reached only at module scope and inside a class
+		// body — a function's `block` is not a container, so statements
+		// in a function body are never walked.
+		return roleContainer
+	case "assignment":
+		return roleSymbol
 	case "function_definition", "class_definition",
 		"import_statement", "import_from_statement":
 		return roleSymbol
@@ -2109,6 +2117,27 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 		}
 	case "python":
 		switch t {
+		case "assignment":
+			// Python declares its module constants and its
+			// dataclass/pydantic model fields as plain assignments.
+			// Measured on a live 194-file tree: 891 such declarations
+			// (343 module-level, 548 class attributes, 541 of them
+			// type-annotated) were invisible, while every other language
+			// arm indexes its consts and fields.
+			//
+			// A binding whose left side is not a plain name — tuple
+			// unpacking `a, b = f()`, an attribute or subscript target —
+			// is DECLINED rather than given a made-up segment.
+			left := node.ChildByFieldName("left")
+			if left == nil || left.Type() != "identifier" {
+				return "", false
+			}
+			if parentClass == "class" {
+				return "field", false
+			}
+			// No `const` class: Python has no const keyword, and
+			// UPPER_CASE is a convention the parser cannot verify.
+			return "var", false
 		case "class_definition":
 			return "class", true
 		case "import_statement", "import_from_statement":
@@ -2187,6 +2216,13 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 		if name, node, ok := groovyName(node, content); ok {
 			return name, node
 		}
+	}
+	// Python assignment: the bound NAME is the `left` field.
+	if lang == "python" && t == "assignment" {
+		if n := node.ChildByFieldName("left"); n != nil {
+			return n.Content(content), n
+		}
+		return "", nil
 	}
 	// Kotlin's grammar has no field names at all, so every name is
 	// resolved positionally before the generic lookups.

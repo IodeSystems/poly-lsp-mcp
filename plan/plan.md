@@ -97,6 +97,11 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **Python verified — 2026-07-27** → done.md. Grammar as robust as Java's (0
+errors over 392 files), but the arm indexed NO bindings: 891 declarations
+were invisible on the live corpus, 541 of them annotated dataclass/pydantic
+fields. Module-level assignments and class attributes are now symbols.
+
 ✅ **TypeScript verified on the redline frontend — 2026-07-27** → done.md.
 212 files / 5,797 symbols on live hand-written React. Fixed three real
 defects it exposed: `.d.ts` ambient files indexed as EMPTY, return segments

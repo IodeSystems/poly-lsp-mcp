@@ -3,6 +3,42 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Python verified; module bindings + class attributes now indexed (DONE 2026-07-27)
+
+- [x] redline's `dev/cli` is KOTLIN, not Python — the whole repo has 2 `.py`
+  files. The real Python on this box is `ml-kit/local` (194 files, HEAD
+  2026-07-26, the user's live work) and `llama.cpp` (198 files, third-party
+  upstream). Both were run.
+- **The Python grammar is as robust as Java's: 0 empty files and 0 files with
+  ERROR nodes across 392 files in the two corpora.** So `classifyPython` does
+  NOT get the ERROR-container remedy that c/cpp and kotlin needed.
+- **Defect found: Python indexed no BINDINGS at all.** The arm handled only
+  functions, classes and imports — no `field`, no `var`, no `const` appeared
+  anywhere in the class distribution, while every other language arm indexes
+  its consts and fields. Measured on the live corpus: **891 declarations
+  invisible — 343 module-level assignments and 548 class attributes, 541 of
+  them type-ANNOTATED**, i.e. dataclass and pydantic model fields, which are
+  exactly the declarations a cross-language index exists to connect to JSON
+  and API schemas.
+- Fix: `expression_statement` is a container and `assignment` a symbol.
+  Reached only at module scope and inside a class body — a function's `block`
+  is not a container, so statements in a function body are still never
+  walked, and neither locals nor `self.x = …` writes leak in (asserted in the
+  test). After: ml-kit/local 4,197 → 5,088 symbols, exactly the 891 predicted
+  (+548 field, +343 var); llama.cpp shows 1,800 field + 601 var.
+- **Two deliberate restraints:**
+  - No `const` class. Python has no const keyword, and UPPER_CASE is a
+    convention the parser cannot verify — the same call the C arm made about
+    `const` qualifiers.
+  - A binding whose left side is not a plain name — tuple unpacking
+    `a, b = f()`, an attribute or subscript target — is DECLINED via the
+    empty-class mechanism rather than given a made-up segment.
+- Spot-check: `Kokoro-FastAPI/api/src/core/config.py` yields `Settings` with
+  every pydantic field (`Settings.api_title`, `Settings.port`, …) where it
+  previously yielded the class alone.
+- Tests: `TestFileSymbolsPythonIndexesBindings`, verified to FAIL with the
+  fix disabled, and asserting the restraints as well as the additions.
+
 ## TypeScript verified on the redline frontend (DONE 2026-07-27)
 
 - [x] Ran the TypeScript arm over `_legacy/redline/web` — a live React/Vite

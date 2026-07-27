@@ -239,3 +239,48 @@ func TestLookupExistingEvictsMissingFiles(t *testing.T) {
 		t.Errorf("post-evict Lookup = %+v, want one site in %s", got, live)
 	}
 }
+
+func hitNames(hits []Hit) map[string]bool {
+	out := make(map[string]bool, len(hits))
+	for _, h := range hits {
+		out[h.Name] = true
+	}
+	return out
+}
+
+func TestCExtractorSkipsCommentsStringsAndKeywords(t *testing.T) {
+	src := []byte(`#include <stdio.h>
+// mentions ghost_in_comment
+static const char *label = "ghost_in_string";
+int add(int lhs, int rhs) { return lhs + rhs; }
+`)
+	names := hitNames(DefaultExtractor("c").Extract(src))
+	for _, want := range []string{"add", "lhs", "rhs", "label"} {
+		if !names[want] {
+			t.Errorf("missing %q; have %v", want, names)
+		}
+	}
+	// The precision win over the lexical tier: identifier-shaped tokens
+	// in comments and string literals are not names.
+	for _, unwanted := range []string{"ghost_in_comment", "ghost_in_string", "NULL"} {
+		if names[unwanted] {
+			t.Errorf("%q leaked into the index", unwanted)
+		}
+	}
+}
+
+func TestCppExtractorIndexesNamespaceScope(t *testing.T) {
+	src := []byte(`namespace app {
+class Widget { int width; };
+}
+int app::Widget::area() const { return width; }
+`)
+	names := hitNames(DefaultExtractor("cpp").Extract(src))
+	// Both halves of a qualified name are indexed separately, which is
+	// what makes Widget findable from an out-of-line definition.
+	for _, want := range []string{"app", "Widget", "area", "width"} {
+		if !names[want] {
+			t.Errorf("missing %q; have %v", want, names)
+		}
+	}
+}

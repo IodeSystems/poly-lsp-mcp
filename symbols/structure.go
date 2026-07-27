@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/c"
+	"github.com/smacker/go-tree-sitter/cpp"
 	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/python"
@@ -28,6 +30,10 @@ func LanguageByName(name string) *sitter.Language {
 		return sql.GetLanguage()
 	case "java":
 		return java.GetLanguage()
+	case "c":
+		return c.GetLanguage()
+	case "cpp":
+		return cpp.GetLanguage()
 	}
 	return nil
 }

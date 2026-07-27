@@ -325,3 +325,216 @@ func TestFileSymbolsJavaArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestFileSymbolsCNestingAndClasses(t *testing.T) {
+	src := []byte(`#include <stdio.h>
+#include "app/widget.h"
+
+#define MAX_SIZE 128
+#define SQUARE(x) ((x) * (x))
+
+typedef struct Point {
+	int x;
+	int y;
+} Point;
+
+typedef unsigned long ulong_t;
+
+enum Color { RED, GREEN, BLUE };
+
+union Value {
+	int i;
+	float f;
+};
+
+static int counter = 0;
+int a, b;
+
+// adds two numbers
+int add(int lhs, int rhs) { return lhs + rhs; }
+
+struct Point *make_point(void);
+`)
+	syms, err := FileSymbols("c", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		// #include answers to the header's base name, extension cut —
+		// a dot would read as a nested path.
+		"stdio":    "import",
+		"widget":   "import",
+		"MAX_SIZE": "const",
+		"SQUARE":   "func",
+		// A typedef'd struct IS the type declaration in C's dominant
+		// idiom, so it takes the underlying kind and keeps its fields.
+		"Point":     "struct",
+		"Point.x":   "field",
+		"Point.y":   "field",
+		"ulong_t":   "type",
+		"Color":     "enum",
+		"Color.RED": "const",
+		// No union class in the vocabulary — a union answers to struct.
+		"Value":   "struct",
+		"Value.i": "field",
+		"counter": "var",
+		// `int a, b;` is ONE declaration with two declarators; both are
+		// symbols, which is why declarators (not declarations) are.
+		"a":          "var",
+		"b":          "var",
+		"add":        "func",
+		"add.lhs":    "argument",
+		"add.rhs":    "argument",
+		"make_point": "func",
+	}
+	for sym, class := range cases {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != class {
+			t.Errorf("%q class = %q, want %q", sym, got.Class, class)
+		}
+	}
+	// `int add(...)` — the decl range starts at the doc comment, not at
+	// the type, and `(void)` is not a parameter.
+	if got := symByPath(syms, "add"); got != nil && got.DeclStartLine != 24 {
+		t.Errorf("add decl starts at line %d, want 24 (the doc comment)", got.DeclStartLine)
+	}
+	if got := symByPath(syms, "make_point.[1]"); got != nil {
+		t.Errorf("(void) became an argument node: %+v", got)
+	}
+	// Return types answer to the bare type name; `struct Point` keeps
+	// its full spelling as the alias.
+	ret := symByPath(syms, "make_point.Point")
+	if ret == nil || ret.Class != "return" {
+		t.Fatalf("missing return node make_point.Point; have %+v", syms)
+	}
+	if ret.Alias != "struct Point" {
+		t.Errorf("return alias = %q, want %q", ret.Alias, "struct Point")
+	}
+}
+
+func TestFileSymbolsCppNestingAndClasses(t *testing.T) {
+	src := []byte(`#include <vector>
+namespace app {
+
+using Alias = int;
+
+class Widget : public Base {
+public:
+	Widget(int id);
+	~Widget();
+	virtual int area() const;
+	static Widget *create(const std::string &name, int count = 0);
+	int width;
+private:
+	std::vector<int> items_;
+};
+
+int Widget::area() const { return width; }
+
+enum class Mode { Fast, Slow };
+
+int free_fn(int a, int b) { return a + b; }
+
+}
+`)
+	syms, err := FileSymbols("cpp", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"vector":                 "import",
+		"app":                    "module",
+		"app.Alias":              "type",
+		"app.Widget":             "class",
+		"app.Widget.Widget":      "ctor",
+		"app.Widget.~Widget":     "ctor",
+		"app.Widget.area":        "method",
+		"app.Widget.create":      "method",
+		"app.Widget.create.name": "argument",
+		"app.Widget.width":       "field",
+		"app.Widget.items_":      "field",
+		"app.Mode":               "enum",
+		"app.Mode.Fast":          "const",
+		"app.free_fn":            "func",
+		"app.free_fn.a":          "argument",
+	}
+	for sym, class := range cases {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != class {
+			t.Errorf("%q class = %q, want %q", sym, got.Class, class)
+		}
+	}
+	// The out-of-line definition owns the same path as the in-class
+	// declaration — both are real, so both are emitted; the definition
+	// is the one carrying a body.
+	var defs int
+	for _, s := range syms {
+		if s.Sym == "app.Widget.area" {
+			defs++
+		}
+	}
+	if defs != 2 {
+		t.Errorf("app.Widget.area emitted %d times, want 2 (declaration + out-of-line definition)", defs)
+	}
+	// A qualified return type answers to its leaf, full spelling aliased.
+	ret := symByPath(syms, "app.Widget.create.Widget")
+	if ret == nil || ret.Class != "return" {
+		t.Errorf("missing return node app.Widget.create.Widget; have %+v", syms)
+	}
+}
+
+func TestFileSymbolsCppHeaderGuardAndExternC(t *testing.T) {
+	// A header wraps its whole body in an #ifndef guard and often an
+	// extern "C" block; without descending through both, a .h file
+	// indexes as empty.
+	src := []byte(`#ifndef APP_WIDGET_H
+#define APP_WIDGET_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int c_fn(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+struct Pair { int x, y; };
+int App::counter = 5;
+
+#endif
+`)
+	syms, err := FileSymbols("cpp", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"APP_WIDGET_H": "const",
+		"c_fn":         "func",
+		"Pair":         "struct",
+		"Pair.x":       "field",
+		"Pair.y":       "field",
+		// An out-of-line member definition is owned by its qualified
+		// scope, not by the file — the C++ analogue of a Go receiver.
+		"App.counter": "var",
+	}
+	for sym, class := range cases {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != class {
+			t.Errorf("%q class = %q, want %q", sym, got.Class, class)
+		}
+	}
+}

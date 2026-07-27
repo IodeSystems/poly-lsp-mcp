@@ -8,7 +8,7 @@ A polyglot LSP + MCP server in Go. One binary, two surfaces:
 
 The unique value-add over single-language LSPs is **cross-language linkage**: rename `UserID` in Go and the rename propagates through TypeScript, Python, YAML config values, proto messages, OpenAPI schemas, and prose — declared bindings, schema-anchored sites, and `@ref` comment markers all stitch the languages together.
 
-Supports go / ts / tsx / js / py / sql / proto / graphql / yaml / json / markdown today.
+Supports go / ts / tsx / js / py / java / c / c++ / sql / proto / graphql / yaml / json / xml / markdown today.
 
 ## Install
 

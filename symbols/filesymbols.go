@@ -249,9 +249,7 @@ func appendParamSymbols(lang string, node *sitter.Node, owner, class string, con
 	if !classTakesParams(class) {
 		return
 	}
-	// Go's method receiver lives on a separate `receiver` field, so
-	// keying on `parameters` naturally excludes it.
-	params := node.ChildByFieldName("parameters")
+	params := paramListNode(lang, node)
 	if params == nil {
 		return
 	}
@@ -282,6 +280,23 @@ func appendParamSymbols(lang string, node *sitter.Node, owner, class string, con
 		sym.NameStartLine, sym.NameStartCol, sym.NameEndLine, sym.NameEndCol = nodeLineCols(nameNode)
 		*out = append(*out, sym)
 	}
+}
+
+// paramListNode returns the node holding a callable's parameter
+// declarations. Everywhere but C/C++ that is the callable's own
+// `parameters` field — which for Go also naturally excludes the method
+// receiver, since that sits on a separate `receiver` field. In C/C++ the
+// parameter list belongs to the function_declarator buried in the
+// declarator chain, not to the definition node.
+func paramListNode(lang string, node *sitter.Node) *sitter.Node {
+	if lang == "c" || lang == "cpp" {
+		fd := cFunctionDeclarator(node)
+		if fd == nil {
+			return nil
+		}
+		return fd.ChildByFieldName("parameters")
+	}
+	return node.ChildByFieldName("parameters")
 }
 
 // ------------------------------------------------------- .return nodes
@@ -318,7 +333,9 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 		}
 		seg := full
 		alias := ""
-		if i := strings.LastIndex(full, "."); i >= 0 {
+		if lang == "c" || lang == "cpp" {
+			seg, alias = cTypeSegment(full)
+		} else if i := strings.LastIndex(full, "."); i >= 0 {
 			// A qualified type (io.Writer): the path segment must be
 			// dot-free, so the leaf is the last component and the full
 			// form is preserved as the alias.
@@ -395,6 +412,26 @@ func returnTypeNodes(lang string, node *sitter.Node) []*sitter.Node {
 			return nil
 		}
 		return []*sitter.Node{rt}
+	case "c", "cpp":
+		// A definition carries `type` itself; a prototype's symbol node
+		// is the declarator, and the type sits on the enclosing
+		// declaration / field_declaration. Pointer and reference depth
+		// lives in the declarator, not the type node, so `char *` yields
+		// a return of `char` — the type NAME is what `return#T` asks
+		// about. Constructors and destructors have no type field, which
+		// is correctly nil here.
+		owner := node
+		if owner.ChildByFieldName("type") == nil {
+			owner = node.Parent()
+		}
+		if owner == nil {
+			return nil
+		}
+		rt := owner.ChildByFieldName("type")
+		if rt == nil {
+			return nil
+		}
+		return []*sitter.Node{rt}
 	}
 	return nil
 }
@@ -463,8 +500,15 @@ func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string
 // and exported (TS) declarations look above their wrapper.
 func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int) {
 	anchor := node
-	if p := node.Parent(); p != nil && (p.Type() == "decorated_definition" || p.Type() == "export_statement") {
-		anchor = p
+	if p := node.Parent(); p != nil {
+		switch p.Type() {
+		case "decorated_definition", "export_statement",
+			// C/C++ wrappers: the symbol is the declarator (or the
+			// templated declaration), but the comment sits above the
+			// whole declaration.
+			"declaration", "field_declaration", "template_declaration":
+			anchor = p
+		}
 	}
 	nextTop := int(anchor.StartPoint().Row) + 1 // 1-based line the block must butt against
 	found := false
@@ -611,6 +655,8 @@ func paramInfos(lang string, p *sitter.Node, content []byte) []paramInfo {
 		return pyParamInfos(p, content)
 	case "java":
 		return javaParamInfos(p, content)
+	case "c", "cpp":
+		return cParamInfos(p, content)
 	}
 	return nil
 }
@@ -799,8 +845,431 @@ func classify(lang, t, parent string) symRole {
 		return classifySQL(t, parent)
 	case "java":
 		return classifyJava(t, parent)
+	case "c", "cpp":
+		return classifyC(t, parent)
 	}
 	return roleSkip
+}
+
+// classifyC maps C and C++ declarations onto the shared role
+// vocabulary. One arm serves both: the C++ grammar inherits C's node
+// names, and every type this switch adds for C++ (namespace_definition,
+// class_specifier, alias_declaration, …) simply never appears in a C
+// tree.
+//
+// The structural difference from every other language here is that C has
+// no per-symbol declarator node the way Java has variable_declarator:
+// `int a, b;` is ONE declaration carrying two declarators, and a
+// function prototype is that same `declaration` node with a
+// function_declarator inside. So declaration / field_declaration are
+// containers and the DECLARATORS are the symbols — which also makes the
+// multi-name case fall out for free.
+func classifyC(t, parent string) symRole {
+	switch parent {
+	case "declaration", "field_declaration":
+		// Inside a declaration, only the declarator half names a symbol.
+		// The type half (type_identifier, qualified_identifier,
+		// template_type, struct_specifier, …) is a REFERENCE to a type,
+		// not a declaration of one, and indexing it would invent symbols
+		// that don't exist — `struct Point *make_point(void);` does not
+		// declare Point.
+		if isCDeclarator(t) {
+			return roleSymbol
+		}
+		return roleSkip
+	case "type_definition":
+		// `typedef struct { int x; } Foo;` — the typedef IS the symbol
+		// (see refinedClassC), so its underlying specifier is walked
+		// through to reach the fields, not emitted on its own.
+		switch t {
+		case "struct_specifier", "union_specifier", "enum_specifier":
+			return roleContainer
+		}
+		return roleSkip
+	}
+	switch t {
+	case "declaration_list", "field_declaration_list", "enumerator_list",
+		"declaration", "field_declaration",
+		"template_declaration", "linkage_specification",
+		// Header include guards wrap the WHOLE file body in a
+		// preproc_ifdef; without descending, a .h file indexes as empty.
+		"preproc_ifdef", "preproc_if", "preproc_else", "preproc_elif",
+		// ERROR is walked THROUGH, which no other language here does.
+		// tree-sitter cannot run the preprocessor, so one GNU extension
+		// it doesn't model (`int x[32] __attribute__((aligned(V)))`) makes
+		// recovery swallow the enclosing #ifdef — i.e. the entire body of
+		// a guarded header. The parser still builds correct subtrees for
+		// the parts it understood; they hang off the ERROR node. Measured
+		// on llama.cpp/ggml: 3 of 504 files indexed as completely empty
+		// without this, each one a real header full of real declarations.
+		"ERROR":
+		return roleContainer
+	case "preproc_include", "preproc_def", "preproc_function_def",
+		"namespace_definition", "class_specifier", "struct_specifier",
+		"union_specifier", "enum_specifier", "enumerator",
+		"type_definition", "alias_declaration", "using_declaration",
+		"function_definition":
+		return roleSymbol
+	}
+	return roleSkip
+}
+
+// isCDeclarator reports whether a node type is a C/C++ DECLARATOR — the
+// half of a declaration that names something, as opposed to the type
+// half.
+//
+// qualified_identifier is deliberately absent: as a direct child of a
+// declaration it is almost always the TYPE (`std::string s;`), and the
+// declarator spelling that matters (`int App::counter = 5;`) arrives
+// wrapped in an init_declarator, which is listed. Classifying it as a
+// declarator here would turn every `std::foo x;` type into a phantom
+// symbol.
+func isCDeclarator(t string) bool {
+	switch t {
+	case "init_declarator", "pointer_declarator", "array_declarator",
+		"function_declarator", "reference_declarator",
+		"parenthesized_declarator", "structured_binding_declarator",
+		"identifier", "field_identifier", "destructor_name",
+		"operator_name", "template_function":
+		return true
+	}
+	return false
+}
+
+// refinedClassC assigns the class for a C/C++ symbol node. The ok
+// return is false for node types this arm doesn't own, so refinedClass
+// falls through to its shared default.
+//
+// There is no `const` class for variables on purpose: `const` in C
+// qualifies a TYPE, not a binding (`const char *p` is a mutable pointer
+// to constant chars), so deciding which side a qualifier applies to
+// would be guesswork. The constants C actually declares — #define and
+// enumerators — get the class directly.
+func refinedClassC(node *sitter.Node, parentClass string, content []byte) (class string, branch, ok bool) {
+	switch node.Type() {
+	case "preproc_include":
+		return "import", false, true
+	case "preproc_def":
+		return "const", false, true
+	case "preproc_function_def":
+		return "func", false, true
+	case "using_declaration":
+		return "import", false, true
+	case "namespace_definition":
+		return "module", true, true
+	case "class_specifier":
+		return "class", true, true
+	case "struct_specifier", "union_specifier":
+		// No separate `union` class in the vocabulary; a union is a
+		// struct whose fields overlap, and selectors written for struct
+		// should find it.
+		return "struct", true, true
+	case "enum_specifier":
+		return "enum", true, true
+	case "enumerator":
+		return "const", false, true
+	case "alias_declaration":
+		return "type", false, true
+	case "type_definition":
+		// A typedef'd struct/enum with a body IS the type declaration in
+		// C's dominant idiom (`typedef struct { int x; } Foo;`), so it
+		// takes the underlying kind and branches to reach its fields.
+		if u := cTypedefUnderlying(node); u != nil {
+			switch u.Type() {
+			case "struct_specifier", "union_specifier":
+				return "struct", true, true
+			case "enum_specifier":
+				return "enum", true, true
+			}
+		}
+		return "type", false, true
+	case "function_definition":
+		return cCallableClass(node, parentClass, content), false, true
+	}
+	if isCDeclarator(node.Type()) {
+		if cFunctionDeclarator(node) != nil {
+			return cCallableClass(node, parentClass, content), false, true
+		}
+		switch parentClass {
+		case "class", "struct", "enum":
+			return "field", false, true
+		}
+		return "var", false, true
+	}
+	return "", false, false
+}
+
+// cTypedefUnderlying returns the struct/union/enum specifier a typedef
+// declares inline, or nil when the typedef merely renames an existing
+// type (`typedef unsigned long ulong_t;`).
+func cTypedefUnderlying(node *sitter.Node) *sitter.Node {
+	ty := node.ChildByFieldName("type")
+	if ty == nil {
+		return nil
+	}
+	switch ty.Type() {
+	case "struct_specifier", "union_specifier", "enum_specifier":
+		// A body is what makes it a declaration rather than a reference
+		// to a tag declared elsewhere.
+		if ty.ChildByFieldName("body") != nil {
+			return ty
+		}
+	}
+	return nil
+}
+
+// cCallableClass decides func / method / ctor for a C/C++ callable.
+// Constructors and destructors are both `ctor` (the vocabulary has no
+// dtor): a destructor is spelled destructor_name, and a constructor is
+// the member whose name equals its enclosing type's — in-class via the
+// enclosing class_specifier, out-of-line via the qualified name's own
+// scope (`Widget::Widget`).
+func cCallableClass(node *sitter.Node, parentClass string, content []byte) string {
+	name := cInnermostDeclarator(node)
+	if name == nil {
+		return "func"
+	}
+	if name.Type() == "destructor_name" {
+		return "ctor"
+	}
+	if name.Type() == "qualified_identifier" {
+		scope, leaf := cQualifiedParts(name, content)
+		if leaf != nil && leaf.Type() == "destructor_name" {
+			return "ctor"
+		}
+		if scope != "" && leaf != nil && scope == leaf.Content(content) {
+			return "ctor"
+		}
+		return "method"
+	}
+	switch parentClass {
+	case "class", "struct":
+		if owner := cEnclosingTypeName(node, content); owner != "" && owner == name.Content(content) {
+			return "ctor"
+		}
+		return "method"
+	}
+	return "func"
+}
+
+// cEnclosingTypeName walks up to the nearest class/struct/union
+// specifier and returns its declared name ("" when anonymous or absent).
+func cEnclosingTypeName(node *sitter.Node, content []byte) string {
+	for p := node.Parent(); p != nil; p = p.Parent() {
+		switch p.Type() {
+		case "class_specifier", "struct_specifier", "union_specifier":
+			if n := p.ChildByFieldName("name"); n != nil {
+				return n.Content(content)
+			}
+			return ""
+		case "translation_unit":
+			return ""
+		}
+	}
+	return ""
+}
+
+// cInnermostDeclarator peels a declarator chain (pointer, array,
+// reference, parenthesized, init, function) down to the node that
+// actually spells the name. Returns nil when there is none — an
+// abstract declarator, e.g. the unnamed `int` in `void f(int);`.
+func cInnermostDeclarator(node *sitter.Node) *sitter.Node {
+	cur := node
+	for range 16 { // depth guard: declarator chains are shallow in practice
+		if cur == nil {
+			return nil
+		}
+		switch cur.Type() {
+		case "identifier", "field_identifier", "type_identifier",
+			"qualified_identifier", "destructor_name", "operator_name":
+			return cur
+		case "template_function":
+			// A template specialization (`Holder<T>::get`) — the name
+			// field holds the callable's own name.
+			if n := cur.ChildByFieldName("name"); n != nil {
+				cur = n
+				continue
+			}
+			return cur
+		}
+		if d := cur.ChildByFieldName("declarator"); d != nil {
+			cur = d
+			continue
+		}
+		// reference_declarator and parenthesized_declarator carry their
+		// inner declarator positionally rather than under a field.
+		switch cur.Type() {
+		case "reference_declarator", "parenthesized_declarator":
+			if cur.NamedChildCount() > 0 {
+				cur = cur.NamedChild(0)
+				continue
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+// cFunctionDeclarator returns the function_declarator inside a
+// declarator chain, or nil when the declaration declares data.
+//
+// A function-POINTER variable (`int (*fp)(void);`) also carries a
+// function_declarator and is therefore classed func. That is a known
+// mislabel, kept because the alternative — deciding by where the
+// parentheses sit — is more machinery than the case is worth.
+func cFunctionDeclarator(node *sitter.Node) *sitter.Node {
+	cur := node
+	for range 16 {
+		if cur == nil {
+			return nil
+		}
+		if cur.Type() == "function_declarator" {
+			return cur
+		}
+		d := cur.ChildByFieldName("declarator")
+		if d == nil {
+			switch cur.Type() {
+			case "reference_declarator", "parenthesized_declarator":
+				if cur.NamedChildCount() > 0 {
+					d = cur.NamedChild(0)
+				}
+			}
+		}
+		cur = d
+	}
+	return nil
+}
+
+// cQualifiedParts splits a qualified_identifier into its scope's LEAF
+// name (Widget for Widget::area, Holder for Holder<T>::get) and the node
+// naming the member. Nested scopes (a::b::c) recurse, so the scope
+// returned is the innermost one — the type or namespace that owns the
+// member.
+func cQualifiedParts(node *sitter.Node, content []byte) (scope string, leaf *sitter.Node) {
+	s := node.ChildByFieldName("scope")
+	n := node.ChildByFieldName("name")
+	if n != nil && n.Type() == "qualified_identifier" {
+		return cQualifiedParts(n, content)
+	}
+	if s != nil {
+		if s.Type() == "template_type" {
+			// Holder<T> — the owner is the template's name.
+			if tn := s.ChildByFieldName("name"); tn != nil {
+				s = tn
+			}
+		}
+		scope = s.Content(content)
+	}
+	return scope, n
+}
+
+// cSymbolName resolves a C/C++ symbol node to its local name. The ok
+// return is false for nodes whose `name` field the generic path already
+// handles (class/struct/enum specifiers, namespaces, enumerators,
+// aliases, #define).
+func cSymbolName(node *sitter.Node, content []byte) (string, *sitter.Node, bool) {
+	switch node.Type() {
+	case "preproc_include":
+		path := node.ChildByFieldName("path")
+		if path == nil {
+			return "", nil, true
+		}
+		return includeBase(path.Content(content)), path, true
+	case "using_declaration":
+		if node.NamedChildCount() == 0 {
+			return "", nil, true
+		}
+		inner := node.NamedChild(0)
+		if inner.Type() == "qualified_identifier" {
+			if _, leaf := cQualifiedParts(inner, content); leaf != nil {
+				return leaf.Content(content), leaf, true
+			}
+		}
+		return inner.Content(content), inner, true
+	case "function_definition":
+	default:
+		if !isCDeclarator(node.Type()) {
+			return "", nil, false
+		}
+	}
+	name := cInnermostDeclarator(node)
+	if name == nil {
+		return "", nil, true // abstract declarator — anonymous
+	}
+	if name.Type() == "qualified_identifier" {
+		if _, leaf := cQualifiedParts(name, content); leaf != nil {
+			return leaf.Content(content), leaf, true
+		}
+	}
+	return name.Content(content), name, true
+}
+
+// includeBase renders an #include path as a path segment: angle brackets
+// and quotes stripped, directories dropped, extension cut — <sys/stat.h>
+// and "app/widget.h" become `stat` and `widget`.
+//
+// The extension MUST go: a dot is the Sym path separator, so "widget.h"
+// would read as a nested symbol.
+func includeBase(s string) string {
+	s = strings.Trim(s, "<>\"'")
+	if i := strings.LastIndexByte(s, '/'); i >= 0 {
+		s = s[i+1:]
+	}
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+// cTypeSegment renders a C/C++ type as a path segment plus the full
+// spelling as an alias. A `.return` node has to answer to a bare name,
+// so the elaborated-type keyword, the namespace scope and the template
+// arguments all come off: `struct Point` → Point, `std::vector<int>` →
+// vector (alias std::vector<int>). The alias is "" when nothing was
+// stripped.
+func cTypeSegment(full string) (seg, alias string) {
+	seg = full
+	for _, kw := range [...]string{"struct ", "union ", "enum ", "class ", "const ", "typename "} {
+		seg = strings.TrimPrefix(seg, kw)
+	}
+	if i := strings.Index(seg, "<"); i >= 0 {
+		seg = seg[:i]
+	}
+	if i := strings.LastIndex(seg, "::"); i >= 0 {
+		seg = seg[i+2:]
+	}
+	seg = strings.TrimSpace(seg)
+	if seg != full {
+		alias = full
+	}
+	return seg, alias
+}
+
+// cParamInfos handles C/C++ parameter forms. A lone `void` is C's way of
+// spelling "no parameters" — it is not a parameter and must not become
+// an anonymous `.argument` child.
+func cParamInfos(p *sitter.Node, content []byte) []paramInfo {
+	switch p.Type() {
+	case "parameter_declaration", "optional_parameter_declaration",
+		"variadic_parameter_declaration":
+	case "variadic_parameter":
+		return []paramInfo{{decl: p}}
+	default:
+		return nil
+	}
+	d := p.ChildByFieldName("declarator")
+	if d == nil {
+		if ty := p.ChildByFieldName("type"); ty != nil && ty.Content(content) == "void" {
+			return nil
+		}
+		// Unnamed parameter (`void f(int);`) — anonymous, addressable
+		// positionally, same as Go's `func f(int)`.
+		return []paramInfo{{decl: p}}
+	}
+	if name := cInnermostDeclarator(d); name != nil {
+		return []paramInfo{{name: name.Content(content), nameNode: name, decl: p}}
+	}
+	return []paramInfo{{decl: p}}
 }
 
 // classifyJava maps Java declarations onto the shared role vocabulary.
@@ -927,6 +1396,10 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 			}
 			return "type", false
 		}
+	case "c", "cpp":
+		if class, branch, ok := refinedClassC(node, parentClass, content); ok {
+			return class, branch
+		}
 	case "java":
 		switch t {
 		case "package_declaration":
@@ -1051,6 +1524,14 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 		}
 		return "", node
 	}
+	// C/C++ names hide inside declarator chains, so they resolve before
+	// the generic `name`-field lookups (which would find the TYPE of a
+	// declaration, not the thing being declared).
+	if lang == "c" || lang == "cpp" {
+		if name, node, ok := cSymbolName(node, content); ok {
+			return name, node
+		}
+	}
 	// SQL create_index names via the `column` field (index name).
 	if lang == "sql" && t == "create_index" {
 		if n := node.ChildByFieldName("column"); n != nil {
@@ -1093,11 +1574,19 @@ func importBase(s string) string {
 var goVersionSeg = regexp.MustCompile(`^v\d+$`)
 
 // parentOverride returns a synthetic parent-path segment for a symbol
-// whose logical owner isn't its tree parent. Today: Go methods, whose
-// owner is the receiver type (Server.Start), not the file root.
+// whose logical owner isn't its tree parent: Go methods, whose owner is
+// the receiver type (Server.Start), and C++ out-of-line definitions,
+// whose owner is the qualified name's scope (Widget::area lands at
+// Widget.area even though the AST parents it to the file).
 func parentOverride(lang string, node *sitter.Node, content []byte) string {
 	if lang == "go" && node.Type() == "method_declaration" {
 		return goReceiverType(node, content)
+	}
+	if lang == "c" || lang == "cpp" {
+		if name := cInnermostDeclarator(node); name != nil && name.Type() == "qualified_identifier" {
+			scope, _ := cQualifiedParts(name, content)
+			return scope
+		}
 	}
 	return ""
 }
@@ -1142,6 +1631,19 @@ func declRangeNode(node *sitter.Node) *sitter.Node {
 		if countSpecChildren(p) == 1 {
 			return p
 		}
+	case "declaration", "field_declaration":
+		// C/C++: the symbol is the declarator, but the DECLARATION is
+		// what a reader (and node_edit) means by the thing — type,
+		// storage class and semicolon included. `int a, b;` keeps
+		// per-declarator ranges so the two siblings don't overlap.
+		// Java also has field_declaration, but its declarator children
+		// are variable_declarator nodes, which this count ignores.
+		if countCDeclarators(p) == 1 {
+			return p
+		}
+	case "template_declaration":
+		// The template header is part of the declaration it introduces.
+		return p
 	}
 	return node
 }
@@ -1151,6 +1653,17 @@ func countSpecChildren(p *sitter.Node) int {
 	cnt := int(p.NamedChildCount())
 	for i := 0; i < cnt; i++ {
 		if strings.HasSuffix(p.NamedChild(i).Type(), "_spec") {
+			n++
+		}
+	}
+	return n
+}
+
+func countCDeclarators(p *sitter.Node) int {
+	n := 0
+	cnt := int(p.NamedChildCount())
+	for i := 0; i < cnt; i++ {
+		if isCDeclarator(p.NamedChild(i).Type()) {
 			n++
 		}
 	}

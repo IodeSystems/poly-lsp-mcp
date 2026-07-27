@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/smacker/go-tree-sitter/c"
+	"github.com/smacker/go-tree-sitter/cpp"
 	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/python"
@@ -53,6 +55,32 @@ const goIdentifierQuery = `[
 const javaIdentifierQuery = `[
   (identifier)
   (type_identifier)
+] @name`
+
+// cIdentifierQuery covers C names: variables, functions, parameters,
+// struct/union/enum tags, field names, typedef names and goto labels.
+// Macro BODIES are deliberately invisible — the grammar hands them back
+// as one opaque preproc_arg token, so an identifier that only ever
+// appears inside a `#define` expansion is not indexed. That is the one
+// place where C's tree-sitter tier sees less than a lexical pass would.
+const cIdentifierQuery = `[
+  (identifier)
+  (type_identifier)
+  (field_identifier)
+  (statement_identifier)
+] @name`
+
+// cppIdentifierQuery is cIdentifierQuery plus namespace_identifier,
+// which the C++ grammar uses for both `namespace app {` and the scope
+// half of a qualified name (std::string, Widget::area). Indexing the
+// scope segment separately is what makes `Widget` findable from an
+// out-of-line definition.
+const cppIdentifierQuery = `[
+  (identifier)
+  (type_identifier)
+  (field_identifier)
+  (namespace_identifier)
+  (statement_identifier)
 ] @name`
 
 // tsxIdentifierQuery covers TypeScript (and TSX/JSX) names: variables,
@@ -626,6 +654,17 @@ func keywordSet(words ...string) map[string]struct{} {
 	return out
 }
 
+// cKeywords is shared by the c and cpp extractors: the stdlib names both
+// dialects surface as identifier / type_identifier nodes and that carry
+// no signal in a cross-file index.
+var cKeywords = keywordSet(
+	"NULL", "nullptr", "true", "false",
+	"size_t", "ssize_t", "ptrdiff_t", "wchar_t", "bool",
+	"int8_t", "int16_t", "int32_t", "int64_t",
+	"uint8_t", "uint16_t", "uint32_t", "uint64_t",
+	"intptr_t", "uintptr_t",
+)
+
 // defaultExtractors covers the languages baked into config.Default().
 // For data formats (yaml/json/markdown) we keep every word — that's the
 // whole point of the cross-language index for string-literal sites.
@@ -675,6 +714,13 @@ var defaultExtractors = map[string]Extractor{
 		"String", "Object", "Integer", "Boolean", "Long", "Double",
 		"Float", "Byte", "Short", "Character", "Void",
 	)),
+	// C / C++ via tree-sitter. `int`/`char`/`void`/`bool` are
+	// primitive_type nodes and never match the query, so the filter only
+	// subtracts the stdlib spellings that DO arrive as identifiers —
+	// mostly stdint/stddef typedefs and the null/bool literals.
+	"c":   mustTreeSitterExtractor(c.GetLanguage(), cIdentifierQuery, cKeywords),
+	"cpp": mustTreeSitterExtractor(cpp.GetLanguage(), cppIdentifierQuery, cKeywords),
+
 	"yaml": &LexicalExtractor{},
 	"json": &LexicalExtractor{},
 	// XML is lexical on purpose: on Android the cross-language edge is

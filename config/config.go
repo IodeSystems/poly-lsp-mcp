@@ -162,6 +162,28 @@ func Default() *Config {
 				TreeSitter: "java",
 			},
 			{
+				// C. clangd is the default child LSP: it works degraded
+				// without a compile_commands.json and simply fails to
+				// spawn when absent, exactly like gopls.
+				Name:       "c",
+				Extensions: []string{"c"},
+				LSP:        &LSP{Cmd: "clangd"},
+				TreeSitter: "c",
+			},
+			{
+				// C++. `.h` belongs HERE, not to c: the C++ grammar is a
+				// superset, so a C header still parses correctly under it,
+				// while a C++ header named .h (the ecosystem norm — LLVM,
+				// Chromium, most of Google) would degrade to ERROR nodes
+				// under the C grammar and lose every class in the file.
+				// The cost is cosmetic: a pure-C repo labels its headers
+				// "cpp".
+				Name:       "cpp",
+				Extensions: []string{"cpp", "cc", "cxx", "c++", "h", "hpp", "hh", "hxx", "h++", "ipp", "tcc", "inl"},
+				LSP:        &LSP{Cmd: "clangd"},
+				TreeSitter: "cpp",
+			},
+			{
 				// XML: lexical, same rationale as yaml/json — the value
 				// is the string-literal site, not an AST. On Android the
 				// whole cross-language graph is string-keyed: a resource

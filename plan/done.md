@@ -3,6 +3,69 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## C / C++ via tree-sitter (DONE 2026-07-26)
+
+- [x] `config.Default()` gains `c` (`.c`) and `cpp` (`.cpp/.cc/.cxx/.c++/.h/
+  .hpp/.hh/.hxx/.h++/.ipp/.tcc/.inl`), both defaulting to **clangd** — it
+  degrades gracefully without a `compile_commands.json` and a missing binary is
+  logged-and-skipped by `multiplex.Manager.Start`, same as gopls.
+- **`.h` belongs to cpp, not c** (decision, user-confirmed). The C++ grammar is
+  a superset, so a C header still parses correctly under it, while a C++ header
+  named `.h` — the ecosystem norm — would degrade to ERROR nodes under the C
+  grammar and lose every class in the file. Cost is cosmetic: a pure-C repo
+  labels its headers `cpp`.
+- **One classify/refine arm serves both** (`classifyC` / `refinedClassC`): the
+  C++ grammar inherits C's node names, and the C++-only types simply never
+  appear in a C tree.
+- **The structural difference from every other language here**: C has no
+  per-symbol declarator node the way Java has `variable_declarator`. `int a, b;`
+  is ONE declaration with two declarators, and a function prototype is that same
+  `declaration` node with a `function_declarator` inside. So
+  declaration/field_declaration are CONTAINERS and the DECLARATORS are the
+  symbols — which makes the multi-name case fall out for free.
+  `declRangeNode`/`docCommentSpan` climb back to the declaration so a
+  single-declarator symbol still spans its type, storage class and doc comment.
+- **Type half vs declarator half**: inside a declaration only declarator-shaped
+  children are symbols. `struct Point *make_point(void);` must NOT declare
+  Point. `qualified_identifier` is deliberately NOT treated as a declarator —
+  as a direct child it is almost always the type (`std::string s;`), and the
+  spelling that matters (`int App::counter = 5;`) arrives inside an
+  `init_declarator`.
+- **Out-of-line definitions get a parentOverride** — `Widget::area` lands at
+  `Widget.area`, the C++ analogue of Go's receiver. The declaration and the
+  definition therefore share a sym path and both are emitted; `loadFileSymbols`
+  already tolerates colliding paths (`nodeByAddr` disambiguates by line).
+- **ERROR is walked THROUGH — unique to c/cpp.** tree-sitter cannot run the
+  preprocessor, so one unmodelled GNU extension (`int x[32]
+  __attribute__((aligned(V)))`) makes error recovery swallow the enclosing
+  `#ifdef` — i.e. the whole body of a guarded header. The parser still builds
+  correct subtrees for what it understood; they hang off the ERROR node.
+  Measured on llama.cpp/ggml: 3 of 504 files indexed as COMPLETELY EMPTY
+  without this; with it, 0 empty and +947 symbols, recovered clean (spot-checked
+  `hmx-utils.h`: 38 symbols, no junk).
+- Include guards (`preproc_ifdef`), `extern "C"` (`linkage_specification`) and
+  `template_declaration` are containers for the same reason — each wraps the
+  declarations rather than being one.
+- `#include <sys/stat.h>` answers to `stat`: directories dropped, extension cut
+  (a dot is the sym-path separator). Return types answer to the bare type name
+  with the full spelling aliased (`struct Point` → `Point`, `std::vector<int>`
+  → `vector`). A lone `(void)` is not a parameter.
+- Known-and-accepted: a function-POINTER variable is classed `func`; macro
+  BODIES are one opaque `preproc_arg` token, so an identifier that only ever
+  appears inside a `#define` expansion is not indexed; no `const` class for
+  variables (C's `const` qualifies a type, not a binding, so which side it
+  applies to would be guesswork).
+- Measured live: kcov 147 files / 6,030 symbols (1 empty file, genuinely
+  declaration-free); llama.cpp `src` 197 files / 16,182 symbols, 0 empty;
+  `ggml/src` 504 files / 59,192 symbols, 0 empty.
+- Tests: `TestFileSymbolsCNestingAndClasses`, `TestFileSymbolsCppNestingAndClasses`,
+  `TestFileSymbolsCppHeaderGuardAndExternC`,
+  `TestCExtractorSkipsCommentsStringsAndKeywords`,
+  `TestCppExtractorIndexesNamespaceScope`.
+- Drive-by (same map, same gap): `languageClassAliases` (mcp/query.go) and
+  `regexLanguage` (internal/bindings/resolver.go) were missing java/xml from
+  the previous slice; both now carry java/xml/c/cpp.
+
 ## Descendant-chain planner (DONE 2026-07-17)
 
 - [x] `C0 C1 … Cn` (descendant) is the Cn matches whose ancestors match C0 ⊃ …

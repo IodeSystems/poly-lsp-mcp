@@ -196,6 +196,14 @@ func regexLanguage(path string) string {
 		return "markdown"
 	case "sql", "psql":
 		return "sql"
+	case "java":
+		return "java"
+	case "xml":
+		return "xml"
+	case "c":
+		return "c"
+	case "cpp", "cc", "cxx", "c++", "h", "hpp", "hh", "hxx", "h++", "ipp", "tcc", "inl":
+		return "cpp"
 	}
 	return ""
 }

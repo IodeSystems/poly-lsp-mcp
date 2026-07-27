@@ -97,6 +97,11 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **C / C++ — shipped 2026-07-26** → done.md ("C / C++ via tree-sitter") for
+the record: `.h` belongs to cpp, declarators (not declarations) are the
+symbols, ERROR nodes are walked through so a `__attribute__` the grammar
+doesn't model can't blank a whole header.
+
 ◐ **Java + Android XML — the JVM/Android blind spot (started 2026-07-26).**
 Motivating measurement, termux-app: **17 of 291 source files were visible**
 (yml/md/json only) — 197 `.java` and 67 `.xml` were invisible, i.e. the index

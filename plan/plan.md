@@ -126,8 +126,9 @@ is entirely generated data.
 ✅ **The index honours `.gitignore` — 2026-07-28** → done.md. Far bigger than
 the config finding that prompted it: on `zdx-go`, **2,128,213 → 471,029 sites
 (-78%)**, with go itself down 75%. Filters IGNORED, never UNTRACKED, so a file
-an agent just created still indexes. Follow-up left open: `internal/bindings`'
-own walker does not consult it yet.
+an agent just created still indexes. The bindings walker honours it too, since
+a binding is a stronger claim than an indexed name. Shared as
+`internal/git.IgnoreSet`.
 
 ⏸ **Groovy is speculative** — zero corpus on this box (→ done.md). A
 Jenkinsfile cannot even be routed: it is extensionless and the registry keys

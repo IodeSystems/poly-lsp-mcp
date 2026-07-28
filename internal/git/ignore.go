@@ -1,4 +1,4 @@
-package symbols
+package git
 
 import (
 	"os/exec"
@@ -6,10 +6,12 @@ import (
 	"strings"
 )
 
-// ignoreSet is the set of paths git says are ignored in a workspace,
-// resolved once per Build.
+// IgnoreSet is the set of paths git says are ignored in a workspace,
+// resolved once and reused. Both the symbol index and the bindings
+// resolver consult it, which is why it lives here rather than in either
+// of them.
 //
-// Why this exists: the walk honoured `skipDirs` — a hardcoded list of
+// Why this exists: the index walk honoured `skipDirs` — a hardcoded list of
 // node_modules, build, dist — but not `.gitignore`. Measured on a real
 // repo (zdx-go), 88% of every yaml/json site in the index came from
 // GITIGNORED files: tool state, lock files, captured API payloads.
@@ -21,16 +23,17 @@ import (
 // ignored, so it keeps indexing. Filtering on `git ls-files` would make
 // an agent's own new work invisible to it — the worst possible failure
 // for a tool an agent uses mid-task.
-type ignoreSet struct {
+type IgnoreSet struct {
 	files map[string]bool
 	dirs  []string // relative, each ending in "/"
 }
 
-// loadIgnoreSet asks git which paths are ignored under root. Returns nil
+// LoadIgnores asks git which paths are ignored under root. Returns nil
 // when root is not a git repository, git is unavailable, or the command
-// fails — in every one of those cases the walk proceeds unfiltered,
-// which is the previous behaviour.
-func loadIgnoreSet(root string) *ignoreSet {
+// fails — in every one of those cases a walk proceeds unfiltered, which
+// is the behaviour that predates this filter. A nil *IgnoreSet is safe
+// to call every method on.
+func LoadIgnores(root string) *IgnoreSet {
 	if _, err := exec.LookPath("git"); err != nil {
 		return nil
 	}
@@ -45,7 +48,7 @@ func loadIgnoreSet(root string) *ignoreSet {
 	if err != nil {
 		return nil
 	}
-	s := &ignoreSet{files: map[string]bool{}}
+	s := &IgnoreSet{files: map[string]bool{}}
 	for _, p := range strings.Split(string(out), "\x00") {
 		if p == "" {
 			continue
@@ -65,7 +68,7 @@ func loadIgnoreSet(root string) *ignoreSet {
 
 // rel renders an absolute path as the repo-relative, slash-separated
 // form git reports. Returns "" when path is not under root.
-func (s *ignoreSet) rel(root, path string) string {
+func (s *IgnoreSet) rel(root, path string) string {
 	r, err := filepath.Rel(root, path)
 	if err != nil {
 		return ""
@@ -73,8 +76,8 @@ func (s *ignoreSet) rel(root, path string) string {
 	return filepath.ToSlash(r)
 }
 
-// dirIgnored reports whether a directory is entirely ignored.
-func (s *ignoreSet) dirIgnored(root, path string) bool {
+// DirIgnored reports whether a directory is entirely ignored.
+func (s *IgnoreSet) DirIgnored(root, path string) bool {
 	if s == nil {
 		return false
 	}
@@ -85,9 +88,9 @@ func (s *ignoreSet) dirIgnored(root, path string) bool {
 	return s.matchDir(r + "/")
 }
 
-// fileIgnored reports whether a file is ignored, either by name or by
+// FileIgnored reports whether a file is ignored, either by name or by
 // sitting under an ignored directory.
-func (s *ignoreSet) fileIgnored(root, path string) bool {
+func (s *IgnoreSet) FileIgnored(root, path string) bool {
 	if s == nil {
 		return false
 	}
@@ -102,7 +105,7 @@ func (s *ignoreSet) fileIgnored(root, path string) bool {
 }
 
 // matchDir reports whether p sits under any ignored directory prefix.
-func (s *ignoreSet) matchDir(p string) bool {
+func (s *IgnoreSet) matchDir(p string) bool {
 	for _, d := range s.dirs {
 		if strings.HasPrefix(p, d) {
 			return true

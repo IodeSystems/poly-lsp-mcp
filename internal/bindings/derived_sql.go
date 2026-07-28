@@ -21,7 +21,7 @@ import (
 func (r *Resolver) ApplyDerivedSQL(idx *symbols.Index) []DerivRoot {
 	// 1. table.column edges the sqlc generator declared.
 	want := map[string]bool{}
-	walkFiles(r.root, func(path string, data []byte) {
+	walkFiles(r.root, r.ignores, func(path string, data []byte) {
 		if !hasSuffix(path, ".go") {
 			return
 		}

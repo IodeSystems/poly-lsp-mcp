@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -28,10 +29,14 @@ import (
 // taken relative to.
 type Resolver struct {
 	root string
+	// ignores is resolved ONCE per resolver, not once per walk: the
+	// binding scans call walkFiles six times across android/derived/
+	// derived_sql, and each load is a git subprocess.
+	ignores *git.IgnoreSet
 }
 
 func NewResolver(root string) *Resolver {
-	return &Resolver{root: root}
+	return &Resolver{root: root, ignores: git.LoadIgnores(root)}
 }
 
 // Apply walks every binding and inserts the resolved sites into idx.

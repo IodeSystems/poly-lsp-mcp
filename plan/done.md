@@ -327,10 +327,20 @@ refactoring against two known cases. Revisit once this daemon runs.
   hatch for a workspace that ignores files it nevertheless wants indexed.
 - Known limit: a nested repository or submodule has its own `.gitignore`,
   which one invocation at the root does not consult.
-- NOT applied to `internal/bindings`' own walker (`walkFiles`), which feeds
-  the Android/derived binding scans. Same noise applies there; left as a
-  follow-up rather than widened silently.
-- Tests: the three above, verified to fail with the filter removed.
+- **Follow-up SHIPPED the same day: the bindings walker honours it too.**
+  A binding is a stronger claim than an indexed name — it asserts two sites
+  are the SAME entity, at declared confidence — so generated state must not
+  be able to make it. `internal/bindings.walkFiles` now takes the ignore set,
+  resolved ONCE per `Resolver` rather than once per walk (the scans call it
+  six times across android/derived/derived_sql, and each load is a git
+  subprocess).
+- The logic moved to `internal/git.IgnoreSet` / `LoadIgnores` now that it has
+  two consumers; `symbols` already imported that package, so this added no
+  new dependency edge.
+- Tests: the three index ones plus
+  `TestApplyAndroidSkipsGitignoredFiles` — a tracked XML/Java pair still
+  binds while an identically-shaped pair under a gitignored path does not.
+  All verified to fail with the filter removed.
 
 ## Verification debts closed: idiomatic Java and config formats (DONE 2026-07-28)
 

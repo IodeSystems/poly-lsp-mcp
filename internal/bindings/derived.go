@@ -10,6 +10,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
 
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -22,7 +23,7 @@ import (
 func (r *Resolver) ApplyDerived(idx *symbols.Index) []DerivRoot {
 	// 1. operationIds the SDL declares as derivation sources.
 	want := map[string]bool{}
-	walkFiles(r.root, func(path string, data []byte) {
+	walkFiles(r.root, r.ignores, func(path string, data []byte) {
 		if !hasSuffix(path, ".graphql", ".gql") {
 			return
 		}
@@ -36,7 +37,7 @@ func (r *Resolver) ApplyDerived(idx *symbols.Index) []DerivRoot {
 
 	// 2. find the Go OperationID literal for each + register it as a declared site.
 	var roots []DerivRoot
-	walkFiles(r.root, func(path string, data []byte) {
+	walkFiles(r.root, r.ignores, func(path string, data []byte) {
 		if !hasSuffix(path, ".go") {
 			return
 		}
@@ -55,7 +56,11 @@ func (r *Resolver) ApplyDerived(idx *symbols.Index) []DerivRoot {
 
 var derivedRe = regexp.MustCompile(`@derived\(operationId:\s*"([^"]+)"\)`)
 
-func walkFiles(root string, fn func(path string, data []byte)) {
+// walkFiles visits every candidate file under root, honouring
+// .gitignore the same way the symbol index does — a repo's generated
+// state should no more become a declared BINDING than an indexed name.
+// A nil ignores (not a git repo, git unavailable) walks unfiltered.
+func walkFiles(root string, ignores *git.IgnoreSet, fn func(path string, data []byte)) {
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -64,6 +69,12 @@ func walkFiles(root string, fn func(path string, data []byte)) {
 			if n := d.Name(); n == "node_modules" || (strings.HasPrefix(n, ".") && n != ".") {
 				return filepath.SkipDir
 			}
+			if ignores.DirIgnored(root, path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if ignores.FileIgnored(root, path) {
 			return nil
 		}
 		if data, rerr := os.ReadFile(path); rerr == nil {

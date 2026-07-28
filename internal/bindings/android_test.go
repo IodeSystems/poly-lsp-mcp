@@ -2,6 +2,7 @@ package bindings
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -228,5 +229,55 @@ val raw = """raw_name"""
 		if _, bad := got[unwanted]; bad {
 			t.Errorf("interpolation fragment %q was returned as a literal", unwanted)
 		}
+	}
+}
+
+// A binding is a stronger claim than an indexed name: it asserts two
+// sites are the SAME entity, at declared confidence. Generated state
+// under a gitignored path must not be able to make that claim — the
+// resolver honours .gitignore the way the symbol index does.
+func TestApplyAndroidSkipsGitignoredFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	root := t.TempDir()
+	write := func(rel, body string) {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write(".gitignore", "generated/\n")
+	// A real, tracked pair: XML declares the key, Java addresses it.
+	write("res/xml/prefs.xml", `<PreferenceScreen><ListPreference app:key="scroll_behaviour" /></PreferenceScreen>`)
+	write("src/Constants.java", "package a;\nclass Constants { static final String K = \"scroll_behaviour\"; }\n")
+	// A GENERATED pair under an ignored path, spelled the same way.
+	write("generated/prefs.xml", `<PreferenceScreen><ListPreference app:key="generated_only_key" /></PreferenceScreen>`)
+	write("generated/Gen.java", "package a;\nclass Gen { static final String K = \"generated_only_key\"; }\n")
+	run("init", "-q")
+	run("add", ".gitignore", "res", "src")
+	run("commit", "-qm", "init")
+
+	idx := symbols.NewIndex()
+	r := NewResolver(root)
+	r.ApplyAndroid(idx)
+
+	if got := len(idx.Lookup("scroll_behaviour")); got == 0 {
+		t.Error("the tracked pair must still bind")
+	}
+	if got := idx.Lookup("generated_only_key"); len(got) != 0 {
+		t.Errorf("a gitignored pair was declared as a binding: %+v", got)
 	}
 }

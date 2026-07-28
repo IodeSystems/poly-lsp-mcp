@@ -39,7 +39,7 @@ import (
 func (r *Resolver) ApplyAndroid(idx *symbols.Index) []DerivRoot {
 	// 1. Resource names the XML side declares or keys on.
 	xmlSites := map[string][]symbols.Site{}
-	walkFiles(r.root, func(path string, data []byte) {
+	walkFiles(r.root, r.ignores, func(path string, data []byte) {
 		if !hasSuffix(path, ".xml") {
 			return
 		}
@@ -56,7 +56,7 @@ func (r *Resolver) ApplyAndroid(idx *symbols.Index) []DerivRoot {
 
 	// 2. Java / Kotlin string literals naming one of them.
 	codeSites := map[string][]symbols.Site{}
-	walkFiles(r.root, func(path string, data []byte) {
+	walkFiles(r.root, r.ignores, func(path string, data []byte) {
 		lang, hits := codeStringLiteralSites(path, data)
 		if lang == "" {
 			return

@@ -35,6 +35,7 @@ import (
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 )
 
 // goIdentifierQuery captures every node Go's grammar uses to name a
@@ -852,9 +853,9 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	// Resolved once: one git invocation per build, not per entry. nil
 	// when root is not a repo or git is unavailable, in which case the
 	// walk proceeds exactly as before.
-	var ign *ignoreSet
+	var ign *git.IgnoreSet
 	if !cfg.noGitignore {
-		ign = loadIgnoreSet(root)
+		ign = git.LoadIgnores(root)
 	}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -864,12 +865,12 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			if skipDirs[d.Name()] {
 				return fs.SkipDir
 			}
-			if ign.dirIgnored(root, path) {
+			if ign.DirIgnored(root, path) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if ign.fileIgnored(root, path) {
+		if ign.FileIgnored(root, path) {
 			return nil
 		}
 		ext := strings.TrimPrefix(filepath.Ext(path), ".")

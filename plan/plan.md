@@ -116,20 +116,31 @@ a C++ out-of-line rename spanned the whole `Widget::area`, deleting the class
 scope and silently detaching the definition — now pinned by
 `TestCppQualifiedRenameKeepsScope`.
 
-◻ **Verification debts — coverage claimed but not earned.**
-  - ◻ **yaml / json were never verified at scale.** This repo has one
-    `.mcp.json` outside testdata; every yaml/json site measured came from
-    fixtures. Their "keep every token" rule is right for config — a value IS a
-    contract — but untested.
-    **next**: run the index over a config-heavy tree (k8s manifests, a CI
-    config set) and check the noise profile the way markdown was checked.
-  - ◻ **Idiomatic Java is untested.** All 492 Java files measured were
-    jOOQ-GENERATED; the box has no hand-written Java. No lambdas, streams,
-    Spring annotation stacks or anonymous inner classes have ever been parsed.
-  - ⏸ **Groovy is speculative** — zero corpus on this box (→ done.md). A
-    Jenkinsfile cannot even be routed: it is extensionless and the registry
-    keys on extension alone. Filename matching would be a `config.Registry`
-    schema change (Build / LookupByExt / languageForFile).
+✅ **Verification debts closed — 2026-07-28** → done.md. Idiomatic Java is
+now measured on JDK 21's `java.base` (3,498 hand-written files, 246k symbols,
+0 parse errors; fixed `module-info.java`, the one file that indexed empty).
+yaml/json measured on a real config tree: the "keep every token" rule works as
+designed on hand-written config (62 files, 343 names, 3% junk), and the noise
+is entirely generated data.
+
+◻ **Respect `.gitignore` when walking — the config measurement's real finding.**
+**88% of all yaml/json sites in `zdx-go` (462,002 of 527,913, across 795
+files) come from GITIGNORED files** — tool state, lock files, captured API
+payloads. The walk honours `skipDirs` but not `.gitignore`, so a repo's own
+throwaway data outweighs its source 8:1 in the index.
+- **next**: honour `.gitignore` in `symbols.Build`'s walk.
+- **why ignored and NOT untracked**: a file an agent just created and has not
+  `git add`-ed is untracked but not ignored, so it must keep indexing.
+  Filtering on `git ls-files` would make new work invisible.
+- **risks**: changes what EVERY language indexes, not just config; needs a
+  fallback for non-git workspaces; someone may gitignore a file they still
+  want indexed.
+- **blocking decision (USER)**: worth doing, given it silently changes index
+  contents for every existing workspace?
+
+⏸ **Groovy is speculative** — zero corpus on this box (→ done.md). A
+Jenkinsfile cannot even be routed: it is extensionless and the registry keys
+on extension alone.
 
 ◻ **Known limits, recorded so they are not re-investigated.**
   - SQL: `CREATE PROCEDURE` is unparseable by tree-sitter-sql (3 migration

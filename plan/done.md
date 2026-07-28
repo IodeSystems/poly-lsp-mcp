@@ -300,6 +300,53 @@ scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
 a shared module yet.** raglit's version is battle-tested but has exactly one
 user; extracting now is speculative, extracting after a second real copy is
 refactoring against two known cases. Revisit once this daemon runs.
+## Verification debts closed: idiomatic Java and config formats (DONE 2026-07-28)
+
+Both debts were "coverage claimed but not earned". Both are now measured
+against real corpora, locally, with no model in the loop.
+
+**Java — idiomatic, at scale.** The earlier 492-file measurement was 100%
+jOOQ-GENERATED, so nothing idiomatic had ever been parsed. Corpus found:
+**JDK 21's own `java.base` from `src.zip` — 3,498 hand-written files**, of
+which 501 carry lambdas, 1,303 carry annotations and 326 are generic-heavy.
+Result: **246,224 symbols, 0 files with ERROR nodes, 0 empty.** The arm holds
+up on real Java — lambdas, generics, nested and anonymous classes, records
+(123 struct), 15,543 annotations exercising the arm added this week, and
+12,097 `[n]` overload disambiguations.
+- ONE defect found, now fixed: `module-info.java` was the only file of 3,498
+  that indexed as completely empty. `module_declaration` is now a symbol
+  classed `module`, answering to its leaf like a package.
+- Its `exports`/`requires` directives are deliberately NOT symbols. Their
+  identity is a full dotted path (`java.lang`, `java.lang.annotation`) and a
+  sym-path segment cannot hold dots, so they collapsed to generic leaves —
+  `io`, `lang`, `util`, and `annotation[1]` vs `annotation[2]` — that collide
+  with each other and bury real names. A first cut DID index them, producing
+  160 symbols for that file; that was the markdown-prose mistake in miniature
+  and was reverted to 1. Pinned by `TestFileSymbolsJavaModuleInfo`.
+
+**yaml / json — the rule is right, the corpus is the problem.** Measured on
+`iodesystems/zdx-go` (812 config files, 527,913 lexical sites), split by hand:
+- **hand-written config: 62 files, 6,003 sites, 343 distinct names**, only 3%
+  junk-shaped. Heaviest names are exactly what the design intends —
+  `slug`, `project`, `src`, `routes`, `file`: the string keys that join config
+  to code. **The "keep every token" rule works as designed.**
+- **generated data: 750 files, 521,910 sites — 99% of all config sites.**
+  Heaviest names are `n` (22,940 sites), `type`, `string`, `bytes`, `webm`:
+  JSON structure and payload values, not keys anyone looks up. 19% of distinct
+  names are junk-shaped (pure digits, single chars, hex blobs). One file,
+  `classified-results.json`, contributes 66,024 sites and exists in three
+  worktree copies.
+- **The finding that matters: 88% of all config sites come from GITIGNORED
+  files** (462,002 of 527,913, across 795 files). The index walk honours
+  `skipDirs` but not `.gitignore`.
+- Gitignore is the SAFE signal, and "tracked" is not: a file just created and
+  not yet `git add`-ed is untracked but NOT ignored, so an agent's own new
+  file would keep indexing. That distinction is why this is worth doing
+  properly rather than filtering on `git ls-files`.
+- ◻ **NOT implemented — a decision for the user.** Respecting `.gitignore`
+  changes what every language indexes, not just config, and needs a fallback
+  for non-git workspaces. Surfaced with the numbers rather than assumed.
+
 ## Rename you can check, and the UTF-16 column fix (DONE 2026-07-28)
 
 The two residual items from the dogfood arc, both found by real use rather

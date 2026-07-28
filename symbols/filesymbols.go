@@ -2064,6 +2064,17 @@ func classifyJava(t, parent string) symRole {
 		"constant_declaration":
 		return roleContainer
 	case "package_declaration", "import_declaration",
+		// A JPMS module-info.java declares the MODULE. Without this the
+		// file indexes as completely empty — measured on JDK 21's
+		// java.base, the only one of 3,498 files that yielded nothing.
+		//
+		// Its `exports`/`requires` directives are deliberately NOT
+		// symbols. Their identity is a full dotted path (java.io,
+		// java.lang.annotation) and a sym-path segment cannot hold the
+		// dots, so they would collapse to generic leaves — `io`, `lang`,
+		// `util` — that collide with each other and bury real names.
+		// One module name is worth more than 159 ambiguous ones.
+		"module_declaration",
 		"class_declaration", "interface_declaration",
 		"enum_declaration", "record_declaration",
 		"annotation_type_declaration", "annotation_type_element_declaration",
@@ -2237,6 +2248,8 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 	case "java":
 		switch t {
 		case "package_declaration":
+			return "module", false
+		case "module_declaration":
 			return "module", false
 		case "import_declaration":
 			return "import", false
@@ -2422,6 +2435,23 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 			return n.Content(content), n
 		}
 		return "", nil
+	}
+	// A Java module declaration names itself with a scoped_identifier
+	// (java.base). Like a package, it answers to the LEAF — a dotted
+	// path would split the sym path.
+	if lang == "java" {
+		switch t {
+		case "module_declaration":
+			if sc := firstNamedChildOfType(node, "scoped_identifier"); sc != nil {
+				if leaf := lastNamedChildOfType(sc, "identifier"); leaf != nil {
+					return leaf.Content(content), leaf
+				}
+			}
+			if id := firstNamedChildOfType(node, "identifier"); id != nil {
+				return id.Content(content), id
+			}
+			return "", nil
+		}
 	}
 	// Kotlin's grammar has no field names at all, so every name is
 	// resolved positionally before the generic lookups.

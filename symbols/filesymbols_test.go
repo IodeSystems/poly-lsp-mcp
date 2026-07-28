@@ -1196,3 +1196,34 @@ public class User {
 		t.Errorf("qualified annotation alias = %q, want com.example.Audited", got.Alias)
 	}
 }
+
+func TestFileSymbolsJavaModuleInfo(t *testing.T) {
+	// module-info.java was the ONLY file of JDK 21's 3,498-file
+	// java.base that indexed as completely empty.
+	src := []byte(`module java.base {
+    exports java.lang;
+    exports java.io;
+    requires transitive java.xml;
+}
+`)
+	syms, err := FileSymbols("java", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The module answers to its LEAF, like a package declaration.
+	got := symByPath(syms, "base")
+	if got == nil {
+		t.Fatalf("missing the module declaration; have %+v", syms)
+	}
+	if got.Class != "module" {
+		t.Errorf("module class = %q, want module", got.Class)
+	}
+	// The directives are deliberately NOT symbols: their identity is a
+	// full dotted path (java.lang, java.io) and a sym-path segment
+	// cannot hold the dots, so they would collapse to generic leaves —
+	// `lang`, `io`, `xml` — that collide and bury real names.
+	if len(syms) != 1 {
+		t.Errorf("got %d symbols, want exactly 1 (the module, not its directives): %+v",
+			len(syms), syms)
+	}
+}

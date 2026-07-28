@@ -103,7 +103,7 @@ export enum Color { Red, Green }
 }
 
 func TestFileSymbolsUnsupportedLanguageErrors(t *testing.T) {
-	if _, err := FileSymbols("markdown", []byte("# hi")); err == nil {
+	if _, err := FileSymbols("yaml", []byte("a: 1")); err == nil {
 		t.Error("expected error for language without a grammar")
 	}
 }
@@ -1085,5 +1085,71 @@ func TestFileSymbolsSQLConstraintWithoutItsTable(t *testing.T) {
 	}
 	if got := symByPath(syms, "account_email_key"); got != nil {
 		t.Errorf("constraint landed at file scope without its table: %+v", got)
+	}
+}
+
+func TestFileSymbolsMarkdownSections(t *testing.T) {
+	src := []byte(`# Top
+
+Intro prose.
+
+## Alpha
+
+Alpha body with ` + "`UserID`" + `.
+
+### Nested
+
+deep
+
+## Beta
+
+Beta body.
+`)
+	syms, err := FileSymbols("markdown", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A document's outline IS its node tree: sections nest, and each
+	// span covers the heading plus everything under it.
+	want := map[string][2]int{
+		"Top":              {1, 16},
+		"Top.Alpha":        {5, 13},
+		"Top.Alpha.Nested": {9, 13},
+		"Top.Beta":         {13, 16},
+	}
+	for sym, span := range want {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing section %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != "module" {
+			t.Errorf("%q class = %q, want module", sym, got.Class)
+		}
+		if got.DeclStartLine != span[0] || got.DeclEndLine != span[1] {
+			t.Errorf("%q spans L%d-%d, want L%d-%d — a section owns its BODY, not just its heading",
+				sym, got.DeclStartLine, got.DeclEndLine, span[0], span[1])
+		}
+	}
+	if len(syms) != 4 {
+		t.Errorf("got %d symbols, want 4 sections (paragraphs are content, not siblings): %+v", len(syms), syms)
+	}
+}
+
+func TestFileSymbolsMarkdownUntitledPreambleDeclined(t *testing.T) {
+	// Text above the first heading titles nothing. It must not become an
+	// anonymous "[1]" node; its text still belongs to the file.
+	src := []byte("Loose intro line.\n\n# Real\n\nbody\n")
+	syms, err := FileSymbols("markdown", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range syms {
+		if strings.Contains(s.Sym, "[") {
+			t.Errorf("untitled preamble emitted an anonymous node: %+v", s)
+		}
+	}
+	if got := symByPath(syms, "Real"); got == nil {
+		t.Errorf("missing the titled section; have %+v", syms)
 	}
 }

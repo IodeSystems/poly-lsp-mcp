@@ -11,6 +11,7 @@ import (
 	"github.com/smacker/go-tree-sitter/groovy"
 	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/kotlin"
+	markdown "github.com/smacker/go-tree-sitter/markdown/tree-sitter-markdown"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/sql"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
@@ -40,6 +41,13 @@ func LanguageByName(name string) *sitter.Language {
 		return kotlin.GetLanguage()
 	case "groovy":
 		return groovy.GetLanguage()
+	case "markdown":
+		// The BLOCK grammar. It yields nested `section` nodes whose span
+		// covers a heading AND its body, which is exactly the unit a
+		// document is navigated by. The companion inline grammar (emphasis,
+		// links, code spans) is a separate tree and is not needed for
+		// structure.
+		return markdown.GetLanguage()
 	}
 	return nil
 }

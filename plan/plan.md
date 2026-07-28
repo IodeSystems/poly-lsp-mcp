@@ -97,6 +97,13 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **Markdown: sections as nodes, prose out of the index — 2026-07-28** →
+done.md. Markdown was 32% of the index and `plan/done.md` the heaviest file
+in the repo; it is now 4,979 sites (-85%). A document's node tree is its
+outline (nested `section` nodes owning their body), and the index keeps only
+headings, fenced code and inline code spans. Backticked spans kept
+deliberately — dropping them would break the prose-rename claim.
+
 ✅ **SQL verified on the Flyway migrations — 2026-07-27** → done.md. Weakest
 result of any language: 41% of files parse with ERRORs and 6 were empty.
 Indexed create_function/trigger/sequence then ADD CONSTRAINT names

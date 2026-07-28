@@ -112,7 +112,7 @@ class UserService:
 }
 
 func TestStructureNodesUnsupportedLanguage(t *testing.T) {
-	_, err := StructureNodes("markdown", []byte("# hello"))
+	_, err := StructureNodes("yaml", []byte("# hello"))
 	if err == nil {
 		t.Error("expected error for unsupported language")
 	}
@@ -152,7 +152,7 @@ func TestEnclosingStructureNodePositionAtIdentifier(t *testing.T) {
 }
 
 func TestEnclosingStructureNodeUnsupported(t *testing.T) {
-	_, err := EnclosingStructureNode("markdown", []byte("hi"), 1, 1)
+	_, err := EnclosingStructureNode("yaml", []byte("hi"), 1, 1)
 	if err == nil {
 		t.Error("expected error for unsupported language")
 	}

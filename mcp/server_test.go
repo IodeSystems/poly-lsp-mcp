@@ -453,10 +453,16 @@ func TestStructureFileReturnsFlatSymbolsWithClassAndRange(t *testing.T) {
 }
 
 func TestStructureFileWithoutTreeSitterGrammar(t *testing.T) {
-	// Markdown has no tree-sitter grammar wired (lexical-only). The
+	// YAML has no tree-sitter grammar wired (lexical-only). The
 	// fallback returns a single "text" node covering the whole file
 	// so agents can node_read / node_edit / node_delete it the same
 	// way they would any other node.
+	//
+	// This used to exercise README.md, which stopped demonstrating the
+	// fallback once markdown gained a grammar and started yielding
+	// section nodes. The behaviour under test is the FALLBACK, so it
+	// moved to a file that still has no grammar rather than being
+	// deleted.
 	root := polyglotFixture(t)
 	s := startSessionFull(t, root, nil, nil)
 	defer s.close()
@@ -464,9 +470,9 @@ func TestStructureFileWithoutTreeSitterGrammar(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	r := s.callTool("structure", map[string]any{"path": "README.md"})
+	r := s.callTool("structure", map[string]any{"path": "config.yaml"})
 	if r.IsError {
-		t.Fatalf("README structure errored: %+v", r.Content)
+		t.Fatalf("config.yaml structure errored: %+v", r.Content)
 	}
 	var entry wireEntry
 	json.Unmarshal([]byte(r.Content[0].Text), &entry)

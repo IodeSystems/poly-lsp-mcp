@@ -3,6 +3,56 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Markdown: sections as nodes, prose out of the index (DONE 2026-07-28)
+
+- [x] Verified markdown/yaml/json against the repo docs and found no bug — the
+  lexical tier did exactly what it was written to do. The problem was the
+  DESIGN, and the numbers made the case: **markdown was 34,093 sites, 32% of
+  the whole index and second only to Go. `plan/done.md` alone was the
+  heaviest file in the repository at 16,372 sites, more than twice the
+  largest Go file.** Half of all indexed names (4,057 of 7,890) appeared ONLY
+  in docs, overwhelmingly English stopwords — `on` 251 sites, `of` 211, `for`
+  209. They cost budget and skewed every cardinality estimate while linking
+  nothing. (A large share of that was self-inflicted: this very file grew
+  enormously from one session of plan entries.)
+- **User's call: index titled sections, and let a section own its markdown
+  content.** Implemented as both halves of the model:
+  - **Nodes.** `LanguageByName` now returns the tree-sitter markdown BLOCK
+    grammar, whose nested `section` nodes span a heading PLUS everything
+    under it. A document's node tree is now its own outline —
+    `README.md#'MCP mode.Selector language'` addresses a section and
+    `node_read` returns its body. Class is `module`, the shared vocabulary's
+    named-container slot (a Go package, a Kotlin package, a TS namespace).
+    A section with no heading is the preamble above the first `#`; it names
+    nothing and is DECLINED rather than emitted as an anonymous `[1]`.
+  - **Index.** `MarkdownExtractor` replaces the lexical one and keeps only
+    the three places a document names things: HEADINGS, FENCED code blocks,
+    and INLINE code spans. A fence's info string (```go) names a language,
+    not an entity, and is skipped.
+- **Inline code spans were kept deliberately, and it is the load-bearing
+  choice.** A strict headings-only reading would have broken
+  `TestBuildPolyglotFindsUserID` and `TestBuildPolyglotFindsGreetUserCrossLanguage`,
+  because the fixture mentions both names in prose BACKTICKS and never in a
+  heading — and with them the README's headline claim that a rename
+  propagates into prose. Backticks are how a document says "this is code",
+  so honouring them satisfies the instruction's intent without discarding
+  the feature. Flagged as an assumption; reversible in one line.
+- Result on this repo: **markdown 34,093 → 4,979 sites (-85%), total names
+  7,890 → 4,647, doc-only names 4,057 → 803.** `the` fell 251 → 20 sites (the
+  survivors sit inside code spans, correctly), `of` 211 → 6, while `UserID`
+  still resolves at 34 sites across go/ts/py/yaml/markdown.
+- Three tests used markdown as their EXAMPLE of a grammar-less language and
+  had to move, not be deleted: the two `Unsupported`/`WithoutTreeSitterGrammar`
+  cases now use yaml, which is still lexical-only, so the fallback behaviour
+  they exist to pin is unchanged.
+- **yaml/json were NOT meaningfully verified.** This repo has exactly one
+  `.mcp.json` outside testdata; the 78 yaml and 69 json sites all come from
+  fixtures. Their "keep every token" rule is right for config — a value is a
+  contract — but it is untested at scale here.
+- Tests: `TestFileSymbolsMarkdownSections` (asserts a section owns its BODY,
+  not just its heading), `TestFileSymbolsMarkdownUntitledPreambleDeclined`,
+  `TestMarkdownExtractorIndexesNamesNotProse`.
+
 ## SQL ADD CONSTRAINT names indexed under their table (DONE 2026-07-27)
 
 - [x] The gap left open by the SQL verification below. `alter_table` is now a

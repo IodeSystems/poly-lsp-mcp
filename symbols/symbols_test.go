@@ -326,3 +326,38 @@ class Widget { int onKey(String event) { return 1 } }
 		}
 	}
 }
+
+func TestMarkdownExtractorIndexesNamesNotProse(t *testing.T) {
+	src := []byte("# Setting up `UserID`\n" +
+		"\n" +
+		"The quick brown fox jumps over the lazy dog and of for with.\n" +
+		"\n" +
+		"Inline `GreetUser` reference in prose.\n" +
+		"\n" +
+		"```go\n" +
+		"func Handle(userID string) error { return nil }\n" +
+		"```\n" +
+		"\n" +
+		"More untouched prose here.\n")
+	names := hitNames((&MarkdownExtractor{}).Extract(src))
+
+	// Kept: heading words, inline code spans, fenced code. The inline
+	// span is what earns the cross-language claim — a doc mentioning a
+	// Go type in backticks still links to it.
+	for _, want := range []string{"Setting", "UserID", "GreetUser", "Handle", "userID"} {
+		if !names[want] {
+			t.Errorf("missing %q; have %v", want, names)
+		}
+	}
+	// Dropped: body prose, which was 32%% of this repo's whole index and
+	// linked nothing.
+	for _, unwanted := range []string{"quick", "brown", "fox", "lazy", "dog", "untouched", "prose"} {
+		if names[unwanted] {
+			t.Errorf("prose word %q leaked into the index", unwanted)
+		}
+	}
+	// The fence INFO string names a language, not a program entity.
+	if names["go"] {
+		t.Error("fence info string was indexed as a name")
+	}
+}

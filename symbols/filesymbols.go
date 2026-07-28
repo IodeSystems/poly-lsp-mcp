@@ -572,6 +572,38 @@ func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int
 	return startLine, startCol, endLine, endCol
 }
 
+// markdownHeadingNode returns the `inline` node holding a section's
+// title text, or nil when the section has no heading.
+func markdownHeadingNode(section *sitter.Node) *sitter.Node {
+	for i := range int(section.NamedChildCount()) {
+		h := section.NamedChild(i)
+		switch h.Type() {
+		case "atx_heading", "setext_heading":
+			if in := firstNamedChildOfType(h, "inline"); in != nil {
+				return in
+			}
+			return nil
+		}
+		// Only a LEADING heading titles the section; anything else means
+		// this section is untitled preamble.
+		return nil
+	}
+	return nil
+}
+
+// markdownHeadingText renders a section's title as a path segment.
+// Dots would split the path, so they are folded to spaces — a heading is
+// prose, not a dotted name.
+func markdownHeadingText(section *sitter.Node, content []byte) string {
+	in := markdownHeadingNode(section)
+	if in == nil {
+		return ""
+	}
+	txt := collapseType(in.Content(content))
+	txt = strings.ReplaceAll(txt, ".", " ")
+	return strings.TrimSpace(txt)
+}
+
 // isCommentNode reports whether a node type is a comment. Every grammar
 // here but Kotlin's spells it `comment`; Kotlin splits the two forms,
 // and without both a Kotlin declaration would silently lose the doc
@@ -908,6 +940,8 @@ func classify(lang, t, parent string) symRole {
 		return classifyJava(t, parent)
 	case "c", "cpp":
 		return classifyC(t, parent)
+	case "markdown":
+		return classifyMarkdown(t, parent)
 	case "kotlin":
 		return classifyKotlin(t, parent)
 	case "groovy":
@@ -940,6 +974,20 @@ func classifyGroovy(t, parent string) symRole {
 		return roleContainer
 	case "groovy_package", "groovy_import", "class_definition",
 		"function_definition", "function_declaration", "declaration":
+		return roleSymbol
+	}
+	return roleSkip
+}
+
+// classifyMarkdown treats a titled SECTION as the unit of a document.
+// The block grammar nests them (a `##` section sits inside its `#`), and
+// a section's span already covers its heading plus everything under it,
+// so the node model comes out as the document's own outline.
+//
+// Nothing else is a symbol: paragraphs, lists and code blocks are the
+// section's CONTENT, reachable through its range, not siblings of it.
+func classifyMarkdown(t, parent string) symRole {
+	if t == "section" {
 		return roleSymbol
 	}
 	return roleSkip
@@ -2114,6 +2162,16 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 			}
 			return "type", false
 		}
+	case "markdown":
+		// A section with no heading is the preamble above the first `#`.
+		// It names nothing, so it is DECLINED rather than emitted as an
+		// anonymous node; its text still belongs to the file.
+		if markdownHeadingText(node, content) == "" {
+			return "", false
+		}
+		// `module` is the shared vocabulary's named-container slot — the
+		// same one a Go package, a Kotlin package and a TS namespace use.
+		return "module", true
 	case "c", "cpp":
 		if class, branch, ok := refinedClassC(node, parentClass, content); ok {
 			return class, branch
@@ -2298,6 +2356,15 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 		if name, node, ok := groovyName(node, content); ok {
 			return name, node
 		}
+	}
+	// A markdown section answers to its heading TEXT, markers stripped.
+	if lang == "markdown" {
+		if h := markdownHeadingNode(node); h != nil {
+			if txt := markdownHeadingText(node, content); txt != "" {
+				return txt, h
+			}
+		}
+		return "", nil
 	}
 	// Python assignment: the bound NAME is the `left` field.
 	if lang == "python" && t == "assignment" {

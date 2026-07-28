@@ -769,8 +769,10 @@ var defaultExtractors = map[string]Extractor{
 	// name="x", app:key="x" — and indexing every token instead buried those
 	// under android:/layout_*/match_parent noise (331 hits vs 33 on one
 	// layout). See XMLExtractor for why encoding/xml and not the html grammar.
-	"xml":      XMLExtractor{},
-	"markdown": &LexicalExtractor{},
+	"xml": XMLExtractor{},
+	// Markdown indexes HEADINGS, fenced code and inline code spans only,
+	// not prose — see MarkdownExtractor for the measurements behind it.
+	"markdown": &MarkdownExtractor{},
 	// Proto and GraphQL SDL deliberately use the lexical extractor —
 	// not the bindings-side proto schema parser. The walker's job is
 	// to surface every identifier-shaped token AND let the

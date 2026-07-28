@@ -764,9 +764,12 @@ var defaultExtractors = map[string]Extractor{
 
 	"yaml": &LexicalExtractor{},
 	"json": &LexicalExtractor{},
-	// XML is lexical on purpose: on Android the cross-language edge is
-	// a resource NAME in an attribute value, not a syntax node.
-	"xml":      &LexicalExtractor{},
+	// XML gets a real parser, not the lexical fallback. The cross-language
+	// edge on Android is a resource NAME in an attribute value — @+id/x,
+	// name="x", app:key="x" — and indexing every token instead buried those
+	// under android:/layout_*/match_parent noise (331 hits vs 33 on one
+	// layout). See XMLExtractor for why encoding/xml and not the html grammar.
+	"xml":      XMLExtractor{},
 	"markdown": &LexicalExtractor{},
 	// Proto and GraphQL SDL deliberately use the lexical extractor —
 	// not the bindings-side proto schema parser. The walker's job is

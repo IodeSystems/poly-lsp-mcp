@@ -76,6 +76,12 @@ const (
 // json / markdown / unregistered) — callers handle those with a single
 // whole-file entry.
 func FileSymbols(language string, content []byte) ([]Symbol, error) {
+	// XML has no vendored grammar (and the html grammar mis-parses Android
+	// XML: dotted tag names split, entities in strings.xml error out), so it
+	// gets a purpose-built encoding/xml walk instead of a whole-file fallback.
+	if language == "xml" {
+		return XMLFileSymbols(content), nil
+	}
 	lang := LanguageByName(language)
 	if lang == nil {
 		return nil, fmt.Errorf("no tree-sitter grammar for language %q", language)

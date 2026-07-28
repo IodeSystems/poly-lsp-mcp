@@ -79,554 +79,132 @@ agents actually want the cross-lib answer unprompted.
   `[path]` (lives), ops `= ^= $= *=` literal, `~=` regex (bracket-aware).
   Shipped 2026-07-17 → done.md ("Graph selector language" + the per-feature
   entries) for the full record.
-- Trivia/metadata as NODES (this session, → done.md): `annotation` (decorators
-  py/ts + struct-tag keys go, a CHILD of its symbol, leaf + virtual-FQN alias),
-  `::comment` (joined doc block, a GENERATED pseudo-element invisible to `*`),
-  `argument` (params). `:annotated('pat')`/`:contains('pat')` are the text
-  fallbacks (Go comment directives have no AST node).
+- Trivia/metadata as NODES (→ done.md): `annotation` (decorators py/ts/kotlin/
+  groovy + struct-tag keys go, a CHILD of its symbol, leaf + virtual-FQN
+  alias — NOT java, see Active work), `::comment` (joined doc block, a
+  GENERATED pseudo-element invisible to `*`), `argument` (params).
+  `:annotated('pat')`/`:contains('pat')` are the text fallbacks (Go comment
+  directives have no AST node).
+- **Twelve languages index and model nodes** (→ done.md for the per-language
+  record): go, typescript/tsx, python, java, kotlin, groovy, c, c++, sql, xml,
+  markdown, plus proto/graphql/yaml/json on the lexical tier. Markdown is
+  structural — nested `section` nodes owning their body, and only headings,
+  fenced code and inline code spans enter the index. Child LSPs default for
+  go/ts/py (gopls/tsserver/pylsp) and c/c++ (clangd); the JVM trio is
+  tree-sitter only because their servers want a build.
+- **Daemon mode is COMPLETE** (→ done.md): `mcp --daemon` proxies to one
+  shared per-user daemon over a unix socket — one warm index, one child-LSP
+  fleet, one parse cache for every client.
 
 ## Active work
 
-**Shipped this session (all → done.md):** query CLI + `bin/dev`; deterministic
-truncation; `[path]` axis + de-leaked `[name]`; `~=` regex (bracket-aware);
-edge-cost fixes (direction split + once-per-query inversion → `func::out` fits
-the 200k default); child-LSP precision pass (`conf: lsp|lexical`); local-scope
-fix (99% far-end noise gone); leading-ref pushdown + containment attribution;
-`:annotated`; `annotation` node; `::comment` pseudo-element; `::in.return.type`
-position axis. Common dev queries are NOT pathological at the default budget.
+Conventions for this file are at the top: current state + active work ONLY.
+Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
-✅ **Markdown: sections as nodes, prose out of the index — 2026-07-28** →
-done.md. Markdown was 32% of the index and `plan/done.md` the heaviest file
-in the repo; it is now 4,979 sites (-85%). A document's node tree is its
-outline (nested `section` nodes owning their body), and the index keeps only
-headings, fenced code and inline code spans. Backticked spans kept
-deliberately — dropping them would break the prose-rename claim.
+◻ **Language coverage has outrun the EDIT surface — the top gap.**
+Twelve languages now index and model nodes (see the pointer below), but the
+mutation half never followed. Concretely:
+  - ◻ **`node_refactor` signature rewriting is go / typescript / python only**
+    (`symbols/refactor.go: langOpsByName`, `mcp/tools.go:
+    signatureSupportedLanguage`). java, kotlin, groovy, c, cpp all index and
+    answer queries, then silently do nothing for `refactor:{params, return}`.
+    Rename still works everywhere — it is the signature/callsite rewrite that
+    is missing.
+    **next**: pick ONE (java is the largest measured corpus) and add a
+    `langOps` entry; the shape is fixed by goLangOps/tsLangOps.
+    **risks**: each language needs its own call-site rewriter, so this is
+    per-language work, not one abstraction.
+  - ◻ **Java has no `.annotation` children** while python/typescript/go/kotlin/
+    groovy all do (`appendAnnotationSymbols`). Java is the language where
+    annotations carry the most meaning — `@Override`, JPA, Spring — so
+    `method:any(annotation#Transactional)` silently matches nothing.
+    **next**: a `javaAnnotations` arm; kotlinAnnotations is the template.
+  - **blocking decision (USER)**: is the edit surface meant to reach parity
+    across all twelve, or do java/kotlin stay query-only on purpose? That
+    answer decides whether this is one slice or five.
 
-✅ **SQL verified on the Flyway migrations — 2026-07-27** → done.md. Weakest
-result of any language: 41% of files parse with ERRORs and 6 were empty.
-Indexed create_function/trigger/sequence then ADD CONSTRAINT names
-(975 → 1,103 → 1,349 symbols, 6 → 4 empty); constraints file under their
-table like a Go receiver. What remains is grammar limits: CREATE PROCEDURE is
-unparseable, so 3 files stay empty.
+◻ **Verification debts — coverage claimed but not earned.**
+  - ◻ **yaml / json were never verified at scale.** This repo has one
+    `.mcp.json` outside testdata; every yaml/json site measured came from
+    fixtures. Their "keep every token" rule is right for config — a value IS a
+    contract — but untested.
+    **next**: run the index over a config-heavy tree (k8s manifests, a CI
+    config set) and check the noise profile the way markdown was checked.
+  - ◻ **Idiomatic Java is untested.** All 492 Java files measured were
+    jOOQ-GENERATED; the box has no hand-written Java. No lambdas, streams,
+    Spring annotation stacks or anonymous inner classes have ever been parsed.
+  - ⏸ **Groovy is speculative** — zero corpus on this box (→ done.md). A
+    Jenkinsfile cannot even be routed: it is extensionless and the registry
+    keys on extension alone. Filename matching would be a `config.Registry`
+    schema change (Build / LookupByExt / languageForFile).
 
-✅ **Go dogfooded on this repo — 2026-07-27** → done.md. 148 files / 6,848
-symbols / 0 errors. Fixed one real defect: composite return types
-(`map[string][]symbols.InvSite`) were dot-split into a FALSE leaf
-(`return#InvSite`). Pointer/slice decoration deliberately left alone — the
-narrow fix over the consistent one, by the user's call.
+◻ **Known limits, recorded so they are not re-investigated.**
+  - SQL: `CREATE PROCEDURE` is unparseable by tree-sitter-sql (3 migration
+    files stay empty); quoted identifiers keep their quotes
+    (`"USER"."USER_pkey"`); index/view/type/trigger/sequence/constraint all
+    collapse to class `type`, so a selector cannot ask for views specifically.
+  - Go keeps pointer/slice decoration on return segments (`*Config`,
+    `[]Schema`) while java/kotlin/typescript/c strip it — USER's call
+    2026-07-27, documented on `goTypeSegment`.
+  - Markdown keeps inline backtick spans in the index. Assistant's judgement,
+    not an instruction: dropping them breaks the prose-rename claim and two
+    polyglot tests. Reversible in one line.
+  - TypeScript arrow components (`const Foo = () => …`) get no
+    `.argument`/`.return` children. Measured at 9 of 331 declarators (3%) on a
+    real React frontend, so left alone; revisit against a codebase that
+    actually writes them.
 
-✅ **Sibling-diagnostic race fixed — 2026-07-27** → done.md. The rollup
-sampled the store the instant the EDITED file was republished, while gopls
-emits the breaking sibling in a SEPARATE publish; it now debounces on a quiet
-window. Was ~1 failure in 3 full-package runs, pre-existing.
+✅ **Language coverage hardening — 2026-07-26/28, twelve languages → done.md**
+for the per-language record. Added c/cpp, kotlin, groovy; markdown became
+section NODES with prose out of the index (34,093 → 4,979 sites); the Android
+resource binding reads Kotlin literals; and every existing arm was verified
+against a live corpus, which is where the defects came from — Kotlin classes
+losing every member to one bad statement, `.d.ts` files indexing as empty,
+96% of TS return segments unusable, Python indexing no bindings at all, Go
+composites claiming a false leaf, SQL missing functions/triggers/sequences and
+246 constraint names.
 
-✅ **Python verified — 2026-07-27** → done.md. Grammar as robust as Java's (0
-errors over 392 files), but the arm indexed NO bindings: 891 declarations
-were invisible on the live corpus, 541 of them annotated dataclass/pydantic
-fields. Module-level assignments and class attributes are now symbols.
+✅ **Daemon mode — COMPLETE → done.md.** One shared poly-lsp per user; steps
+1-5 + per-connection read-only/validate policy shipped, step 6 (worktree COW)
+measured and iceboxed. Verified live 2026-07-28: `mcp --daemon` auto-starts,
+warms the root and proxies tool calls; `daemon --stop` shuts it down.
 
-✅ **TypeScript verified on the redline frontend — 2026-07-27** → done.md.
-212 files / 5,797 symbols on live hand-written React. Fixed three real
-defects it exposed: `.d.ts` ambient files indexed as EMPTY, return segments
-kept generics (96% of TS returns unusable — worse than Java's 4.9%), and
-`declare module "react"` carried its quotes into the path.
+✅ **`--validate`, staged-edit transactions (`commit:false`) and editable
+`::signature` / `::body` — all SHIPPED → done.md.** The safe-edit loop:
+revert-on-new-diagnostics, benchmarked and measured with error bars.
 
-✅ **Java verified on redline — 2026-07-27** → done.md. 492 files / 43,128
-symbols / 0 parse errors (the most robust grammar of the set — no ERROR
-remedy needed). But ALL 492 are jOOQ-generated; there is no hand-written Java
-corpus on this box, so idiomatic Java is untested. Fixed a real pre-existing
-defect found there: JVM return-type segments kept generics and `[]` with no
-alias, so `return#Field` missed `Field<String>` (4.9% of Java returns).
+✅ **Dogfooding wired → done.md.** `.mcp.json` registers poly-lsp as a native
+tool for Claude Code in this repo, so the project develops itself with its own
+`node_query`/`node_read`/`node_edit`. Two dogfood passes found cost cliffs
+100% test coverage had missed. Residual open items from that arc:
+  - ◻ Make a rename result harder to distrust (echo the touched symbols so a
+    grep-audit is unnecessary) — models spent ~30 calls re-verifying a correct
+    `filesChanged:9`.
+  - ◻ LSP `character` is UTF-16; `lineColToByteOffset` treats it as bytes —
+    correct for ASCII identifiers, a known edge for non-ASCII.
 
-✅ **Kotlin verified on a live 504-file repo — 2026-07-27** → done.md. Found
-and fixed a real defect (a class could keep its name and lose every member to
-one unparsable statement in a method; ERROR is now a container, as in c/cpp).
-No Android Kotlin repo exists on this box beyond llama.cpp's 15-file example
-— `_legacy/redline` is `kotlin.jvm`, not Android, but it is live and large.
+✅ **`:explain` cost-visible queries + cardinality-ordered descendant chains —
+SHIPPED → done.md.**
 
-✅ **Groovy — shipped 2026-07-26, SPECULATIVE** → done.md ("Groovy via
-tree-sitter"), whose header note explains why: this workspace has NO Groovy.
-Zero `.groovy`, zero `.gradle` (every Gradle project here is Kotlin DSL,
-already covered), and the only Groovy on disk is three Jenkinsfiles last
-edited June 2023 in repos that run to 2026. Kept by the user's call because
-it is written and tested, not because it was needed. The durable win is the
-capability it forced: `refinedClass` may now DECLINE a node (empty class),
-which any content-ambiguous grammar needs.
-
-✅ **Android bindings read Kotlin literals — shipped 2026-07-26** → done.md.
-The Java arm's want-set gate is shared verbatim; the Kotlin-specific hazard is
-string INTERPOLATION, whose content fragments must never be read as a whole
-resource name.
-
-✅ **Kotlin — shipped 2026-07-26** → done.md ("Kotlin via tree-sitter"): a
-FIELD-LESS grammar (everything positional), companion objects and primary
-constructors walked through, extension functions filed under their receiver.
-Also added `.gradle` to `skipDirs` — it was hiding 1.5M sites of vendored
-Node headers behind the new C/C++ support.
-
-✅ **C / C++ — shipped 2026-07-26** → done.md ("C / C++ via tree-sitter") for
-the record: `.h` belongs to cpp, declarators (not declarations) are the
-symbols, ERROR nodes are walked through so a `__attribute__` the grammar
-doesn't model can't blank a whole header.
 
 ◐ **Java + Android XML — the JVM/Android blind spot (started 2026-07-26).**
-Motivating measurement, termux-app: **17 of 291 source files were visible**
-(yml/md/json only) — 197 `.java` and 67 `.xml` were invisible, i.e. the index
-saw 6% of the repo and none of the code. Any agent using us as its code tool on
-an Android repo degrades to grep.
-
-**Slice 1 SHIPPED — Java via tree-sitter.** `config.Default()` entry
-(treesitter-only; jdtls is opt-in via yaml, it is too heavy to default),
-`javaIdentifierQuery`, `LanguageByName`, `classifyJava`, `refinedClass` java
-arm (module/import/class/interface/enum/struct(record)/ctor/method/field/var/
-const), `returnTypeNodes` (`type` field), `javaParamInfos` (formal_parameter,
-spread_parameter, receiver_parameter). Verified live on termux-app: 8,099 names
-indexed, `class#X > method` and nested field paths
-(`TermuxPreferenceConstants.TERMUX_APP.KEY_SCROLL_BEHAVIOUR`) resolve. Tests:
-`TestFileSymbolsJavaClassMembers`, `TestFileSymbolsJavaArguments`.
-Package declarations answer to the LEAF segment (`view`, not
-`com.termux.view`) — deliberate, matches Go's `package_clause`.
-
-**Slice 2 SHIPPED — the Android binding (`internal/bindings/android.go`).**
-`ApplyAndroid` sits alongside `ApplyDerived` / `ApplyDerivedSQL`, wired into
-both `mcp/server.go` and `server/lsp.go`. The structural problem it solves:
-**the Java side of an Android binding is a STRING LITERAL, which the
-tree-sitter extractor drops by design** — right for Go, wrong for Android.
-Widening the Java query to capture all literals would flood the index, so this
-takes the same want-set gate ApplyDerived uses:
-
-1. Collect resource names from XML (`name="x"`, `@+id/x`, `@string/x`, and the
-   read-by-code attributes `app:key` / `defaultValue` / `entryValues` /
-   `fragment` / `android:name`).
-2. Collect Java string literals via tree-sitter, keeping only values the XML
-   side already declares.
-3. Declare sites **only for names present on BOTH sides** — a resource nothing
-   in Java addresses carries no cross-language information and the lexical tier
-   already has it.
-
-**Precision is tiered**, and it had to be: binding every XML name first gave
-46,595 sites of mostly noise. Read-by-code attributes bind unconditionally;
-generic `name="x"` / `@res/x` additionally require the name to look chosen
-(`_`, `.`, an uppercase letter, or ≥12 chars), which drops coincidental
-collisions on `color` / `key` / `layout` / `content`. Result on termux-app:
-**42 bound names**, including the motivating case
-(`scroll_behaviour`: 2 XML + 3 Java sites), every AndroidManifest
-`android:name` ↔ activity/service class, the extra-keys names
-(ALT/CTRL/SHIFT), and preference keys (`log_level`, `current_session`,
-`crash_report_notifications_enabled`).
-
-Tests: `internal/bindings/android_test.go` — cross-language pair, unpaired
-resource NOT bound, unpaired Java literal NOT bound, noise filter.
-
+Motivating measurement, termux-app: 17 of 291 source files were visible
+(yml/md/json only) — 197 `.java` and 67 `.xml` invisible, i.e. 6% of the repo
+and none of the code. Slice 1 (Java via tree-sitter) and slice 2 (the Android
+resource binding, `internal/bindings/android.go`) SHIPPED → done.md; the
+binding now reads Kotlin literals as well as Java ones, and XML gained real
+named symbols (USER, 2026-07-27).
+- **next**: decide whether this tree is complete now that XML is real, or
+  whether `R.id.x` still wants the generated-R side.
 - **risks**: only direct literals are read (no constant folding, so
   `KEY = PREFIX + "x"` is invisible); the tier-2 distinctiveness heuristic is
-  lexical, so a genuinely short lowercase resource name paired with a real Java
+  lexical, so a genuinely short lowercase resource name paired with a real
   literal is dropped as noise.
-- **optional extensions**: kotlin SHIPPED, and the Android binding reads
-  Kotlin literals as well as Java ones (both → done.md); groovy SHIPPED too;
-  jdtls as an opt-in child LSP for
-  resolved edges and safe rename; `R.id.x` is currently bound via the `@+id/`
-  declaration side only, since R.java is generated and not in the tree.
+- **optional extensions**: jdtls as an opt-in child LSP for resolved edges and
+  safe rename.
 
-◐ **Daemon mode — ONE shared poly-lsp per user, many clients (agreed 2026-07-23).**
-Steps 1-5 SHIPPED (skeleton + proxy + persisted shared cache + FileSymbols op
-+ per-session mutation isolation + ref-counted child-LSP pooling; see
-"SHIPPED" + steps below). Step 6 (worktree COW) MEASURED and iceboxed — its
-goal is already met by the shared ParseCache; a true index COW isn't worth the
-core refactor (see below + icebox). Per-connection policy (read-only/validate)
-SHIPPED. **The planned daemon arc (steps 1-5 + per-connection policy) is
-COMPLETE**; the only daemon non-goal left is per-connection LEGACY surface (the
-daemon serves modern only) and the LSP-mode proxy (optional extension).
-Today every client runs `poly-lsp-mcp mcp --root <dir>` as its own process, and
-each one owns: a symbol index built by walking the workspace, a `ParseCache`
-persisted to `<root>/.poly-lsp-mcp/cache.gob`, an fsnotify watcher over the
-tree, git prewarm, and a `multiplex.Manager` spawning CHILD LSPs (main.go:84-100,
-mcp/server.go). Every Claude session, every editor, and every future
-non-interactive consumer pays for all five. gopls alone is hundreds of MB and
-tens of seconds of warmup, and N copies fight over the same module cache. This
-is raglit's "single writer + single worker pool" argument plus a child-LSP
-fleet, which is the expensive part.
-
-**Second consumer, and why it forces the design:** raglit wants `FileSymbols`
-for structural fragmentation (symbol path + class + doc-comment span +
-`BodyStartLine` = fragment atoms with titles, no LLM). raglit builds
-CGO_ENABLED=0 today; `smacker/go-tree-sitter` needs cgo, so importing `symbols`
-would forfeit its pure-Go build, and shelling out costs a fork per file. A
-daemon removes both problems — raglit becomes a client hitting a warm,
-content-keyed parse cache over the generated OpenAPI client: no cgo, no fork
-per file. A non-MCP, non-editor consumer is a first-class caller, not an
-afterthought.
-
-**Shape (deliberately mirrors raglit; copy, don't invent):**
-- **Transport: gat/huma, served on a UNIX SOCKET** (DECIDED, USER,
-  2026-07-23). The house stack — huma handlers through gat for REST + GraphQL +
-  gRPC + OpenAPI, exactly as raglit's `buildGatHandler` — bound to
-  `$XDG_RUNTIME_DIR/poly-lsp/daemon.sock` (fallback `~/.poly-lsp/daemon.sock`),
-  dir 0700 / socket 0600, instead of a TCP port. **Protocol and listener are
-  orthogonal**: gat yields an `http.Handler`, and an `http.Handler` serves on
-  any `net.Listener`, so the trust decision below costs nothing in stack
-  consistency. (An earlier draft proposed JSON-RPC-over-socket to make the MCP
-  proxy a pipe swap; that saves only the tool-call→HTTP translation
-  `raglit/cmd/raglit/serveclient.go` already shows how to write, and is not
-  worth diverging from every other service we run.)
-  - `http.Server{ConnContext: …}` stashes the accepted conn's peer creds
-    (uid/pid) in the request context — the mechanism that makes per-CONNECTION
-    policy (read-only / validate) enforceable at the boundary.
-  - Clients dial `http.Transport{DialContext: unix}` and use the generated
-    OpenAPI client; `curl --unix-socket` debugs it.
-  - Accepted consequences: no cross-host clients and no browser pointing at it
-    (we have no review UI; an opt-in TCP listener can be added later without
-    touching the trust model).
-  - ⚠ **Server→client PUSH does not fit request/response.** LSP
-    `publishDiagnostics`/progress need SSE, a websocket, or LSP-mode proxying
-    stays out of scope. MCP tool calls are all request/response, so steps 1-3
-    are unaffected — decide this when the LSP proxy is actually built.
-- **Registry keyed by ABSOLUTE workspace root**, not by a name. raglit
-  namespaces because "default" collides across projects; our roots are already
-  unique paths. Closest analogue: raglit's `OpenScopedRegistry`.
-- **Client = thin proxy.** `poly-lsp-mcp mcp` keeps its stdio JSON-RPC surface
-  and forwards tool calls to the daemon — exactly what `raglit serve` does
-  today. LSP mode can proxy the same way later; editors keep speaking stdio.
-- **Lifecycle copied from raglit** `cmd/raglit/{runtime,daemon,httpd}.go`:
-  a state file at `~/.poly-lsp/daemon.json` (pid / socket path / started_at /
-  version — NOTE: "root" there means raglit's storage root, ours is per-DAEMON,
-  not per-workspace) for discovery, auto-start detached (Setsid, output to
-  `daemon.log`), `--stop`, and `--restart` (SIGTERM → wait for the pid to
-  actually exit → relaunch detached replaying the invocation's flags). A
-  successful CONNECT plus a ping is the authority on "is it up" (raglit uses an
-  HTTP health probe for the same purpose); a stale socket file whose owner is
-  gone gets unlinked and replaced, the way raglit drops a stale `daemon.json`.
-- **ParseCache becomes daemon-wide.** It is ALREADY content-keyed
-  (`symbols/cache.go`: `Language + Hash[32]byte → []Hit`, LRU, version-tagged
-  gob) — it just lives per-root. Promote it to one shared store and identical
-  file content across five worktrees parses once. This is raglit's pool move
-  (`(recipe_hash, file_hash)`), and the cache comment already anticipates "a
-  long-running agent walking many branches".
-- **Branches = git worktrees, COW over the parent index.** A worktree shares
-  ~95% of its content with the parent checkout, and git names the difference for
-  free (`diff --name-only`). Overlay the parent's warm index and re-parse only
-  the divergent files, so a fresh worktree starts warm instead of rebuilding.
-  raglit's branch overlay (branch-over-parent at document grain, tombstones for
-  deletes) is the model. **UPDATE (MEASURED 2026-07-25): the shared ParseCache
-  already delivers this — re-parse-only-divergent falls out of content-keying;
-  the extra in-memory-clone win is ~90ms on a rare, gopls-bound open. Iceboxed;
-  see step 6 + icebox.**
-- **Child LSPs pool by ROOT, not by content.** gopls is bound to a module root,
-  so it can't be shared across worktrees — but it CAN be shared across every
-  session on the same root: keyed by root, ref-counted, idle-evicted LRU (same
-  policy shape as raglit's `GCPolicy`, different key). This is the single
-  biggest resource win.
-
-**SHIPPED this session (steps 1, 3-proxy, 2-share; all in `daemon/`):** the
-daemon runs — `poly-lsp-mcp daemon --allow <dir>` hosts many roots over a unix
-socket; `poly-lsp-mcp mcp --root X --daemon` is the thin stdio proxy that
-auto-starts it and forwards tools/list + tools/call. Verified end-to-end
-against the real binary (health, open=6965 names, /call, 403 on out-of-allow +
-sibling-prefix bypass, stop/restart replaying flags, stale-socket reclaim).
-Files: `paths/state/trust/peercred_{linux,other}/registry/server/spawn/client/proxy.go`;
-mcp gained `Init`/`Shutdown`/`CallTool`/`Tools`/`IndexedNames`/`SetParseCache`/
-`Root`/`RollbackSession` (`mcp/daemon_api.go`, `mcp/session.go`) — the exported
-seams the daemon drives a Server through without the stdio handshake. Tests:
-`daemon/{trust,daemon}_test.go` (bypass matrix, symlink escape, e2e round-trip,
-stale/live socket, disconnect auto-rollback), `mcp/session_test.go` (per-session
-batch isolation, claim conflict, external-write conflict).
-
-**next** (each step independently useful; 1-3 deliver the raglit consumer):
-  1. ✅ Daemon skeleton: gat/huma handler on a unix listener, peer-cred check
-     (`SO_PEERCRED` on Linux via a cred-filtering `net.Listener` + `ConnContext`
-     stash; mode-bit-only fallback on `!linux`) + root-prefix gate (`AllowList`,
-     EvalSymlinks/Clean + component-wise `filepath.Rel`, default `$HOME`),
-     registry keyed by canonical abs root (lazy, per-root serialized build),
-     health, `daemon.json`, auto-start detached (Setsid → `daemon.log`),
-     `--stop`/`--restart` (replays flags via `stripBoolFlags`). Straight port of
-     raglit's lifecycle; the socket/creds/gate part was new, as predicted.
-  2. ✅ Daemon-wide content-keyed ParseCache. One `symbols.NewParseCache()` on
-     the `Registry`, injected into every hosted Server via `SetParseCache`, so
-     identical bytes across roots parse once (safe: content-keyed, own mutex).
-     Persistence is daemon-OWNED — `Registry.LoadCache` at `Serve` start,
-     `SaveCache` (temp+rename) on shutdown, one load/save at
-     `~/.poly-lsp/cache.gob`, not the N racing per-root gobs the stdio path
-     does. Verified e2e: 172 entries saved on stop, reloaded on restart. Test:
-     `TestRegistryCachePersistence`.
-  3. ✅ Client-proxy (`daemon/proxy.go`: stdio MCP ⇄ socket, warms the root on
-     initialize so the trust-gate 403 surfaces early; shutdown is local, the
-     daemon keeps the root warm) + the typed read-only **`/filesymbols`** op
-     (`POST` content → structural atoms; language derived from `path` ext or
-     given). Content-first, NO root/file access + NO trust gate (the caller
-     owns the bytes; peer-cred + 0600 bound callers) — the "no cgo, no
-     fork-per-file" path the plan wants for raglit. Clean json-tagged
-     `FileSymbol` DTO (decoupled from `symbols.Symbol`) carries sym/class/decl+
-     name ranges/doc-comment span/body-start — fragment atoms with titles.
-     `Client.FileSymbols` + `TestDaemonEndToEnd` cover it; e2e-verified.
-     **Deferred (measure-first):** a content-keyed cache of `[]Symbol` results
-     (the existing `ParseCache` stores `[]Hit`, a different shape) — parse is
-     one tree-sitter pass/call; cache only if raglit re-ingest shows it hot.
-  4. ✅ Per-session mutation isolation. **Session identity = a client-minted
-     id (X-Poly-Session header) + a watched connection** (USER, 2026-07-24):
-     the proxy mints a random id, sends it on every `/call`, and holds one
-     long-lived `GET /session/watch` open; when it drops the daemon
-     auto-rolls-back that session's batch (`Registry.RollbackSession` sweeps
-     hosted roots). mcp side (`mcp/session.go`): the single `editBatch` field
-     became `batches map[sessionID]*editBatch` + a `claims map[uri]sessionID`,
-     all under `editMu` (the per-root commit serializer). The session reaches
-     the shared write funnels via an `editMu`-guarded `activeSession` field
-     (the node_edit handler sets it) rather than threading `sess` through every
-     apply signature; only the tool-handler dispatch type + `CallTool` gained
-     the param. **Per-file claim** (as predicted, not per-root lease): a second
-     session staging a held file is rejected naming the holder. **Stage-time
-     hash + commit-time recheck** (`editBatch.staged` + `externalWrites`): a
-     staged file written underneath the batch (another session/editor/
-     formatter/git) aborts the commit with a `conflict` + `changedFiles`,
-     leaving the batch OPEN — never silently overwritten or reverted. Tests:
-     `mcp/session_test.go` (isolation, claim conflict, external-write conflict),
-     `daemon TestDaemonRollsBackBatchOnDisconnect` (e2e auto-rollback).
-     **Scope note (batch isolation only, USER 2026-07-24):** per-CONNECTION
-     policy (read-only/validate) was a follow-up — now SHIPPED (see the
-     per-connection policy entry below). **Derived, still deferred:** the workspace-wide `--validate`
-     cross-session false-reject REPORT ("these errors are in files you didn't
-     touch; session X has an open batch") — a reporting nicety, not a
-     correctness gap; commit hashing + claims already prevent the corruption.
-  5. ✅ Child-LSP pooling: ref-count + idle eviction per root. Child LSPs were
-     ALREADY shared per-root across sessions (one *Server per root); the gap
-     was EVICTION — a root, once opened, pinned its gopls (hundreds of MB)
-     forever. Now `entry` carries `holders` (sessions keeping it warm) +
-     `evictTimer`: `Registry.Acquire(session,root)` holds + cancels any pending
-     evict, `Release(session)` (called on the SAME /session/watch disconnect
-     that rolls back the batch) drops the ref and, at zero holders, arms an
-     idle timer; `evict` shuts the server down IFF still unheld (re-checked
-     under mu, so a reconnect races safely). `idleTimeout` default 5m, 0
-     disables. The daemon-owned shared parse cache survives eviction, so a
-     re-open comes up warm on parses. Wired: `/open` Acquires (session header
-     on `openIn`), `/call`+`/tools` use the non-holding `Get`. Tests:
-     `TestRegistryRefCountEviction` (two holders keep it, last release evicts),
-     `TestRegistryReacquireCancelsEviction`; `-race` clean.
-  6. ⏸ Worktree overlay (COW index over a parent root) — MEASURED, iceboxed
-     (2026-07-25). The goal (re-parse only divergent files on worktree open) is
-     already met by the shared content-keyed ParseCache (step 2). Measured
-     (`daemon/measure_test.go`, `-tags measure`, this repo): warm worktree index
-     build with the shared cache is **93ms** (cold is 552ms — the cache already
-     saves 84% for free), while gopls workspace warmth is **355ms** and
-     UNSHAREABLE (per module root). A true in-memory COW would shave ~90ms off a
-     RARE, gopls-bound operation at the cost of refactoring the hottest struct
-     (`symbols.Index` is absolute-path, name-keyed, no clone). Not worth it now;
-     re-measure on a large repo before revisiting — see icebox
-     "Worktree COW index overlay" for the gate.
-
-**risks**
-- **Mutation is the hard part, and raglit never had to solve it.**
-  `node_edit`/`node_refactor`/`--validate` write the user's real source and
-  revert on new diagnostics; the staged-edit batch is "one open batch per
-  server, `editMu`-serialized". Concurrent agents already race today with stale
-  indexes — the daemon is the fix only if it owns apply→diagnose→revert
-  serially per root. **DECIDED (USER, 2026-07-23): one open batch per CLIENT
-  SESSION, and a commit whose underlying file changed underneath it must SAY
-  SO.** Consequences, in order of how much they change the code:
-  - **Staging is ON DISK** (a deliberate earlier choice — reuses
-    atomicWrite/revert, fires no PostToolUse hooks, and the file-watch wants to
-    see it), so per-session isolation is BOOKKEEPING, not filesystem
-    isolation. Two sessions with disjoint file sets are genuinely independent;
-    two sessions staging the SAME file are not, and a naive revert would
-    restore session A's original over session B's staged edit — silent data
-    loss. So a staged file is CLAIMED by its session: a second session staging
-    it gets `rejected` + help naming the holder. A per-FILE claim, not the
-    per-root lease we considered — far less restrictive and it falls out of the
-    originals map the batch already keeps. (Derived, not user-stated — flag on
-    review.)
-  - **Stage-time hash, commit-time recheck.** The batch already records each
-    touched file's pre-edit bytes for revert; hash them at stage time and
-    re-hash at commit. If the on-disk bytes are neither the original nor what
-    we staged, something else wrote the file — another session, the user's
-    editor, a formatter, `git checkout`. Report the conflict; never silently
-    overwrite it and never silently revert it away. Content hashing is already
-    idiomatic here (`ParseCache` is content-keyed; raglit hashes documents the
-    same way).
-  - **Commits serialize per root** (short exclusive hold across
-    apply→diagnose→verify; commits are brief). Even so, `--validate`'s
-    fingerprint is WORKSPACE-WIDE, so a concurrent session's staged broken
-    intermediate can make another session's commit look like it introduced
-    errors. A false reject, not a corruption — but the report must be able to
-    say "these errors are in files you didn't touch, and session X has an open
-    batch" instead of blaming the committer. (Derived — flag on review.)
-  - **A dropped connection must not strand a batch.** Today the batch dies with
-    the process because server and client are the same lifetime; in a daemon a
-    client can vanish mid-batch and leave a BROKEN INTERMEDIATE on disk. This
-    is a failure mode the daemon INTRODUCES: auto-rollback on disconnect is the
-    safe default. (Derived — flag on review.)
-  - The file watcher sees staged edits and refreshes the index, which other
-    sessions' queries then observe. That is arguably correct — the working tree
-    really did change — but it is a behavior change worth naming.
-- **Trust boundary — DECIDED (USER, 2026-07-23): peer creds + declared root
-  prefixes.** A daemon that opens any root a client names lets any client read
-  and EDIT any file on the machine (raglit answered the equivalent with
-  namespaces — "a project can't reach an arbitrary project's indexes by
-  guessing"). Two gates, both cheap:
-  - **Peer credentials on accept** — `SO_PEERCRED` (Linux) / `getpeereid`
-    (macOS); reject any uid but the daemon's own. Redundant with 0600 socket
-    mode in the normal case, which is the point: it still holds if the mode
-    bits are ever wrong.
-  - **Declared root prefixes** — a client may only address roots UNDER a
-    configured prefix (`--allow <dir>`, repeatable, plus a config list;
-    default `$HOME`). The check is the part that goes wrong in practice:
-    compare `filepath.EvalSymlinks`'d, `filepath.Clean`'d ABSOLUTE paths, and
-    match on PATH COMPONENTS — `/home/u/local` must not admit
-    `/home/u/localsecrets`, and `..` must not walk out. Test the bypasses, not
-    just the happy path.
-  - ◻ **Optional strengthening (Linux-only, later):** peer creds carry the
-    client PID, so `/proc/<pid>/cwd` can bind a connection to its ACTUAL
-    working directory — kernel-verified instead of self-declared. No portable
-    macOS equivalent, so it can only ever be a bonus tier, never the base.
-- ✅ **Per-client policy — SHIPPED (read-only + validate).** These were
-  process-global flags; in a shared daemon they are per-CONNECTION attributes,
-  now enforced at the daemon boundary and TIGHTEN-ONLY (a client may add
-  read-only/validate on top of the daemon baseline, never remove it — a
-  read-only daemon stays locked for everyone). The proxy sends
-  `X-Poly-Read-Only`/`X-Poly-Validate` (from its `--read-only`/`--validate`
-  flags); `CallTool(sess, name, args, CallOptions)` rejects mutating tools
-  (`mcp.IsMutatingTool`, one source of truth with `applyReadOnly`) for a
-  read-only call and injects `validate:true` into edit args for a validate
-  call; `/tools` returns a filtered catalog per connection. The shared *Server*
-  stays read-write for other clients — enforcement is at the boundary, not on
-  the Server. `--legacy-tools` has NO daemon path (the daemon serves the modern
-  surface only; the proxy logs that it's ignored) — the one piece deliberately
-  left out. Tests: `mcp` (`TestCallToolReadOnlyPolicy`, `TestWithValidateInjects`),
-  `daemon TestDaemonReadOnlyIsPerConnection` (per-connection catalog + reject).
-- **Generation-keyed caches** (`defCache` is valid for one index
-  `Generation()`) must be per-root and invalidate for all clients of that root
-  at once — a stale definition surviving another client's edit is the failure.
-- One watcher per root instead of N is strictly better; no risk, just the win.
-
-**blocking decisions**
-- ✅ **Transport** — gat/huma on a unix-socket listener (USER, 2026-07-23).
-  See Shape. Stack consistency and peer creds are not in tension.
-- ✅ **Trust model** — peer creds + declared root prefixes (USER, 2026-07-23).
-  See risks.
-- ✅ **Concurrent staged batches on one root** — one open batch per CLIENT
-  SESSION, with commit-time change detection (USER, 2026-07-23). See the
-  mutation risk above for the four consequences; three of them are derived
-  rather than user-stated and want a review pass.
-
-No open blocking decisions. Steps 1-2 are unblocked and independent of the
-mutation design.
-
-**optional extensions** (explicitly out of scope now): LSP-mode proxy for
-editors; a `poly-lsp-mcp status` CLI over the daemon; extracting the daemon
-scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
-
-**Decided (USER, 2026-07-23): COPY raglit's daemon scaffolding, do not extract
-a shared module yet.** raglit's version is battle-tested but has exactly one
-user; extracting now is speculative, extracting after a second real copy is
-refactoring against two known cases. Revisit once this daemon runs.
-
-✅ **`--validate` (revert-on-new-diagnostics) + the safe-edit-loop thesis,
-shipped, tested, and MEASURED.** The whole arc — reframe → build → benchmark →
-tune → measure with error bars.
-
-**Thesis (why):** LLMs run a grep→read→edit loop and reach for grep by habit.
-Don't fight it — ABSORB it: keep the loop, make edits *safe*. node_edit is the
-edit; `--validate` makes it un-break-able.
-
-**Built (poly-lsp side, all in `mcp/validate.go`):**
-- Write paths (range/whole-file/diff) run through `applyBytes`: fingerprint the
-  workspace's pre-edit errors, write, re-collect, and if the edit introduces a
-  NEW error, atomically restore + report `rejected` (isError=true; `newErrors`).
-- Multi-file rename/signature via `validationTxn` — records every touched file's
-  pre-edit bytes before writing, reverts them ALL as one unit on any new error
-  (nested rename inside signature shares the outer txn: all-or-nothing).
-- **CROSS-FILE**: the fingerprint is WORKSPACE-WIDE (`errorFingerprintAll` over
-  the store snapshot), so an edit that breaks an IMPORTER (rename a type its
-  callers use) is caught — gopls publishes package-level, `settleErrorFingerprint`
-  waits for the sibling republish to land before the diff. This was the binding
-  constraint the benchmark exposed.
-- Server flag `--validate` (or per-call `validate:true`); no-op-but-flagged
-  without a child LSP (`validated:false`).
-- **Sharpened `node_edit` rename description** (modern.go, shipped default):
-  leads with "renaming? use the rename op — one atomic call, don't hand-edit".
-- Tests (gopls-backed, stable): `TestNodeEditValidateReverts`,
-  `TestRefactorRenameValidateRevertsAllFiles`, `TestNodeEditValidateCrossFileRevert`;
-  full mcp suite green.
-
-**Measured (corrallm llm-bench, Qwen3-6-27B-MPT via llm.iodesystems.com, n=5):**
-on a cross-file rename (`edit-safety-rename`, type used across 4 files):
-| arm | rename-op | broken-intermediates | pass | tokens |
-|---|---|---|---|---|
-| baseline (shell/read/edit) | n/a | **2 [2–2]** | 5/5 | 9k |
-| polylsp / polylsp-validate | **5/5** | **0 [0–0]** | 5/5 | ~30k |
-**Net benefit, with error bars:** poly-lsp reliably completes the refactor with
-ZERO broken intermediate states (baseline lands 2 every time) — structural
-safety grep+sed can't match — at ~3× the token cost. **The lever was
-PRESENTATION**: the sharpened description gets Qwen onto the atomic rename op
-10/10 runs; that op is safe by construction, so `broken=0` even WITHOUT
-validation. Validation is the untested insurance for when presentation doesn't
-land (weaker model / harder refactor / hand-editing).
-
-**Lessons the runs taught (each cost a wrong turn until measured):** (1) on
-tasks a capable model passes, pass/fail is BLIND to the offering's value — the
-`broken_intermediates` safety metric is what separates the arms. (2) `--validate`
-is redundant for a diligent model WITH a build tool (it self-heals); its value
-needs the no-self-check path (`--run-tool=false`) or a task the model breaks.
-(3) single runs LIE — the validate arm "hand-edited (64k tokens)" was n=1 noise;
-at n=5 it's 5/5 atomic rename. Always `--runs`.
-
-**Remaining (opt-in):** `validate:"strict"` (refuse, not fail-open, when no LSP);
-pre-touch baseline for never-analyzed files (an unanalyzed file with prior
-errors could false-revert its first edit — documented limitation); the ~3×
-token premium is the thing to shave if this goes wide.
-
-✅ **Staged-edit transaction (`commit:false`) — SHIPPED.** `--validate` reverts
-any edit that breaks the build, which BLOCKS a refactor that must pass through
-a broken intermediate (change a signature AND its body/callers). The
-transaction lets those commit atomically: `commit:false` stages an edit
-(applied but NOT validated); the FIRST `node_edit` WITHOUT `commit:false` (or
-`commit:true` with no op — the noop) validates the whole batch's UNION and
-persists, or reverts ALL; `rollback:true` discards to the last committed state.
-**INSTRUCTIVE by design** — the three flags are HIDDEN from the schema; a
-plain edit that's valid alone but breaks the build gets `rejected` + a `help`
-string that teaches the multi-stage path exactly when it's needed.
-Implementation: `editBatch` (validate.go) is a long-lived `validationTxn` —
-on-disk staging (each staged edit is written so later edits/resolves see it;
-the intermediate reverts on rollback/fail-commit; chosen over an in-memory
-buffer because it reuses the existing atomicWrite/revert machinery, node_edit
-fires no PostToolUse hooks, and the file-watch WANTS to see it). `applyBytes`
-routes through the open batch; the handler is the state machine; semantic ops
-(rename/params/return) refuse staging (already coherent). One open batch per
-server, `editMu`-serialized. Tests: `TestEditBatchStageAndRollback` (mechanics,
-no-gopls), `TestEditBatchAtomicCommit` (gopls: sig+caller as one clean unit;
-lone breaking edit → rejected+help).
-  - ✅ **Semantic refactors (`params`/`return`/`rename`) can now JOIN a batch.**
-    `validationTxn` is batch-aware: when a `commit:false` batch is open,
-    `beginValidationTxn` returns a txn whose `record` feeds the batch's
-    originals and whose `verify` DEFERS to the batch commit — so a refactor's
-    multi-file edits stage into the same all-or-nothing unit as raw text edits.
-    (A nested rename inside a signature refactor already skips its own verify —
-    `ownTxn` — so it can't commit the batch early.) Now
-    `node_edit(#F, return:'string', commit:false)` + `node_edit(#F::body,
-    newText, commit:false)` + commit is one atomic sig+body change. Count is
-    handler-managed (one per staged node_edit). Test:
-    `TestEditBatchStagesSemanticRefactor` (gopls).
-
-✅ **Editable `::signature` / `::body` — SHIPPED (on the txn).** `::body` is
-now the STATEMENTS between the braces (a rewrite replaces just the impl,
-leaving the sig line and `}` intact); it and `::signature` carry a RANGE
-address (`file@start-end`) so node_read/node_edit hit the whole span, and a
-generated-span address treats `newText` ALONE as replace-the-span (no need to
-repeat the old text): `node_edit #'F'::body newText:'…'`. Both the selector
-(`#'F'::body`) and the emitted address resolve to the span (the selector path
-now routes generated nodes — ref/comment/signature/body — through their
-address instead of collapsing to the whole file; an `external` stub is
-refused as read-only). `::body` edits alone (safe); `::signature` edits inside
-a `commit:false` batch with its counterpart (the broken-intermediate the txn
-exists for). Tests: `TestGenPartBodyEditable` (selector + address, statements
-only). Degenerate single-line/empty bodies yield no `::body` node.
-
-**⚑ corrallm-side changes (their repo, uncommitted — flag for review):**
-`services/corrallm` gained, to make the above measurable: the
-`broken_intermediates` metric + task `safetyCheck` field (run after each mutating
-call); `--run-tool` gate + toolset `baseArgs` (argument the base llm-bench-mcp,
-generalizing `cedeFileTools`); `--runs N` + per-run artifact naming (`_rN`); the
-`edit-safety-{pop,import,rename}` probes + `polylsp-validate`/`polylsp-norun*`
-toolsets.
 
 ◐ **Adoption measurement — the existential question, now instrumented.**
 `llm-bench/` (own nested module, uses `agentkit` — `mcpmgr` spawns the server,
@@ -676,194 +254,6 @@ taught anything it's that MORE prose is worse, not better.
 home turf (autowork3 dead). Either find/build another real-agent vehicle, or
 accept the llm-bench peer result and let the roadmap ride on it.
 
-✅ **Broader dogfood pass — 3 cliffs found + fixed, all invisible to tests.**
-Drove the real MCP server across ~20 queries. Edit/transaction UX + instructive
-help confirmed excellent. Three issues surfaced, all fixed:
-  1. `:recursive` broad exhausted the cap (see Edges) — 1 match → 10, complete.
-  2. **`:any`/`:empty` over a bare edge over-resolved → the FLAGSHIP dead-code
-     recipe (in the description) hit the cap and returned non-deterministic,
-     incomplete results.** Fixed with a SHORT-CIRCUIT: `bareEdge()` detects a
-     plain `::in`/`::out` existence test and routes it to `anyEdge`/`anyInEdge`/
-     `anyOutEdge`, which stop at the FIRST real edge instead of building+resolving
-     the whole set (out-edges need no LSP; in-edges resolve only ambiguous names,
-     until the first real caller). A live func stops at its first caller; only a
-     truly-uncalled one pays the full scan. Recipe now 2.0s, complete (3 real
-     dead non-test funcs; the other 482 "dead" were `Test*` funcs — no direct
-     caller by design). `bareEdge` deliberately REJECTS a bare-claim shape
-     (`::in:empty`, a positionClaim) — that path stays full/correct. Recipe in
-     description/README/grammar switched to the fast `:empty(::in)` form. Tests
-     `TestPositionClaims`/`TestNotAndIsAreSelfTests` pinned it (caught a
-     complement-inversion mid-fix).
-  3. **Addressing friction: `#'file#method'` silently matched nothing** (the sym
-     is `Type.method`). `nodeIDs` now also answers to `file#leaf` for nested
-     symbols, so the natural `#'precision.go#resolveDefinition'` matches the
-     method — a model rarely knows the receiver type.
-
-✅ **Dogfooding wired: `.mcp.json` registers poly-lsp as a NATIVE tool** for
-Claude Code in this repo (`./bin/dev mcp --root . --validate` — build chatter
-is stderr, stdout is clean JSON-RPC, verified). So the project develops
-itself with its own `node_query`/`node_read`/`node_edit` — the closest thing
-to the missing real-agent vehicle, and a standing dogfood. **First dogfood
-session already paid off**: driving the real MCP server surfaced the
-`:recursive` cost cliff (see Edges) that 100% test coverage missed — the
-edit/transaction UX and instructive help were confirmed excellent in real
-use, `:recursive` broad was noisy+incomplete, now fixed. "Complete" = the
-natural queries a model reaches for are cheap, quiet, and complete; tests
-prove correctness, dogfooding proves usability, and they diverge exactly at
-cost cliffs like this one.
-  - ✅ **Binary files polluted the projection (DOGFOOD, 2026-07-21).** The very
-    first `:root > *` tour surfaced `mcp.test` (56916 "lines") and
-    `poly-lsp-mcp` (45616) — gitignored ELF binaries — as file nodes.
-    `node_read mcp.test` returned **12.9M chars** of garbage and the hint
-    *invited* reading all 56916 lines (context-nuking footgun); `countFileLines`
-    slurped the whole 13 MB binary on every query build. `walkDir` (query.go)
-    made a file node for every regular file with NO binary/ignore filter — the
-    other two projection walkers (node_query.go) already skip non-source via
-    `languageForFile==""`. Fixed: `looksBinaryFile` (prefix-only null-byte
-    probe, same heuristic as `symbols.Search`/search.go — never slurps the
-    binary whole) gates `walkDir`. Tour 22→20, all text files retained. Chose
-    binary-only skip over honoring `.gitignore` (USER call) — narrow,
-    unambiguous, keeps gitignored-but-text files queryable. Tests:
-    `TestWalkDirSkipsBinaryFiles`, `TestLooksBinaryFile`. Invisible to the
-    existing suite (tests use clean temp fixtures; a real repo has build
-    artifacts) — the exact tests-vs-dogfooding divergence noted above.
-    **Decided (USER, 2026-07-21): do NOT honor `.gitignore`** — hiding files
-    loses context and it's hard to tell what's missing; only binary encodings
-    and extremely-large files are no-gos, and only for the OPS, not visibility.
-  - ✅ **`node_read` unbounded on a pathological long line (DOGFOOD follow-on,
-    2026-07-21).** The binary skip fixed the PROJECTION, but a direct
-    `node_read file.min.js` still dumped megabytes: `buildReadPayload`'s auto
-    char budget (2048) is defeated because the FIRST line is appended BEFORE
-    the budget check, and with no caller `lineLength` there was NO per-line cap
-    — a 5 MB line-1 returned all 5 MB. Worse, the truncation hint then advised
-    "re-read with lineLimit=N for the whole file in ONE call", walking the model
-    straight into the dump. Fixed with `renderLine`, TWO regimes: an explicit
-    `lineLength` clips every line (legacy); with NONE, normal lines return
-    WHOLE and only a GENERATED line (> `readGeneratedLineLen` = 5000, mirrors
-    search.go's `maxSearchLineBytes`) is previewed to `readLongLinePreview` =
-    500. **Why not a flat 500 cap (USER pushed): a mid-content clip of real
-    prose fed to an LLM is strange, and 500 is wrong by DATA** — this repo has
-    13 lines > 500, ZERO > 800, longest legit 742 (plan/done.md); a 5000
-    threshold clips zero real lines, 500 clips 13 (incl. markdown paragraphs).
-    The cap must sit in the 3-orders-of-magnitude GAP between legit (hundreds)
-    and pathological (millions). The blob preview is honestly labeled
-    ("a generated/minified line (N chars) was previewed to 500; pass lineLength
-    or search(pattern=) to target"), not a silent box. VISIBLE (`truncated` +
-    true `maxLineLength`); ops bounded. Verified e2e on the real server: 5 MB
-    blob → 515 chars + generated hint; real 742-char line → returned WHOLE, no
-    ellipsis. Tests: `TestReadPayloadBoundsPathologicalLongLine`,
-    `TestReadPayloadLegitLongLineNotClipped`, `TestReadPayloadNormalFileUnaffected`.
-    (Whole-file BROWSE path only; an addressed-symbol read stays byte-exact.)
-  - ✅ **Search/`::grep` context is byte-budgeted, not line-counted (DOGFOOD
-    design, USER-driven, 2026-07-22).** Same bytes-not-lines theme: search
-    context was N whole neighbour LINES (`-A/-B/-C`), so match + 2×N context
-    could be multiple KB/hit — token-heavy across many hits, though already
-    bounded (each line ≤500B, generated files skipped). Reframed to grep-style
-    **min(bytes, lines)**: `symbols.BudgetHitContext` trims already-capped,
-    already-sliced context so the WHOLE hit ≤ `maxHitTotalBytes` = 500B
-    (~125 tokens/hit), match rendered FIRST (CapHitLine) and context filling
-    the remainder nearest-first + contiguous. Shared helper in symbols, called
-    from `searchFile` + `fragmentsOf` (one source of truth). Tests:
-    `TestBudgetHitContext`, `TestBudgetHitContextStopsSideOnOverflow`.
-  - ✅ **Default context is now OFF; a hit is the matched line + a per-file
-    rollup (DOGFOOD, USER-driven, 2026-07-22).** Reverses the "default ON"
-    above after dogfooding the funnel (grep wide → refine → read the *symbol*).
-    The realization: the matched LINE is grep's signal and is paginated (≤20
-    rows), so it's cheap; CONTEXT (before/after) multiplies every hit 3–7× and
-    is the real token sink. So flipped: **context opt-in** (`-A/-B/-C` on
-    `::grep`, `contextLines` on the search tool; both default 0), matched line
-    always shown, still byte-bounded when context IS requested. Removed the
-    now-dead `DefaultContextLines`/`grepSpec.ctxSet`. **Added `rollup`**: a
-    per-file match count over the WHOLE result set (pre-pagination), so a wide
-    search shows WHERE a term concentrates without paying for any line body —
-    `fragmentRollup(rows)` in modern.go, only present for grep. USER chose
-    "line + rollup, context opt-in" over pure address-only (address-only forces
-    a read to tell hits apart; the paginated line disambiguates for free).
-    Token-budget guardrail caught the new ::grep doc line 1 token over —
-    tightened, not bumped. Test: `TestModernQueryGrepDefaultNoContextHasRollup`.
-    Deferred to icebox: `-c` counts-only mode (rollup already gives the
-    distribution; -c only saves the 20-row page's line text — marginal).
-  - ✅ **LLM e2e bench (`scripts/smoke/llm_e2e.py`) drove out two rename
-    friction bugs + a harness drift (DOGFOOD, 2026-07-22).** Fired the bench
-    (real Qwen-27B, cross-language `UserID`→`PersonID` rename on a temp fixture
-    copy). PASSED but took **11 tool calls**: the model did the atomic rename
-    (`filesChanged:9`) then DIDN'T TRUST it — re-ran per-file (errors) and
-    hand-patched comments. Fixes: **(A)** `node_edit` rename on a non-symbol
-    node (whole file, or a ref/::grep/span — all `sym==""`) used to silently
-    rename whatever token sat on the span's first line and report
-    `filesChanged:0`; now ERRORS pointing at the `file#Name` form
-    (`TestModernNodeEditRenameRejectsNonSymbol`). **(B)** the rename RESULT now
-    carries a terminal `note` ("DONE — workspace-wide … in this ONE call; do
-    NOT rename per-file"); models act on results, not descriptions
-    (`TestModernNodeEditRename` asserts it). **(C)** the harness `SYSTEM_PROMPT`
-    had drifted to the legacy surface (`structure`/`node_refactor`); rewrote to
-    the modern 3-tool flow. Re-ran: **4 tool calls**, 0 hand-patches, model's
-    own words "the first rename already handled everything workspace-wide."
-    11→4. NOTE (USER): the only baseline worth running is vs vanilla
-    grep/read/edit-style tools, not the legacy surface.
-  - ✅ **Vanilla A/B baseline arm (`scripts/smoke/vanilla_e2e.py`).** Same
-    model/fixture/task as `llm_e2e.py`, but the model gets ONLY structure-blind
-    tools — `grep` / `read_file` / `str_replace` (unique-match), implemented
-    locally over the temp fixture copy, no MCP. Measures the tool-call cost of
-    the same cross-language rename WITHOUT the structural surface, to quantify
-    the delta vs poly-lsp's 4 calls. Self-contained (KISS>DRY — does not touch
-    the poly arm). Same PASS criteria (changed≥8, PersonID≥15).
-  - ✅ **Task-registry A/B harness (`scripts/smoke/ab_bench.py`) + first real-repo
-    task, which EXPOSED a correctness bug (DOGFOOD, 2026-07-23).** Generalized
-    the one-off demos into a registry (id → instruction, optional setup patch,
-    static verify predicate, fixture); reuses the MCP + vanilla plumbing by
-    import (no refactor of the working scripts). Fixture = a fresh copy of a
-    sibling repo (redline: 529 .go files, 0.4s copy, no `replace` dirs so
-    `go vet` runs in-copy); verify is deterministic shell (go vet + grep counts),
-    validated on both PASS and FAIL paths before any LLM spend. First task
-    `islive-rename` (rename `payments.Gateway.IsLive` while two unrelated `llm`
-    interfaces share the name). Result: **poly 56 calls / PASS, vanilla 22 / FAIL**
-    — but the story is the bug: poly's lexical rename corrupted the `llm` package
-    (`filesChanged:15`), the model brute-forced a 20-edit manual repair. See the
-    escalated icebox item "Go refs/rename lexical → CORRECTNESS bug." Harness is
-    the reusable repro; more tasks (mined from redline) drop into the registry.
-    Mined catalog of 10 candidate tasks lives in this session's history (6
-    statically verifiable; controls where grep wins included for honesty).
-  - ✅ **Rename collision guardrail SHIPPED (stopgap for the lexical-rename bug,
-    2026-07-23).** `lexicalRenameCollision` (tools.go) blocks a rename when the
-    name is DECLARED in >1 package with no authoritative site coupling them —
-    the coincidental-clash signature — returning `kind:"rename-blocked"` + the
-    collision list instead of applying. The authority check (`Confidence >=
-    ConfidenceDeclared`) is the discriminator that keeps schema-coupled cross-
-    language renames (polyglot `UserID`, which has declared bindings) working
-    while blocking pure-lexical clashes (`IsLive` across payments/llm). Only
-    runs on the lexical path, only parses touched files. Tests:
-    `TestModernNodeEditRenameBlocksCrossPackageCollision` (+ Free→Freed and the
-    schema path still pass). Bench-validated: the `filesChanged:15` corruption is
-    now blocked at call 1; model went straight to safe scoped edits, llm never
-    touched. **NEXT (owns the real fix): gopls `textDocument/rename`** — type-
-    scoped correctness, removes the guard's false-positives on legit cross-
-    package interface renames and restores one-call ergonomics. See icebox
-    "Go refs/rename lexical → CORRECTNESS bug."
-  - ✅ **gopls type-scoped rename SHIPPED — the real fix for the lexical-rename
-    bug (2026-07-23).** `refactorRename` now tries the child LSP first
-    (`mcp/rename_gopls.go`: `goplsRenameEdits` routes the file via
-    `manager.RouteByURI`, calls `textDocument/rename`, converts the WorkspaceEdit
-    to byte-ranged resolvedEdits, and reuses the existing apply/txn/diagnostics
-    pipeline unchanged). Correct on collisions: renames only the addressed
-    symbol's decl/impls/usages by declaring TYPE, so `payments.Gateway.IsLive`
-    no longer touches `llm.Rewriter.IsLive`. Stamps `resolvedBy:"lsp"`; the DONE
-    note now states the scope (type-scoped vs name-matched). Fallback: only a
-    tree-sitter-only file (no child LSP) takes the lexical path + collision
-    guard; a server that refuses returns `rename-error` (never silently degrades
-    to lexical). Tests: `TestRefactorRenameTypeScopedViaGopls` (gopls-guarded),
-    reconciled the revert test (gopls front-stops conflicts). Caveat: LSP
-    `character` is UTF-16; `lineColToByteOffset` treats it as bytes — correct for
-    ASCII identifiers, a known edge for non-ASCII (noted, not yet handled).
-    **Bench-validated on the real bug**: `ab_bench islive-rename` now does the
-    rename in ONE correct call (`filesChanged:9`, the right scope; llm package
-    untouched; verify PASS) vs the lexical `filesChanged:15` corruption. Residual
-    overhead: the model still spent ~30 calls grep-auditing AFTER the correct
-    rename (didn't trust `filesChanged:9`/DONE) → 39 total. That's model over-
-    verification, not tool cost — the "models don't trust the rename result"
-    theme again; a note/UX follow-up, not a correctness gap. ◻ OPTIONAL next:
-    make the rename result even harder to distrust (e.g. echo the touched
-    symbols so an audit is unnecessary), and the UTF-16 column fix.
 
 ◻ **Cost visibility + planning share an estimator.**
   - ◻ **Cardinality-order a descendant chain.** `A B` evaluates left-to-right;
@@ -890,29 +280,6 @@ cost cliffs like this one.
     **blocking decision**: costs `totalMatches` (can't report "of 24,590"
     without finishing) — node_query's result shape changes.
 
-✅ **`:explain` — cost-visible queries, all 3 commits shipped → done.md.**
-`:explain <selector>` returns a cost tree: a-priori `est` (free, from the
-commit-2 tallies) beside `measured` work, with `>x` lower bounds on the element
-the budget tripped in and `—` for unreached elements. The always-on trace also
-upgrades every plain budget-blow to point at the culprit. node_query returns
-`{"explain": rows, "truncated"}` — a trace, not matches (the result-shape fork
-the plan flagged; resolved by making it a MODE, not a change to plain queries).
-**Open remainder**: the est column shows `?` for edges/`*` — the index has no
-fan-out. A fan-out estimate (from `::out` avg degree, or the pushdown's
-opposite-edge count) would fill those in; deferred until the descendant-chain
-planner (below) needs it, since they share the estimator.
-
-✅ **Cardinality-order a descendant chain → done.md.** A plain pure-descendant
-chain whose tip is an exact NAME far rarer than the broad leading element is
-now seeded from the INDEX (`declsNamed` loads only the files containing the
-name) and filtered by an ancestor SUBSEQUENCE — `struct #Name` dropped ~6.9k
-work → 0, equivalence + "actually cheaper" gated by test. Lesson recorded: the
-first cut (seed via collectMatches) was a correct NO-OP — the tree walk negated
-the win; the fix was index-seeding + an O(1) decision (`estCardCheap`, NOT
-classCounts). **Remaining planner ideas** (opt-in): a bare-class or edge tip
-can't be index-seeded (no class/fan-out in the index) — those still forward.
-The fan-out estimate `:explain` shows as `?` for edges is the same gap; fill it
-only when a query needs an edge-tip reorder.
 
 ◐ **Edges: from coincidence toward reference.** Two of three steps done
 (→ done.md): lexical scope killed 99% of far ends (a local is not visible
@@ -1025,6 +392,7 @@ per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
 **Assumption made**: `textDocument/definition`'s first location is the
 declaration. True for gopls; unverified for tsserver/pylsp.
 
+
 ◻ **Node model — loose ends found this session.**
   - ✅ **TS `::in.type` double-count — NOT reproducible; the ❓ was stale.**
     Verified across interface / class / generic / export / .tsx / union /
@@ -1075,6 +443,7 @@ Known caveats (documented in code): edges are name-keyed via the lexical
 index, so same-named symbols share edges (the LSP pass is the fix);
 unbounded `{m,}` collects nodes at their shortest hop; `:where(sel)` ≡
 `:any(sel)` at tip granularity (pseudoHolds).
+
 
 ## Non-goals (for now)
 

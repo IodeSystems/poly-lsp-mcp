@@ -5,10 +5,55 @@ A polyglot LSP + MCP server in Go. One binary, two surfaces:
 - **LSP server** (`poly-lsp-mcp`) — editor integration. Multiplexes child language servers (gopls / tsserver / pylsp / …) and falls back to tree-sitter where no child exists.
 - **MCP server** (`poly-lsp-mcp mcp`) — LLM agent integration. The same workspace machinery exposed as **three tools** (`node_query` / `node_read` / `node_edit`) over a unified node tree, driven by a **CSS-inspired selector language** that queries containment *and* the reference graph. Edits are **LSP-validated** (`--validate`) so an agent can't leave the workspace broken.
 - **Query CLI** (`poly-lsp-mcp query <selector>`) — run one selector from the shell, no editor or agent.
+- **Daemon mode** (`poly-lsp-mcp mcp --daemon`) — every client proxies to ONE shared per-user daemon over a unix socket, so the workspace index, the child-LSP fleet and the parse cache exist once instead of once per session. Auto-starts on first use; `poly-lsp-mcp daemon --stop` / `--restart` manage it, `--read-only` / `--validate` are enforced per connection.
 
-The unique value-add over single-language LSPs is **cross-language linkage**: rename `UserID` in Go and the rename propagates through TypeScript, Python, YAML config values, proto messages, OpenAPI schemas, and prose — declared bindings, schema-anchored sites, and `@ref` comment markers all stitch the languages together.
+The unique value-add over single-language LSPs is **cross-language linkage**: rename `UserID` in Go and the rename propagates through TypeScript, Python, YAML config values, proto messages, OpenAPI schemas, and prose that names code in `backticks` — declared bindings, schema-anchored sites, and `@ref` comment markers all stitch the languages together.
 
-Supports go / ts / tsx / js / py / java / kotlin / groovy / c / c++ / sql / proto / graphql / yaml / json / xml / markdown today.
+## Language support
+
+Every language below is indexed for cross-language lookup. **Node model** means
+a file resolves into addressable symbols (`file#Type.method`) with declaration,
+name, doc-comment and signature/body ranges; without it a file is still
+readable and editable, just as one whole-file node. **Child LSP** is the
+default server spawned when it is on `PATH` — a missing binary is logged and
+skipped, never fatal.
+
+| Language | Extensions | Node model | Child LSP | Signature refactor |
+|---|---|---|---|---|
+| Go | `.go` | ✅ | gopls | ✅ |
+| TypeScript / TSX / JS | `.ts .tsx .js .jsx .mjs .cjs` | ✅ | typescript-language-server | ✅ |
+| Python | `.py .pyi` | ✅ | pylsp | ✅ |
+| Java | `.java` | ✅ | — (jdtls opt-in) | — |
+| Kotlin | `.kt .kts` | ✅ | — (opt-in) | — |
+| Groovy | `.groovy .gradle .gvy .gy` | ✅ | — (opt-in) | — |
+| C | `.c` | ✅ | clangd | — |
+| C++ | `.cpp .cc .cxx .c++ .h .hpp .hh .hxx .h++ .ipp .tcc .inl` | ✅ | clangd | — |
+| SQL | `.sql .psql` | ✅ | — | — |
+| XML | `.xml` | ✅ | — | — |
+| Markdown | `.md .markdown` | ✅ sections | — | — |
+| Proto / GraphQL | `.proto .graphql .gql` | — | — | — |
+| YAML / JSON | `.yaml .yml .json` | — | — | — |
+
+Notes worth knowing before you rely on them:
+
+- **`.h` belongs to C++**, not C. The C++ grammar is a superset, so a C header
+  still parses correctly, while a C++ header named `.h` — the ecosystem norm —
+  would lose every class under the C grammar.
+- **Markdown is structural.** A document's node tree is its outline: nested
+  `section` nodes whose range covers the heading *and* its body, so
+  `README.md#'MCP mode.Selector language'` addresses a section and `node_read`
+  returns it. Only headings, fenced code and inline `` `code` `` spans enter
+  the name index — prose does not.
+- **Signature refactor is go / typescript / python only.** Rename works
+  everywhere; it is the parameter/return rewrite with call-site fixups that is
+  per-language.
+- **YAML and JSON are lexical on purpose** — a config *value* is a contract, so
+  every token is indexed. That is what makes a YAML string match a Go type.
+- A Jenkinsfile is Groovy but has no extension, and the registry keys on
+  extension alone, so it is not routed.
+
+Languages, extensions and child-LSP commands are all overridable in
+`poly-lsp-mcp.yaml`.
 
 ## Install
 

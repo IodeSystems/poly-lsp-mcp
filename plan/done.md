@@ -3,6 +3,303 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Daemon mode — one shared poly-lsp per user (DONE 2026-07-27)
+
+Moved from plan.md when the arc completed. Verified live on 2026-07-28:
+`poly-lsp-mcp mcp --daemon --root .` auto-started the daemon, warmed the
+root (4,651 names) and proxied a `node_query` tool call to a correct
+answer; `daemon --stop` shut it down. Steps 1-5 + per-connection policy
+SHIPPED, step 6 (worktree COW) MEASURED and iceboxed.
+
+**Original entry follows.**
+
+Steps 1-5 SHIPPED (skeleton + proxy + persisted shared cache + FileSymbols op
++ per-session mutation isolation + ref-counted child-LSP pooling; see
+"SHIPPED" + steps below). Step 6 (worktree COW) MEASURED and iceboxed — its
+goal is already met by the shared ParseCache; a true index COW isn't worth the
+core refactor (see below + icebox). Per-connection policy (read-only/validate)
+SHIPPED. **The planned daemon arc (steps 1-5 + per-connection policy) is
+COMPLETE**; the only daemon non-goal left is per-connection LEGACY surface (the
+daemon serves modern only) and the LSP-mode proxy (optional extension).
+Today every client runs `poly-lsp-mcp mcp --root <dir>` as its own process, and
+each one owns: a symbol index built by walking the workspace, a `ParseCache`
+persisted to `<root>/.poly-lsp-mcp/cache.gob`, an fsnotify watcher over the
+tree, git prewarm, and a `multiplex.Manager` spawning CHILD LSPs (main.go:84-100,
+mcp/server.go). Every Claude session, every editor, and every future
+non-interactive consumer pays for all five. gopls alone is hundreds of MB and
+tens of seconds of warmup, and N copies fight over the same module cache. This
+is raglit's "single writer + single worker pool" argument plus a child-LSP
+fleet, which is the expensive part.
+
+**Second consumer, and why it forces the design:** raglit wants `FileSymbols`
+for structural fragmentation (symbol path + class + doc-comment span +
+`BodyStartLine` = fragment atoms with titles, no LLM). raglit builds
+CGO_ENABLED=0 today; `smacker/go-tree-sitter` needs cgo, so importing `symbols`
+would forfeit its pure-Go build, and shelling out costs a fork per file. A
+daemon removes both problems — raglit becomes a client hitting a warm,
+content-keyed parse cache over the generated OpenAPI client: no cgo, no fork
+per file. A non-MCP, non-editor consumer is a first-class caller, not an
+afterthought.
+
+**Shape (deliberately mirrors raglit; copy, don't invent):**
+- **Transport: gat/huma, served on a UNIX SOCKET** (DECIDED, USER,
+  2026-07-23). The house stack — huma handlers through gat for REST + GraphQL +
+  gRPC + OpenAPI, exactly as raglit's `buildGatHandler` — bound to
+  `$XDG_RUNTIME_DIR/poly-lsp/daemon.sock` (fallback `~/.poly-lsp/daemon.sock`),
+  dir 0700 / socket 0600, instead of a TCP port. **Protocol and listener are
+  orthogonal**: gat yields an `http.Handler`, and an `http.Handler` serves on
+  any `net.Listener`, so the trust decision below costs nothing in stack
+  consistency. (An earlier draft proposed JSON-RPC-over-socket to make the MCP
+  proxy a pipe swap; that saves only the tool-call→HTTP translation
+  `raglit/cmd/raglit/serveclient.go` already shows how to write, and is not
+  worth diverging from every other service we run.)
+  - `http.Server{ConnContext: …}` stashes the accepted conn's peer creds
+    (uid/pid) in the request context — the mechanism that makes per-CONNECTION
+    policy (read-only / validate) enforceable at the boundary.
+  - Clients dial `http.Transport{DialContext: unix}` and use the generated
+    OpenAPI client; `curl --unix-socket` debugs it.
+  - Accepted consequences: no cross-host clients and no browser pointing at it
+    (we have no review UI; an opt-in TCP listener can be added later without
+    touching the trust model).
+  - ⚠ **Server→client PUSH does not fit request/response.** LSP
+    `publishDiagnostics`/progress need SSE, a websocket, or LSP-mode proxying
+    stays out of scope. MCP tool calls are all request/response, so steps 1-3
+    are unaffected — decide this when the LSP proxy is actually built.
+- **Registry keyed by ABSOLUTE workspace root**, not by a name. raglit
+  namespaces because "default" collides across projects; our roots are already
+  unique paths. Closest analogue: raglit's `OpenScopedRegistry`.
+- **Client = thin proxy.** `poly-lsp-mcp mcp` keeps its stdio JSON-RPC surface
+  and forwards tool calls to the daemon — exactly what `raglit serve` does
+  today. LSP mode can proxy the same way later; editors keep speaking stdio.
+- **Lifecycle copied from raglit** `cmd/raglit/{runtime,daemon,httpd}.go`:
+  a state file at `~/.poly-lsp/daemon.json` (pid / socket path / started_at /
+  version — NOTE: "root" there means raglit's storage root, ours is per-DAEMON,
+  not per-workspace) for discovery, auto-start detached (Setsid, output to
+  `daemon.log`), `--stop`, and `--restart` (SIGTERM → wait for the pid to
+  actually exit → relaunch detached replaying the invocation's flags). A
+  successful CONNECT plus a ping is the authority on "is it up" (raglit uses an
+  HTTP health probe for the same purpose); a stale socket file whose owner is
+  gone gets unlinked and replaced, the way raglit drops a stale `daemon.json`.
+- **ParseCache becomes daemon-wide.** It is ALREADY content-keyed
+  (`symbols/cache.go`: `Language + Hash[32]byte → []Hit`, LRU, version-tagged
+  gob) — it just lives per-root. Promote it to one shared store and identical
+  file content across five worktrees parses once. This is raglit's pool move
+  (`(recipe_hash, file_hash)`), and the cache comment already anticipates "a
+  long-running agent walking many branches".
+- **Branches = git worktrees, COW over the parent index.** A worktree shares
+  ~95% of its content with the parent checkout, and git names the difference for
+  free (`diff --name-only`). Overlay the parent's warm index and re-parse only
+  the divergent files, so a fresh worktree starts warm instead of rebuilding.
+  raglit's branch overlay (branch-over-parent at document grain, tombstones for
+  deletes) is the model. **UPDATE (MEASURED 2026-07-25): the shared ParseCache
+  already delivers this — re-parse-only-divergent falls out of content-keying;
+  the extra in-memory-clone win is ~90ms on a rare, gopls-bound open. Iceboxed;
+  see step 6 + icebox.**
+- **Child LSPs pool by ROOT, not by content.** gopls is bound to a module root,
+  so it can't be shared across worktrees — but it CAN be shared across every
+  session on the same root: keyed by root, ref-counted, idle-evicted LRU (same
+  policy shape as raglit's `GCPolicy`, different key). This is the single
+  biggest resource win.
+
+**SHIPPED this session (steps 1, 3-proxy, 2-share; all in `daemon/`):** the
+daemon runs — `poly-lsp-mcp daemon --allow <dir>` hosts many roots over a unix
+socket; `poly-lsp-mcp mcp --root X --daemon` is the thin stdio proxy that
+auto-starts it and forwards tools/list + tools/call. Verified end-to-end
+against the real binary (health, open=6965 names, /call, 403 on out-of-allow +
+sibling-prefix bypass, stop/restart replaying flags, stale-socket reclaim).
+Files: `paths/state/trust/peercred_{linux,other}/registry/server/spawn/client/proxy.go`;
+mcp gained `Init`/`Shutdown`/`CallTool`/`Tools`/`IndexedNames`/`SetParseCache`/
+`Root`/`RollbackSession` (`mcp/daemon_api.go`, `mcp/session.go`) — the exported
+seams the daemon drives a Server through without the stdio handshake. Tests:
+`daemon/{trust,daemon}_test.go` (bypass matrix, symlink escape, e2e round-trip,
+stale/live socket, disconnect auto-rollback), `mcp/session_test.go` (per-session
+batch isolation, claim conflict, external-write conflict).
+
+**next** (each step independently useful; 1-3 deliver the raglit consumer):
+  1. ✅ Daemon skeleton: gat/huma handler on a unix listener, peer-cred check
+     (`SO_PEERCRED` on Linux via a cred-filtering `net.Listener` + `ConnContext`
+     stash; mode-bit-only fallback on `!linux`) + root-prefix gate (`AllowList`,
+     EvalSymlinks/Clean + component-wise `filepath.Rel`, default `$HOME`),
+     registry keyed by canonical abs root (lazy, per-root serialized build),
+     health, `daemon.json`, auto-start detached (Setsid → `daemon.log`),
+     `--stop`/`--restart` (replays flags via `stripBoolFlags`). Straight port of
+     raglit's lifecycle; the socket/creds/gate part was new, as predicted.
+  2. ✅ Daemon-wide content-keyed ParseCache. One `symbols.NewParseCache()` on
+     the `Registry`, injected into every hosted Server via `SetParseCache`, so
+     identical bytes across roots parse once (safe: content-keyed, own mutex).
+     Persistence is daemon-OWNED — `Registry.LoadCache` at `Serve` start,
+     `SaveCache` (temp+rename) on shutdown, one load/save at
+     `~/.poly-lsp/cache.gob`, not the N racing per-root gobs the stdio path
+     does. Verified e2e: 172 entries saved on stop, reloaded on restart. Test:
+     `TestRegistryCachePersistence`.
+  3. ✅ Client-proxy (`daemon/proxy.go`: stdio MCP ⇄ socket, warms the root on
+     initialize so the trust-gate 403 surfaces early; shutdown is local, the
+     daemon keeps the root warm) + the typed read-only **`/filesymbols`** op
+     (`POST` content → structural atoms; language derived from `path` ext or
+     given). Content-first, NO root/file access + NO trust gate (the caller
+     owns the bytes; peer-cred + 0600 bound callers) — the "no cgo, no
+     fork-per-file" path the plan wants for raglit. Clean json-tagged
+     `FileSymbol` DTO (decoupled from `symbols.Symbol`) carries sym/class/decl+
+     name ranges/doc-comment span/body-start — fragment atoms with titles.
+     `Client.FileSymbols` + `TestDaemonEndToEnd` cover it; e2e-verified.
+     **Deferred (measure-first):** a content-keyed cache of `[]Symbol` results
+     (the existing `ParseCache` stores `[]Hit`, a different shape) — parse is
+     one tree-sitter pass/call; cache only if raglit re-ingest shows it hot.
+  4. ✅ Per-session mutation isolation. **Session identity = a client-minted
+     id (X-Poly-Session header) + a watched connection** (USER, 2026-07-24):
+     the proxy mints a random id, sends it on every `/call`, and holds one
+     long-lived `GET /session/watch` open; when it drops the daemon
+     auto-rolls-back that session's batch (`Registry.RollbackSession` sweeps
+     hosted roots). mcp side (`mcp/session.go`): the single `editBatch` field
+     became `batches map[sessionID]*editBatch` + a `claims map[uri]sessionID`,
+     all under `editMu` (the per-root commit serializer). The session reaches
+     the shared write funnels via an `editMu`-guarded `activeSession` field
+     (the node_edit handler sets it) rather than threading `sess` through every
+     apply signature; only the tool-handler dispatch type + `CallTool` gained
+     the param. **Per-file claim** (as predicted, not per-root lease): a second
+     session staging a held file is rejected naming the holder. **Stage-time
+     hash + commit-time recheck** (`editBatch.staged` + `externalWrites`): a
+     staged file written underneath the batch (another session/editor/
+     formatter/git) aborts the commit with a `conflict` + `changedFiles`,
+     leaving the batch OPEN — never silently overwritten or reverted. Tests:
+     `mcp/session_test.go` (isolation, claim conflict, external-write conflict),
+     `daemon TestDaemonRollsBackBatchOnDisconnect` (e2e auto-rollback).
+     **Scope note (batch isolation only, USER 2026-07-24):** per-CONNECTION
+     policy (read-only/validate) was a follow-up — now SHIPPED (see the
+     per-connection policy entry below). **Derived, still deferred:** the workspace-wide `--validate`
+     cross-session false-reject REPORT ("these errors are in files you didn't
+     touch; session X has an open batch") — a reporting nicety, not a
+     correctness gap; commit hashing + claims already prevent the corruption.
+  5. ✅ Child-LSP pooling: ref-count + idle eviction per root. Child LSPs were
+     ALREADY shared per-root across sessions (one *Server per root); the gap
+     was EVICTION — a root, once opened, pinned its gopls (hundreds of MB)
+     forever. Now `entry` carries `holders` (sessions keeping it warm) +
+     `evictTimer`: `Registry.Acquire(session,root)` holds + cancels any pending
+     evict, `Release(session)` (called on the SAME /session/watch disconnect
+     that rolls back the batch) drops the ref and, at zero holders, arms an
+     idle timer; `evict` shuts the server down IFF still unheld (re-checked
+     under mu, so a reconnect races safely). `idleTimeout` default 5m, 0
+     disables. The daemon-owned shared parse cache survives eviction, so a
+     re-open comes up warm on parses. Wired: `/open` Acquires (session header
+     on `openIn`), `/call`+`/tools` use the non-holding `Get`. Tests:
+     `TestRegistryRefCountEviction` (two holders keep it, last release evicts),
+     `TestRegistryReacquireCancelsEviction`; `-race` clean.
+  6. ⏸ Worktree overlay (COW index over a parent root) — MEASURED, iceboxed
+     (2026-07-25). The goal (re-parse only divergent files on worktree open) is
+     already met by the shared content-keyed ParseCache (step 2). Measured
+     (`daemon/measure_test.go`, `-tags measure`, this repo): warm worktree index
+     build with the shared cache is **93ms** (cold is 552ms — the cache already
+     saves 84% for free), while gopls workspace warmth is **355ms** and
+     UNSHAREABLE (per module root). A true in-memory COW would shave ~90ms off a
+     RARE, gopls-bound operation at the cost of refactoring the hottest struct
+     (`symbols.Index` is absolute-path, name-keyed, no clone). Not worth it now;
+     re-measure on a large repo before revisiting — see icebox
+     "Worktree COW index overlay" for the gate.
+
+**risks**
+- **Mutation is the hard part, and raglit never had to solve it.**
+  `node_edit`/`node_refactor`/`--validate` write the user's real source and
+  revert on new diagnostics; the staged-edit batch is "one open batch per
+  server, `editMu`-serialized". Concurrent agents already race today with stale
+  indexes — the daemon is the fix only if it owns apply→diagnose→revert
+  serially per root. **DECIDED (USER, 2026-07-23): one open batch per CLIENT
+  SESSION, and a commit whose underlying file changed underneath it must SAY
+  SO.** Consequences, in order of how much they change the code:
+  - **Staging is ON DISK** (a deliberate earlier choice — reuses
+    atomicWrite/revert, fires no PostToolUse hooks, and the file-watch wants to
+    see it), so per-session isolation is BOOKKEEPING, not filesystem
+    isolation. Two sessions with disjoint file sets are genuinely independent;
+    two sessions staging the SAME file are not, and a naive revert would
+    restore session A's original over session B's staged edit — silent data
+    loss. So a staged file is CLAIMED by its session: a second session staging
+    it gets `rejected` + help naming the holder. A per-FILE claim, not the
+    per-root lease we considered — far less restrictive and it falls out of the
+    originals map the batch already keeps. (Derived, not user-stated — flag on
+    review.)
+  - **Stage-time hash, commit-time recheck.** The batch already records each
+    touched file's pre-edit bytes for revert; hash them at stage time and
+    re-hash at commit. If the on-disk bytes are neither the original nor what
+    we staged, something else wrote the file — another session, the user's
+    editor, a formatter, `git checkout`. Report the conflict; never silently
+    overwrite it and never silently revert it away. Content hashing is already
+    idiomatic here (`ParseCache` is content-keyed; raglit hashes documents the
+    same way).
+  - **Commits serialize per root** (short exclusive hold across
+    apply→diagnose→verify; commits are brief). Even so, `--validate`'s
+    fingerprint is WORKSPACE-WIDE, so a concurrent session's staged broken
+    intermediate can make another session's commit look like it introduced
+    errors. A false reject, not a corruption — but the report must be able to
+    say "these errors are in files you didn't touch, and session X has an open
+    batch" instead of blaming the committer. (Derived — flag on review.)
+  - **A dropped connection must not strand a batch.** Today the batch dies with
+    the process because server and client are the same lifetime; in a daemon a
+    client can vanish mid-batch and leave a BROKEN INTERMEDIATE on disk. This
+    is a failure mode the daemon INTRODUCES: auto-rollback on disconnect is the
+    safe default. (Derived — flag on review.)
+  - The file watcher sees staged edits and refreshes the index, which other
+    sessions' queries then observe. That is arguably correct — the working tree
+    really did change — but it is a behavior change worth naming.
+- **Trust boundary — DECIDED (USER, 2026-07-23): peer creds + declared root
+  prefixes.** A daemon that opens any root a client names lets any client read
+  and EDIT any file on the machine (raglit answered the equivalent with
+  namespaces — "a project can't reach an arbitrary project's indexes by
+  guessing"). Two gates, both cheap:
+  - **Peer credentials on accept** — `SO_PEERCRED` (Linux) / `getpeereid`
+    (macOS); reject any uid but the daemon's own. Redundant with 0600 socket
+    mode in the normal case, which is the point: it still holds if the mode
+    bits are ever wrong.
+  - **Declared root prefixes** — a client may only address roots UNDER a
+    configured prefix (`--allow <dir>`, repeatable, plus a config list;
+    default `$HOME`). The check is the part that goes wrong in practice:
+    compare `filepath.EvalSymlinks`'d, `filepath.Clean`'d ABSOLUTE paths, and
+    match on PATH COMPONENTS — `/home/u/local` must not admit
+    `/home/u/localsecrets`, and `..` must not walk out. Test the bypasses, not
+    just the happy path.
+  - ◻ **Optional strengthening (Linux-only, later):** peer creds carry the
+    client PID, so `/proc/<pid>/cwd` can bind a connection to its ACTUAL
+    working directory — kernel-verified instead of self-declared. No portable
+    macOS equivalent, so it can only ever be a bonus tier, never the base.
+- ✅ **Per-client policy — SHIPPED (read-only + validate).** These were
+  process-global flags; in a shared daemon they are per-CONNECTION attributes,
+  now enforced at the daemon boundary and TIGHTEN-ONLY (a client may add
+  read-only/validate on top of the daemon baseline, never remove it — a
+  read-only daemon stays locked for everyone). The proxy sends
+  `X-Poly-Read-Only`/`X-Poly-Validate` (from its `--read-only`/`--validate`
+  flags); `CallTool(sess, name, args, CallOptions)` rejects mutating tools
+  (`mcp.IsMutatingTool`, one source of truth with `applyReadOnly`) for a
+  read-only call and injects `validate:true` into edit args for a validate
+  call; `/tools` returns a filtered catalog per connection. The shared *Server*
+  stays read-write for other clients — enforcement is at the boundary, not on
+  the Server. `--legacy-tools` has NO daemon path (the daemon serves the modern
+  surface only; the proxy logs that it's ignored) — the one piece deliberately
+  left out. Tests: `mcp` (`TestCallToolReadOnlyPolicy`, `TestWithValidateInjects`),
+  `daemon TestDaemonReadOnlyIsPerConnection` (per-connection catalog + reject).
+- **Generation-keyed caches** (`defCache` is valid for one index
+  `Generation()`) must be per-root and invalidate for all clients of that root
+  at once — a stale definition surviving another client's edit is the failure.
+- One watcher per root instead of N is strictly better; no risk, just the win.
+
+**blocking decisions**
+- ✅ **Transport** — gat/huma on a unix-socket listener (USER, 2026-07-23).
+  See Shape. Stack consistency and peer creds are not in tension.
+- ✅ **Trust model** — peer creds + declared root prefixes (USER, 2026-07-23).
+  See risks.
+- ✅ **Concurrent staged batches on one root** — one open batch per CLIENT
+  SESSION, with commit-time change detection (USER, 2026-07-23). See the
+  mutation risk above for the four consequences; three of them are derived
+  rather than user-stated and want a review pass.
+
+No open blocking decisions. Steps 1-2 are unblocked and independent of the
+mutation design.
+
+**optional extensions** (explicitly out of scope now): LSP-mode proxy for
+editors; a `poly-lsp-mcp status` CLI over the daemon; extracting the daemon
+scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
+
+**Decided (USER, 2026-07-23): COPY raglit's daemon scaffolding, do not extract
+a shared module yet.** raglit's version is battle-tested but has exactly one
+user; extracting now is speculative, extracting after a second real copy is
+refactoring against two known cases. Revisit once this daemon runs.
 ## Markdown: sections as nodes, prose out of the index (DONE 2026-07-28)
 
 - [x] Verified markdown/yaml/json against the repo docs and found no bug — the

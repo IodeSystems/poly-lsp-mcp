@@ -99,10 +99,10 @@ Open frontier:
 
 ✅ **SQL verified on the Flyway migrations — 2026-07-27** → done.md. Weakest
 result of any language: 41% of files parse with ERRORs and 6 were empty.
-Indexed create_function/trigger/sequence (975 → 1,103 symbols, 6 → 4 empty);
-the rest are grammar limits (CREATE PROCEDURE is unparseable). Open and
-NOT done: 246 `ADD CONSTRAINT` names are still unindexed — needs alter_table
-walking, a slice of its own.
+Indexed create_function/trigger/sequence then ADD CONSTRAINT names
+(975 → 1,103 → 1,349 symbols, 6 → 4 empty); constraints file under their
+table like a Go receiver. What remains is grammar limits: CREATE PROCEDURE is
+unparseable, so 3 files stay empty.
 
 ✅ **Go dogfooded on this repo — 2026-07-27** → done.md. 148 files / 6,848
 symbols / 0 errors. Fixed one real defect: composite return types

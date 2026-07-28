@@ -3,6 +3,41 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## SQL ADD CONSTRAINT names indexed under their table (DONE 2026-07-27)
+
+- [x] The gap left open by the SQL verification below. `alter_table` is now a
+  CONTAINER and `add_constraint` a symbol: 492 of the 620 alter_table
+  statements in the Flyway corpus carry one, and they were the largest
+  declaration a migration tree still dropped. The other 128 are
+  `alter_column`, which MODIFIES an existing column and declares nothing —
+  asserted in the test, not just assumed.
+- **A constraint is filed under the table it is added to**, via the same
+  `parentOverride` mechanism that files a Go method under its receiver, a C++
+  out-of-line definition under its class and a Kotlin extension under its
+  type: `account.account_pkey`, not a bare `account_pkey`. The enclosing
+  `ALTER TABLE`'s object_reference supplies the prefix, leaf-first
+  (`redline.account` → `account`).
+- Class is `type`, joining index/view/trigger/sequence in the existing
+  "named database object" bucket rather than inventing a class for one
+  statement kind. The bucket being coarse is a known wart already recorded
+  below; this does not make it worse in kind.
+- Result on the corpus: **1,103 → 1,349 symbols, exactly the 246 predicted.**
+  Spot-checked: `account.account_pkey`, `address.address_pkey`,
+  `account_transfer.account_transfer_pkey`.
+- **Honest limit of the live check:** every one of those 246 constraints lives
+  in `V001__base.sql` ALONGSIDE its table, so the cross-file case — a
+  constraint added by a later migration to a table created in an earlier one —
+  never occurs in this corpus and was NOT verified live. It is covered
+  synthetically by `TestFileSymbolsSQLConstraintWithoutItsTable`, which pins
+  that the constraint still carries its table in the path instead of landing
+  bare at file scope.
+- Quoted identifiers still keep their quotes on both halves
+  (`"USER"."USER_pkey"`), consistent with how the SQL arm already renders
+  `"USER"`. Left alone rather than fixed asymmetrically.
+- Tests: `TestFileSymbolsSQLAddConstraint`,
+  `TestFileSymbolsSQLConstraintWithoutItsTable` — both verified to fail with
+  the fix disabled.
+
 ## SQL verified on the Flyway migrations; functions/triggers/sequences indexed (DONE 2026-07-27)
 
 - [x] Ran the SQL arm over redline's `db/migrations` — 34 Flyway files, 15,076
@@ -29,14 +64,7 @@
   and contain expression FRAGMENTS — identifiers, keywords, joins, terms —
   not declarations. Descending would surface noise, not symbols.
 - **Known and NOT fixed, reported instead:**
-  - **246 `ADD CONSTRAINT` names are unindexed.** Of the 620 alter_table
-    statements, that is the only clause that DECLARES a name (the rest are 64
-    `ALTER COLUMN` modifications and 1 `RENAME COLUMN`). Notably there are ZERO
-    `ADD COLUMN`s here, so the obvious worry — columns added by later
-    migrations being invisible — does not apply to this corpus. A constraint
-    name is a real cross-language contract (Postgres reports it in violation
-    errors that application code catches by name), so this is worth doing;
-    it needs alter_table walking, which is a slice of its own.
+  - ~~246 `ADD CONSTRAINT` names unindexed~~ — SHIPPED, see the entry above.
   - A quoted identifier keeps its quotes in the path segment (`"USER"`), the
     same wart fixed for TS ambient modules.
   - `create_index` / `create_view` / `create_type` / trigger / sequence all

@@ -1023,3 +1023,67 @@ CREATE TRIGGER account_updated_at BEFORE UPDATE ON redline.account
 		t.Errorf("schema qualifier was indexed as a symbol: %+v", got)
 	}
 }
+
+func TestFileSymbolsSQLAddConstraint(t *testing.T) {
+	// ADD CONSTRAINT is the largest declaration a migration tree carries
+	// that the arm used to drop: 492 of 620 alter_table statements in a
+	// real Flyway corpus, 246 distinct names. A constraint name is a
+	// cross-language contract — Postgres reports it in violation errors
+	// that application code catches by name.
+	src := []byte(`CREATE TABLE redline.account (
+  account_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY redline.account
+  ADD CONSTRAINT account_pkey PRIMARY KEY (account_id);
+
+ALTER TABLE ONLY redline.account
+  ADD CONSTRAINT account_user_fkey FOREIGN KEY (user_id) REFERENCES redline."USER"(user_id);
+
+ALTER TABLE ONLY redline.account ALTER COLUMN account_id SET DEFAULT 1;
+`)
+	syms, err := FileSymbols("sql", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A constraint is filed under the table it is added to, the same way
+	// a Go method is filed under its receiver.
+	for _, want := range []string{"account.account_pkey", "account.account_user_fkey"} {
+		got := symByPath(syms, want)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", want, syms)
+			continue
+		}
+		if got.Class != "type" {
+			t.Errorf("%q class = %q, want type", want, got.Class)
+		}
+	}
+	// ALTER COLUMN modifies an existing column and declares nothing, so
+	// it must not emit a symbol.
+	for _, s := range syms {
+		if s.Class != "field" && strings.HasSuffix(s.Sym, "account_id") && s.DeclStartLine > 5 {
+			t.Errorf("ALTER COLUMN emitted a declaration: %+v", s)
+		}
+	}
+}
+
+func TestFileSymbolsSQLConstraintWithoutItsTable(t *testing.T) {
+	// The usual migration shape: the table was created in an EARLIER
+	// file, so the prefix has no parent node here. The constraint still
+	// carries the table in its path rather than landing bare at file
+	// scope — the same behaviour as a Go method whose receiver type is
+	// declared in another file.
+	src := []byte(`ALTER TABLE ONLY redline.account
+  ADD CONSTRAINT account_email_key UNIQUE (email);
+`)
+	syms, err := FileSymbols("sql", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := symByPath(syms, "account.account_email_key"); got == nil {
+		t.Errorf("missing account.account_email_key; have %+v", syms)
+	}
+	if got := symByPath(syms, "account_email_key"); got != nil {
+		t.Errorf("constraint landed at file scope without its table: %+v", got)
+	}
+}

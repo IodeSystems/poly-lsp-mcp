@@ -123,20 +123,11 @@ yaml/json measured on a real config tree: the "keep every token" rule works as
 designed on hand-written config (62 files, 343 names, 3% junk), and the noise
 is entirely generated data.
 
-◻ **Respect `.gitignore` when walking — the config measurement's real finding.**
-**88% of all yaml/json sites in `zdx-go` (462,002 of 527,913, across 795
-files) come from GITIGNORED files** — tool state, lock files, captured API
-payloads. The walk honours `skipDirs` but not `.gitignore`, so a repo's own
-throwaway data outweighs its source 8:1 in the index.
-- **next**: honour `.gitignore` in `symbols.Build`'s walk.
-- **why ignored and NOT untracked**: a file an agent just created and has not
-  `git add`-ed is untracked but not ignored, so it must keep indexing.
-  Filtering on `git ls-files` would make new work invisible.
-- **risks**: changes what EVERY language indexes, not just config; needs a
-  fallback for non-git workspaces; someone may gitignore a file they still
-  want indexed.
-- **blocking decision (USER)**: worth doing, given it silently changes index
-  contents for every existing workspace?
+✅ **The index honours `.gitignore` — 2026-07-28** → done.md. Far bigger than
+the config finding that prompted it: on `zdx-go`, **2,128,213 → 471,029 sites
+(-78%)**, with go itself down 75%. Filters IGNORED, never UNTRACKED, so a file
+an agent just created still indexes. Follow-up left open: `internal/bindings`'
+own walker does not consult it yet.
 
 ⏸ **Groovy is speculative** — zero corpus on this box (→ done.md). A
 Jenkinsfile cannot even be routed: it is extensionless and the registry keys

@@ -817,6 +817,10 @@ type BuildOption func(*buildConfig)
 
 type buildConfig struct {
 	cache *ParseCache
+	// noGitignore disables the .gitignore filter. Default is to honour
+	// it; this is the escape hatch for a workspace that deliberately
+	// ignores files it still wants indexed.
+	noGitignore bool
 }
 
 // WithCache plumbs a ParseCache through Build. Files whose
@@ -828,6 +832,14 @@ func WithCache(c *ParseCache) BuildOption {
 	return func(cfg *buildConfig) { cfg.cache = c }
 }
 
+// WithoutGitignore indexes gitignored files too. Build honours
+// `.gitignore` by default — see ignoreSet for the measurement that
+// motivated it — and this turns that off for a workspace that ignores
+// files it nevertheless wants in the index.
+func WithoutGitignore() BuildOption {
+	return func(cfg *buildConfig) { cfg.noGitignore = true }
+}
+
 // Build walks root recursively and indexes every file whose extension is
 // registered in reg. Returns the populated Index. The walk is sequential;
 // concurrent walks are a possible future optimization.
@@ -837,6 +849,13 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		o(&cfg)
 	}
 	idx := NewIndex()
+	// Resolved once: one git invocation per build, not per entry. nil
+	// when root is not a repo or git is unavailable, in which case the
+	// walk proceeds exactly as before.
+	var ign *ignoreSet
+	if !cfg.noGitignore {
+		ign = loadIgnoreSet(root)
+	}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -845,6 +864,12 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			if skipDirs[d.Name()] {
 				return fs.SkipDir
 			}
+			if ign.dirIgnored(root, path) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if ign.fileIgnored(root, path) {
 			return nil
 		}
 		ext := strings.TrimPrefix(filepath.Ext(path), ".")

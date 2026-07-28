@@ -61,6 +61,12 @@ Notes worth knowing before you rely on them:
 Languages, extensions and child-LSP commands are all overridable in
 `poly-lsp-mcp.yaml`.
 
+**The index honours `.gitignore`.** A repo's throwaway data — tool state, lock
+files, captured payloads — otherwise outweighs its source: measured on one
+real repo, ignored files were 78% of every indexed site. Ignored is filtered;
+**untracked is not**, so a file you just created and have not `git add`-ed is
+still indexed. Outside a git repository the walk is unfiltered.
+
 ## Install
 
 ```sh

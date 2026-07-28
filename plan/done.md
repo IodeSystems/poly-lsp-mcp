@@ -300,6 +300,38 @@ scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
 a shared module yet.** raglit's version is battle-tested but has exactly one
 user; extracting now is speculative, extracting after a second real copy is
 refactoring against two known cases. Revisit once this daemon runs.
+## The index honours .gitignore (DONE 2026-07-28)
+
+- [x] The walk honoured `skipDirs` — a hardcoded node_modules/build/dist
+  list — but not `.gitignore`. `symbols.Build` now resolves the ignored set
+  once per build and skips it.
+- **The effect is far larger than the config measurement that found it.** On
+  `zdx-go`: **2,128,213 → 471,029 sites (-78%)**, names 26,197 → 20,495.
+  Per language: json 453,027 → 47,213 (-90%), **go 1,242,285 → 316,070
+  (-75%)**, yaml 74,886 → 18,698 (-75%). This was never a config problem; a
+  repo's throwaway data was outweighing its source across every language.
+- **IGNORED, not UNTRACKED — the distinction the design turns on.** A file an
+  agent just created and has not `git add`-ed is untracked but NOT ignored,
+  so it keeps indexing. Filtering on `git ls-files` would have made an
+  agent's own new work invisible to it mid-task, which is the worst failure
+  available to a tool an agent edits with. Pinned by
+  `TestBuildSkipsGitignoredButKeepsBrandNewFiles`.
+- Mechanism: one `git ls-files --others --ignored --exclude-standard
+  --directory -z` per build. `--directory` collapses a fully-ignored tree to
+  a single entry, so node_modules costs one line rather than a hundred
+  thousand. A TRACKED file is never listed even when a pattern matches it,
+  which is correct — git still tracks it, so it is part of the project.
+- Degrades to the previous behaviour, never fails: not a git repo, git
+  missing, or the command erroring all yield an unfiltered walk
+  (`TestBuildUnfilteredOutsideAGitRepo`). `WithoutGitignore()` is the escape
+  hatch for a workspace that ignores files it nevertheless wants indexed.
+- Known limit: a nested repository or submodule has its own `.gitignore`,
+  which one invocation at the root does not consult.
+- NOT applied to `internal/bindings`' own walker (`walkFiles`), which feeds
+  the Android/derived binding scans. Same noise applies there; left as a
+  follow-up rather than widened silently.
+- Tests: the three above, verified to fail with the filter removed.
+
 ## Verification debts closed: idiomatic Java and config formats (DONE 2026-07-28)
 
 Both debts were "coverage claimed but not earned". Both are now measured

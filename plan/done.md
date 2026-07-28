@@ -300,6 +300,227 @@ scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
 a shared module yet.** raglit's version is battle-tested but has exactly one
 user; extracting now is speculative, extracting after a second real copy is
 refactoring against two known cases. Revisit once this daemon runs.
+## Cost visibility, edges and the node model — trees completed (DONE 2026-07-28)
+
+Moved from plan.md when their last open sub-item closed. Every item below is
+✅ or ⏸ except the general-form chain reorder, which was built, measured and
+deliberately NOT shipped — see its entry for the numbers.
+
+◻ **Cost visibility + planning share an estimator.**
+  - ⏸ **Cardinality-order a descendant chain — general form BUILT, MEASURED,
+    and NOT shipped (2026-07-28).** The name-tip form shipped long ago
+    (`planReorder`, → done.md). The general form extends it to a bare-CLASS
+    tip, estimated from `classCounts` instead of the index.
+    It works and is equivalent — verified row-for-row against the forward
+    walk on every shape tried. It just never pays: **0% saving on this repo
+    for `func argument`, `class method`, `struct field`, `file func argument`
+    — identical op counts, because the gate correctly DECLINES every time.**
+    On real code the tip class is almost always MORE common than the leading
+    one (`argument` 2,009 vs `func` 1,096; `field` 763 vs `struct` 164), which
+    is the opposite of the condition the reorder needs. Only a contrived
+    fixture where arguments are rare fires it (−26% there).
+    Shipping it would ADD cost: `reorderSeed` must call `classCounts()` — a
+    full-symbol walk on first use — to then decline. Reverted rather than
+    left as dead code on the planning path, which is the trap this item's own
+    note warned about.
+    **next**: nothing, unless a corpus turns up where a rare tip class is
+    common. The estimator work below stands on its own.
+  - ✅ **The ~76k inversion floor is gone from query budget.** `sitesByFile`
+    is now `symbols.Index.SitesByFile` — index-owned derived state, memoized on
+    `gen` (invalidates on Refresh), abs-keyed, liveness-evicting at build. An
+    edge query no longer charges the inversion to its budget: `func::in.call`
+    dropped 89,894 → 13,379 ops (−85%), `struct::in.type` 89,451 → 12,940.
+    **Measured caveat (measure-first paid off): the win is OPS, not wall** —
+    the inversion was 50ms of a 1.9s query; wall is unchanged because the real
+    bottleneck is the per-target far-end build (the O(sites) item below), which
+    this does not touch. Also note the 200k→10000ms default already relieved
+    the ops PRESSURE this item was written for; the value now is a lower ops
+    floor for `Nops` budgets + large workspaces, not a broad speedup. Tests:
+    `TestSitesByFile{EquivalenceAndMemo,EvictsVanishedFiles}`; determinism
+    budgets in `TestTrippedBudgetIsReproducible` retuned (trip moved into the
+    walk).
+  - ✅ **Short-circuiting SHIPPED (2026-07-28).** `evaluateCapped` stops the
+    base walk at `offset+limit`. The blocking decision was resolved by the
+    USER: use the `>x` floor convention, so a capped run reports
+    `totalMatchesAtLeast: ">5"` under a DIFFERENT key than the exact
+    `totalMatches` — a reader cannot mistake one for the other.
+    **Only fires for a single plain top-level compound** (`cappableList`):
+    chains, unions, edges, pseudo-elements and moves compose through SETS,
+    where "first N found" is not "first N in order", so an early exit could
+    drop a node that belongs on the page. Those still evaluate fully and
+    report an exact total.
+    **Measured, and it corrected the assumption**: the win is per-FILE, not
+    per-node — a match means loading that file's symbols, so the cap pays by
+    never reaching the later files. On ONE fat file the saving is marginal.
+    On 120 small files with a 200-op budget, `limit:5` finishes cleanly while
+    the uncapped query exhausts the budget and returns an INCOMPLETE result.
+    Tests: `TestModernQueryShortCircuitsTheWalk`,
+    `TestModernQueryDoesNotShortCircuitComposedSelectors`.
+
+
+◐ **Edges: from coincidence toward reference.** Two of three steps done
+(→ done.md): lexical scope killed 99% of far ends (a local is not visible
+outside its function), and the child-LSP pass now settles what remains,
+per edge, with tri-state `conf: lsp|lexical|unsettled` on every row. **next**:
+  - ✅ **The CLI is lexical-only, and now SAYS so.** `bin/dev query` has no
+    manager (a one-shot gopls spawn is seconds); its tree renders far ends with
+    no conf column. Fixed by a footer caveat that fires whenever a selector uses
+    `::in`/`::out` (`usesEdge`), on every path — match, traversal-to-symbols,
+    empty, or budget-blow: "edges are name-keyed (lexical) here … the MCP server
+    resolves via child LSPs (conf: lsp); `query` does not." Pinned by
+    `TestQueryTextLexicalEdgeCaveat`. A per-row conf column is the fuller fix
+    but needs the manager the CLI deliberately skips; the footer is the honest
+    minimum. (Live proof it's needed: `func#New::out.call` shows `engine.s,
+    modSelParser.s` — lexical collisions on the field name `s`.)
+  - ✅ **Transitive queries still compound — now they SAY where trust runs
+    out.** `::in.call{1,}` spends the per-query LSP cap shallowest-first, so
+    deep hops fall back to name-keying. **Decided (USER): not a refusal — a
+    WARNING. Say what IS precise and what wasn't.** Shipped: `conf` is now
+    TRI-STATE — the old `lexical` conflated two opposites, split into `lexical`
+    (name UNIQUE in workspace → certain without an LSP) and `unsettled` (≥2
+    same-named decls, no LSP settled it → a GUESS listing candidates).
+    `refineFar`/`refineIn` return `unsettled` on every ambiguous-unresolved
+    path (incl. the out-of-root `picked==nil` case — Stage 0 no longer reads as
+    a false-local `lexical`). `precisionNote` is hop-aware: `evalRepeat`→
+    `noteHop` tallies per-hop, and a transitive walk reports "crossed up to N
+    hops; M unsettled edges begin at hop K — distant nodes least certain" (or
+    "all LSP-resolved or name-unique" when clean). Tests (no-gopls, fast):
+    `TestTriStateConfSplitsCertainFromGuess`, `TestTransitiveNoteReportsUnsettledHop`,
+    `TestTransitiveNoteCleanWalkSaysSo`; `TestWithoutLSPEdges…` renamed to assert
+    `unsettled`. Docs (grammar CONF line, modern.go conf comment, query_text
+    caveat `lsp|lexical|unsettled`) updated. **Remaining**: per-hop LSP CAPS
+    (spend budget across depth, not all on hop 1) were NOT done — the warning
+    makes the current spend honest; a fairer spend is a separate opt-in.
+  - ✅ **`::in`/precision round-trips are now cached across queries.** A warm
+    session re-asked `textDocument/definition` for the same site every query
+    (#New = 93 callers; every edge-precision pass, `:recursive`, external-stub
+    resolution). `resolveDefinition` now memoizes on a Server-side `defCache`
+    keyed on the site position, valid for ONE index `Generation()` — any
+    mutation drops the whole cache, so a stale definition can't outlive an
+    edit. The LSP round-trip runs OUTSIDE the lock (never serializes concurrent
+    queries); negatives are cached too (an unresolvable site isn't re-asked).
+    `defMisses` counts real round-trips. Tests: `TestDefCacheGenInvalidation`,
+    `TestDefCacheCachesNegatives` (mechanics), `TestResolveDefinitionCachedAcrossQueries`
+    (gopls e2e: identical 2nd query = 0 new round-trips). Pure perf, no
+    behavior change.
+  - ✅ **The LSP cap is TUNED from the workspace collision rate (Timsort-style).**
+    The flat `defaultLSPResolveCap = 200` is gone. Only AMBIGUOUS edges cost a
+    round-trip, and names are Zipfian (most unique → free), so the cap only has
+    to cover the collision-prone tail: it now scales with the count of declared
+    names that have ≥2 EDGE-TARGETABLE declarations (params/return/annotation
+    excluded) — `tunedLSPCap` = floor 64 + 4/name, ceilinged at 1500 (bounded
+    cost = the explainable-cost moat). Set LAZILY (`ensureLSPCap`) on the first
+    round-trip off the already-built `declsByName` (free — the edge builds it
+    first), so a non-edge query never pays. Legible: the cap + collision counts
+    surface in `precisionNote` when it's hit; `SetLSPResolveCap` overrides.
+    **Measured on THIS repo: 216 collision-prone of 1964 declared → cap 928**
+    (4.6× the old flat 200 — a collision-heavy codebase gets budget where it
+    needs it; a clean one sits at the floor and never hits it). Tests:
+    `TestTunedLSPCapFormula`, `TestLSPCapTunedFromCollisions`,
+    `TestLSPCapExplicitOverride`. **Next (the broader "tune for code" arc):**
+    same treatment for the other magic constants (generated-file line
+    threshold as a percentile, etc.), and adaptive re-plan when realized
+    cardinality diverges from `:explain`'s estimate.
+  - ✅ **A resolved far end OUTSIDE the root is now an EXTERNAL STUB** (North
+    Star Stage 0 — SHIPPED). `refineFar`'s `picked==nil` path splits on
+    `filepath.IsLocal(defRel)`: outside the root → mint an `external` node
+    (`module@version#sym`, `domain:"external"`, ro, `[not indexed]`, conf `lsp`)
+    as the far end; inside-but-unmatched stays `unsettled`. `externalIdentity`
+    derives the identity best-effort per ecosystem (Go mod cache `@version`,
+    stdlib/`node_modules`/`site-packages` package path, dir-base fallback) — always
+    nameable, never a false local. `addr()`/`nodeIDs()` handle the class;
+    node_query flags the row `domain:"external"`. Tests: `TestExternalIdentity`,
+    `TestExternalStubShape` (fast), `TestPrecisionResolvesToExternalStub`
+    (gopls e2e: two local `Split` + a `strings.Split` call → `strings#Split`, no
+    false local). **Scope note**: only fires on the ≥2-candidate ambiguous path
+    (`refineFar` skips len<2); a single local candidate that's actually external
+    still fast-paths as `lexical` (asking the LSP per unambiguous edge is the
+    cost the skip buys) — documented limitation, not this slice.
+  - ✅ **`:recursive` — the first edge-SEMANTIC predicate, LSP-confirmed.** A
+    callable with a self-call the child LSP resolves back into its OWN span.
+    Unblocked by the precision pass (the icebox parked it as lexically unsound:
+    `func Write` calling `w.Write` is io.Writer's, not itself). `isRecursive`
+    scans ONLY the func's self-name call sites (`fileSites` filtered to
+    `kind==call && name==n.leaf` inside its body) and `confirmSelfCall`
+    resolves those via the LSP. No LSP ⇒ confirms nothing and SAYS so
+    (`recursive` note / CLI caveat), never a silent false negative. Bare only —
+    mutual/cyclic rejects an arg and points at `::out.call{1,}`. Tests:
+    `TestRecursivePredicateLSPConfirmed` (gopls), `TestRecursiveWithoutLSPIsUnderResolved`.
+    - ✅ **Cost-cliff fixed (DOGFOODING).** The first cut walked `::out.call`
+      and resolved EVERY outgoing call of every candidate — a broad
+      `func:recursive` on this repo did ~700 round-trips, tripped the cap, and
+      returned 1 match with an "UNDER-RESOLVED, may miss real recursion"
+      caveat. Only self-NAME calls can be self-edges, so scanning just those
+      dropped it to a handful of resolutions: broad `func:recursive` is now
+      2.2s and returns **10** (complete) — the cap exhaustion had been HIDING
+      9 of them. Found by actually driving the MCP server, not the tests.
+  - ✅ **`.implements` — the first LSP-NATIVE edge kind.** `interface#Foo::in.implements
+    > *` = implementers; `type#Bar::out.implements > *` = interfaces Bar
+    satisfies. Go's structural typing has NO lexical clause to key on, so
+    unlike .call/.type/.import this edge is resolved ENTIRELY by the child LSP
+    (`textDocument/implementation`, `resolveImplementations` + a gen-keyed
+    `implCache`), built ONLY when explicitly named (one round-trip per host,
+    never for a bare ::in/::out). `implementsRefs` maps each target via `declAt`
+    (in-root) or an external stub (out-of-root, e.g. a workspace type
+    satisfying `io.Reader`); needed the symbol NAME position, so `nameAt` is now
+    on treeNode. conf `lsp`; no-LSP ⇒ `implements` note / CLI caveat, never a
+    silent empty. Tests: `TestImplementsEdgeKind` (gopls: Animal→Dog/Cat, not
+    NotAnimal; Dog→Animal), `TestImplementsWithoutLSPIsUnavailable`, parse.
+**Assumption made**: `textDocument/definition`'s first location is the
+declaration. True for gopls; unverified for tsserver/pylsp.
+
+
+◻ **Node model — loose ends found this session.**
+  - ✅ **TS `::in.type` double-count — NOT reproducible; the ❓ was stale.**
+    Verified across interface / class / generic / export / .tsx / union /
+    cross-file: `Widget::in.type` counts each occurrence ONCE, split cleanly by
+    the position axis (param/return/field), with value refs (`new Widget()`) out
+    of `.type`. The index emits 4 DISTINCT positions for 1 decl + 3 uses (no
+    site dup); the old "4 on 2 uses" was fixed en route (likely the span-
+    containment attribution that stopped name-only double-attribution). Pinned
+    by `TestTSInTypeNoDoubleCount` so a real dup can't creep back.
+  - ✅ **`return` as a NODE — shipped.** The return TYPE is now a `return`
+    CHILD of every callable (`func:any(return#error)` = funcs returning error),
+    across Go/TS/Python (`appendReturnSymbols` + `returnTypeNodes`: Go `result`,
+    TS/Python `return_type`). Go's `(T, error)` tuple SPLITS into one child per
+    type so `return#error` matches it; a qualified type answers to its leaf
+    (`return#Writer`) and its full alias (`return#'io.Writer'`). Three
+    integration snags, all fixed + pinned: a `return` node's span is the
+    signature line, so `enclosingSymPath` must skip it (else it steals call/type
+    sites from the func — like `argument`); its name span sits ON the type
+    usage, so `isDeclSite` must skip it (else the ref is deleted); and it answers
+    to `#Type`, so it's excluded from `refNodes` edge-building (else
+    `#Type::in.type` doubles). Tests: `symbols/return_node_test.go` (Go/TS/Py),
+    `TestModernQueryReturnNode`. **Remaining** (icebox): `var` slot nodes, and
+    the return-VALUE slot (needs column precision — param vs return share a line).
+  - ✅ **`:arity(m,n)` — signature-size filter, shipped.** Sound/structural
+    (counts `argument` children, no edge guessing): `:arity(2)` exact,
+    `:arity(2,)` 2+, `:arity(0,0)` no-arg. `parseParenRange` mirrors the `{m,n}`
+    shape; `TestModernQueryArity`.
+  - ✅ **`search`/`::grep` long-line cap + generated-file skip, shipped** (icebox
+    field-report BUG). `symbols.CapHitLine` (rune-safe, match-centred, 500B)
+    caps every matched line on BOTH surfaces; `symbols.Search` skips files with
+    a >5000B line (reported as `skippedGeneratedFiles`, `IncludeGenerated` opts
+    back in). Tests: `symbols/cap_test.go`, `TestModernQueryGrepCapsLongLine`.
+  - ✅ **`::signature` / `::body` pseudo-elements — shipped.** A callable split
+    into its decl HEAD (doc- and body-excluded) and body block, GENERATED nodes
+    (invisible to `*`) carrying source INLINE so `func::signature` is a one-query
+    overview. `Symbol.BodyStartLine` (tree-sitter `body` field) is the split;
+    the doc is skipped via the stored `commentAt`. `genPartOf`/`genPartMatches`
+    mirror `::comment`; `isGenerated()` folds them into the planner guards.
+    Known imprecision (line-granular): the `{` line shows in both halves on a
+    single-line signature — column precision is v2. Tests: `mcp/genpart_test.go`
+    (Go/TS/Python, invisibility to `*`, non-callables excluded).
+
+Next candidates are opt-in, in icebox.md — most valuable: a real-agent
+adoption vehicle (autowork3 is dead; needs a replacement), then the
+external-stub Stage 0 node (conf is now honest, the node is not yet).
+
+Known caveats (documented in code): edges are name-keyed via the lexical
+index, so same-named symbols share edges (the LSP pass is the fix);
+unbounded `{m,}` collects nodes at their shortest hop; `:where(sel)` ≡
+`:any(sel)` at tip granularity (pseudoHolds).
+
 ## The index honours .gitignore (DONE 2026-07-28)
 
 - [x] The walk honoured `skipDirs` — a hardcoded node_modules/build/dist

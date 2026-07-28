@@ -973,3 +973,53 @@ func Sites() map[string][]io.Writer { return nil }
 		t.Errorf("map return missing; have %+v", syms)
 	}
 }
+
+func TestFileSymbolsSQLDeclarationKinds(t *testing.T) {
+	// A migration tree is not just CREATE TABLE. Measured on a 34-file
+	// Flyway corpus: 48 create_function, 80 create_trigger and 128
+	// create_sequence went unindexed, leaving six files — every PL/pgSQL
+	// function and trigger file — completely empty.
+	src := []byte(`CREATE TABLE redline.account (
+  account_id bigint NOT NULL,
+  balance numeric
+);
+
+CREATE SEQUENCE redline.account_account_id_seq START WITH 1;
+
+CREATE OR REPLACE FUNCTION redline.set_updated_at() RETURNS TRIGGER AS $$
+BEGIN
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER account_updated_at BEFORE UPDATE ON redline.account
+  FOR EACH ROW EXECUTE PROCEDURE redline.set_updated_at();
+`)
+	syms, err := FileSymbols("sql", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		// A schema-qualified name answers to its LEAF, like every other
+		// language here — redline.account is `account`.
+		"account":                "struct",
+		"account.account_id":     "field",
+		"account_account_id_seq": "type",
+		"set_updated_at":         "func",
+		"account_updated_at":     "type",
+	}
+	for sym, class := range cases {
+		got := symByPath(syms, sym)
+		if got == nil {
+			t.Errorf("missing %q; have %+v", sym, syms)
+			continue
+		}
+		if got.Class != class {
+			t.Errorf("%q class = %q, want %q", sym, got.Class, class)
+		}
+	}
+	// The schema must never become the symbol.
+	if got := symByPath(syms, "redline"); got != nil {
+		t.Errorf("schema qualifier was indexed as a symbol: %+v", got)
+	}
+}

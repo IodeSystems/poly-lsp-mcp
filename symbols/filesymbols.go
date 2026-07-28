@@ -2054,7 +2054,13 @@ func classifySQL(t, parent string) symRole {
 	case "statement", "column_definitions":
 		return roleContainer
 	case "create_table", "column_definition",
-		"create_index", "create_view", "create_type":
+		"create_index", "create_view", "create_type",
+		// Functions, triggers and sequences are declarations too, and a
+		// migration tree is full of them: measured on a 34-file Flyway
+		// corpus, 48 create_function / 80 create_trigger / 128
+		// create_sequence, with SIX files — every PL/pgSQL function and
+		// trigger file — indexing as completely empty without these.
+		"create_function", "create_trigger", "create_sequence":
 		return roleSymbol
 	}
 	return roleSkip
@@ -2219,11 +2225,16 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 			return "struct", true
 		case "column_definition":
 			return "field", false
-		case "create_index":
-			return "type", false
-		case "create_view":
-			return "type", false
-		case "create_type":
+		case "create_function":
+			// A stored function is the one SQL object that is genuinely
+			// callable.
+			return "func", false
+		case "create_index", "create_view", "create_type",
+			// Triggers and sequences join index/view under `type`: named
+			// database objects with no better slot in the shared
+			// vocabulary. Keeping them together is the existing
+			// convention here, not a new judgement.
+			"create_trigger", "create_sequence":
 			return "type", false
 		}
 	}
@@ -2287,6 +2298,20 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 	if lang == "kotlin" {
 		if name, node, ok := kotlinName(node, content); ok {
 			return name, node
+		}
+	}
+	// SQL objects introduced by CREATE name themselves through an
+	// object_reference, whose LAST identifier is the object and whose
+	// leading ones are the schema (redline.account → account). This
+	// mirrors how every other language answers to the leaf.
+	if lang == "sql" {
+		switch t {
+		case "create_function", "create_trigger", "create_sequence":
+			if ref := firstNamedChildOfType(node, "object_reference"); ref != nil {
+				if leaf := lastNamedChildOfType(ref, "identifier"); leaf != nil {
+					return leaf.Content(content), leaf
+				}
+			}
 		}
 	}
 	// SQL create_index names via the `column` field (index name).

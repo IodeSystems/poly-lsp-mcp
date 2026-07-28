@@ -3,6 +3,47 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## SQL verified on the Flyway migrations; functions/triggers/sequences indexed (DONE 2026-07-27)
+
+- [x] Ran the SQL arm over redline's `db/migrations` — 34 Flyway files, 15,076
+  lines of real PostgreSQL. **This is the weakest result of any language
+  checked: 14 of 34 files (41%) parse with ERROR nodes, and 6 indexed as
+  completely EMPTY.** For comparison, java/python/go were 0%.
+- The corpus is dominated by statements the arm never handled. Counted:
+  **620 alter_table**, 164 create_table, 128 create_sequence, 128
+  alter_sequence, 94 create_view, 92 create_index, 80 create_trigger, 48
+  create_function.
+- **Fixed (contained):** `create_function` → func, `create_trigger` and
+  `create_sequence` → type (joining index/view under the existing "named
+  database object" convention rather than inventing a class). They name
+  themselves through an `object_reference` whose LAST identifier is the
+  object and whose leading ones are the schema, so `redline.account` answers
+  to `account` like every other language's leaf. Result: 975 → 1,103 symbols,
+  empty files 6 → 4.
+- **The 4 remaining empty files are honestly accounted for**, not waved off:
+  `reset.sql` holds only SELECTs (genuinely declaration-free), and the other
+  three use `CREATE PROCEDURE`, which tree-sitter-sql does not model AT ALL —
+  the whole statement becomes one ERROR. Nothing in classify can recover it.
+- **ERROR-walking was considered and REJECTED with data.** It rescued whole
+  declarations for c/cpp and kotlin, but here ERROR nodes cover 9% of lines
+  and contain expression FRAGMENTS — identifiers, keywords, joins, terms —
+  not declarations. Descending would surface noise, not symbols.
+- **Known and NOT fixed, reported instead:**
+  - **246 `ADD CONSTRAINT` names are unindexed.** Of the 620 alter_table
+    statements, that is the only clause that DECLARES a name (the rest are 64
+    `ALTER COLUMN` modifications and 1 `RENAME COLUMN`). Notably there are ZERO
+    `ADD COLUMN`s here, so the obvious worry — columns added by later
+    migrations being invisible — does not apply to this corpus. A constraint
+    name is a real cross-language contract (Postgres reports it in violation
+    errors that application code catches by name), so this is worth doing;
+    it needs alter_table walking, which is a slice of its own.
+  - A quoted identifier keeps its quotes in the path segment (`"USER"`), the
+    same wart fixed for TS ambient modules.
+  - `create_index` / `create_view` / `create_type` / trigger / sequence all
+    collapse to class `type`, so a selector cannot ask for views specifically.
+- Tests: `TestFileSymbolsSQLDeclarationKinds`, verified to fail with the fix
+  disabled, and asserting the schema qualifier never becomes the symbol.
+
 ## Go verified on this repo; composite return types stop claiming a leaf (DONE 2026-07-27)
 
 - [x] Dogfooded the Go arm on poly-lsp-mcp itself: **148 files, 6,848 symbols,

@@ -97,6 +97,13 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **SQL verified on the Flyway migrations — 2026-07-27** → done.md. Weakest
+result of any language: 41% of files parse with ERRORs and 6 were empty.
+Indexed create_function/trigger/sequence (975 → 1,103 symbols, 6 → 4 empty);
+the rest are grammar limits (CREATE PROCEDURE is unparseable). Open and
+NOT done: 246 `ADD CONSTRAINT` names are still unindexed — needs alter_table
+walking, a slice of its own.
+
 ✅ **Go dogfooded on this repo — 2026-07-27** → done.md. 148 files / 6,848
 symbols / 0 errors. Fixed one real defect: composite return types
 (`map[string][]symbols.InvSite`) were dot-split into a FALSE leaf

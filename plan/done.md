@@ -300,6 +300,51 @@ scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
 a shared module yet.** raglit's version is battle-tested but has exactly one
 user; extracting now is speculative, extracting after a second real copy is
 refactoring against two known cases. Revisit once this daemon runs.
+## Rename you can check, and the UTF-16 column fix (DONE 2026-07-28)
+
+The two residual items from the dogfood arc, both found by real use rather
+than by tests.
+
+**1. LSP `character` is UTF-16; every column here is a byte.** They agree only
+on pure-ASCII lines, which is why it survived — identifiers are ASCII even in
+files that are not. The mismatch ran in BOTH directions and the inbound one
+CORRUPTED files:
+
+- outbound, `rename_gopls.go` sent a byte column as `character`, pointing gopls
+  at the wrong offset;
+- inbound, it read gopls's `character` as a byte offset, producing edit ranges
+  that slice mid-character.
+
+Demonstrated, not assumed. With the fix reverted, renaming `Total` → `Somme`
+on this line:
+
+	café := "naïve — résultat"; _ = Total(1); _ = café
+
+produced `café := "naïve — résultat";SommeTotal(1); _ = café` — five bytes
+early (é, ï, —, é ahead of it), eating ` _ = `.
+
+`mcp/utf16.go` is now the only place that converts: `utf16ColToByteOffset`,
+`byteOffsetToUTF16Col`, `utf16ColToByteColumn`. Diagnostics convert at the
+boundary too, since their reported columns feed `sliceRangeText` and the
+enclosing-node lookup, both byte-based. Surrogate pairs count as two units;
+a malformed byte degrades instead of hanging; a column past end-of-line clamps
+because servers legitimately report one-past-the-end.
+
+Tests: `TestUTF16ColumnConversions` (é and a 🙂 surrogate pair, both
+directions), `TestUTF16OffsetSelectsWholeIdentifier`,
+`TestUTF16ClampsPastEndOfLine`, `TestUTF16InvalidUTF8DegradesInsteadOfHanging`,
+and the end-to-end `TestRefactorRenameAcrossMultibyteLineViaGopls` — verified
+to FAIL with the fix reverted.
+
+**2. A rename result is now checkable.** Dogfooding showed models spending ~30
+calls grep-auditing a CORRECT `filesChanged:9`, because the result gave them a
+count and nothing to verify it against. Each `results[]` entry now carries the
+1-based `lines` it touched, sorted and de-duplicated, and the note points at
+them: "Every touched site is listed in results[].lines — check those if you
+want to verify, but do NOT re-run the rename per-file." Capped at 20 lines per
+file with `linesTruncated` reporting the overflow — a silent cap reads as
+"that was all". Test: `TestTouchedLinesAreSortedDedupedAndCapped`.
+
 ## XML edit ops — attributes are the parameter list (DONE 2026-07-28)
 
 - [x] Correcting the record first: **XML rename already worked** before this,

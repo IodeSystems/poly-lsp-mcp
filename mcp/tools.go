@@ -1855,7 +1855,10 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 			s.refreshFileInIndex(abs, newContent)
 			newContents[pathToURI(abs)] = newContent
 		}
-		results = append(results, applyResult{File: rel, Edits: n})
+		lines, truncated := touchedLines(edits)
+		results = append(results, applyResult{
+			File: rel, Edits: n, Lines: lines, LinesTruncated: truncated,
+		})
 	}
 
 	uris := make([]string, 0, len(newContents))
@@ -1902,7 +1905,9 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 			scope = "name-matched (no language server for this file; collision-guarded)"
 		}
 		note := fmt.Sprintf(
-			"DONE — rename %q → %q, %s, across %d file(s) in this ONE call. Do NOT rename per-file or search/replace to \"finish\".",
+			"DONE — rename %q → %q, %s, across %d file(s) in this ONE call. "+
+				"Every touched site is listed in results[].lines — check those if you want to verify, "+
+				"but do NOT re-run the rename per-file or search/replace to \"finish\".",
 			name, newName, scope, len(results))
 		if !includeComments {
 			note += " Any occurrences left are in comments/strings/prose (not identifiers) and were intentionally skipped — pass includeComments:true to rename those too."
@@ -2067,6 +2072,37 @@ type applyResult struct {
 	File    string `json:"file"`
 	Edits   int    `json:"edits,omitempty"`
 	Skipped string `json:"skipped,omitempty"`
+	// Lines are the 1-based lines this op actually touched in File.
+	// Reporting them is what lets a caller VERIFY a rename instead of
+	// re-deriving it: dogfooding showed models spending ~30 calls
+	// grep-auditing a correct filesChanged:9 because the result gave
+	// them a count and nothing to check it against.
+	Lines          []int `json:"lines,omitempty"`
+	LinesTruncated int   `json:"linesTruncated,omitempty"`
+}
+
+// maxReportedLines caps the per-file line list. A rename across a huge
+// file should not blow the caller's budget echoing hundreds of numbers —
+// but the overflow is REPORTED, never silently dropped.
+const maxReportedLines = 20
+
+// touchedLines renders the sorted, de-duplicated lines a set of edits
+// covers, plus how many were withheld by the cap.
+func touchedLines(edits []resolvedEdit) ([]int, int) {
+	seen := map[int]bool{}
+	out := make([]int, 0, len(edits))
+	for _, e := range edits {
+		if seen[e.Line] {
+			continue
+		}
+		seen[e.Line] = true
+		out = append(out, e.Line)
+	}
+	sort.Ints(out)
+	if len(out) > maxReportedLines {
+		return out[:maxReportedLines], len(out) - maxReportedLines
+	}
+	return out, 0
 }
 
 // buildRenameEdits plans the rewrites for renaming `name` to `newName`. Returns the

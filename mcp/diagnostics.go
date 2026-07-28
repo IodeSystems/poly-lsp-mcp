@@ -527,7 +527,21 @@ func (s *Server) enrichDiagnostic(uri string, d multiplex.Diagnostic, content []
 		}
 	}
 	if content == nil {
+		// No content to measure against, so the columns stay as the
+		// server reported them — UTF-16, and flagged as such rather
+		// than silently mixed with byte columns elsewhere.
 		return item
+	}
+
+	// The server counts `character` in UTF-16 code units; every column
+	// this tool reports, and every consumer below (sliceRangeText,
+	// enclosing-node lookup), works in 1-based BYTES. Convert once here
+	// so the two conventions never meet.
+	if c, ok := utf16ColToByteColumn(content, item.StartLine, item.StartCol); ok {
+		item.StartCol = c
+	}
+	if c, ok := utf16ColToByteColumn(content, item.EndLine, item.EndCol); ok {
+		item.EndCol = c
 	}
 
 	item.Text = sliceRangeText(content, item.StartLine, item.StartCol, item.EndLine, item.EndCol, maxRangeTextChars)

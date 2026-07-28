@@ -165,3 +165,75 @@ func TestRefactorRenameValidateRevertsAllFiles(t *testing.T) {
 		t.Fatalf("b.go not restored:\n got: %q\nwant: %q", got, origB)
 	}
 }
+
+// An LSP position's `character` counts UTF-16 code units; every column
+// this tool works in is a byte. On a line carrying multibyte text BEFORE
+// the identifier, reading the server's column as bytes lands early and
+// the edit slices through neighbouring source.
+//
+// Measured before the fix, this exact fixture produced:
+//
+//	café := "naïve — résultat";SommeTotal(1); _ = café
+//
+// — five bytes early (é, ï, —, é), eating ` _ = `. It corrupted the file
+// it was asked to rename.
+func TestRefactorRenameAcrossMultibyteLineViaGopls(t *testing.T) {
+	if testing.Short() {
+		t.Skip("gopls rename e2e skipped under -short")
+	}
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not on PATH")
+	}
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module x\n\ngo 1.21\n")
+	write("main.go", "package main\n\n"+
+		"func Total(a int) int { return a }\n\n"+
+		"func main() {\n"+
+		"\tcafé := \"naïve — résultat\"; _ = Total(1); _ = café\n"+
+		"}\n")
+
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(reg, dir, nil, nil)
+	srv.SetManager(multiplex.NewManager(reg))
+	srv.SetDiagnosticWait(8 * time.Second)
+
+	sIn, cOut := io.Pipe()
+	cIn, sOut := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(sIn, sOut) }()
+	sess := &mcpSession{t: t, srv: srv, srvIn: cOut, clientR: json.NewDecoder(cIn), clientW: cOut, done: done}
+	defer sess.close()
+	sess.request("initialize", map[string]any{})
+	sess.notify("notifications/initialized", map[string]any{})
+
+	r := sess.callTool("node_edit", map[string]any{"node": "main.go#Total", "rename": "Somme"})
+	if r.IsError {
+		t.Fatalf("rename should succeed; got %s", r.Content[0].Text)
+	}
+	got := string(mustRead(t, filepath.Join(dir, "main.go")))
+	want := "\tcafé := \"naïve — résultat\"; _ = Somme(1); _ = café\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("call site mangled by a UTF-16/byte column mismatch:\n%s", got)
+	}
+	if !strings.Contains(got, "func Somme(a int) int") {
+		t.Errorf("declaration not renamed:\n%s", got)
+	}
+	// The surrounding multibyte text must be byte-identical.
+	for _, keep := range []string{"café", "naïve", "—", "résultat"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("multibyte text %q was damaged:\n%s", keep, got)
+		}
+	}
+}

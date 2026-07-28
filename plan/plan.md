@@ -169,12 +169,8 @@ revert-on-new-diagnostics, benchmarked and measured with error bars.
 ✅ **Dogfooding wired → done.md.** `.mcp.json` registers poly-lsp as a native
 tool for Claude Code in this repo, so the project develops itself with its own
 `node_query`/`node_read`/`node_edit`. Two dogfood passes found cost cliffs
-100% test coverage had missed. Residual open items from that arc:
-  - ◻ Make a rename result harder to distrust (echo the touched symbols so a
-    grep-audit is unnecessary) — models spent ~30 calls re-verifying a correct
-    `filesChanged:9`.
-  - ◻ LSP `character` is UTF-16; `lineColToByteOffset` treats it as bytes —
-    correct for ASCII identifiers, a known edge for non-ASCII.
+100% test coverage had missed. **Both residual items from that arc are now
+SHIPPED → done.md ("Rename you can check, and the UTF-16 column fix").**
 
 ✅ **`:explain` cost-visible queries + cardinality-ordered descendant chains —
 SHIPPED → done.md.**

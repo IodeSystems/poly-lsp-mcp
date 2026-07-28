@@ -45,10 +45,17 @@ func (s *Server) goplsRenameEdits(a rangeArgs, newName string) (edits []resolved
 
 	ctx, cancel := context.WithTimeout(context.Background(), lspResolveTimeout)
 	defer cancel()
-	// LSP positions are 0-based; ours are 1-based. Point at the identifier.
+	// LSP positions are 0-based; ours are 1-based. `character` is
+	// counted in UTF-16 code units, NOT bytes — sending a byte column
+	// points gopls at the wrong offset on any line with a non-ASCII
+	// character before the identifier.
+	utf16Col, ok := byteOffsetToUTF16Col(content, a.StartLine, a.StartCol)
+	if !ok {
+		return nil, false, nil
+	}
 	raw, cerr := child.Call(ctx, "textDocument/rename", map[string]any{
 		"textDocument": map[string]any{"uri": uri},
-		"position":     map[string]any{"line": a.StartLine - 1, "character": a.StartCol - 1},
+		"position":     map[string]any{"line": a.StartLine - 1, "character": utf16Col - 1},
 		"newName":      newName,
 	})
 	if cerr != nil {
@@ -123,16 +130,25 @@ func (s *Server) workspaceEditToResolved(raw json.RawMessage, _ string) ([]resol
 		}
 		rel := relPath(abs, root)
 		for _, e := range edits {
-			startOff, ok1 := lineColToByteOffset(content, e.Range.Start.Line+1, e.Range.Start.Character+1)
-			endOff, ok2 := lineColToByteOffset(content, e.Range.End.Line+1, e.Range.End.Character+1)
+			// The server's `character` is a UTF-16 code-unit count.
+			// Reading it as bytes produces ranges that slice
+			// mid-character and corrupt the file being renamed.
+			startOff, ok1 := utf16ColToByteOffset(content, e.Range.Start.Line+1, e.Range.Start.Character+1)
+			endOff, ok2 := utf16ColToByteOffset(content, e.Range.End.Line+1, e.Range.End.Character+1)
 			if !ok1 || !ok2 || startOff > endOff || endOff > len(content) {
 				continue
+			}
+			// Col is reported to the caller in OUR convention: 1-based
+			// bytes within the line.
+			byteCol := startOff
+			if ls, ok := lineStartOffset(content, e.Range.Start.Line+1); ok {
+				byteCol = startOff - ls + 1
 			}
 			out = append(out, resolvedEdit{
 				AbsFile: abs,
 				RelFile: rel,
 				Line:    e.Range.Start.Line + 1,
-				Col:     e.Range.Start.Character + 1,
+				Col:     byteCol,
 				OldText: string(content[startOff:endOff]),
 				NewText: e.NewText,
 			})

@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // IgnoreSet is the set of paths git says are ignored in a workspace,
@@ -24,8 +25,13 @@ import (
 // an agent's own new work invisible to it — the worst possible failure
 // for a tool an agent uses mid-task.
 type IgnoreSet struct {
+	root  string
 	files map[string]bool
 	dirs  []string // relative, each ending in "/"
+
+	// mu guards checked, the memo for the pattern fallback below.
+	mu      sync.Mutex
+	checked map[string]bool
 }
 
 // LoadIgnores asks git which paths are ignored under root. Returns nil
@@ -48,7 +54,7 @@ func LoadIgnores(root string) *IgnoreSet {
 	if err != nil {
 		return nil
 	}
-	s := &IgnoreSet{files: map[string]bool{}}
+	s := &IgnoreSet{root: root, files: map[string]bool{}, checked: map[string]bool{}}
 	for _, p := range strings.Split(string(out), "\x00") {
 		if p == "" {
 			continue
@@ -59,10 +65,9 @@ func LoadIgnores(root string) *IgnoreSet {
 		}
 		s.files[p] = true
 	}
-	if len(s.files) == 0 && len(s.dirs) == 0 {
-		// Nothing ignored: skip the per-entry checks entirely.
-		return nil
-	}
+	// Even with nothing currently ignored the set is kept: `.gitignore`
+	// may match paths that do not exist YET, and Matches falls back to
+	// git for those.
 	return s
 }
 
@@ -88,8 +93,15 @@ func (s *IgnoreSet) DirIgnored(root, path string) bool {
 	return s.matchDir(r + "/")
 }
 
-// FileIgnored reports whether a file is ignored, either by name or by
-// sitting under an ignored directory.
+// FileIgnored reports whether a file is ignored, either by name, by
+// sitting under an ignored directory, or by matching a pattern.
+//
+// The snapshot from LoadIgnores only enumerates paths that EXISTED when
+// it ran, which is enough for the build walk but not for a watcher: a
+// build output or a branch switch creates ignored files afterwards. Those
+// fall through to `git check-ignore`, memoized per directory so a run
+// that writes a thousand files into one ignored tree costs one
+// subprocess, not a thousand.
 func (s *IgnoreSet) FileIgnored(root, path string) bool {
 	if s == nil {
 		return false
@@ -98,10 +110,35 @@ func (s *IgnoreSet) FileIgnored(root, path string) bool {
 	if r == "" {
 		return false
 	}
-	if s.files[r] {
+	if s.files[r] || s.matchDir(r) {
 		return true
 	}
-	return s.matchDir(r)
+	if dir := filepath.Dir(r); dir != "." && dir != "" {
+		if s.checkIgnore(dir + "/") {
+			return true
+		}
+	}
+	return s.checkIgnore(r)
+}
+
+// checkIgnore asks git whether one relative path is ignored, memoizing
+// the answer. Returns false when git cannot answer.
+func (s *IgnoreSet) checkIgnore(rel string) bool {
+	s.mu.Lock()
+	if v, ok := s.checked[rel]; ok {
+		s.mu.Unlock()
+		return v
+	}
+	s.mu.Unlock()
+
+	cmd := exec.Command("git", "-C", s.root, "check-ignore", "-q", "--", rel)
+	// Exit 0 = ignored, 1 = not ignored, anything else = error.
+	ignored := cmd.Run() == nil
+
+	s.mu.Lock()
+	s.checked[rel] = ignored
+	s.mu.Unlock()
+	return ignored
 }
 
 // matchDir reports whether p sits under any ignored directory prefix.

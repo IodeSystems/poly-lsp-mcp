@@ -24,6 +24,7 @@ import (
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
@@ -66,6 +67,9 @@ type Server struct {
 
 	indexMu sync.RWMutex
 	index   *symbols.Index
+	// ignores is the workspace's gitignore set, guarded by indexMu
+	// alongside the index it was resolved with.
+	ignores *git.IgnoreSet
 
 	// classCount tallies symbols per class (func/type/…) for the query-cost
 	// estimator's a-priori bare-class figure. It needs the SYMBOL TREE (the
@@ -560,6 +564,10 @@ func (s *Server) BuildIndex() error {
 	if root == "" {
 		return errors.New("no workspace root configured")
 	}
+	// Resolved alongside the walk so the watcher filters by exactly the
+	// same set the build used, and re-resolved on every rebuild so a
+	// branch switch that changes .gitignore is picked up.
+	s.setIgnores(git.LoadIgnores(root))
 	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache))
 	if err != nil {
 		return fmt.Errorf("index build failed for %s: %w", root, err)
@@ -737,6 +745,33 @@ func (s *Server) handleToolsCall(req *jsonrpc.Message) {
 		"content": content,
 		"isError": isError,
 	})
+}
+
+// setIgnores stores the workspace's gitignore set. The WATCHER consults
+// it as well as the build walk: without that, `Build` would exclude an
+// ignored file and the very next write to it would put it back, so a
+// session that runs a build — or switches branches — drifts back toward
+// indexing everything.
+func (s *Server) setIgnores(ig *git.IgnoreSet) {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	s.ignores = ig
+}
+
+func (s *Server) getIgnores() *git.IgnoreSet {
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
+	return s.ignores
+}
+
+// pathIgnored reports whether a path is gitignored relative to the
+// workspace root. Safe on a nil set (non-git workspace).
+func (s *Server) pathIgnored(path string) bool {
+	root := s.getRoot()
+	if root == "" {
+		return false
+	}
+	return s.getIgnores().FileIgnored(root, path)
 }
 
 func (s *Server) setIndex(idx *symbols.Index) {

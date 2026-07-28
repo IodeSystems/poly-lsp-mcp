@@ -325,6 +325,22 @@ refactoring against two known cases. Revisit once this daemon runs.
   missing, or the command erroring all yield an unfiltered walk
   (`TestBuildUnfilteredOutsideAGitRepo`). `WithoutGitignore()` is the escape
   hatch for a workspace that ignores files it nevertheless wants indexed.
+- **Two defects in the first cut, both found by pushing on the worktree/branch
+  case rather than by review:**
+  1. **The WATCHER did not honour the ignore set.** `Build` excluded a file
+     and the very next write put it straight back, so any session that ran a
+     build — or switched branches — drifted back toward indexing everything.
+     `watchableFile` and `watchRefreshFile` now check, `addWatchDirs` no
+     longer spends descriptors on ignored trees, and a `.gitignore` change
+     (the branch-switch signal) re-resolves the set instead of leaving it
+     frozen at build time. An explicit tool edit still refreshes what it
+     touched — that is a deliberate act on a named file, not a stray build
+     write.
+  2. **`git ls-files` only enumerates paths that EXIST when it runs.** A
+     build output or a branch switch creates ignored files afterwards, and
+     the snapshot missed them entirely. `FileIgnored` now falls back to
+     `git check-ignore`, memoized per DIRECTORY, so a run writing a thousand
+     files into one ignored tree costs one subprocess rather than a thousand.
 - Known limit: a nested repository or submodule has its own `.gitignore`,
   which one invocation at the root does not consult.
 - **Follow-up SHIPPED the same day: the bindings walker honours it too.**

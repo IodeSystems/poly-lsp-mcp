@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -97,6 +98,10 @@ func (s *Server) addWatchDirs(w *fsnotify.Watcher, root string) int {
 		if path != root && skipProactiveOpenDir(d.Name()) {
 			return filepath.SkipDir
 		}
+		// Don't spend watch descriptors on trees the index excludes.
+		if path != root && s.getIgnores().DirIgnored(s.getRoot(), path) {
+			return filepath.SkipDir
+		}
 		if err := w.Add(path); err == nil {
 			count++
 		}
@@ -142,6 +147,16 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 			return
 		}
 	}
+	// A .gitignore change — most often a branch switch — invalidates the
+	// filter the walk and this watcher both use. Re-resolve it, and do
+	// so BEFORE the watchable check, since .gitignore is not itself an
+	// indexed file.
+	if filepath.Base(ev.Name) == ".gitignore" {
+		if root := s.getRoot(); root != "" {
+			s.setIgnores(git.LoadIgnores(root))
+		}
+		return
+	}
 	if !s.watchableFile(ev.Name) {
 		return
 	}
@@ -167,10 +182,19 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 
 // watchableFile reports whether path routes to a registered language
 // with a working extractor — the only files whose changes can affect
-// the symbol index.
+// the symbol index — AND is not gitignored.
+//
+// The ignore check has to be here, not only in the build walk: `Build`
+// excludes an ignored file, and without this the very next write to it
+// would put it straight back. A session that runs a build, or switches
+// branches, would drift back toward indexing everything it was meant to
+// skip.
 func (s *Server) watchableFile(path string) bool {
 	lang := s.languageForFile(path)
-	return lang != "" && symbols.DefaultExtractor(lang) != nil
+	if lang == "" || symbols.DefaultExtractor(lang) == nil {
+		return false
+	}
+	return !s.pathIgnored(path)
 }
 
 // watchRefreshFile reads a changed file off disk and refreshes its slice
@@ -179,6 +203,13 @@ func (s *Server) watchableFile(path string) bool {
 // parse cache included). A file that vanished or grew past the scan cap
 // is treated as a removal.
 func (s *Server) watchRefreshFile(path string) {
+	// Belt to watchableFile's braces: this is the one place a WATCHED
+	// change enters the index, so the ignore check lives here too. An
+	// explicit tool edit still refreshes whatever it touched — that is a
+	// deliberate act on a named file, not a stray write from a build.
+	if s.pathIgnored(path) {
+		return
+	}
 	content, err := os.ReadFile(path)
 	if err != nil || len(content) > maxScanSize {
 		s.removeFileFromIndex(path)

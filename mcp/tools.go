@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
@@ -561,7 +562,47 @@ type nodeReadArgs struct {
 // defaultReadCharBudget is the implicit cap when the agent doesn't
 // set lineLimit explicitly. Tuned to be "a reasonable preview" —
 // usually 30-60 lines of code, well under typical context budgets.
-const defaultReadCharBudget = 2048
+//
+// The cap is not free. Measured on an agent run against a ~1100-line Java
+// file, 85% of node_read calls came back truncated and the agent re-read the
+// same three files 45 times to reassemble them. Each re-read is a round-trip:
+// a turn, plus the generated tokens to compose the next call. Against a flat
+// whole-file read on the same task that was 2.2x the turns and 2x the
+// generated tokens, while saving only input tokens — trading the expensive
+// channel for the cheap one.
+//
+// So it is tunable, in precedence order:
+//
+//	--read-char-budget N        the CLI flag, alongside --root and the rest
+//	POLY_LSP_READ_CHAR_BUDGET   fallback, for a client that can only set env
+//	2048                        default, unchanged
+//
+// The right value depends on the model's context window and on how dearly its
+// provider prices generation against input, so there is no good universal
+// number — hence a knob rather than a new constant.
+const defaultReadCharBudgetFallback = 2048
+
+// defaultReadCharBudget is the resolved cap. Seeded from the environment at
+// init and overridden by SetReadCharBudget when the flag is passed.
+var defaultReadCharBudget = readCharBudgetFromEnv()
+
+// SetReadCharBudget applies the --read-char-budget flag. Non-positive values
+// are ignored so a caller passing 0 (the flag's "unset" value) keeps whatever
+// the environment or the default already resolved to.
+func SetReadCharBudget(n int) {
+	if n > 0 {
+		defaultReadCharBudget = n
+	}
+}
+
+func readCharBudgetFromEnv() int {
+	if v := os.Getenv("POLY_LSP_READ_CHAR_BUDGET"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultReadCharBudgetFallback
+}
 
 // readGeneratedLineLen is the length past which a single line is treated
 // as generated/minified (a JSON/data blob, a bundled JS line) rather than

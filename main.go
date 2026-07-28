@@ -77,7 +77,12 @@ func runMCP() {
 	readOnly := flag.Bool("read-only", false, "hide every mutating tool (node_edit/node_delete/node_refactor/node_rename_file); navigation + reading only")
 	validate := flag.Bool("validate", false, "revert-on-new-diagnostics: an edit that introduces a new error is rolled back instead of landing (needs a child LSP)")
 	daemonMode := flag.Bool("daemon", false, "proxy tool calls to the shared per-user poly-lsp daemon (auto-starting it) instead of building the index in-process; one warm index + child-LSP fleet is shared across every client")
+	readCharBudget := flag.Int("read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
 	flag.Parse()
+
+	if *readCharBudget > 0 {
+		mcp.SetReadCharBudget(*readCharBudget)
+	}
 
 	root, err := filepath.Abs(*rootPath)
 	if err != nil {

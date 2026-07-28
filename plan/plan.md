@@ -246,10 +246,24 @@ accept the llm-bench peer result and let the roadmap ride on it.
 
 
 ◻ **Cost visibility + planning share an estimator.**
-  - ◻ **Cardinality-order a descendant chain.** `A B` evaluates left-to-right;
-    if B is far rarer than A, start from B and check ancestors. Needs the same
-    per-compound estimate `:explain` renders (below). The ref pushdown was the
-    measured 700× case; this is the general form.
+  - ⏸ **Cardinality-order a descendant chain — general form BUILT, MEASURED,
+    and NOT shipped (2026-07-28).** The name-tip form shipped long ago
+    (`planReorder`, → done.md). The general form extends it to a bare-CLASS
+    tip, estimated from `classCounts` instead of the index.
+    It works and is equivalent — verified row-for-row against the forward
+    walk on every shape tried. It just never pays: **0% saving on this repo
+    for `func argument`, `class method`, `struct field`, `file func argument`
+    — identical op counts, because the gate correctly DECLINES every time.**
+    On real code the tip class is almost always MORE common than the leading
+    one (`argument` 2,009 vs `func` 1,096; `field` 763 vs `struct` 164), which
+    is the opposite of the condition the reorder needs. Only a contrived
+    fixture where arguments are rare fires it (−26% there).
+    Shipping it would ADD cost: `reorderSeed` must call `classCounts()` — a
+    full-symbol walk on first use — to then decline. Reverted rather than
+    left as dead code on the planning path, which is the trap this item's own
+    note warned about.
+    **next**: nothing, unless a corpus turns up where a rare tip class is
+    common. The estimator work below stands on its own.
   - ✅ **The ~76k inversion floor is gone from query budget.** `sitesByFile`
     is now `symbols.Index.SitesByFile` — index-owned derived state, memoized on
     `gen` (invalidates on Refresh), abs-keyed, liveness-evicting at build. An

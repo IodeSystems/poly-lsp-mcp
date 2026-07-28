@@ -61,13 +61,13 @@ func (o SignatureOps) NonEmpty() bool {
 // Byte offsets are 0-based; 1-based positions go through
 // FindFunctionSignature's line/col args.
 type FunctionSignature struct {
-	Language string
-	Type     string
-	Name     ByteRange
-	Params   ByteRange
-	Result   ByteRange
+	Language  string
+	Type      string
+	Name      ByteRange
+	Params    ByteRange
+	Result    ByteRange
 	BodyStart int
-	Receiver ByteRange
+	Receiver  ByteRange
 }
 
 // CallSite describes one resolved call to a function in a single file
@@ -297,6 +297,11 @@ var langOpsByName = map[string]*langOps{
 	"go":         goLangOps,
 	"typescript": tsLangOps,
 	"python":     pythonLangOps,
+	"java":       javaLangOps,
+	"kotlin":     kotlinLangOps,
+	"groovy":     groovyLangOps,
+	"c":          cLangOps,
+	"cpp":        cLangOps,
 }
 
 // ---------- Go ----------

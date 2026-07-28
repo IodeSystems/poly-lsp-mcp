@@ -103,27 +103,16 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
-◻ **Language coverage has outrun the EDIT surface — the top gap.**
-Twelve languages now index and model nodes (see the pointer below), but the
-mutation half never followed. Concretely:
-  - ◻ **`node_refactor` signature rewriting is go / typescript / python only**
-    (`symbols/refactor.go: langOpsByName`, `mcp/tools.go:
-    signatureSupportedLanguage`). java, kotlin, groovy, c, cpp all index and
-    answer queries, then silently do nothing for `refactor:{params, return}`.
-    Rename still works everywhere — it is the signature/callsite rewrite that
-    is missing.
-    **next**: pick ONE (java is the largest measured corpus) and add a
-    `langOps` entry; the shape is fixed by goLangOps/tsLangOps.
-    **risks**: each language needs its own call-site rewriter, so this is
-    per-language work, not one abstraction.
-  - ◻ **Java has no `.annotation` children** while python/typescript/go/kotlin/
-    groovy all do (`appendAnnotationSymbols`). Java is the language where
-    annotations carry the most meaning — `@Override`, JPA, Spring — so
-    `method:any(annotation#Transactional)` silently matches nothing.
-    **next**: a `javaAnnotations` arm; kotlinAnnotations is the template.
-  - **blocking decision (USER)**: is the edit surface meant to reach parity
-    across all twelve, or do java/kotlin stay query-only on purpose? That
-    answer decides whether this is one slice or five.
+✅ **Edit parity across every callable language — 2026-07-28.** The gap that
+headed this list is closed. `node_refactor` signature rewriting now covers
+java, kotlin, groovy, c and c++ alongside go/typescript/python
+(`symbols/refactor_langs.go`), and Java gained the `.annotation` children five
+other languages already had. SQL, XML and Markdown are deliberately excluded:
+a signature refactor rewrites a callable AND its callers, and none of the
+three has a call expression to rewrite. Found and fixed while exercising it:
+a C++ out-of-line rename spanned the whole `Widget::area`, deleting the class
+scope and silently detaching the definition — now pinned by
+`TestCppQualifiedRenameKeepsScope`.
 
 ◻ **Verification debts — coverage claimed but not earned.**
   - ◻ **yaml / json were never verified at scale.** This repo has one

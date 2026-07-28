@@ -23,11 +23,11 @@ skipped, never fatal.
 | Go | `.go` | ✅ | gopls | ✅ |
 | TypeScript / TSX / JS | `.ts .tsx .js .jsx .mjs .cjs` | ✅ | typescript-language-server | ✅ |
 | Python | `.py .pyi` | ✅ | pylsp | ✅ |
-| Java | `.java` | ✅ | — (jdtls opt-in) | — |
-| Kotlin | `.kt .kts` | ✅ | — (opt-in) | — |
-| Groovy | `.groovy .gradle .gvy .gy` | ✅ | — (opt-in) | — |
-| C | `.c` | ✅ | clangd | — |
-| C++ | `.cpp .cc .cxx .c++ .h .hpp .hh .hxx .h++ .ipp .tcc .inl` | ✅ | clangd | — |
+| Java | `.java` | ✅ | — (jdtls opt-in) | ✅ |
+| Kotlin | `.kt .kts` | ✅ | — (opt-in) | ✅ |
+| Groovy | `.groovy .gradle .gvy .gy` | ✅ | — (opt-in) | ✅ |
+| C | `.c` | ✅ | clangd | ✅ |
+| C++ | `.cpp .cc .cxx .c++ .h .hpp .hh .hxx .h++ .ipp .tcc .inl` | ✅ | clangd | ✅ |
 | SQL | `.sql .psql` | ✅ | — | — |
 | XML | `.xml` | ✅ | — | — |
 | Markdown | `.md .markdown` | ✅ sections | — | — |
@@ -44,9 +44,9 @@ Notes worth knowing before you rely on them:
   `README.md#'MCP mode.Selector language'` addresses a section and `node_read`
   returns it. Only headings, fenced code and inline `` `code` `` spans enter
   the name index — prose does not.
-- **Signature refactor is go / typescript / python only.** Rename works
-  everywhere; it is the parameter/return rewrite with call-site fixups that is
-  per-language.
+- **Signature refactor covers every language with call sites.** SQL, XML and
+  Markdown are the exceptions: a signature refactor rewrites a callable *and*
+  its callers, and none of the three has a call expression to rewrite.
 - **YAML and JSON are lexical on purpose** — a config *value* is a contract, so
   every token is indexed. That is what makes a YAML string match a Go type.
 - A Jenkinsfile is Groovy but has no extension, and the registry keys on
@@ -149,7 +149,7 @@ The prior surface — `structure`, `search`, `node_references`, `node_read`, `no
 | `node_read` | Read whole file, line preview, or byte-precise range. |
 | `node_edit` | Atomic write: whole-file create-or-overwrite, range replace, or unified-diff patch. |
 | `node_delete` | Delete a range OR delete the whole file. |
-| `node_refactor` | Composable cross-language refactor: `refactor:{rename?, params?, return?}`. Supports go / typescript / python. |
+| `node_refactor` | Composable cross-language refactor: `refactor:{rename?, params?, return?}`. Signature rewriting supports go / typescript / python / java / kotlin / groovy / c / c++; rename works everywhere. |
 
 ### Tool capability matrix
 

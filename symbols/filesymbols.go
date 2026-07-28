@@ -505,6 +505,8 @@ func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string
 		marks = tsDecorators(node, content)
 	case "go":
 		marks = goStructTags(node, class, content)
+	case "java":
+		marks = javaAnnotations(node, content)
 	case "kotlin":
 		marks = kotlinAnnotations(node, content)
 	case "groovy":
@@ -752,6 +754,54 @@ func paramInfos(lang string, p *sitter.Node, content []byte) []paramInfo {
 		return groovyParamInfos(p, content)
 	}
 	return nil
+}
+
+// javaAnnotations collects a declaration's annotations. Java spells a
+// bare one `marker_annotation` (@Override, @Id) and an argument-bearing
+// one `annotation` (@Table(name = "users")); both sit under `modifiers`.
+//
+// A FIELD is the wrinkle: classifyJava makes the variable_declarator the
+// symbol, but the modifiers hang off the enclosing field_declaration, so
+// the search climbs one level for those. Without that, every JPA column
+// annotation would be invisible.
+func javaAnnotations(node *sitter.Node, content []byte) []annMark {
+	mods := firstNamedChildOfType(node, "modifiers")
+	if mods == nil {
+		if p := node.Parent(); p != nil {
+			switch p.Type() {
+			case "field_declaration", "local_variable_declaration", "constant_declaration":
+				mods = firstNamedChildOfType(p, "modifiers")
+			}
+		}
+	}
+	if mods == nil {
+		return nil
+	}
+	var out []annMark
+	for i := range int(mods.NamedChildCount()) {
+		ann := mods.NamedChild(i)
+		switch ann.Type() {
+		case "marker_annotation", "annotation":
+		default:
+			continue
+		}
+		name := ann.ChildByFieldName("name")
+		if name == nil {
+			name = firstNamedChildOfType(ann, "identifier")
+		}
+		if name == nil {
+			continue
+		}
+		fqn := name.Content(content)
+		leaf := fqn
+		// @com.example.Audited arrives as a scoped_identifier; the index
+		// answers to the leaf, with the written form kept as the alias.
+		if i := strings.LastIndexByte(leaf, '.'); i >= 0 && i+1 < len(leaf) {
+			leaf = leaf[i+1:]
+		}
+		out = append(out, annMark{ann, leaf, fqn})
+	}
+	return out
 }
 
 // javaParamInfos handles Java's formal_parameter, spread_parameter

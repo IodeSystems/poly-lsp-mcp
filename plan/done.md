@@ -300,6 +300,47 @@ scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
 a shared module yet.** raglit's version is battle-tested but has exactly one
 user; extracting now is speculative, extracting after a second real copy is
 refactoring against two known cases. Revisit once this daemon runs.
+## Edit parity: signature refactor for every callable language (DONE 2026-07-28)
+
+- [x] `langOpsByName` gains java, kotlin, groovy, c and cpp
+  (`symbols/refactor_langs.go`), so `refactor:{rename, params, return}` and
+  its call-site fixups work in eight languages instead of three. Before this,
+  five languages indexed and answered queries, then silently did nothing when
+  asked to rewrite a signature.
+- Each arm answers the same eight-question `langOps` contract; the work is in
+  where a grammar hides things:
+  - **Java** — `method_invocation` call sites keyed on the `name` field; a
+    constructor has no `type`, which is correctly an empty Result, and the
+    insert path puts a return type before the name.
+  - **Kotlin** — the grammar has NO field names, so `extractKotlinSignature`
+    reuses `kotlinFuncParts` for the positional receiver/name/result split.
+    Call sites cover both `f(...)` and `obj.f(...)` (navigation_expression);
+    a trailing-lambda call has no parenthesised argument list and is skipped.
+  - **Groovy** — names a callable through `function`, not `name`.
+  - **C/C++** — the name lives at the bottom of a declarator chain, and the
+    parameter list belongs to the `function_declarator`, not the definition.
+    Prototypes and in-class method declarations qualify via
+    `cFunctionDeclarator`.
+- **Bug found by exercising it, not by review:** a C++ out-of-line definition
+  names itself `Widget::area`, and `cInnermostDeclarator` returns that whole
+  qualified node — so a rename replaced the scope too, turning
+  `int Widget::area(...)` into `int area2(...)` and silently detaching the
+  definition from its class. The rename target is now the LEAF only. Pinned by
+  `TestCppQualifiedRenameKeepsScope`.
+- **Java annotations** (`javaAnnotations`) close the other gap: python,
+  typescript, go, kotlin and groovy all emitted `.annotation` children and
+  Java — where `@Override`, JPA and Spring carry the most meaning — did not.
+  A field is the wrinkle: the symbol is the `variable_declarator` but the
+  modifiers hang off the enclosing `field_declaration`, so the search climbs
+  one level. A qualified `@com.example.Audited` answers to its leaf with the
+  written form as the alias.
+- SQL, XML and Markdown stay out by design — no call expression to rewrite.
+- Tests: `TestSignatureRefactorParityAcrossLanguages` (five languages, each
+  doing the full locate → rewrite → find-call-sites loop),
+  `TestCppQualifiedRenameKeepsScope`, `TestZeroValuesPerLanguage`,
+  `TestFileSymbolsJavaAnnotations`. Verified: removing the five registry
+  entries fails them 15 ways.
+
 ## Markdown: sections as nodes, prose out of the index (DONE 2026-07-28)
 
 - [x] Verified markdown/yaml/json against the repo docs and found no bug — the

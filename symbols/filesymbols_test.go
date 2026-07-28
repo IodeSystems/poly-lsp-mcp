@@ -1153,3 +1153,46 @@ func TestFileSymbolsMarkdownUntitledPreambleDeclined(t *testing.T) {
 		t.Errorf("missing the titled section; have %+v", syms)
 	}
 }
+
+func TestFileSymbolsJavaAnnotations(t *testing.T) {
+	// Java is the language where annotations carry the most meaning, and
+	// it was the only one of six with a node model that had none — so
+	// `method:any(annotation#Transactional)` matched nothing.
+	src := []byte(`@Entity
+@Table(name = "users")
+public class User {
+    @Id
+    @Column(name = "user_id")
+    private Long id;
+
+    @Override
+    @com.example.Audited
+    public String getName() { return null; }
+}
+`)
+	syms, err := FileSymbols("java", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"User.Entity", "User.Table",
+		// A FIELD is the wrinkle: the symbol is the variable_declarator
+		// but the modifiers hang off the enclosing field_declaration.
+		"User.id.Id", "User.id.Column",
+		"User.getName.Override", "User.getName.Audited",
+	} {
+		got := symByPath(syms, want)
+		if got == nil {
+			t.Errorf("missing annotation %q; have %+v", want, syms)
+			continue
+		}
+		if got.Class != "annotation" {
+			t.Errorf("%q class = %q, want annotation", want, got.Class)
+		}
+	}
+	// A qualified annotation answers to its leaf, keeping what was
+	// written as the alias.
+	if got := symByPath(syms, "User.getName.Audited"); got != nil && got.Alias != "com.example.Audited" {
+		t.Errorf("qualified annotation alias = %q, want com.example.Audited", got.Alias)
+	}
+}

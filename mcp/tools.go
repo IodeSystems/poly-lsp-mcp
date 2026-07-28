@@ -1558,10 +1558,15 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 }
 
 // signatureSupportedLanguage reports whether RewriteSignature has a
-// per-language implementation. Today: go / typescript / python.
+// per-language implementation.
+//
+// SQL, XML and Markdown are absent on purpose: a signature refactor
+// rewrites a callable AND its call sites, and none of the three has a
+// call expression to rewrite.
 func signatureSupportedLanguage(lang string) bool {
 	switch lang {
-	case "go", "typescript", "python":
+	case "go", "typescript", "python",
+		"java", "kotlin", "groovy", "c", "cpp":
 		return true
 	}
 	return false

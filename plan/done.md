@@ -300,6 +300,41 @@ scaffolding into a shared `iodesystems/daemonkit` — see the decision below.
 a shared module yet.** raglit's version is battle-tested but has exactly one
 user; extracting now is speculative, extracting after a second real copy is
 refactoring against two known cases. Revisit once this daemon runs.
+## XML edit ops — attributes are the parameter list (DONE 2026-07-28)
+
+- [x] Correcting the record first: **XML rename already worked** before this,
+  and the previous entry's "SQL, XML and Markdown are deliberately absent"
+  was misleading because it read as "XML has no refactor". Rename never goes
+  through `signatureSupportedLanguage` — it runs over the INDEX
+  (`refactorRename`), and XMLExtractor indexes the `<string name="x">`
+  declaration and every `@string/x` reference under the same name. Verified
+  end-to-end: one call reported `filesChanged:2` and rewrote both the
+  declaration and the layout reference.
+- What was genuinely missing is the signature-shaped half, now shipped:
+  **an element's ATTRIBUTES are its parameter list**. Same operation —
+  replace the whole list in one structured edit — spelled `k="v"` instead of
+  `T name`. `Param.Name` is the attribute name, `Param.Type` carries its
+  VALUE.
+- XML reaches the refactor surface through its OWN path
+  (`symbols/refactor_xml.go`), not through langOps' grammar walk, because it
+  has no tree-sitter grammar. `FindFunctionSignature` branches on `xml`
+  before the grammar lookup, mirroring how `FileSymbols` already special-cases
+  it.
+- Ranges: `Name` is the name the element DECLARES (`name`/`key` attribute, or
+  an `@+id/…` id) falling back to the tag name — so a rename lands on
+  `go_btn`, never on `Button`. `Params` spans the attribute region only,
+  which is what keeps a self-closing `/>` intact through a rewrite.
+- `return` is REJECTED for XML with a reason rather than silently ignored: a
+  no-op that reports success is worse than an error.
+- Verified live through the MCP surface: `params:[…]` on
+  `res/layout/main.xml#go_btn` added `android:enabled="true"` while preserving
+  the existing attributes and the self-closing tag.
+- Tests: `TestXMLSignatureFindsElementAndDeclaredName`,
+  `TestXMLRewriteAttributes` (asserts the `/>` survives),
+  `TestXMLElementWithoutDeclaredNameFallsBackToTag`,
+  `TestXMLAttributeValueWithQuoteUsesSingleQuotes` (a value containing `"`
+  would otherwise close the attribute early and corrupt the tag).
+
 ## Edit parity: signature refactor for every callable language (DONE 2026-07-28)
 
 - [x] `langOpsByName` gains java, kotlin, groovy, c and cpp

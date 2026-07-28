@@ -107,9 +107,11 @@ Open frontier:
 headed this list is closed. `node_refactor` signature rewriting now covers
 java, kotlin, groovy, c and c++ alongside go/typescript/python
 (`symbols/refactor_langs.go`), and Java gained the `.annotation` children five
-other languages already had. SQL, XML and Markdown are deliberately excluded:
-a signature refactor rewrites a callable AND its callers, and none of the
-three has a call expression to rewrite. Found and fixed while exercising it:
+other languages already had. XML followed: an element's ATTRIBUTES are
+its parameter list, through its own non-grammar path. Only SQL and Markdown
+remain out — a stored function's callers are strings inside other statements,
+and a document section has no call site. (Rename always worked everywhere,
+including XML; it runs over the index, not the grammar.) Found and fixed while exercising it:
 a C++ out-of-line rename spanned the whole `Widget::area`, deleting the class
 scope and silently detaching the definition — now pinned by
 `TestCppQualifiedRenameKeepsScope`.

@@ -87,6 +87,11 @@ type CallSite struct {
 // (line, col). 1-based positions; nil result (with nil error) when
 // no function declaration covers the position.
 func FindFunctionSignature(language string, content []byte, line, col int) (*FunctionSignature, error) {
+	// XML resolves through its own element walk: it has no tree-sitter
+	// grammar, and its "signature" is an open tag's attribute list.
+	if language == "xml" {
+		return xmlSignature(content, line, col)
+	}
 	ops, ok := langOpsFor(language)
 	if !ok {
 		return nil, fmt.Errorf("signature refactor not supported for language %q", language)
@@ -302,6 +307,7 @@ var langOpsByName = map[string]*langOps{
 	"groovy":     groovyLangOps,
 	"c":          cLangOps,
 	"cpp":        cLangOps,
+	"xml":        xmlLangOps,
 }
 
 // ---------- Go ----------

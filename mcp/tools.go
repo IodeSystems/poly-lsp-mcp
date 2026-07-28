@@ -1419,7 +1419,11 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 	lang := s.languageForFile(abs)
 	if !signatureSupportedLanguage(lang) {
-		return nil, true, fmt.Errorf("signature refactor not supported for language %q (try go / typescript / python)", lang)
+		return nil, true, fmt.Errorf("signature refactor not supported for language %q "+
+			"(supported: go, typescript, python, java, kotlin, groovy, c, cpp, xml)", lang)
+	}
+	if lang == "xml" && ops.Return != "" {
+		return nil, true, errors.New("xml has no return type; use params to rewrite an element's attributes")
 	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
@@ -1566,7 +1570,10 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 func signatureSupportedLanguage(lang string) bool {
 	switch lang {
 	case "go", "typescript", "python",
-		"java", "kotlin", "groovy", "c", "cpp":
+		"java", "kotlin", "groovy", "c", "cpp",
+		// XML's parameter list is an element's ATTRIBUTES; it has no
+		// return type, which refactorSignature rejects explicitly.
+		"xml":
 		return true
 	}
 	return false

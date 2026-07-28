@@ -29,7 +29,7 @@ skipped, never fatal.
 | C | `.c` | ✅ | clangd | ✅ |
 | C++ | `.cpp .cc .cxx .c++ .h .hpp .hh .hxx .h++ .ipp .tcc .inl` | ✅ | clangd | ✅ |
 | SQL | `.sql .psql` | ✅ | — | — |
-| XML | `.xml` | ✅ | — | — |
+| XML | `.xml` | ✅ | — | ✅ attributes |
 | Markdown | `.md .markdown` | ✅ sections | — | — |
 | Proto / GraphQL | `.proto .graphql .gql` | — | — | — |
 | YAML / JSON | `.yaml .yml .json` | — | — | — |
@@ -44,9 +44,15 @@ Notes worth knowing before you rely on them:
   `README.md#'MCP mode.Selector language'` addresses a section and `node_read`
   returns it. Only headings, fenced code and inline `` `code` `` spans enter
   the name index — prose does not.
-- **Signature refactor covers every language with call sites.** SQL, XML and
-  Markdown are the exceptions: a signature refactor rewrites a callable *and*
-  its callers, and none of the three has a call expression to rewrite.
+- **Rename works in every language, including the ones with no grammar.** It
+  runs over the index, so renaming an Android resource rewrites both the
+  `<string name="x">` declaration and every `@string/x` reference in one call.
+- **Signature refactor** rewrites a callable's parameters and return type. For
+  **XML** the parameter list is an element's ATTRIBUTES (`params:[{name:
+  "android:enabled", type: "true"}]` rewrites the open tag); XML has no return
+  type and asking for one is an error. SQL and Markdown are the remaining
+  exceptions — a stored function's callers are strings inside other
+  statements, and a document section has no call site at all.
 - **YAML and JSON are lexical on purpose** — a config *value* is a contract, so
   every token is indexed. That is what makes a YAML string match a Go type.
 - A Jenkinsfile is Groovy but has no extension, and the registry keys on
@@ -149,7 +155,7 @@ The prior surface — `structure`, `search`, `node_references`, `node_read`, `no
 | `node_read` | Read whole file, line preview, or byte-precise range. |
 | `node_edit` | Atomic write: whole-file create-or-overwrite, range replace, or unified-diff patch. |
 | `node_delete` | Delete a range OR delete the whole file. |
-| `node_refactor` | Composable cross-language refactor: `refactor:{rename?, params?, return?}`. Signature rewriting supports go / typescript / python / java / kotlin / groovy / c / c++; rename works everywhere. |
+| `node_refactor` | Composable cross-language refactor: `refactor:{rename?, params?, return?}`. Signature rewriting supports go / typescript / python / java / kotlin / groovy / c / c++, plus xml (attributes); rename works everywhere. |
 
 ### Tool capability matrix
 

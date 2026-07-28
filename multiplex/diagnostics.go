@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 )
 
 // Diagnostic mirrors the LSP `Diagnostic` shape but stays in this
@@ -44,6 +45,14 @@ type DiagnosticStore struct {
 	latest map[string][]Diagnostic
 	gen    map[string]uint64
 	chans  map[string][]chan struct{}
+
+	// total counts publishes across ALL URIs, with anyChans waking on
+	// each one. A per-URI gen cannot answer "has the server stopped
+	// talking yet?", which is the question a caller must ask before
+	// sampling for SIBLING fallout: the file you edited and the file
+	// that breaks because of it arrive in separate publishes.
+	total    uint64
+	anyChans []chan struct{}
 }
 
 func NewDiagnosticStore() *DiagnosticStore {
@@ -80,11 +89,68 @@ func (s *DiagnosticStore) put(uri string, diags []Diagnostic) {
 	s.mu.Lock()
 	s.latest[uri] = diags
 	s.gen[uri]++
+	s.total++
 	waiters := s.chans[uri]
 	delete(s.chans, uri)
+	anyWaiters := s.anyChans
+	s.anyChans = nil
 	s.mu.Unlock()
 	for _, ch := range waiters {
 		close(ch)
+	}
+	for _, ch := range anyWaiters {
+		close(ch)
+	}
+}
+
+// TotalGen returns the number of publishes this store has seen across
+// every URI.
+func (s *DiagnosticStore) TotalGen() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.total
+}
+
+// WaitAnyAfter blocks until ANY URI is published past `since`, ctx is
+// done, or the wait exceeds quiet. It reports the total generation
+// observed and whether a new publish actually arrived.
+//
+// This is the settle primitive: call it in a loop and stop when it
+// returns false, i.e. the child LSP has gone quiet for `quiet` and the
+// store is safe to sample for sibling fallout.
+func (s *DiagnosticStore) WaitAnyAfter(ctx context.Context, since uint64, quiet time.Duration) (uint64, bool) {
+	s.mu.Lock()
+	if s.total > since {
+		total := s.total
+		s.mu.Unlock()
+		return total, true
+	}
+	ch := make(chan struct{})
+	s.anyChans = append(s.anyChans, ch)
+	s.mu.Unlock()
+
+	timer := time.NewTimer(quiet)
+	defer timer.Stop()
+	select {
+	case <-ch:
+		return s.TotalGen(), true
+	case <-timer.C:
+		s.removeAnyWaiter(ch)
+		return s.TotalGen(), false
+	case <-ctx.Done():
+		s.removeAnyWaiter(ch)
+		return s.TotalGen(), false
+	}
+}
+
+func (s *DiagnosticStore) removeAnyWaiter(ch chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, c := range s.anyChans {
+		if c == ch {
+			s.anyChans = append(s.anyChans[:i], s.anyChans[i+1:]...)
+			return
+		}
 	}
 }
 

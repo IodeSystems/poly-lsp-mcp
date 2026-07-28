@@ -137,3 +137,60 @@ func TestDiagnosticStoreEmptyListClearsErrors(t *testing.T) {
 		t.Errorf("got = %+v, want empty (non-nil)", got)
 	}
 }
+
+// TestWaitAnyAfterSettlesAcrossURIs pins the primitive the sibling
+// rollup depends on: a publish for a DIFFERENT URI than the one just
+// waited on must still wake the waiter. Without this, the rollup samples
+// the store while the sibling's message is still in flight — which is
+// how TestSiblingDiagnosticsRollup failed roughly 1 run in 3.
+func TestWaitAnyAfterSettlesAcrossURIs(t *testing.T) {
+	s := NewDiagnosticStore()
+
+	// A publish that already happened is reported without blocking.
+	s.put("file:///a.go", []Diagnostic{{Message: "boom"}})
+	if got, more := s.WaitAnyAfter(context.Background(), 0, time.Second); !more || got != 1 {
+		t.Fatalf("WaitAnyAfter(since=0) = (%d, %v), want (1, true)", got, more)
+	}
+
+	// A quiet store reports no activity once the window elapses, and
+	// does NOT block for longer than the window.
+	start := time.Now()
+	if _, more := s.WaitAnyAfter(context.Background(), 1, 60*time.Millisecond); more {
+		t.Error("WaitAnyAfter reported activity on a quiet store")
+	}
+	if waited := time.Since(start); waited > 700*time.Millisecond {
+		t.Errorf("quiet wait took %v, want ~60ms", waited)
+	}
+
+	// The sibling case: the waiter is watching total generations, and a
+	// publish for a URI it never asked about wakes it.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		s.put("file:///sibling.go", []Diagnostic{{Message: "fallout"}})
+	}()
+	got, more := s.WaitAnyAfter(context.Background(), 1, 2*time.Second)
+	if !more || got != 2 {
+		t.Fatalf("WaitAnyAfter woke as (%d, %v), want (2, true) from the sibling publish", got, more)
+	}
+	if diags := s.Get("file:///sibling.go"); len(diags) != 1 {
+		t.Errorf("sibling diagnostics = %+v, want 1", diags)
+	}
+}
+
+// TestWaitAnyAfterHonoursContext ensures a cancelled caller doesn't hang
+// for the whole quiet window.
+func TestWaitAnyAfterHonoursContext(t *testing.T) {
+	s := NewDiagnosticStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	if _, more := s.WaitAnyAfter(ctx, 0, 10*time.Second); more {
+		t.Error("reported activity after cancellation")
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Errorf("cancelled wait took %v, want ~20ms", waited)
+	}
+}

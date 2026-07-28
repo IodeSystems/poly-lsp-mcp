@@ -97,6 +97,11 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **Sibling-diagnostic race fixed — 2026-07-27** → done.md. The rollup
+sampled the store the instant the EDITED file was republished, while gopls
+emits the breaking sibling in a SEPARATE publish; it now debounces on a quiet
+window. Was ~1 failure in 3 full-package runs, pre-existing.
+
 ✅ **Python verified — 2026-07-27** → done.md. Grammar as robust as Java's (0
 errors over 392 files), but the arm indexed NO bindings: 891 declarations
 were invisible on the live corpus, 541 of them annotated dataclass/pydantic

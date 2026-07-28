@@ -145,6 +145,13 @@ type Server struct {
 	// meaningful under editMu; the zero value is localSession.
 	activeSession sessionID
 
+	// diagnosticSettle is how long the sibling rollup waits for the
+	// publish stream to go quiet before sampling; see
+	// waitForDiagnosticsToSettle. diagnosticSettleSet distinguishes
+	// "explicitly zero" (disable) from "unset" (use the default).
+	diagnosticSettle    time.Duration
+	diagnosticSettleSet bool
+
 	// diagnosticWait is the per-edit deadline for publishDiagnostics.
 	// 0 means use the default (1500ms). Tests set a smaller value to
 	// stay fast.
@@ -213,6 +220,15 @@ type Server struct {
 }
 
 const defaultDiagnosticWait = 1500 * time.Millisecond
+
+// defaultDiagnosticSettle is the quiet window the SIBLING rollup waits
+// out before sampling the store. It is the price of not racing gopls:
+// the edited file and the file that breaks because of it arrive in
+// separate publishes, and LSP offers no "analysis finished" signal to
+// wait on instead. 150ms is comfortably longer than the gap inside one
+// gopls burst and small beside the round-trip already paid, and it is
+// only spent when sibling rollup is on.
+const defaultDiagnosticSettle = 150 * time.Millisecond
 
 // New constructs an MCP server bound to a workspace. The root is the
 // directory whose files the symbol index will cover; bindings and
@@ -410,6 +426,21 @@ func (s *Server) diagWaitDuration() time.Duration {
 		return s.diagnosticWait
 	}
 	return defaultDiagnosticWait
+}
+
+// SetDiagnosticSettle overrides how long the sibling rollup waits for
+// the publish stream to go QUIET before sampling. Zero disables the
+// wait (and restores the old race).
+func (s *Server) SetDiagnosticSettle(d time.Duration) {
+	s.diagnosticSettle = d
+	s.diagnosticSettleSet = true
+}
+
+func (s *Server) diagSettleDuration() time.Duration {
+	if s.diagnosticSettleSet {
+		return s.diagnosticSettle
+	}
+	return defaultDiagnosticSettle
 }
 
 // SetCachePath configures persistence: on Serve start the cache loads

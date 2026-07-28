@@ -337,9 +337,35 @@ func (s *Server) stopManagerIfPresent() {
 //   - available=false when manager is nil OR none of the URIs has a
 //     child LSP. Empty Items.
 //   - available=true with the per-URI diagnostic snapshot otherwise.
-//     TimedOut indicates at least one edited URI hit the deadline
-//     without a fresh publish (the snapshot may still be a prior
-//     state).
+//     TimedOut indicates the deadline was hit before the picture was
+//     complete — either an edited URI never got a fresh publish, or the
+//     sibling rollup ran out of time waiting for the publish stream to
+//     go quiet. Either way the snapshot may be a partial or prior
+//     state, and the flag says so rather than passing it off as final.
+//
+// waitForDiagnosticsToSettle blocks until the child LSPs stop
+// publishing for one `quiet` interval, or ctx expires. Returns false
+// when it gave up on the deadline rather than on quiet.
+//
+// A debounce is the honest primitive here: LSP has no "analysis
+// finished" signal a client can wait on, so the only portable evidence
+// that the fallout is complete is the server going silent.
+func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.DiagnosticStore, quiet time.Duration) bool {
+	if quiet <= 0 {
+		return true
+	}
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		since := store.TotalGen()
+		if _, gotMore := store.WaitAnyAfter(ctx, since, quiet); !gotMore {
+			// Nothing new for a full quiet window: the burst is over.
+			return ctx.Err() == nil
+		}
+	}
+}
+
 func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, opts diagnosticOptions) editDiagnostics {
 	if s.manager == nil || len(uris) == 0 {
 		return editDiagnostics{Available: false, Items: []diagnosticJSON{}}
@@ -424,6 +450,21 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 	// the edited set. New URIs (never seen before) count as advanced
 	// from 0 → ≥1.
 	if opts.siblingDiagnostics() {
+		// SETTLE FIRST. Phase 1 returns the instant the EDITED file is
+		// published, but the sibling that breaks because of that edit
+		// arrives in a SEPARATE publish — gopls re-analyses the package
+		// and emits one message per file. Sampling here without waiting
+		// is a race that silently reports "no fallout" whenever the
+		// sibling's message is a few milliseconds behind, which is
+		// exactly the failure this feature exists to prevent.
+		//
+		// Measured before this: TestSiblingDiagnosticsRollup failed
+		// roughly 1 run in 3, always by returning [] in ~1.2s while its
+		// 12s budget went unused — the wait was never the problem, the
+		// missing wait was.
+		if !waitForDiagnosticsToSettle(ctx, store, s.diagSettleDuration()) {
+			out.TimedOut = true
+		}
 		snapshot := store.Snapshot()
 		siblingURIs := make([]string, 0, len(snapshot))
 		for uri := range snapshot {

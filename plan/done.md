@@ -3,6 +3,41 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Sibling-diagnostic race fixed — the rollup now settles (DONE 2026-07-27)
+
+- [x] `TestSiblingDiagnosticsRollup` failed ~1 full-package run in 3, never in
+  isolation. Confirmed PRE-EXISTING by running the baseline commit `5dafcff`
+  in a throwaway worktree: 2 failures in 6 runs with no session changes
+  applied (`TestNodeEditSurfacesGoplsDiagnostics` fell over there once too).
+- **It was a real product race, not a slow test.** `collectDiagnostics` phase 1
+  waits for the EDITED URI to be republished, then phase 2 sampled the store
+  INSTANTANEOUSLY for sibling fallout. But gopls re-analyses the package and
+  emits one publish PER FILE: the file you edited and the file that breaks
+  because of it arrive in separate messages. Whenever the sibling's message
+  was a few ms behind, the rollup reported "no fallout". The tell was in the
+  timing all along — the failing subtest returned `[]` in 1.2s while its 12s
+  budget went unused. The wait was never the problem; the MISSING wait was.
+- Fix: `DiagnosticStore` gains a TOTAL generation counter plus
+  `WaitAnyAfter(ctx, since, quiet)` — a per-URI gen cannot answer "has the
+  server stopped talking yet?". `collectDiagnostics` now debounces before
+  sampling: keep waiting while publishes keep arriving, stop after one quiet
+  window (`defaultDiagnosticSettle`, 150ms, overridable via
+  `SetDiagnosticSettle`; zero restores the old behaviour). LSP has no
+  "analysis finished" signal, so silence is the only portable evidence that
+  the fallout is complete.
+- Cost: up to 150ms per edit, and ONLY when sibling rollup is on (the
+  default). It is bounded by the existing diagnostic deadline, and small
+  beside the gopls round-trip already paid. `TimedOut` now also covers
+  "ran out of time waiting for quiet", and its doc says so rather than
+  passing a partial picture off as final.
+- Evidence: 8 of 8 clean full-package runs after, against 2 failures in 6
+  before. Not proof — at the old ~1-in-3 rate, 8 clean runs is ~4% likely by
+  chance — but it lines up with a mechanistic explanation and with two
+  DETERMINISTIC unit tests that need no gopls:
+  `TestWaitAnyAfterSettlesAcrossURIs` (a publish for a URI the waiter never
+  asked about must wake it; a quiet store must not block past the window) and
+  `TestWaitAnyAfterHonoursContext`.
+
 ## Python verified; module bindings + class attributes now indexed (DONE 2026-07-27)
 
 - [x] redline's `dev/cli` is KOTLIN, not Python — the whole repo has 2 `.py`

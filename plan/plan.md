@@ -97,6 +97,12 @@ position axis. Common dev queries are NOT pathological at the default budget.
 
 Open frontier:
 
+✅ **Go dogfooded on this repo — 2026-07-27** → done.md. 148 files / 6,848
+symbols / 0 errors. Fixed one real defect: composite return types
+(`map[string][]symbols.InvSite`) were dot-split into a FALSE leaf
+(`return#InvSite`). Pointer/slice decoration deliberately left alone — the
+narrow fix over the consistent one, by the user's call.
+
 ✅ **Sibling-diagnostic race fixed — 2026-07-27** → done.md. The rollup
 sampled the store the instant the EDITED file was republished, while gopls
 emits the breaking sibling in a SEPARATE publish; it now debounces on a quiet

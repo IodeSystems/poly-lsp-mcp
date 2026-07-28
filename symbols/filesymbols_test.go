@@ -921,3 +921,55 @@ class Settings(BaseSettings):
 		}
 	}
 }
+
+func TestGoTypeSegmentKeepsDecorationButNotFalseLeaves(t *testing.T) {
+	// Decoration is KEPT — `*Config` and `[]Schema` are how Go code names
+	// the result, and existing sym paths depend on it.
+	//
+	// What is fixed is the blind dot-split reaching INSIDE a composite and
+	// reporting its last identifier as the leaf: sitesByFile returns
+	// map[string][]symbols.InvSite and used to answer to `return#InvSite`,
+	// a type it does not return.
+	cases := []struct{ in, seg, alias string }{
+		{"error", "error", ""},
+		{"*Config", "*Config", ""},
+		{"[]Schema", "[]Schema", ""},
+		{"io.Writer", "Writer", "io.Writer"},
+		{"*sitter.Node", "Node", "*sitter.Node"},
+		// Composites claim nothing.
+		{"map[string][]symbols.InvSite", "map[string][]symbols.InvSite", ""},
+		{"map[string]int", "map[string]int", ""},
+		{"[]map[string]symbols.Hit", "[]map[string]symbols.Hit", ""},
+		{"chan Result", "chan Result", ""},
+		{"func() error", "func() error", ""},
+		{"*[2]int", "*[2]int", ""},
+		{"interface{}", "interface{}", ""},
+	}
+	for _, c := range cases {
+		seg, alias := goTypeSegment(c.in)
+		if seg != c.seg || alias != c.alias {
+			t.Errorf("goTypeSegment(%q) = (%q, %q), want (%q, %q)", c.in, seg, alias, c.seg, c.alias)
+		}
+	}
+}
+
+func TestFileSymbolsGoMapReturnClaimsNoLeaf(t *testing.T) {
+	src := []byte(`package x
+
+import "io"
+
+func Sites() map[string][]io.Writer { return nil }
+`)
+	syms, err := FileSymbols("go", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The old dot-split produced Sites.Writer — asserting the function
+	// returns a Writer, which it does not.
+	if got := symByPath(syms, "Sites.Writer"); got != nil {
+		t.Errorf("map return claimed the leaf %q of its VALUE type: %+v", "Writer", got)
+	}
+	if got := symByPath(syms, "Sites.map[string][]io.Writer"); got == nil {
+		t.Errorf("map return missing; have %+v", syms)
+	}
+}

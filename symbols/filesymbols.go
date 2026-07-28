@@ -348,6 +348,8 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 		alias := ""
 		if lang == "c" || lang == "cpp" {
 			seg, alias = cTypeSegment(full)
+		} else if lang == "go" {
+			seg, alias = goTypeSegment(full)
 		} else if lang == "kotlin" || lang == "java" || lang == "typescript" {
 			seg, alias = typeSegment(full)
 		} else if i := strings.LastIndex(full, "."); i >= 0 {
@@ -1516,6 +1518,62 @@ func findDescendantOfType(n *sitter.Node, t string, depth int) *sitter.Node {
 		}
 	}
 	return nil
+}
+
+// goTypeSegment renders a Go type as a path segment plus the full
+// spelling as an alias.
+//
+// Decoration is KEPT: `*Config` and `[]Schema` stay whole, because the
+// pointer and slice markers are part of how Go code names the result and
+// existing sym paths depend on it. Only the qualifier is split off, as
+// before — `*sitter.Node` → Node aliased `*sitter.Node`.
+//
+// What this fixes is narrower and outright wrong: the blind dot-split
+// used to reach INSIDE a composite type and report its last identifier
+// as the leaf. `func sitesByFile() map[string][]symbols.InvSite` answered
+// to `return#InvSite` — a type it does not return. A map, channel, func
+// type, fixed-size array or inline interface/struct has no single leaf,
+// so it is left whole and claims nothing.
+func goTypeSegment(full string) (seg, alias string) {
+	if isGoCompositeType(full) {
+		return full, ""
+	}
+	if i := strings.LastIndex(full, "."); i >= 0 && i+1 < len(full) {
+		return full[i+1:], full
+	}
+	return full, ""
+}
+
+// isGoCompositeType reports whether a type is a composite whose last
+// dotted identifier is NOT its name. Pointer and slice decoration is
+// peeled only to see what is underneath — the caller keeps the full
+// spelling either way.
+func isGoCompositeType(full string) bool {
+	t := full
+	for {
+		switch {
+		case strings.HasPrefix(t, "*"):
+			t = t[1:]
+			continue
+		case strings.HasPrefix(t, "[]"):
+			t = t[2:]
+			continue
+		}
+		break
+	}
+	switch {
+	case strings.HasPrefix(t, "map["),
+		strings.HasPrefix(t, "chan "),
+		strings.HasPrefix(t, "<-chan"),
+		strings.HasPrefix(t, "chan<-"),
+		strings.HasPrefix(t, "func("),
+		strings.HasPrefix(t, "func "),
+		strings.HasPrefix(t, "interface{"),
+		strings.HasPrefix(t, "struct{"),
+		strings.HasPrefix(t, "["): // fixed-size array
+		return true
+	}
+	return false
 }
 
 // typeSegment renders a Java, Kotlin or TypeScript type as a path

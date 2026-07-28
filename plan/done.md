@@ -3,6 +3,43 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Go verified on this repo; composite return types stop claiming a leaf (DONE 2026-07-27)
+
+- [x] Dogfooded the Go arm on poly-lsp-mcp itself: **148 files, 6,848 symbols,
+  0 empty, 0 files with ERROR nodes.** Like Java and Python, the Go grammar
+  needs no ERROR remedy. Distribution: 2,009 argument / 1,096 func / 989
+  return / 843 import / 763 field / 398 method / 258 annotation (struct-tag
+  keys) / 164 struct / 148 module / 127 const.
+- **Defect: the blind dot-split reached INSIDE composite types.**
+  `func (e *engine) sitesByFile() map[string][]symbols.InvSite` answered to
+  `return#InvSite` — a type it does not return. Any map, channel, func type,
+  fixed-size array or inline interface/struct whose spelling happened to end
+  in a qualified identifier got its last segment reported as the result.
+  Those types have no single leaf, so they are now left whole and claim
+  nothing (`goTypeSegment` / `isGoCompositeType`).
+- **Deliberately NOT changed (user's call, 2026-07-27):** pointer and slice
+  DECORATION stays. `*Config` and `[]Schema` remain whole rather than being
+  stripped to their element type. That would have made `return#Config` find
+  Go's dominant constructor shape and matched what java/kotlin/typescript/c
+  now do — 269 of 989 return nodes (27%) — but it moves existing Go sym paths
+  repo-wide, and `return_node_test.go` already pins `Pointer.*Server`. The
+  narrow fix was chosen over the consistent one; the asymmetry is intentional
+  and documented on `goTypeSegment`.
+- Non-findings worth recording so they are not re-investigated:
+  - `interface: 2` looked low against 3 grep hits for `type X interface`. It
+    is correct — the third, `Animal`, lives inside a Go STRING LITERAL in a
+    test fixture, not in real code.
+  - `int[1]` / `int[2]` return segments are the renderSegment disambiguator
+    for `(int, int)` tuples, not stray syntax.
+- Tests: `TestGoTypeSegmentKeepsDecorationButNotFalseLeaves`,
+  `TestFileSymbolsGoMapReturnClaimsNoLeaf` — verified to fail with the fix
+  disabled. `TestFileSymbolsGoReturns` is untouched and still passes, which
+  is the point of the narrow scope.
+- **Process note:** two of my measurement passes were wrong before they were
+  right. A `dumpSyms` cap of 30 hid `Extractor` and looked like a missing
+  interface; a `sed`-mangled before/after diff invented a phantom delta. Both
+  were tool bugs, caught before reporting.
+
 ## Sibling-diagnostic race fixed — the rollup now settles (DONE 2026-07-27)
 
 - [x] `TestSiblingDiagnosticsRollup` failed ~1 full-package run in 3, never in

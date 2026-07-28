@@ -264,11 +264,23 @@ accept the llm-bench peer result and let the roadmap ride on it.
     `TestSitesByFile{EquivalenceAndMemo,EvictsVanishedFiles}`; determinism
     budgets in `TestTrippedBudgetIsReproducible` retuned (trip moved into the
     walk).
-  - ◻ **Nothing short-circuits.** `evaluate()` computes the FULL set, then the
-    caller slices, so `--limit 5` / `:first` pay for everything. Traversal is
-    document-ordered so a top-level early exit at offset+limit is sound.
-    **blocking decision**: costs `totalMatches` (can't report "of 24,590"
-    without finishing) — node_query's result shape changes.
+  - ✅ **Short-circuiting SHIPPED (2026-07-28).** `evaluateCapped` stops the
+    base walk at `offset+limit`. The blocking decision was resolved by the
+    USER: use the `>x` floor convention, so a capped run reports
+    `totalMatchesAtLeast: ">5"` under a DIFFERENT key than the exact
+    `totalMatches` — a reader cannot mistake one for the other.
+    **Only fires for a single plain top-level compound** (`cappableList`):
+    chains, unions, edges, pseudo-elements and moves compose through SETS,
+    where "first N found" is not "first N in order", so an early exit could
+    drop a node that belongs on the page. Those still evaluate fully and
+    report an exact total.
+    **Measured, and it corrected the assumption**: the win is per-FILE, not
+    per-node — a match means loading that file's symbols, so the cap pays by
+    never reaching the later files. On ONE fat file the saving is marginal.
+    On 120 small files with a 200-op budget, `limit:5` finishes cleanly while
+    the uncapped query exhausts the budget and returns an INCOMPLETE result.
+    Tests: `TestModernQueryShortCircuitsTheWalk`,
+    `TestModernQueryDoesNotShortCircuitComposedSelectors`.
 
 
 ◐ **Edges: from coincidence toward reference.** Two of three steps done

@@ -81,6 +81,7 @@ func startModern(t *testing.T) (*mcpSession, string) {
 
 type queryResult struct {
 	TotalMatches int            `json:"totalMatches"`
+	TotalAtLeast string         `json:"totalMatchesAtLeast"`
 	Returned     int            `json:"returned"`
 	Truncated    bool           `json:"truncated"`
 	Note         string         `json:"note"`
@@ -636,16 +637,33 @@ func TestModernQueryPaginationDefaultsAndNote(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	// Default limit is 20 — small on purpose.
+	// Default limit is 20 — small on purpose. A plain `func` is the
+	// cappable shape, so the walk STOPS at 20 rather than finding all 25:
+	// that is the point of short-circuiting, and it costs the exact
+	// total. The count becomes a FLOOR, reported under a different key
+	// and spelled ">N" so it cannot be misread as exact.
 	q := query(t, s, map[string]any{"selector": "func"})
-	if q.TotalMatches != 25 || q.Returned != 20 || len(q.Matches) != 20 {
-		t.Fatalf("want 25 total / 20 returned, got %d / %d", q.TotalMatches, q.Returned)
+	if q.Returned != 20 || len(q.Matches) != 20 {
+		t.Fatalf("want 20 returned, got %d", q.Returned)
+	}
+	if q.TotalMatches != 0 {
+		t.Errorf("a short-circuited walk must NOT report an exact total, got %d", q.TotalMatches)
+	}
+	if q.TotalAtLeast != ">20" {
+		t.Errorf("totalMatchesAtLeast = %q, want \">20\"", q.TotalAtLeast)
 	}
 	if !q.Truncated {
 		t.Error("truncated should be set when more matches exist")
 	}
-	if !strings.Contains(q.Note, "20 of 25") {
-		t.Errorf("note = %q, want it to say 20 of 25", q.Note)
+	if !strings.Contains(q.Note, "STOPPED at the limit") {
+		t.Errorf("note = %q, want it to say the walk stopped early", q.Note)
+	}
+
+	// A limit that can hold everything still reports an EXACT total —
+	// the walk ran to completion, so there is nothing to hedge.
+	qAll := query(t, s, map[string]any{"selector": "func", "limit": 100})
+	if qAll.TotalMatches != 25 || qAll.TotalAtLeast != "" {
+		t.Errorf("uncapped run: total=%d atLeast=%q, want exact 25", qAll.TotalMatches, qAll.TotalAtLeast)
 	}
 
 	// offset pages, and the last page isn't truncated.
@@ -1304,5 +1322,84 @@ func TestEnclosingSymPathIgnoresArguments(t *testing.T) {
 	got := s.srv.enclosingSymPath(abs, 9, cache)
 	if got != "Server.Start" {
 		t.Errorf("enclosing symbol of the signature line = %q, want Server.Start (not an argument)", got)
+	}
+}
+
+// Short-circuiting: `--limit 5` must not pay for the whole workspace.
+//
+// The win is per-FILE, not per-node: finding a match in a file means
+// loading that file's symbols, so the cap pays off by never reaching the
+// later files at all. Measured while writing this — on a single fat file
+// the saving is marginal, because the one load dominates either way.
+func TestModernQueryShortCircuitsTheWalk(t *testing.T) {
+	dir := t.TempDir()
+	// Many files, few symbols each: the shape where stopping early means
+	// never loading the rest.
+	for f := 0; f < 120; f++ {
+		body := fmt.Sprintf("package p%03d\n\nfunc F%03d() {}\n", f, f)
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d.go", f)),
+			[]byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	// Ample for a handful of files, far too small for 120.
+	const tight = "200ops"
+	q := query(t, s, map[string]any{"selector": "func", "limit": 5, "budget": tight})
+	if q.Returned != 5 {
+		t.Errorf("capped query returned %d, want 5 — the walk should stop, not blow the budget", q.Returned)
+	}
+	if strings.Contains(q.Note, "work budget") {
+		t.Errorf("the capped walk should finish inside the budget; note = %q", q.Note)
+	}
+	if q.TotalAtLeast != ">5" {
+		t.Errorf("totalMatchesAtLeast = %q, want \">5\"", q.TotalAtLeast)
+	}
+
+	// The same query without a small limit has to reach every file, and
+	// on this budget that means an incomplete result.
+	full := query(t, s, map[string]any{"selector": "func", "limit": 100000, "budget": tight})
+	if !strings.Contains(full.Note, "work budget") {
+		t.Errorf("uncapped query should exhaust the tight budget; note = %q", full.Note)
+	}
+}
+
+// The cap is only sound where evaluation is one document-ordered walk.
+// Anything composed through sets — a union, a chain, a pseudo-class that
+// consults other nodes — must fall back to a full evaluation and an
+// EXACT total, or a page could silently omit a node that sorts ahead of
+// one shown.
+func TestModernQueryDoesNotShortCircuitComposedSelectors(t *testing.T) {
+	dir := t.TempDir()
+	var b strings.Builder
+	b.WriteString("package main\n")
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&b, "\nfunc F%02d(a int) {}\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "many.go"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	for _, sel := range []string{
+		"func:has(argument)", // pseudo-class consults other nodes
+		"func, argument",     // union merges two sets
+		"func argument",      // descendant chain
+	} {
+		q := query(t, s, map[string]any{"selector": sel, "limit": 5})
+		if q.TotalAtLeast != "" {
+			t.Errorf("%s: reported a floor %q; composed selectors must evaluate fully",
+				sel, q.TotalAtLeast)
+		}
+		if q.TotalMatches == 0 {
+			t.Errorf("%s: expected an exact total, got 0", sel)
+		}
 	}
 }

@@ -244,6 +244,18 @@ type engine struct {
 	// ordSeq feeds treeNode.fileOrd during the workspace walk.
 	ordSeq int
 
+	// cap short-circuits the base walk once this many matches exist:
+	// `--limit 5` should not pay for 24,590. Zero = uncapped.
+	//
+	// It is only ever SET for a selector whose evaluation is a single
+	// document-ordered walk (see cappableList) — the composition and
+	// union paths are set-based, so stopping them early could drop a
+	// node that sorts ahead of one already collected.
+	cap int
+	// capHit records that the walk actually stopped early, which makes
+	// every count downstream a FLOOR rather than a total.
+	capHit bool
+
 	// fileByRel indexes file nodes by workspace-relative path — how a
 	// reference site (which is file+line) becomes a tree node again.
 	fileByRel map[string]*treeNode
@@ -2353,6 +2365,51 @@ func (e *engine) evaluate(list selectorList) []*treeNode {
 	return ordered(e.evalList(list, e.project, false))
 }
 
+// evaluateCapped is evaluate with an early exit once `need` matches
+// exist. The second return reports whether the walk stopped early, which
+// makes the count a FLOOR: the caller must not present it as a total.
+//
+// The cap is applied ONLY to a selector shape whose evaluation is one
+// document-ordered walk. Everything else — chains, unions, edges,
+// pseudo-elements, moves — composes through sets, where "the first N
+// found" is not "the first N in order", so stopping early could silently
+// drop a node that belongs on the page.
+func (e *engine) evaluateCapped(list selectorList, need int) ([]*treeNode, bool) {
+	if need <= 0 || !cappableList(list) {
+		return e.evaluate(list), false
+	}
+	e.cap = need
+	defer func() { e.cap = 0 }()
+	rows := ordered(e.evalList(list, e.project, false))
+	return rows, e.capHit
+}
+
+// cappableList reports whether a selector evaluates as a single
+// top-level walk, which is the only shape an early exit is sound for.
+func cappableList(list selectorList) bool {
+	if len(list) != 1 {
+		return false // a union merges two sets; order is not per-branch
+	}
+	cx := list[0]
+	if cx.rel != relTop || len(cx.elems) != 1 {
+		return false
+	}
+	el := cx.elems[0]
+	if el.group != nil || el.comp == nil {
+		return false
+	}
+	if el.min != 1 || el.max != 1 {
+		return false // {m,n} repetition re-walks
+	}
+	c := el.comp
+	if c.isRef || c.isFrag || c.root || c.hasMove() {
+		return false // generated nodes and moves are not the base walk
+	}
+	// A pseudo-class that consults OTHER nodes (:has, :parents, …) can
+	// match out of document order relative to the walk.
+	return len(c.pseudos) == 0
+}
+
 // classCounts returns symbols-per-class over the whole workspace, the
 // a-priori bare-class figure for the query-cost estimator (:explain's est
 // column, the descendant-chain planner). The class lives in the symbol
@@ -3419,6 +3476,12 @@ func (e *engine) collectMatches(anchor *treeNode, min, max int, comp *selCompoun
 	var walk func(n *treeNode, d int)
 	walk = func(n *treeNode, d int) {
 		if !e.spend(1) {
+			return
+		}
+		// Short-circuit: the walk is pre-order, so the first `cap`
+		// matches ARE the first `cap` in document order.
+		if e.cap > 0 && len(out) >= e.cap {
+			e.capHit = true
 			return
 		}
 		if d >= min && (relaxed || e.positionalMatch(n, comp)) {

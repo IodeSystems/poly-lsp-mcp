@@ -61,6 +61,13 @@ Notes worth knowing before you rely on them:
 Languages, extensions and child-LSP commands are all overridable in
 `poly-lsp-mcp.yaml`.
 
+**Queries stop at the limit.** A `limit` (default 20) short-circuits the walk
+instead of computing every match and slicing, so a broad selector is cheap.
+The cost is the exact count: a short-circuited run reports
+`totalMatchesAtLeast: ">20"` rather than `totalMatches`, because the walk
+never learned the total. Composed selectors — unions, chains, edges,
+`:has()` — still evaluate fully and report an exact `totalMatches`.
+
 **The index honours `.gitignore`.** A repo's throwaway data — tool state, lock
 files, captured payloads — otherwise outweighs its source: measured on one
 real repo, ignored files were 78% of every indexed site. Ignored is filtered;

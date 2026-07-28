@@ -171,7 +171,16 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		e.setBudget(v, unit) // Nms wall-clock (bare=ms) or Nops deterministic
 	}
 
-	rows := e.evaluate(list)
+	// `--limit 5` should not pay for 24,590 matches. The cap is honoured
+	// only for a selector whose evaluation is one document-ordered walk;
+	// everything else evaluates in full (see evaluateCapped). `explain`
+	// deliberately opts OUT — a cost trace of a short-circuited run would
+	// under-report the very work it exists to show.
+	need := 0
+	if !explain {
+		need = offset + limit
+	}
+	rows, capped := e.evaluateCapped(list, need)
 
 	// :explain returns a cost TRACE, not matches — a deliberate
 	// result-shape fork. The query still RAN (that is the measured
@@ -266,9 +275,17 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 	}
 
 	payload := map[string]any{
-		"totalMatches": total,
-		"returned":     len(paged),
-		"matches":      matches,
+		"returned": len(paged),
+		"matches":  matches,
+	}
+	if capped {
+		// The walk stopped at the limit, so the count is a FLOOR, not a
+		// total. Rendered as the same ">N" the cost trace uses for a
+		// budget blow, and under a DIFFERENT key so a reader cannot
+		// mistake it for an exact figure.
+		payload["totalMatchesAtLeast"] = ">" + commaInt(total)
+	} else {
+		payload["totalMatches"] = total
 	}
 	// ::grep recon: a per-file count over ALL matches (not just the page),
 	// so a truncated result still shows WHERE the term concentrates —
@@ -277,10 +294,15 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		payload["rollup"] = rollup
 	}
 	// Never cut off silently: say there's more, and how to reach it.
-	if end < total {
+	if end < total || capped {
 		payload["truncated"] = true
 	}
-	if end < total || offset > 0 {
+	switch {
+	case capped:
+		payload["note"] = fmt.Sprintf(
+			"%d shown; the walk STOPPED at the limit, so the total is only known to be >%s — "+
+				"raise limit or use offset to see more.", len(paged), commaInt(total))
+	case end < total || offset > 0:
 		payload["note"] = fmt.Sprintf("%d of %d shown; raise limit or use offset", len(paged), total)
 	}
 	// Say what the edges are made of. An ambiguous lexical edge lists

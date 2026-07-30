@@ -1110,6 +1110,26 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 				comb = selChild
 			} else if !sawWS {
 				return cx, p.errf("a combinator, ',' or end of selector")
+			} else if p.peekIsBareAttr() && len(cx.elems) > 0 {
+				// ` path=x` after something — FILTER what we just landed on,
+				// not descend into it.
+				//
+				// The space is doing different work here than before a tag, and
+				// deliberately so. Space-as-descendant answers "what is inside
+				// this?", which for a TYPE is the whole point (`path=a.go func`)
+				// but for an attribute is almost never the question: nobody
+				// means "things at path x nested inside the callers", they mean
+				// "the callers at path x". Written the CSS way that is
+				// `> *[path=x]` — three punctuation marks to say the obvious.
+				//
+				// A tag after a space still descends, so `path=a.go func` and
+				// `func::in.call path=a.go` both read the way they look. The
+				// explicit forms stay available and unchanged: `> path=x` is
+				// still the child axis, `[path=x]` still attaches.
+				if err := p.attachBareAttrs(cx.elems[len(cx.elems)-1].comp); err != nil {
+					return cx, err
+				}
+				continue
 			}
 		}
 
@@ -1666,6 +1686,26 @@ func (p *modSelParser) readID() (string, error) {
 		return "", pathIsAnIDErr(path)
 	}
 	return id, nil
+}
+
+// attachBareAttrs folds one or more space-separated bare attributes onto an
+// already-parsed compound, so `X path=a name^=B` filters X by both.
+func (p *modSelParser) attachBareAttrs(comp *selCompound) error {
+	if comp == nil {
+		return fmt.Errorf("a bare attribute has nothing to filter here — write it as its own step (*[…]) or attach it with brackets")
+	}
+	for {
+		a, err := p.parseBareAttr()
+		if err != nil {
+			return err
+		}
+		comp.attrs = append(comp.attrs, a)
+		save := p.i
+		if !p.skipWS() || !p.peekIsBareAttr() {
+			p.i = save
+			return nil
+		}
+	}
 }
 
 // peekIsBareAttr reports whether the cursor is on an unbracketed attribute —
@@ -2436,6 +2476,7 @@ TASK → QUERY
   what is here?               :root > *            then descend:  #web > *
   find something by name      #Save                anywhere;  #'store.go#Save' pins one
   what is in a file           path=store.go func   (bare attr: no quotes, even with / in it)
+  who calls X, only in a file #'X'::in.call > * path=main.go   (a bare attr after a space FILTERS)
                               #'store.go' func     (the id form; pins the file node itself)
   who calls X                 #'store.go#Save'::in.call          rows carry from: + a file@line site
   what does X call            #'store.go#Save'::out.call > *
@@ -2466,9 +2507,11 @@ SPEC
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
   ATTR   Brackets optional when the value has no space: path=a/b.go ≡ [path=a/b.go],
-         name^=Test ≡ [name^=Test]. Unbracketed is a COMPOUND of its own, so a space
-         before it is still the descendant combinator: "path=a/b.go func" = funcs in
-         that file; to FILTER what you just landed on, attach it: "> *[path=a/b.go]".
+         name^=Test ≡ [name^=Test]. A bare attribute after a space FILTERS what
+         precedes it (X path=a.go ≡ X[path=a.go]) — chain them to AND. Leading, or
+         after a combinator, it is *[…]: "path=a.go func" = funcs in that file,
+         "::in.call > * path=a.go" = the callers that live there. A TAG after a space
+         still descends; only attributes attach.
          [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES
          (workspace-relative file path; a symbol answers with its FILE's).
          OPS  = ^= $= *= are LITERAL (exact/prefix/suffix/contains).  ~= is a regex.

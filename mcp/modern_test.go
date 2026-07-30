@@ -1534,14 +1534,30 @@ func TestBareAttribute(t *testing.T) {
 			t.Errorf("%s: %s", sel, r.Content[0].Text)
 		}
 	}
-	// It is a COMPOUND, so a space before it is still the descendant
-	// combinator — the property that keeps this purely additive rather than a
-	// second meaning for whitespace.
-	desc := query(t, s, map[string]any{"selector": "file path=main.go", "limit": 50})
-	for _, n := range nodes(desc) {
-		if n == "main.go" {
-			t.Error("a space must stay descendant: the file itself is not its own descendant")
-		}
+	// A space before a bare attribute FILTERS what precedes it — nobody asking
+	// "the callers in main.go" means "things at main.go nested inside the
+	// callers", which is what the CSS descendant reading would give.
+	filt := query(t, s, map[string]any{"selector": "file path=main.go", "limit": 50})
+	if got := nodes(filt); len(got) != 1 || got[0] != "main.go" {
+		t.Errorf("`file path=main.go` should filter files to that path, got %v", got)
+	}
+	// Equivalent to attaching it, which is the point of the sugar.
+	if a, b := nodes(filt), nodes(query(t, s, map[string]any{"selector": "file[path=main.go]", "limit": 50})); len(a) != len(b) {
+		t.Errorf("bare and bracketed filters disagree: %v vs %v", a, b)
+	}
+	// Several in a row chain onto the same compound (AND).
+	if r := s.callTool("node_query", map[string]any{"selector": "func path=main.go name^=S", "limit": 5}); r.IsError {
+		t.Errorf("chained bare attrs should attach: %s", r.Content[0].Text)
+	}
+	// A TAG after a space still descends — only attributes attach, so
+	// "path=main.go func" keeps meaning "funcs in that file".
+	if q := query(t, s, map[string]any{"selector": "path=main.go func", "limit": 50}); q.TotalMatches == 0 {
+		t.Error("a tag after a bare attribute must still descend")
+	}
+	// The explicit axes stay available and unchanged.
+	if a, b := nodes(query(t, s, map[string]any{"selector": "file > * path=main.go", "limit": 50})),
+		nodes(query(t, s, map[string]any{"selector": "file > *[path=main.go]", "limit": 50})); len(a) != len(b) {
+		t.Errorf("`> * path=x` should equal `> *[path=x]`: %v vs %v", a, b)
 	}
 	// An unknown attribute name is still an error, not a silent tag.
 	if msg := queryErr(t, s, map[string]any{"selector": "bogus=x"}); !strings.Contains(msg, "unknown attribute") {

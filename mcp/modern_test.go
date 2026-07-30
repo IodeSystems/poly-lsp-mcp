@@ -1510,3 +1510,51 @@ func TestSelectorCorpus_ShellHabits(t *testing.T) {
 		t.Errorf("an absolute path should say addresses are relative; got %s", abs)
 	}
 }
+
+// Bracket-free attributes. Brackets were never the problem — QUOTING was: a
+// path is the commonest thing to name and the fiddliest to write, so callers
+// wrote it bare and got an error. Unbracketed, the value runs to whitespace, so
+// a path needs no quoting at all.
+func TestBareAttribute(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	// The shape that replaces #'a/b.go': scope by path, no quotes.
+	bare := query(t, s, map[string]any{"selector": "path=main.go func", "limit": 50})
+	brack := query(t, s, map[string]any{"selector": "#'main.go' func", "limit": 50})
+	if bare.TotalMatches == 0 {
+		t.Fatalf("path=main.go func matched nothing")
+	}
+	if got, want := nodes(bare), nodes(brack); len(got) != len(want) {
+		t.Errorf("bare and id forms disagree:\n bare %v\n  id  %v", got, want)
+	}
+	// Every operator the bracketed form has.
+	for _, sel := range []string{"name^=Serve", "name*=erve", "path$=.go", "path~=ma+in"} {
+		if r := s.callTool("node_query", map[string]any{"selector": sel, "limit": 5}); r.IsError {
+			t.Errorf("%s: %s", sel, r.Content[0].Text)
+		}
+	}
+	// It is a COMPOUND, so a space before it is still the descendant
+	// combinator — the property that keeps this purely additive rather than a
+	// second meaning for whitespace.
+	desc := query(t, s, map[string]any{"selector": "file path=main.go", "limit": 50})
+	for _, n := range nodes(desc) {
+		if n == "main.go" {
+			t.Error("a space must stay descendant: the file itself is not its own descendant")
+		}
+	}
+	// An unknown attribute name is still an error, not a silent tag.
+	if msg := queryErr(t, s, map[string]any{"selector": "bogus=x"}); !strings.Contains(msg, "unknown attribute") {
+		t.Errorf("bare attrs must validate the name; got %s", msg)
+	}
+}
+
+// The path error should teach the form that needs no quoting.
+func TestPathErrorTeachesBareAttribute(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+	msg := queryErr(t, s, map[string]any{"selector": "src/main/Foo.java"})
+	if !strings.Contains(msg, "path=src/main/Foo.java") {
+		t.Errorf("the corrected selector should lead with the bare attribute; got %s", msg)
+	}
+}

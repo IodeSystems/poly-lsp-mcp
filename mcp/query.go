@@ -1506,6 +1506,26 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 			return comp, dotIsNotAClassErr(name)
 		}
 		sawType = true
+	case p.peekIsBareAttr():
+		// `path=cmd/dun/tui.go` — a bracket-free attribute.
+		//
+		// Brackets are not the problem; QUOTING is. A path is the commonest
+		// thing anyone wants to name and the fiddliest to write — `#'a/b.go'`
+		// asks for a sigil and a quote pair before the caller has said anything
+		// — and the measured result is that they just write the path bare and
+		// get an error. Unbracketed, the value runs to whitespace, so a path
+		// needs no quoting at all: `path=cmd/dun/tui.go func`.
+		//
+		// Purely additive: a bare word followed by '=' is not a tag and never
+		// parsed before, so no selector that worked yesterday changes meaning.
+		a, err := p.parseBareAttr()
+		if err != nil {
+			return comp, err
+		}
+		comp.attrs = append(comp.attrs, a)
+		comp.anyType = true
+		comp.implied = true
+		sawType = true
 	case isSelIdentStart(p.peek()):
 		// A bare word is the TAG — the node's intrinsic type, as `div` is an
 		// element's type. Closed set: a model that knows CSS knows it cannot
@@ -1646,6 +1666,60 @@ func (p *modSelParser) readID() (string, error) {
 		return "", pathIsAnIDErr(path)
 	}
 	return id, nil
+}
+
+// peekIsBareAttr reports whether the cursor is on an unbracketed attribute —
+// an identifier followed directly by an operator and '='. Lookahead only.
+func (p *modSelParser) peekIsBareAttr() bool {
+	if !isSelIdentStart(p.peek()) {
+		return false
+	}
+	j := p.i
+	for j < len(p.s) && isModIdentPart(p.s[j]) {
+		j++
+	}
+	if j == p.i || j >= len(p.s) {
+		return false
+	}
+	if p.s[j] == '=' {
+		return true
+	}
+	return strings.ContainsRune("^$*~", p.s[j]) && j+1 < len(p.s) && p.s[j+1] == '='
+}
+
+// parseBareAttr parses `path=a/b.go`, `name^=Test`, `path~=test|smoke` — the
+// same attribute grammar as the bracketed form, with the value running to the
+// next whitespace or combinator instead of to ']'.
+func (p *modSelParser) parseBareAttr() (selAttr, error) {
+	// Reuse the bracketed parser by lending it brackets: the alternative is a
+	// second copy of the name/op/regex handling, which would drift.
+	name := p.readIdentAt(p.i)
+	rest := p.i + len(name)
+	end := rest
+	for end < len(p.s) && !strings.ContainsRune(" \t,>)]", p.s[end]) {
+		if p.s[end] == ':' { // `path=x::grep(…)` — the value stops at the element
+			break
+		}
+		end++
+	}
+	inner := string(p.s[p.i:end])
+	sub := &modSelParser{s: []rune("[" + inner + "]")}
+	a, err := sub.parseAttr()
+	if err != nil {
+		return a, err
+	}
+	p.i = end
+	return a, nil
+}
+
+// readIdentAt reads an identifier at an arbitrary offset without moving the
+// cursor.
+func (p *modSelParser) readIdentAt(i int) string {
+	j := i
+	for j < len(p.s) && isModIdentPart(p.s[j]) {
+		j++
+	}
+	return string(p.s[i:j])
 }
 
 func (p *modSelParser) parseAttr() (selAttr, error) {
@@ -2312,13 +2386,14 @@ func pathIsAnIDErr(path string) error {
 	if strings.HasPrefix(path, "/") {
 		return fmt.Errorf(
 			"%q is an absolute PATH, not a node type — and addresses here are workspace-RELATIVE. "+
-				"Drop the workspace prefix and quote the rest: #'path/inside/the/workspace.go'. "+
-				"Pass selector \"?\" for the grammar",
+				"Drop the workspace prefix and scope by the rest: path=path/inside/the/workspace.go func "+
+				"(or the id form, #'path/inside/the/workspace.go'). Pass selector \"?\" for the grammar",
 			path)
 	}
 	return fmt.Errorf(
-		"%q is a PATH, not a node type. A path is an id, and one containing / or . must be quoted: #'%s'. "+
-			"Write it as   #'%s'   (add ` func`, ` *`, or `::grep('…')` after it to look inside). "+
+		"%q is a PATH, not a node type. Scope by path with the bare attribute — no quoting needed:\n"+
+			"  path=%s func            (everything of a type in it; use * for all, ::grep('…') to search it)\n"+
+			"The id form also works and pins the file node itself: #'%s'. "+
 			"Pass selector \"?\" for the grammar.",
 		path, path, path)
 }
@@ -2360,7 +2435,8 @@ that ate the budget. Use it when a query blows the budget to see WHICH element t
 TASK → QUERY
   what is here?               :root > *            then descend:  #web > *
   find something by name      #Save                anywhere;  #'store.go#Save' pins one
-  what is in a file           #'store.go' func     (or *, method, struct, …)
+  what is in a file           path=store.go func   (bare attr: no quotes, even with / in it)
+                              #'store.go' func     (the id form; pins the file node itself)
   who calls X                 #'store.go#Save'::in.call          rows carry from: + a file@line site
   what does X call            #'store.go#Save'::out.call > *
   everything that reaches X   #'X'::in.call{1,} > *
@@ -2389,7 +2465,11 @@ SPEC
          splits into one return child per type. #error = leaf, #'io.Writer' = via the full alias.
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
-  ATTR   [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES
+  ATTR   Brackets optional when the value has no space: path=a/b.go ≡ [path=a/b.go],
+         name^=Test ≡ [name^=Test]. Unbracketed is a COMPOUND of its own, so a space
+         before it is still the descendant combinator: "path=a/b.go func" = funcs in
+         that file; to FILTER what you just landed on, attach it: "> *[path=a/b.go]".
+         [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES
          (workspace-relative file path; a symbol answers with its FILE's).
          OPS  = ^= $= *= are LITERAL (exact/prefix/suffix/contains).  ~= is a regex.
          OR   is the regex: [path~=test|smoke].  Quote a literal '|': [path*='a|b'].

@@ -347,16 +347,30 @@ func TestModernQueryGuidedParseError(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
+	// A misspelled pseudo-class is not a caller who is lost about SHAPE — it is
+	// one who is a word off. Name the word; 7k of grammar buries it. (The full
+	// dump stays for genuine syntax errors, asserted just below, and on "?".)
 	msg := queryErr(t, s, map[string]any{"selector": "func:bogus(x)"})
-	if !strings.Contains(msg, "unknown pseudo-class") || !strings.Contains(msg, "TASK → QUERY") {
-		t.Errorf("expected a guided usage dump; got %q", msg)
+	if !strings.Contains(msg, "unknown pseudo-class") {
+		t.Errorf("expected the pseudo-class to be named; got %q", msg)
 	}
-	// The deep grammar (attribute ops) is taught by the error, not the
-	// every-turn description: the literal ops AND the regex op, which is
-	// how the language spells OR.
-	for _, want := range []string{"^=", "~= is a regex", "[path~=test|smoke]"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("grammar dump should teach attribute ops; missing %q in %q", want, msg)
+	if strings.Contains(msg, "TASK → QUERY") {
+		t.Errorf("a wrong NAME should not reprint the grammar; got %q", msg)
+	}
+	if !strings.Contains(msg, ":annotated") || !strings.Contains(msg, ":arity") {
+		t.Errorf("the error should list the real vocabulary; got %q", msg)
+	}
+	// Half-remembered names get the one they meant. Edit distance alone picks
+	// ":all" for ":arg" (2 edits vs 3); the shared prefix is what carries it.
+	if m := queryErr(t, s, map[string]any{"selector": "func:arg"}); !strings.Contains(m, "did you mean :arity") {
+		t.Errorf(":arg should suggest :arity; got %q", m)
+	}
+	// Malformed SYNTAX still gets the full grammar — there the caller does not
+	// know the shape, and the attribute-op table is the thing they need.
+	syn := queryErr(t, s, map[string]any{"selector": "func[name^=[A-Z]]"})
+	for _, want := range []string{"TASK → QUERY", "^=", "~= is a regex", "[path~=test|smoke]"} {
+		if !strings.Contains(syn, want) {
+			t.Errorf("grammar dump should teach attribute ops; missing %q in %q", want, syn)
 		}
 	}
 	// A bare word that isn't a type: almost always a workspace NAME used where
@@ -1401,5 +1415,98 @@ func TestModernQueryDoesNotShortCircuitComposedSelectors(t *testing.T) {
 		if q.TotalMatches == 0 {
 			t.Errorf("%s: expected an exact total, got 0", sel)
 		}
+	}
+}
+
+// The corpus below is REAL: every selector here was written by a model driving
+// this server in a recorded session, and every one of them failed. Across ~205
+// node_query calls, 39 distinct selectors errored, and they were not evenly
+// spread — 25 were a bare file path where an id belongs and 8 were a grep
+// pattern quoted twice. Those two classes are 85% of all selector failures.
+//
+// The test asserts the error CORRECTS the caller. Naming the mistake is not
+// enough: the old unknown-type error told a path-writer to try "#terminal-view"
+// (the first segment), they followed it, and hit a different wall — that exact
+// pair is in the corpus.
+func TestSelectorCorpus_ErrorsNameTheFix(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	cases := []struct {
+		name     string
+		selector string
+		want     []string // substrings the error must contain
+	}{{
+		name:     "bare path in tag position",
+		selector: "terminal-view/src/main/java/com/termux/view/TerminalView.java",
+		want:     []string{"is a PATH", "#'terminal-view/src/main/java/com/termux/view/TerminalView.java'"},
+	}, {
+		name:     "bare path with a pseudo-element after it",
+		selector: "app/src/main/java/Foo.java::grep('bar')",
+		want:     []string{"is a PATH", "#'app/src/main/java/Foo.java'"},
+	}, {
+		name:     "unquoted id containing a path — the follow-on mistake",
+		selector: "#termux-shared/src/main/java/Foo.java",
+		want:     []string{"is a PATH", "#'termux-shared/src/main/java/Foo.java'"},
+	}, {
+		name:     "a lone filename is still a path",
+		selector: "sum.mjs",
+		want:     []string{"is a PATH", "#'sum.mjs'"},
+	}, {
+		name:     "grep pattern quoted twice",
+		selector: `file::grep('-E "onKeyDown|onTouchEvent"')`,
+		want:     []string{"quoted twice", `::grep('-E onKeyDown|onTouchEvent')`},
+	}, {
+		name:     "misremembered pseudo-class",
+		selector: "func:arg:contains(x)",
+		want:     []string{"did you mean :arity"},
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			msg := queryErr(t, s, map[string]any{"selector": c.selector})
+			for _, w := range c.want {
+				if !strings.Contains(msg, w) {
+					t.Errorf("error does not carry the fix %q\ngot: %s", w, msg)
+				}
+			}
+			if len(msg) > 1500 {
+				t.Errorf("a corrected mistake should be answered, not buried: %d bytes", len(msg))
+			}
+		})
+	}
+}
+
+// The silent one. A pattern quoted twice used to parse fine, match nothing, and
+// report totalMatches:0 — indistinguishable from "that code is not here", which
+// is how a session ends up looking somewhere else entirely. It must be loud.
+func TestSelectorCorpus_DoubleQuotedGrepIsNotSilent(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	// A pattern that DOES occur, wrapped the way a shell habit wraps it.
+	msg := queryErr(t, s, map[string]any{"selector": `file::grep('-E "func|type"')`})
+	if !strings.Contains(msg, "quoted twice") {
+		t.Errorf("double-quoted pattern must be rejected, not silently unmatched; got %s", msg)
+	}
+	// And the legitimate case still works: quotes INSIDE a pattern are content.
+	if q := query(t, s, map[string]any{"selector": `file::grep('"')`}); q.TotalMatches == 0 {
+		t.Log("no quote characters in the fixture workspace — pattern accepted, which is the point")
+	}
+}
+
+// The rest of the corpus's shell habits: flags as a separate argv word, and an
+// absolute path (doubly wrong — addresses are workspace-relative).
+func TestSelectorCorpus_ShellHabits(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	msg := queryErr(t, s, map[string]any{"selector": `::grep('-E' 'sum.mjs')`})
+	if !strings.Contains(msg, "ONE quoted argument") || !strings.Contains(msg, `::grep('-E sum.mjs')`) {
+		t.Errorf("separate-word flags should be corrected inline; got %s", msg)
+	}
+	abs := queryErr(t, s, map[string]any{"selector": "/tmp/ws/cmd/dun/tui.go"})
+	if !strings.Contains(abs, "workspace-RELATIVE") {
+		t.Errorf("an absolute path should say addresses are relative; got %s", abs)
 	}
 }

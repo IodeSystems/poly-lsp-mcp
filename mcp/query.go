@@ -1338,6 +1338,17 @@ func (p *modSelParser) parseFragmentElement() (selCompound, error) {
 	p.i++
 	p.skipWS()
 	if p.peek() != ')' {
+		// The other half of the shell habit: ::grep('-E' 'pattern') — flags and
+		// pattern as SEPARATE argv words, the way a shell takes them. Same
+		// answer as the double-quoting case, and worth saying rather than
+		// reprinting the grammar over a missing paren.
+		if c := p.peek(); c == '"' || c == '\'' || c == '-' {
+			rest := strings.TrimRight(strings.TrimSpace(string(p.s[p.i:])), ")")
+			rest = strings.Trim(rest, "\"'")
+			return comp, fmt.Errorf(
+				"::grep takes ONE quoted argument — flags and pattern go inside the same quotes, "+
+					"not as separate words. Write ::grep('%s %s')", text, rest)
+		}
 		return comp, p.errf("')' to close ::grep")
 	}
 	p.i++
@@ -1411,6 +1422,9 @@ func parseFragmentSpec(text string) (*grepSpec, error) {
 		if rest == "" {
 			break
 		}
+	}
+	if err := rejectShellQuoting(strings.TrimSuffix(text, rest), rest); err != nil {
+		return nil, err
 	}
 	g.pattern = rest
 	if err := g.finalize(); err != nil {
@@ -1498,9 +1512,35 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 		// invent one, which is the whole point of the move.
 		comp.class = p.readIdent()
 		if !knownSelectorClass(comp.class) {
+			// A PATH is the overwhelmingly common case here — measured across
+			// real agent sessions, 25 of 39 distinct bad selectors were a bare
+			// file path in tag position. The parser stops at the first '/' or
+			// '.', so the plain unknown-type error names only the first segment
+			// and sends the caller to `#terminal-view`, which fails again on
+			// the rest of the path. Read the whole path and quote it for them.
+			if path := p.peekPathTail(comp.class); path != "" {
+				return comp, pathIsAnIDErr(path)
+			}
 			return comp, unknownTypeErr(comp.class)
 		}
 		sawType = true
+	case p.peek() == '/' || p.peek() == '"':
+		// An ABSOLUTE path ("/tmp/ws/cmd/tui.go") or one the caller quoted with
+		// double quotes. Neither can start a compound, and both are the same
+		// mistake as the bare relative path — say so instead of "expected a
+		// type tag". Addresses are workspace-RELATIVE, which is the other half
+		// of what an absolute path gets wrong.
+		start := p.i
+		for !p.eof() && !strings.ContainsRune(":,>()[] ", p.peek()) {
+			p.i++
+		}
+		raw := strings.Trim(string(p.s[start:p.i]), `"`)
+		if strings.ContainsAny(raw, "/.") {
+			return comp, pathIsAnIDErr(raw)
+		}
+		p.i = start
+		comp.anyType = true
+		comp.implied = true
 	default:
 		comp.anyType = true // implied universal; needs an id/attr/pseudo
 		comp.implied = true
@@ -1597,7 +1637,15 @@ func (p *modSelParser) readID() (string, error) {
 	if p.i == start {
 		return "", p.errf("an id after '#' (bare, or quoted like #'a b')")
 	}
-	return string(p.s[start:p.i]), nil
+	id := string(p.s[start:p.i])
+	// `#some/path/File.java` — the bare-id charset stops at the first '/', and
+	// the leftovers then fail as "expected a combinator". This is the SECOND
+	// half of the commonest mistake: the caller was told a path is an id, wrote
+	// #path, and hit a different wall. Quote it for them.
+	if path := p.peekPathTail(id); path != "" {
+		return "", pathIsAnIDErr(path)
+	}
+	return id, nil
 }
 
 func (p *modSelParser) parseAttr() (selAttr, error) {
@@ -1805,7 +1853,7 @@ func (p *modSelParser) parsePseudo(comp *selCompound) error {
 	case "depth":
 		return fmt.Errorf(":depth is gone — {m,n} REPEATS (regex semantics): func{2} = func > func; 'within 1..3 levels' = \"> *{0,2} > func\". Pass selector \"?\" for the grammar.")
 	default:
-		return fmt.Errorf("unknown pseudo-class %q\n\n%s", ":"+name, selectorGrammarHelp)
+		return unknownPseudoErr(name)
 	}
 }
 
@@ -2116,6 +2164,164 @@ func selectorTypeList() []string {
 // still didn't learn, because a grammar dump never mentions `cache`; it just
 // guessed the other sigil next time. Name the fix, get out. The full grammar
 // stays for malformed SYNTAX (caller lost about shape) and on demand via "?".
+
+// peekPathTail reads the rest of a path that started with the already-consumed
+// first segment, or "" if what follows is not a path.
+//
+// Called only after a bare word failed to be a tag. `src/main/Foo.java` parses
+// as the tag `src` followed by junk; the caller meant one id. A path is
+// recognised by a '/' or a '.' immediately following the word, and it runs to
+// the first character that cannot be in one — so `Foo.java::grep('x')` yields
+// `Foo.java` and stops at the pseudo-element.
+func (p *modSelParser) peekPathTail(first string) string {
+	if p.eof() {
+		return ""
+	}
+	if c := p.peek(); c != '/' && c != '.' {
+		return ""
+	}
+	j := p.i
+	for j < len(p.s) {
+		c := p.s[j]
+		if c == ':' || c == ' ' || c == '>' || c == ',' || c == '[' || c == '(' || c == ')' {
+			break
+		}
+		j++
+	}
+	tail := strings.TrimRight(string(p.s[p.i:j]), ".")
+	if tail == "" || !strings.ContainsAny(tail, "/.") {
+		return ""
+	}
+	return first + tail
+}
+
+// selectorPseudoNames is the pseudo-class vocabulary, for errors and
+// did-you-mean. Kept beside parsePseudo's switch — a new pseudo belongs in
+// both, and an error that omits one sends the caller to invent a synonym.
+var selectorPseudoNames = []string{
+	"all", "annotated", "any", "arity", "contains", "empty", "first", "is",
+	"last", "not", "parents", "recursive", "root", "where",
+}
+
+// unknownPseudoErr answers a misremembered pseudo-class by NAME rather than by
+// reprinting the grammar. A wrong name is not a caller who is lost about shape
+// — it is one who is one word off, and 7k of grammar buries the word.
+func unknownPseudoErr(name string) error {
+	if near := nearestName(name, selectorPseudoNames); near != "" {
+		return fmt.Errorf("unknown pseudo-class %q — did you mean :%s? The full set: :%s. Pass selector \"?\" for the grammar",
+			":"+name, near, strings.Join(selectorPseudoNames, " :"))
+	}
+	return fmt.Errorf("unknown pseudo-class %q. The full set: :%s. Pass selector \"?\" for the grammar",
+		":"+name, strings.Join(selectorPseudoNames, " :"))
+}
+
+// nearestName returns the candidate the caller most likely meant, or "" when
+// nothing is close enough to be worth guessing at.
+//
+// Edit distance ALONE gets this wrong in exactly the case that matters: a
+// half-remembered name is usually a correct PREFIX plus a wrong ending, and
+// distance punishes the length difference. ":arg" is 2 edits from ":all" and 3
+// from ":arity" — but it shares "ar" with the one that was meant. Weighting the
+// shared prefix fixes it without a special case.
+func nearestName(want string, candidates []string) string {
+	best, bestScore, bestPre := "", 1<<30, 0
+	for _, c := range candidates {
+		pre := commonPrefixLen(want, c)
+		score := editDistance(want, c) - 2*pre
+		if score < bestScore {
+			best, bestScore, bestPre = c, score, pre
+		}
+	}
+	// Close enough to name: either nearly spelled right, or a real shared start.
+	if bestScore <= 1 || bestPre >= 2 {
+		return best
+	}
+	return ""
+}
+
+func commonPrefixLen(a, b string) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return n
+}
+
+// editDistance is Levenshtein, two rows.
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(min(cur[j-1]+1, prev[j]+1), prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
+}
+
+// rejectShellQuoting catches a pattern the caller quoted a SECOND time —
+// ::grep('-E "a|b"') instead of ::grep('-E a|b').
+//
+// This is the worst failure mode on the whole selector surface, because
+// without it there IS no failure: the quotes become part of the pattern, the
+// search matches nothing, and the caller is handed `totalMatches: 0`. That
+// reads as "the code isn't here" and sends them somewhere else entirely.
+// Measured across real agent sessions it is second only to bare paths, and it
+// is the only class that fails SILENTLY.
+//
+// A pattern that legitimately contains a quote will not be wrapped in the same
+// quote at BOTH ends, so ::grep('printf("%d")') still works.
+func rejectShellQuoting(flags, pattern string) error {
+	p := strings.TrimSpace(pattern)
+	if len(p) < 2 {
+		return nil
+	}
+	q := p[0]
+	if (q != '"' && q != '\'') || p[len(p)-1] != q {
+		return nil
+	}
+	inner := p[1 : len(p)-1]
+	if inner == "" || strings.ContainsRune(inner, rune(q)) {
+		return nil // the quotes are part of the pattern, not around it
+	}
+	// Rebuild the WHOLE corrected argument, flags included: a suggestion the
+	// caller can copy beats one they have to reassemble.
+	return fmt.Errorf(
+		"the pattern is quoted twice: ::grep takes ONE quoted argument and its contents are "+
+			"already literal. Drop the inner %c%c — write ::grep('%s%s'). Left as written, %c is "+
+			"searched for as part of the pattern, which is why it would match nothing",
+		q, q, flags, inner, q)
+}
+
+// pathIsAnIDErr: a bare file or directory PATH written where a tag belongs.
+// The single most common selector mistake there is. It gets the corrected
+// selector spelled out, because the generic "try #<word>" advice is actively
+// wrong for a path — the caller follows it and fails on the next '/'.
+func pathIsAnIDErr(path string) error {
+	// An absolute path is doubly wrong: addresses are workspace-RELATIVE, so
+	// quoting it as written would still find nothing. Say both things at once.
+	if strings.HasPrefix(path, "/") {
+		return fmt.Errorf(
+			"%q is an absolute PATH, not a node type — and addresses here are workspace-RELATIVE. "+
+				"Drop the workspace prefix and quote the rest: #'path/inside/the/workspace.go'. "+
+				"Pass selector \"?\" for the grammar",
+			path)
+	}
+	return fmt.Errorf(
+		"%q is a PATH, not a node type. A path is an id, and one containing / or . must be quoted: #'%s'. "+
+			"Write it as   #'%s'   (add ` func`, ` *`, or `::grep('…')` after it to look inside). "+
+			"Pass selector \"?\" for the grammar.",
+		path, path, path)
+}
 
 // unknownTypeErr: a bare word that isn't one of our tags. Almost always a
 // workspace NAME used where a type belongs — `cache` for the cache/ dir.
@@ -4728,6 +4934,9 @@ func parseContainsSpec(text string) (*grepSpec, error) {
 		if rest == "" {
 			break
 		}
+	}
+	if err := rejectShellQuoting(strings.TrimSuffix(text, rest), rest); err != nil {
+		return nil, err
 	}
 	g.pattern = rest
 	if err := g.finalize(); err != nil {

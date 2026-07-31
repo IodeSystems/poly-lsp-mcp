@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"io/fs"
 	"log"
@@ -290,6 +291,7 @@ func (s *Server) notifyChildOfOpen(child *multiplex.Child, uri string, content [
 	}
 	s.openDocs[uri] = 1
 	s.openDocsMu.Unlock()
+	s.recordSent(uri, content)
 
 	languageID := s.languageIDForURI(uri)
 	if err := child.Notify("textDocument/didOpen", map[string]any{
@@ -730,6 +732,7 @@ func (s *Server) notifyChildOfEdit(child *multiplex.Child, uri string, content [
 		s.openDocs[uri] = version
 	}
 	s.openDocsMu.Unlock()
+	s.recordSent(uri, content)
 
 	languageID := s.languageIDForURI(uri)
 
@@ -764,6 +767,95 @@ func (s *Server) notifyChildOfEdit(child *multiplex.Child, uri string, content [
 		"text":         string(content),
 	}); err != nil {
 		log.Printf("mcp didSave %s: %v", uri, err)
+	}
+}
+
+// notifyChildOfExternalChange tells the matching child LSP that a file
+// changed on disk OUTSIDE the tool's own edits — a `git checkout` or
+// `rebase`, a formatter, a second agent, the user's editor. Called from
+// the file watcher.
+//
+// This is not optional bookkeeping, it is the difference between
+// truthful diagnostics and confident lies. A proactively-didOpen'd file
+// is an OVERLAY as far as the server is concerned: per LSP the client's
+// copy is authoritative for an open document, and the server will never
+// consult the disk for it again. Nothing here reopens that gap on its
+// own — no didChangeWatchedFiles is registered, and a server like gopls
+// does not watch the filesystem itself. So a rebase that rewrites a
+// file leaves the child type-checking against a version that no longer
+// exists anywhere, and it says so with total confidence: the dogfood
+// case reported `too many arguments … want 1` against a signature that
+// had taken three arguments on disk for twenty minutes, while `go
+// build` passed. Re-pushing the bytes is what closes it.
+//
+// Sending didChange (rather than didChangeWatchedFiles) is deliberate:
+// it works whether or not the URI is already open, needs no capability
+// negotiation, and reuses the exact path an edit takes.
+//
+// The hash guard matters as much as the notification. fsnotify fires on
+// the tool's OWN writes too, ~200ms behind each node_edit, and echoing
+// those back would spend a round-trip per edit and dribble extra
+// publishes into the next call's settle window. Content the child
+// already has is dropped here.
+func (s *Server) notifyChildOfExternalChange(path string, content []byte) {
+	if s.manager == nil {
+		return
+	}
+	uri := pathToURI(path)
+	child := s.manager.RouteByURI(uri)
+	if child == nil {
+		return
+	}
+	if s.sentContentMatches(uri, content) {
+		return // the child already has exactly these bytes
+	}
+	s.notifyChildOfEdit(child, uri, content)
+}
+
+// recordSent remembers the text just pushed to the child for uri. Caller
+// must NOT hold openDocsMu.
+func (s *Server) recordSent(uri string, content []byte) {
+	sum := sha256.Sum256(content)
+	s.openDocsMu.Lock()
+	s.sentDocs[uri] = sum
+	s.openDocsMu.Unlock()
+}
+
+// sentContentMatches reports whether the child already holds exactly these
+// bytes for uri — false when the URI was never pushed at all.
+func (s *Server) sentContentMatches(uri string, content []byte) bool {
+	sum := sha256.Sum256(content)
+	s.openDocsMu.Lock()
+	defer s.openDocsMu.Unlock()
+	known, seen := s.sentDocs[uri]
+	return seen && known == sum
+}
+
+// notifyChildOfExternalDelete closes a URI the watcher saw disappear, so
+// the child stops reporting against a file that no longer exists and a
+// later re-create is announced as a fresh didOpen rather than a
+// didChange on a version the child never saw.
+func (s *Server) notifyChildOfExternalDelete(path string) {
+	if s.manager == nil {
+		return
+	}
+	uri := pathToURI(path)
+	child := s.manager.RouteByURI(uri)
+	if child == nil {
+		return
+	}
+	s.openDocsMu.Lock()
+	_, opened := s.openDocs[uri]
+	delete(s.openDocs, uri)
+	delete(s.sentDocs, uri)
+	s.openDocsMu.Unlock()
+	if !opened {
+		return
+	}
+	if err := child.Notify("textDocument/didClose", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+	}); err != nil {
+		log.Printf("mcp didClose %s: %v", uri, err)
 	}
 }
 

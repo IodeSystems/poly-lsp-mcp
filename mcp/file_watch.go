@@ -157,7 +157,7 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 		}
 		return
 	}
-	if !s.watchableFile(ev.Name) {
+	if !s.watchedFile(ev.Name) {
 		return
 	}
 	removed := ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0
@@ -173,6 +173,7 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 		mu.Unlock()
 		if removed {
 			s.removeFileFromIndex(name)
+			s.notifyChildOfExternalDelete(name)
 		} else {
 			s.watchRefreshFile(name)
 		}
@@ -213,9 +214,29 @@ func (s *Server) watchRefreshFile(path string) {
 	content, err := os.ReadFile(path)
 	if err != nil || len(content) > maxScanSize {
 		s.removeFileFromIndex(path)
+		s.notifyChildOfExternalDelete(path)
 		return
 	}
 	s.refreshFileInIndex(path, content)
+	// The index is only half the picture. Push the same bytes at the
+	// child LSP, or its answers go stale the moment anything but this
+	// tool writes the file — see notifyChildOfExternalChange.
+	s.notifyChildOfExternalChange(path, content)
+}
+
+// watchedFile reports whether a path is worth watching at all: it feeds
+// the symbol index, or it routes to a child LSP, or both. The two sets
+// overlap heavily but neither contains the other — a language can have
+// an extractor and no server, or a server and no extractor — and a
+// change to either kind of file has somewhere to go.
+func (s *Server) watchedFile(path string) bool {
+	if s.watchableFile(path) {
+		return true
+	}
+	if s.manager == nil || s.pathIgnored(path) {
+		return false
+	}
+	return s.manager.RouteByURI(pathToURI(path)) != nil
 }
 
 // removeFileFromIndex evicts every site for path from the index. Used

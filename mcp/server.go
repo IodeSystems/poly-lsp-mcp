@@ -111,6 +111,14 @@ type Server struct {
 	openDocsMu sync.Mutex
 	openDocs   map[string]int32
 
+	// sentDocs is the SHA-256 of the text last pushed to the child for
+	// each URI. The file watcher consults it to answer "does the child
+	// already have this?" — which both suppresses the echo of our own
+	// writes (fsnotify fires ~200ms after every node_edit) and lets a
+	// genuine out-of-band change through. Same lock as openDocs: the two
+	// are written together on every notification.
+	sentDocs map[string][32]byte
+
 	// defCache memoizes textDocument/definition answers across queries: a
 	// warm session resolves the same site (an ::in target with N callers,
 	// a :recursive self-call) once instead of per query. Keyed on the
@@ -244,6 +252,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		bindings:      declared,
 		schemas:       schemas,
 		openDocs:      map[string]int32{},
+		sentDocs:      map[string][32]byte{},
 		proactiveOpen: true,
 		gitPrewarm:    true,
 		fileWatch:     true,

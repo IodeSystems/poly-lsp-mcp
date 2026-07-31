@@ -103,6 +103,29 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+✅ **The child LSP now hears about OUT-OF-BAND writes — 2026-07-31.** A
+`git rebase` run through a dun session's exec tool rewrote a file on disk; the
+fsnotify watcher re-indexed it and told the child LSP nothing, so gopls kept
+type-checking against a proactively-`didOpen`'d overlay that had been wrong
+for twenty minutes — confidently, with `diagnosticsTimedOut:false`, while
+`go build`, `node_read` and `node_query` all agreed on the truth. The watcher
+now pushes what it indexes (`notifyChildOfExternalChange`, `didClose` on
+delete), hash-guarded so the tool's own writes aren't echoed back. Full
+forensics in `plan/bugs.md`; pinned by a test with a demonstrated negative
+control. Two ergonomics fixes rode along, both from the same session corpus:
+an empty `oldText` now CREATES a file instead of answering "no such file",
+and a shell-double-quoted `::grep('-E "a|b"')` is answered with the search the
+caller meant plus a note saying what was stripped, where it used to be an
+error (and before that, a silent zero-match).
+- **risks**: an out-of-band change now costs a `didChange` round-trip per
+  watched file, so a branch switch across hundreds of files is a burst the
+  child must absorb; the debounce coalesces per path, not across the batch.
+  Untested at that scale.
+- **optional extensions**: register `workspace/didChangeWatchedFiles`
+  properly, which would also cover files that were never opened — it needs
+  client capabilities beyond `{}` and a `client/registerCapability` handler,
+  neither of which the current fix requires.
+
 ✅ **Edit parity across every callable language — 2026-07-28.** The gap that
 headed this list is closed. `node_refactor` signature rewriting now covers
 java, kotlin, groovy, c and c++ alongside go/typescript/python

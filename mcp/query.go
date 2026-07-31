@@ -1443,8 +1443,8 @@ func parseFragmentSpec(text string) (*grepSpec, error) {
 			break
 		}
 	}
-	if err := rejectShellQuoting(strings.TrimSuffix(text, rest), rest); err != nil {
-		return nil, err
+	if stripped, ok := stripShellQuoting(rest); ok {
+		rest = stripped
 	}
 	g.pattern = rest
 	if err := g.finalize(); err != nil {
@@ -2382,38 +2382,37 @@ func editDistance(a, b string) int {
 	return prev[len(b)]
 }
 
-// rejectShellQuoting catches a pattern the caller quoted a SECOND time —
-// ::grep('-E "a|b"') instead of ::grep('-E a|b').
+// stripShellQuoting unwraps a pattern the caller quoted a SECOND time —
+// ::grep('-E "a|b"') for ::grep('-E a|b') — and reports whether it did.
 //
-// This is the worst failure mode on the whole selector surface, because
-// without it there IS no failure: the quotes become part of the pattern, the
-// search matches nothing, and the caller is handed `totalMatches: 0`. That
-// reads as "the code isn't here" and sends them somewhere else entirely.
-// Measured across real agent sessions it is second only to bare paths, and it
-// is the only class that fails SILENTLY.
+// Taken literally the inner quotes are part of the pattern, so the search
+// matches nothing and the caller is handed `totalMatches: 0`. That reads as
+// "the code isn't here" and sends them somewhere else entirely: measured
+// across real agent sessions this is second only to bare paths, and it is the
+// only class that fails SILENTLY. It used to be an error for exactly that
+// reason. But the caller's intent is not in doubt — nobody greps for a string
+// wrapped in its own quotes — so the useful answer is the search they meant,
+// plus a note saying what was dropped. An error here costs a round-trip to
+// reach the same place. Erroring was better than lying; answering is better
+// than both. (The note is the load-bearing half: silent normalisation would
+// reintroduce exactly the invisibility this guard exists to prevent.)
 //
 // A pattern that legitimately contains a quote will not be wrapped in the same
-// quote at BOTH ends, so ::grep('printf("%d")') still works.
-func rejectShellQuoting(flags, pattern string) error {
+// quote at BOTH ends, so ::grep('printf("%d")') is left alone.
+func stripShellQuoting(pattern string) (string, bool) {
 	p := strings.TrimSpace(pattern)
 	if len(p) < 2 {
-		return nil
+		return pattern, false
 	}
 	q := p[0]
 	if (q != '"' && q != '\'') || p[len(p)-1] != q {
-		return nil
+		return pattern, false
 	}
 	inner := p[1 : len(p)-1]
 	if inner == "" || strings.ContainsRune(inner, rune(q)) {
-		return nil // the quotes are part of the pattern, not around it
+		return pattern, false // the quotes are part of the pattern, not around it
 	}
-	// Rebuild the WHOLE corrected argument, flags included: a suggestion the
-	// caller can copy beats one they have to reassemble.
-	return fmt.Errorf(
-		"the pattern is quoted twice: ::grep takes ONE quoted argument and its contents are "+
-			"already literal. Drop the inner %c%c — write ::grep('%s%s'). Left as written, %c is "+
-			"searched for as part of the pattern, which is why it would match nothing",
-		q, q, flags, inner, q)
+	return inner, true
 }
 
 // pathIsAnIDErr: a bare file or directory PATH written where a tag belongs.
@@ -5058,8 +5057,8 @@ func parseContainsSpec(text string) (*grepSpec, error) {
 			break
 		}
 	}
-	if err := rejectShellQuoting(strings.TrimSuffix(text, rest), rest); err != nil {
-		return nil, err
+	if stripped, ok := stripShellQuoting(rest); ok {
+		rest = stripped
 	}
 	g.pattern = rest
 	if err := g.finalize(); err != nil {
@@ -5093,24 +5092,75 @@ type grepHit struct {
 //
 // Only fires on an empty result, so a literal search that genuinely matches is
 // never second-guessed.
-func literalRegexNote(selector string) string {
+// shellQuotedNote reports the pattern stripShellQuoting unwrapped, so a
+// normalised search never passes for a verbatim one. Unlike
+// literalRegexNote this fires whether or not anything matched: the caller
+// asked for one search and got another, and that is true at any match count
+// — a HIT on the stripped pattern is exactly the case where silence would
+// teach the wrong lesson about the syntax.
+func shellQuotedNote(selector string) string {
+	arg, ok := grepArg(selector)
+	if !ok {
+		return ""
+	}
+	flags, pattern := splitGrepFlags(arg)
+	inner, stripped := stripShellQuoting(pattern)
+	if !stripped {
+		return ""
+	}
+	q := strings.TrimSpace(pattern)[0]
+	return fmt.Sprintf(
+		"the pattern was quoted twice; searched for %s, not %c%s%c. ::grep takes ONE quoted "+
+			"argument and its contents are already literal — write ::grep('%s%s')",
+		inner, q, inner, q, flags, inner)
+}
+
+// grepArg returns the raw text inside the first ::grep(…) of a selector.
+func grepArg(selector string) (string, bool) {
 	i := strings.Index(selector, "::grep(")
 	if i < 0 {
-		return ""
+		return "", false
 	}
 	rest := selector[i+len("::grep("):]
 	if len(rest) < 2 {
-		return ""
+		return "", false
 	}
 	q := rest[0]
 	if q != '\'' && q != '"' {
-		return ""
+		return "", false
 	}
 	end := strings.IndexByte(rest[1:], q)
 	if end < 0 {
+		return "", false
+	}
+	return rest[1 : 1+end], true
+}
+
+// splitGrepFlags splits a ::grep argument into its leading flag words and
+// the pattern that follows (which may itself contain spaces).
+func splitGrepFlags(arg string) (flags, pattern string) {
+	rest := arg
+	for {
+		trimmed := strings.TrimLeft(rest, " \t")
+		if len(trimmed) < 2 || trimmed[0] != '-' {
+			rest = trimmed
+			break
+		}
+		if i := strings.IndexAny(trimmed, " \t"); i >= 0 {
+			rest = trimmed[i:]
+		} else {
+			rest = ""
+			break
+		}
+	}
+	return strings.TrimSuffix(arg, rest), rest
+}
+
+func literalRegexNote(selector string) string {
+	arg, ok := grepArg(selector)
+	if !ok {
 		return ""
 	}
-	arg := rest[1 : 1+end]
 	// Already a regex, or explicitly literal: nothing to say.
 	for _, f := range strings.Fields(arg) {
 		if !strings.HasPrefix(f, "-") {

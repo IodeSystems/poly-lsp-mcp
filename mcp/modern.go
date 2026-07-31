@@ -309,6 +309,15 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 			payload["note"] = n
 		}
 	}
+	// What was SEARCHED differs from what was written — say so at any
+	// match count, and ahead of any note about the result set.
+	if n := shellQuotedNote(p.Selector); n != "" {
+		if prev, ok := payload["note"].(string); ok && prev != "" {
+			payload["note"] = n + ". " + prev
+		} else {
+			payload["note"] = n
+		}
+	}
 	// Say what the edges are made of. An ambiguous lexical edge lists
 	// CANDIDATES; silence here would let a name match read as a fact.
 	if note := e.precisionNote(); note != "" {

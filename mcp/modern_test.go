@@ -1453,10 +1453,6 @@ func TestSelectorCorpus_ErrorsNameTheFix(t *testing.T) {
 		selector: "sum.mjs",
 		want:     []string{"is a PATH", "#'sum.mjs'"},
 	}, {
-		name:     "grep pattern quoted twice",
-		selector: `file::grep('-E "onKeyDown|onTouchEvent"')`,
-		want:     []string{"quoted twice", `::grep('-E onKeyDown|onTouchEvent')`},
-	}, {
 		name:     "misremembered pseudo-class",
 		selector: "func:arg:contains(x)",
 		want:     []string{"did you mean :arity"},
@@ -1479,19 +1475,39 @@ func TestSelectorCorpus_ErrorsNameTheFix(t *testing.T) {
 
 // The silent one. A pattern quoted twice used to parse fine, match nothing, and
 // report totalMatches:0 — indistinguishable from "that code is not here", which
-// is how a session ends up looking somewhere else entirely. It must be loud.
-func TestSelectorCorpus_DoubleQuotedGrepIsNotSilent(t *testing.T) {
+// is how a session ends up looking somewhere else entirely.
+//
+// It is now ANSWERED rather than rejected: the caller gets the search they
+// plainly meant. The note is what keeps it from being the old silence with a
+// friendlier face — matching while saying nothing would teach the shell habit
+// instead of correcting it.
+func TestDoubleQuotedGrepIsAnsweredAndAnnounced(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
 	// A pattern that DOES occur, wrapped the way a shell habit wraps it.
-	msg := queryErr(t, s, map[string]any{"selector": `file::grep('-E "func|type"')`})
-	if !strings.Contains(msg, "quoted twice") {
-		t.Errorf("double-quoted pattern must be rejected, not silently unmatched; got %s", msg)
+	raw := query(t, s, map[string]any{"selector": `file::grep('-E "func|type"')`})
+	if raw.TotalMatches == 0 {
+		t.Fatalf("a double-quoted pattern must still find what it meant; got 0 matches")
 	}
-	// And the legitimate case still works: quotes INSIDE a pattern are content.
-	if q := query(t, s, map[string]any{"selector": `file::grep('"')`}); q.TotalMatches == 0 {
-		t.Log("no quote characters in the fixture workspace — pattern accepted, which is the point")
+	// Same query without the inner quotes: identical result set.
+	clean := query(t, s, map[string]any{"selector": `file::grep('-E func|type')`})
+	if raw.TotalMatches != clean.TotalMatches {
+		t.Errorf("stripped pattern should search identically: quoted=%d bare=%d",
+			raw.TotalMatches, clean.TotalMatches)
+	}
+	if !strings.Contains(raw.Note, "quoted twice") {
+		t.Errorf("a normalised pattern must say so; note=%q", raw.Note)
+	}
+	if clean.Note != "" && strings.Contains(clean.Note, "quoted twice") {
+		t.Errorf("an unquoted pattern must not claim it was normalised; note=%q", clean.Note)
+	}
+
+	// The legitimate case still works: quotes INSIDE a pattern are content,
+	// never stripped, never announced.
+	inner := query(t, s, map[string]any{"selector": `file::grep('printf("%d")')`})
+	if strings.Contains(inner.Note, "quoted twice") {
+		t.Errorf("quotes inside a pattern are content, not wrapping; note=%q", inner.Note)
 	}
 }
 

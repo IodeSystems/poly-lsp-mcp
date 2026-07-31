@@ -5076,3 +5076,74 @@ type grepHit struct {
 	Before []string `json:"before,omitempty"`
 	After  []string `json:"after,omitempty"`
 }
+
+// literalRegexNote explains an empty ::grep result when the pattern was
+// obviously a regex and was searched LITERALLY.
+//
+// ::grep is a substring match unless -E is passed, so `func.*refresh` looks for
+// those characters and finds nothing. That is a correct answer to the question
+// asked and a useless one to the question meant, and — unlike a syntax error —
+// there is nothing to report: the caller gets `totalMatches: 0`, which reads as
+// "it isn't there".
+//
+// Measured in one recorded session: 49 queries returned nothing and 44 of them
+// were this. The same pattern was retried VERBATIM ten times, because zero
+// results give nothing to correct, and the search was eventually abandoned for
+// grepping one file at a time.
+//
+// Only fires on an empty result, so a literal search that genuinely matches is
+// never second-guessed.
+func literalRegexNote(selector string) string {
+	i := strings.Index(selector, "::grep(")
+	if i < 0 {
+		return ""
+	}
+	rest := selector[i+len("::grep("):]
+	if len(rest) < 2 {
+		return ""
+	}
+	q := rest[0]
+	if q != '\'' && q != '"' {
+		return ""
+	}
+	end := strings.IndexByte(rest[1:], q)
+	if end < 0 {
+		return ""
+	}
+	arg := rest[1 : 1+end]
+	// Already a regex, or explicitly literal: nothing to say.
+	for _, f := range strings.Fields(arg) {
+		if !strings.HasPrefix(f, "-") {
+			break
+		}
+		if strings.Contains(f, "E") || strings.Contains(f, "F") {
+			return ""
+		}
+	}
+	pattern := arg
+	if j := strings.LastIndexFunc(arg, func(r rune) bool { return r == ' ' }); j >= 0 && strings.HasPrefix(strings.TrimSpace(arg), "-") {
+		pattern = strings.TrimSpace(arg[j+1:])
+	}
+	if !looksLikeRegex(pattern) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"no matches — and the pattern was searched LITERALLY. %q contains regex syntax; "+
+			"::grep is a substring match unless you pass -E. Retry as ::grep('-E %s')",
+		pattern, pattern)
+}
+
+// looksLikeRegex reports whether a pattern is one a caller plainly meant as a
+// regex. Deliberately narrow: a lone '.' or '$' is ordinary in code, so it
+// takes a construct that has no literal reading worth having.
+func looksLikeRegex(p string) bool {
+	if p == "" {
+		return false
+	}
+	for _, sig := range []string{".*", ".+", "|", "\\(", "\\)", "\\[", "[a-", "[A-", "[0-", "(?"} {
+		if strings.Contains(p, sig) {
+			return true
+		}
+	}
+	return false
+}

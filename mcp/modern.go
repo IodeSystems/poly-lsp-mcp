@@ -304,6 +304,10 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 				"raise limit or use offset to see more.", len(paged), commaInt(total))
 	case end < total || offset > 0:
 		payload["note"] = fmt.Sprintf("%d of %d shown; raise limit or use offset", len(paged), total)
+	case total == 0:
+		if n := literalRegexNote(p.Selector); n != "" {
+			payload["note"] = n
+		}
 	}
 	// Say what the edges are made of. An ambiguous lexical edge lists
 	// CANDIDATES; silence here would let a name match read as a fact.

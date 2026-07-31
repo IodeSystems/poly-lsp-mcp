@@ -2010,10 +2010,22 @@ func (s *Server) findCommentMentions(name, newName string, existing []resolvedEd
 
 const maxScanSize = 1 << 20 // 1 MiB per file; mirrors the lexical pass
 
+// skipScanDir names directories that are never source: build output, vendored
+// copies, and TOOL STATE.
+//
+// That last class is the one that bites. A tool whose state lives inside the
+// workspace will index itself, and if that state contains a COPY of the
+// workspace the index becomes mostly copies. Measured in a real repo: dun keeps
+// its per-session git worktrees in .dun/worktrees, 16 of them had accumulated,
+// and every workspace-wide query came back 100% stale duplicates — the live
+// files did not fit under the limit at all. The agent driving it responded
+// rationally by giving up on workspace-wide search and grepping file by file.
 func skipScanDir(name string) bool {
 	switch name {
 	case ".git", "node_modules", "vendor", "__pycache__",
-		"dist", "build", ".idea", ".vscode", ".poly-lsp-mcp":
+		"dist", "build", ".idea", ".vscode",
+		".poly-lsp-mcp", // this tool's own index
+		".dun":          // dun's state: sessions AND per-session worktrees
 		return true
 	}
 	return false

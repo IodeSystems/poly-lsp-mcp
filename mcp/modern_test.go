@@ -1574,3 +1574,52 @@ func TestPathErrorTeachesBareAttribute(t *testing.T) {
 		t.Errorf("the corrected selector should lead with the bare attribute; got %s", msg)
 	}
 }
+
+// A regex searched literally is the worst kind of wrong answer: correct to the
+// question asked, useless to the question meant, and indistinguishable from
+// "it isn't there". In one recorded session 44 of 49 empty results were this,
+// and the same pattern was retried verbatim ten times because zero results give
+// nothing to correct.
+func TestLiteralRegexNote(t *testing.T) {
+	cases := []struct {
+		name     string
+		selector string
+		want     bool
+	}{
+		{"regex without -E", `::grep('func.*tuiModel.*refresh')`, true},
+		{"alternation without -E", `path=cmd/dun ::grep('slashCmd|commandNamed')`, true},
+		{"escaped parens without -E", `::grep('func \(m \*tuiModel\) refresh')`, true},
+		{"explicitly a regex", `::grep('-E func.*refresh')`, false},
+		{"explicitly literal", `::grep('-F func.*refresh')`, false},
+		{"an ordinary word", `::grep('refresh')`, false},
+		{"a dotted name is not a regex", `::grep('strings.Join')`, false},
+		{"no grep at all", `func[name=refresh]`, false},
+	}
+	for _, c := range cases {
+		got := literalRegexNote(c.selector) != ""
+		if got != c.want {
+			t.Errorf("%s: note=%v, want %v (%s)", c.name, got, c.want, c.selector)
+		}
+	}
+	// The note has to carry the corrected call, not just a diagnosis.
+	n := literalRegexNote(`::grep('func.*refresh')`)
+	if !strings.Contains(n, "-E func.*refresh") {
+		t.Errorf("note should spell out the fix: %s", n)
+	}
+}
+
+// dun keeps per-session git WORKTREES in .dun — copies of the workspace. Left
+// indexed, every workspace-wide query in a real repo came back 100% stale
+// duplicates.
+func TestSkipScanDir_ToolState(t *testing.T) {
+	for _, d := range []string{".git", ".dun", ".poly-lsp-mcp", "node_modules"} {
+		if !skipScanDir(d) {
+			t.Errorf("%s should never be indexed", d)
+		}
+	}
+	for _, d := range []string{"cmd", "internal", ".github", "src"} {
+		if skipScanDir(d) {
+			t.Errorf("%s is real source and must be indexed", d)
+		}
+	}
+}

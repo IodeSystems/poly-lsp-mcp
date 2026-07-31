@@ -965,6 +965,17 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		return s.applyRangeRewrite(rn.addr, rn.decl, *p.NewText, p.diagnosticOptions)
 	}
 
+	// An EMPTY oldText is "replace nothing with newText" — a create, and
+	// the spelling every Edit-shaped tool accepts for one. Refusing it
+	// with "no such file" is a lie about which argument was wrong, and
+	// the caller's next move is to guess. Treat it as the create it is.
+	// Only when the target doesn't exist: on an existing node an empty
+	// oldText matches at every offset, and the ambiguity error below is
+	// the right answer to that.
+	if p.NewText != nil && p.OldText != nil && *p.OldText == "" && !rn.exists {
+		p.OldText = nil
+	}
+
 	// ---- create: newText alone, and only where nothing resolves yet.
 	// Guarded so a create can never silently degrade into clobbering
 	// something that already exists.

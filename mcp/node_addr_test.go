@@ -341,3 +341,50 @@ func TestNodeAddressUnknownSymGuidedErrorNoWrite(t *testing.T) {
 		t.Errorf("file was modified despite resolution failure")
 	}
 }
+
+// An empty oldText is how every Edit-shaped tool spells "create": replace
+// nothing with newText. It used to fall through to the modify path and come
+// back "no such file", which blames the wrong argument — the caller supplied
+// the file, it just didn't exist yet, which is the whole point of a create.
+// Recorded dogfood: a session lost a round-trip to this on ship.go and only
+// recovered by dropping oldText on the retry.
+func TestNodeEditEmptyOldTextCreatesTheFile(t *testing.T) {
+	dir := goWorkspace(t, nestedGoSrc)
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	body := "package main\n\nfunc Shipped() {}\n"
+	r := s.callTool("node_edit", map[string]any{
+		"node":    "ship.go",
+		"oldText": "",
+		"newText": body,
+	})
+	if r.IsError {
+		t.Fatalf("empty oldText should create the file, got: %s", r.Content[0].Text)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "ship.go"))
+	if err != nil {
+		t.Fatalf("file not created: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("content mismatch:\n got %q\nwant %q", got, body)
+	}
+
+	// The guard survives: an empty oldText against something that ALREADY
+	// exists matches at every offset, and must not clobber the file.
+	before, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	r = s.callTool("node_edit", map[string]any{
+		"node":    "main.go",
+		"oldText": "",
+		"newText": "// nope\n",
+	})
+	if !r.IsError {
+		t.Fatalf("empty oldText on an existing file must not silently rewrite it")
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	if string(before) != string(after) {
+		t.Errorf("existing file was modified by an empty-oldText edit")
+	}
+}

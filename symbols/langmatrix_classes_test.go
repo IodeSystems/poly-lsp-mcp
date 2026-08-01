@@ -85,10 +85,17 @@ func trailingCommentClass() bugClass {
 				},
 			},
 			"sql": {
-				src: "CREATE TABLE t (\n  a int, -- doc for a\n  b int -- doc for b\n);\n",
+				// The second statement pins the no-escape rule: a comment
+				// trailing the whole CREATE belongs to the STATEMENT, and the
+				// column must not step over `)` to reach it. It did, reading
+				// back as `c int); -- doc for u`.
+				src: "CREATE TABLE t (\n  a int, -- doc for a\n  b int -- doc for b\n);\n\n" +
+					"CREATE TABLE u (c int); -- doc for u\n",
 				want: map[string]string{
 					"t.a": "a int, -- doc for a",
 					"t.b": "b int -- doc for b",
+					"u.c": "c int",
+					"u":   "CREATE TABLE u (c int); -- doc for u",
 				},
 			},
 		},
@@ -162,8 +169,8 @@ func docBlockAboveClass() bugClass {
 				src: "-- doc for t\nCREATE TABLE t (a int);\n\n" +
 					"/* doc for u */\nCREATE TABLE u (b int);\n",
 				want: map[string]string{
-					"t": "-- doc for t\nCREATE TABLE t (a int)",
-					"u": "/* doc for u */\nCREATE TABLE u (b int)",
+					"t": "-- doc for t\nCREATE TABLE t (a int);",
+					"u": "/* doc for u */\nCREATE TABLE u (b int);",
 				},
 			},
 		},

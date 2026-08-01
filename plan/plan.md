@@ -216,10 +216,8 @@ on extension alone.
     files stay empty); quoted identifiers keep their quotes
     (`"USER"."USER_pkey"`); index/view/type/trigger/sequence/constraint all
     collapse to class `type`, so a selector cannot ask for views specifically.
-    A statement's span also stops BEFORE its `;`, which tree-sitter-sql makes
-    a sibling of the statement rather than part of it — so deleting a table
-    leaves a bare `;` behind. Deliberate scope call 2026-08-01, not a
-    discovery: absorbing it is a separate behaviour change.
+    (The `;` sitting OUTSIDE the statement node is handled — `terminatorEnd`
+    absorbs it, so deleting a table no longer leaves a bare `;`.)
   - Go keeps pointer/slice decoration on return segments (`*Config`,
     `[]Schema`) while java/kotlin/typescript/c strip it — USER's call
     2026-07-27, documented on `goTypeSegment`.

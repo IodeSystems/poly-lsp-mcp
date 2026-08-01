@@ -669,6 +669,36 @@ func isStatementWrapper(p *sitter.Node) bool {
 	return p.Type() == "statement" && p.NamedChildCount() == 1
 }
 
+// isDeclPunctuation reports whether an anonymous token merely TERMINATES or
+// SEPARATES a declaration, so a comment after it still trails that same
+// declaration.
+//
+// A closing bracket is excluded deliberately. Stepping over one let a node
+// climb OUT of the construct containing it and claim a comment belonging to
+// an ancestor: in `CREATE TABLE t (a int); -- why` the column `a int` walked
+// past `)`, out of its column list, and took the comment trailing the whole
+// statement — reading back as `a int); -- why`.
+func isDeclPunctuation(t string) bool {
+	return t == ";" || t == ","
+}
+
+// terminatorEnd returns the end of an anonymous `;` immediately following
+// decl, or zeros. tree-sitter-sql puts the semicolon OUTSIDE the statement it
+// terminates, so a statement's span stopped short of its own terminator and
+// deleting a table left a bare `;` behind.
+//
+// No line check: the `;` is the IMMEDIATE sibling, so nothing sits between it
+// and the statement even when it is written on the next line, and absorbing
+// it cannot reach into whatever follows.
+func terminatorEnd(decl *sitter.Node) (endLine, endCol int) {
+	next := decl.NextSibling()
+	if next == nil || next.IsNamed() || next.Type() != ";" {
+		return 0, 0
+	}
+	_, _, el, ec := nodeLineCols(next)
+	return el, ec
+}
+
 // isTrailingComment reports whether a comment node trails code on its own
 // line — `Enabled bool // why` — rather than standing on a line of its own.
 //
@@ -750,7 +780,7 @@ func trailingCommentSpan(decl *sitter.Node) (startLine, startCol, endLine, endCo
 		// over it, but only while it stays on this line: go's newline
 		// terminator is also anonymous and starts here, and following it
 		// would hand this declaration the DOC comment of the next one.
-		if next.IsNamed() || el != line {
+		if next.IsNamed() || el != line || !isDeclPunctuation(next.Type()) {
 			break
 		}
 		cur = next
@@ -1118,6 +1148,14 @@ func declLineCols(n *sitter.Node) (startLine, startCol, endLine, endCol int) {
 		}
 		startLine, startCol = pStart, pCol
 		cur = prev
+	}
+	// Only for the sql statement wrapper: typescript and java either already
+	// carry the `;` inside the declaration or deliberately leave it out of a
+	// multi-declarator range, and widening those is a different change.
+	if isStatementWrapper(n) {
+		if el, ec := terminatorEnd(n); el != 0 {
+			endLine, endCol = el, ec
+		}
 	}
 	if _, _, tl, tc := trailingCommentSpan(n); tl != 0 {
 		endLine, endCol = tl, tc

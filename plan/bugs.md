@@ -131,10 +131,31 @@ symptom:
 Verified: both comment styles and `CREATE FUNCTION`, matrix green with no
 KNOWN entries left, 0 sibling overlaps over 25,376 files / 2.24M symbols.
 
-**Deliberately not fixed:** a sql statement's span stops before its `;`, which
-the grammar makes a sibling of the statement rather than part of it, so
-deleting a table leaves a bare `;`. Absorbing it is a separate behaviour
-change — recorded under SQL known-limits in plan.md.
+**The `;` is absorbed too** (USER, 2026-08-01). tree-sitter-sql makes the
+semicolon a sibling of the statement rather than part of it, so a statement's
+span stopped short of its own terminator and deleting a table left a bare `;`.
+`terminatorEnd` takes it. No line check is needed: the `;` is the IMMEDIATE
+sibling, so nothing sits between it and the statement even when written on its
+own line, and two statements on one line stay disjoint (verified).
+
+**A regression that fix exposed, shipped in `ef89c6c` and live until now:** a
+child could climb OUT of the construct containing it and claim an ancestor's
+trailing comment. In
+
+    CREATE TABLE t (a int); -- why
+
+the column `a int` stepped over `)`, out of its column list, and read back as
+`a int); -- why` — so node_read on the column returned garbage and node_edit
+on it would have destroyed the `)` and the `;`. Cause: the wrapper-rise added
+for python (climb to a parent that ends exactly where this node does) composed
+with the punctuation-stepping added for typescript's `;`, and nothing said
+which punctuation was safe to cross. `isDeclPunctuation` now allows only `;`
+and `,` — a terminator or separator of the declaration itself — never a
+closing bracket.
+
+The sweep did NOT catch this: it compares SIBLINGS, and the column stayed
+inside its parent's span because the parent had legitimately grown to cover
+the same comment. Pinned instead by a fixture in the trailing-comment class.
 
 ## Stale diagnostics after an OUT-OF-BAND file change
 

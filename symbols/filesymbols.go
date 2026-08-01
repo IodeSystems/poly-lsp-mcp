@@ -2717,6 +2717,14 @@ func declRangeNode(node *sitter.Node) *sitter.Node {
 			return p
 		}
 	case "declaration", "field_declaration":
+		// Java spells its declarator variable_declarator, which the C
+		// count deliberately ignores — so a java field's range used to be
+		// the bare name (`name`, not `String name;`), and node_read handed
+		// back an identifier with no type. Same single-declarator rule:
+		// `int a, b;` keeps per-declarator ranges.
+		if countJavaDeclarators(p) == 1 {
+			return p
+		}
 		// C/C++: the symbol is the declarator, but the DECLARATION is
 		// what a reader (and node_edit) means by the thing — type,
 		// storage class and semicolon included. `int a, b;` keeps
@@ -2738,6 +2746,20 @@ func countSpecChildren(p *sitter.Node) int {
 	cnt := int(p.NamedChildCount())
 	for i := 0; i < cnt; i++ {
 		if strings.HasSuffix(p.NamedChild(i).Type(), "_spec") {
+			n++
+		}
+	}
+	return n
+}
+
+// countJavaDeclarators counts the variable_declarator children of a
+// field_declaration. Only java (and groovy, which shares the shape) spells
+// declarators this way — c and c++ use init_declarator and friends — so this
+// stays zero everywhere else and the C rule below is left untouched.
+func countJavaDeclarators(p *sitter.Node) int {
+	n := 0
+	for i := range int(p.NamedChildCount()) {
+		if p.NamedChild(i).Type() == "variable_declarator" {
 			n++
 		}
 	}

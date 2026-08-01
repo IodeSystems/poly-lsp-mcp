@@ -115,10 +115,41 @@ stranded its own. A declaration now owns the comment trailing it (USER's call
 no other. Full forensics in `plan/bugs.md`.
 - **risks**: field node text is now wider wherever a trailing comment exists,
   so a caller that matched on the bare declaration still works (substring) but
-  a caller comparing whole node text sees more. Java's decl span still starts
-  at the declarator — pre-existing, unrelated to comments, recorded in bugs.md.
-- **optional extensions**: widen the java field decl span to the whole
-  `field_declaration` so its text reads `String name; // why`.
+  a caller comparing whole node text sees more.
+- Java's field span was widened in the same pass (USER, 2026-08-01): a java
+  field's range was the bare declarator (`name`), now the whole
+  `field_declaration` — `@Inject String name; // why`, modifiers and
+  annotations included. Same single-declarator rule as C: `int a, b;` keeps
+  per-declarator ranges so siblings cannot overlap.
+
+◻ **Bug CLASSES are asserted across the whole language registry —
+2026-08-01.** `TestLanguageBugMatrix` (+ `langmatrix_classes_test.go`) states a
+property ONCE and runs it against `config.Default().Languages`, not a
+hand-written list. Every registered language must land in exactly one cell —
+`ok` / `n/a`+reason / `KNOWN`+reason / **unmeasured, which FAILS** — so adding
+a grammar breaks the test until someone decides, per class, where it belongs.
+A `KNOWN` entry that starts passing ALSO fails, so a fix cannot leave a stale
+"unsupported" note behind. Motivation: the hand-written table shipped with the
+trailing-comment fix listed five languages and silently omitted java, which was
+the one still broken. Two classes seeded ("owns the comment trailing it",
+"owns the doc block above it"); the harness's three failure modes are each
+verified by negative control.
+- **next**: decide the two violations the matrix surfaced on its first run
+  (below), then add a class per bug that turns out to be language-shaped.
+- **risks**: fixtures are per-language source, so a class costs real authoring
+  per grammar — the pressure will be to write `n/a` instead of a fixture.
+  `n/a` reasons are prose and nothing checks they are true.
+- **blocking decision (USER owns)** — two real defects, recorded as `KNOWN`
+  rather than silently absent:
+  - **typescript: an EXPORTED declaration loses its doc comment.**
+    `declRangeNode` does not rise to `export_statement`, so `// doc` above
+    `export function f` is outside the span and the span also starts after
+    `export `. Every exported symbol in a TS codebase — i.e. the ones that
+    matter — reads back undocumented, and node_edit replacing one strands its
+    comment. This is the SAME failure the go rule was written to prevent.
+  - **sql: comments are not attached to statements at all**, so `-- doc` above
+    a `CREATE TABLE` is dropped. (Column-level trailing comments DO work.)
+
 
 ✅ **The child LSP now hears about OUT-OF-BAND writes — 2026-07-31.** A
 `git rebase` run through a dun session's exec tool rewrote a file on disk; the

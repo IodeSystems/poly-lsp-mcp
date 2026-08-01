@@ -71,11 +71,38 @@ field's trailing comment IS its godoc.
 fail with the reported symptoms — `C.B doc comment on line 4, want 5` and
 `typescript C.b: decl spans lines 2..3 … reached across into a neighbour`.
 
-**Not fixed, recorded so it is not re-investigated:** a java field's decl span
-still starts at the DECLARATOR (`name; // why`, not `String name; // why`).
-That is pre-existing `declRangeNode` behaviour — java's declarators are
-`variable_declarator` nodes, which its single-declarator count deliberately
-ignores — and is independent of comments.
+**Also fixed in the same pass** (USER, 2026-08-01): a java field's decl span
+started at the DECLARATOR (`name`, not `String name;`), because java spells its
+declarator `variable_declarator` and the C single-declarator count ignores that
+type. `countJavaDeclarators` applies the same rule, so a java field now spans
+the whole `field_declaration` — modifiers and annotations included
+(`@Inject String name; // why`). `int a, b;` keeps per-declarator ranges.
+Re-measured: 0 sibling span overlaps over 25,369 files / 2.24M symbols.
+
+## Doc comments dropped in typescript exports and sql statements
+
+**Reported:** 2026-08-01, by `TestLanguageBugMatrix` on its first run
+**Status:** ❓ open — recorded as KNOWN entries in the matrix, awaiting a call
+
+Both are the class above ("a declaration owns its documentation"), in the
+UPWARD direction, in languages the hand-written table never covered:
+
+- **typescript** — `declRangeNode` does not rise to `export_statement`, so for
+
+      // doc for f
+      export function f() {}
+
+  `f`'s span is `function f() {}`: the doc comment is outside it and so is the
+  `export` keyword. Exported symbols are the ones a caller cares about, so in
+  practice this is most of a TS codebase reading back undocumented, and
+  node_edit replacing the function strands the comment above it — exactly what
+  `declLineCols` was written to prevent in go.
+- **sql** — comments are not attached to statements at all, so `-- doc` above
+  a `CREATE TABLE` is dropped. Column-level TRAILING comments do work
+  (`a int, -- doc`), so this is specifically the block-above rule.
+
+Neither is silent: the matrix lists them as KNOWN with these reasons, and it
+FAILS if either starts passing without the entry being deleted.
 
 ## Stale diagnostics after an OUT-OF-BAND file change
 

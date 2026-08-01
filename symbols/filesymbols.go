@@ -564,6 +564,9 @@ func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int
 		if el != nextTop-1 {
 			break // a blank line (or code) breaks the doc block
 		}
+		if isTrailingComment(s) {
+			break // it documents the declaration it trails, not this one
+		}
 		if !found {
 			endLine, endCol = el, ec
 			found = true
@@ -571,7 +574,16 @@ func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int
 		startLine, startCol = sl, sc
 		nextTop = sl
 	}
-	return startLine, startCol, endLine, endCol
+	if found {
+		return startLine, startCol, endLine, endCol
+	}
+	// No block above: a comment trailing the declaration is its doc instead —
+	// the Go convention for struct fields and enum members. A leading block
+	// wins when both exist, since that is the fuller documentation.
+	if sl, sc, el, ec := trailingCommentSpan(anchor); el != 0 {
+		return sl, sc, el, ec
+	}
+	return 0, 0, 0, 0
 }
 
 // markdownHeadingNode returns the `inline` node holding a section's
@@ -616,6 +628,95 @@ func isCommentNode(t string) bool {
 		return true
 	}
 	return false
+}
+
+// isTrailingComment reports whether a comment node trails code on its own
+// line — `Enabled bool // why` — rather than standing on a line of its own.
+//
+// This is the distinction both span rules were missing. They asked only
+// whether a comment ENDED on the line directly above a declaration, which a
+// trailing comment does, so the comment documenting one field was claimed by
+// the field BELOW it. In go and java that only mis-aimed ::comment; in
+// typescript and kotlin it pulled the neighbour's comment into the next
+// declaration's span, and `delete` on that declaration destroyed it while
+// stranding the comment that really was its own.
+//
+// The test is structural rather than textual: a comment is trailing when
+// something on the same line precedes it. Anonymous siblings count — the `;`
+// after a typescript field is exactly what precedes its comment.
+//
+// The column check is what makes that sound. Go's grammar puts an anonymous
+// newline terminator between declarations, and it ends at column 0 OF THE
+// COMMENT'S OWN ROW — so "the previous sibling ends on this row" alone marks
+// every doc comment in the language as trailing. A sibling ending at column 0
+// contributes nothing to that line; only one ending past it does.
+func isTrailingComment(c *sitter.Node) bool {
+	prev := c.PrevSibling()
+	if prev == nil {
+		return false
+	}
+	end := prev.EndPoint()
+	return end.Row == c.StartPoint().Row && end.Column > 0
+}
+
+// trailingCommentSpan returns the span of the run of comments trailing decl
+// on its final line, or zeros when there is none. A declaration OWNS the
+// comment that trails it for the same reasons it owns the doc block above it
+// (see declLineCols): node_read that omits it hands back undocumented code,
+// node_edit that excludes it cannot rewrite the comment and strands it, and
+// delete orphans it.
+func trailingCommentSpan(decl *sitter.Node) (startLine, startCol, endLine, endCol int) {
+	_, _, line, lineEndCol := nodeLineCols(decl)
+	// A node can END at the start of the following line because it swallowed
+	// its terminating newline — c's preproc_def does, so `#define A 1` claims
+	// to end at column 1 of the NEXT line. It occupies none of that line, and
+	// treating it as the declaration's own would hand it the comment trailing
+	// the next #define. Column 1 is zero-width, so the real last line is the
+	// one before it. (This is the downward twin of the column check in
+	// isTrailingComment; measured at 10,758 sibling span overlaps across a
+	// 22,858-file sweep before the guard, 0 after.)
+	if lineEndCol == 1 && line > 1 {
+		line--
+	}
+	for cur := decl; ; {
+		next := cur.NextSibling()
+		if next == nil {
+			// The declaration can be the TAIL of a wrapper node, with the
+			// comment attached to the wrapper instead: python's assignment
+			// sits inside an expression_statement, and `# why` is the
+			// statement's sibling. Rise only while the parent ends exactly
+			// where this node does, so we never step out past a closing
+			// brace and claim a comment belonging to the enclosing scope.
+			p := cur.Parent()
+			if p == nil || p.EndPoint() != cur.EndPoint() {
+				break
+			}
+			cur = p
+			continue
+		}
+		sl, sc, el, ec := nodeLineCols(next)
+		if sl != line { // starts on a later line — it belongs to what follows
+			break
+		}
+		if isCommentNode(next.Type()) {
+			if startLine == 0 {
+				startLine, startCol = sl, sc
+			}
+			endLine, endCol, line = el, ec, el
+			cur = next
+			continue
+		}
+		// Anonymous punctuation can sit between a declaration and its
+		// comment — the `;` typescript and java close a field with. Step
+		// over it, but only while it stays on this line: go's newline
+		// terminator is also anonymous and starts here, and following it
+		// would hand this declaration the DOC comment of the next one.
+		if next.IsNamed() || el != line {
+			break
+		}
+		cur = next
+	}
+	return startLine, startCol, endLine, endCol
 }
 
 // annMark is one resolved annotation: the AST node for its span, the
@@ -957,6 +1058,11 @@ func nodeLineCols(n *sitter.Node) (startLine, startCol, endLine, endCol int) {
 // A blank line ends the block: that is the language-level convention for "this
 // comment belongs to the next thing" in Go and TS alike. Python needs nothing —
 // its docstrings live inside the body, already in the span.
+//
+// It is extended DOWNWARD too, over a comment trailing the declaration on its
+// last line, which is where the documentation for a struct field actually
+// gets written (and what godoc reads). Both directions stop at a trailing
+// comment belonging to something else — see isTrailingComment.
 func declLineCols(n *sitter.Node) (startLine, startCol, endLine, endCol int) {
 	startLine, startCol, endLine, endCol = nodeLineCols(n)
 	for cur := n; ; {
@@ -968,8 +1074,14 @@ func declLineCols(n *sitter.Node) (startLine, startCol, endLine, endCol int) {
 		if pEnd+1 != startLine { // blank line (or same line) → not a doc comment
 			break
 		}
+		if isTrailingComment(prev) { // documents the line it sits on, not this one
+			break
+		}
 		startLine, startCol = pStart, pCol
 		cur = prev
+	}
+	if _, _, tl, tc := trailingCommentSpan(n); tl != 0 {
+		endLine, endCol = tl, tc
 	}
 	return startLine, startCol, endLine, endCol
 }

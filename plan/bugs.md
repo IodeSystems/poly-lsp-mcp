@@ -2,6 +2,81 @@
 
 Known defects. Format: one entry per bug, with repro, impact, and status.
 
+## A trailing comment was credited to the declaration BELOW it
+
+**Reported:** 2026-08-01 (dogfooding, from a `node_edit` toolcall)
+**Status:** ✅ fixed 2026-08-01 — `isTrailingComment` +
+`trailingCommentSpan`, pinned by `TestTrailingCommentBelongsToTheLineItSitsOn`,
+`TestTrailingCommentIsTheDeclsOwnDoc`, `TestOwnLineCommentIsStillADocComment`,
+`TestSiblingSpansDoNotOverlap`, and two MCP-level tests
+
+**Repro** (as reported): edit a struct field, writing the line as it appears
+on screen.
+
+    node_edit node=harness.go#Config.EnableShip
+      oldText="EnableShip  bool  // add the ship tool (opt-in: …)"
+    → ERROR: oldText not found in harness.go#Config.EnableShip …
+      which is:
+      ---
+      EnableShip  bool
+      ---
+
+**Cause.** Both span rules asked only whether a comment ENDED on the line
+directly above a declaration — `declLineCols` extending the decl span upward,
+`docCommentSpan` filling `::comment`. A comment trailing the PREVIOUS
+declaration ends on exactly that line, so it satisfied the test. Neither rule
+asked whether the comment began its line.
+
+That single omission produced two different symptoms depending on whether the
+grammar puts a node between declarations:
+
+- **go, java** — decl spans were right (an anonymous newline terminator
+  happens to sit between declarations and breaks the scan), but `::comment` on
+  a field returned the comment belonging to the field ABOVE it.
+- **typescript, kotlin, c** — nothing intervenes, so the neighbour's comment
+  was pulled INTO the next declaration's span. `node_read Config.enableShip`
+  answered `"// the harness name\n  enableShip = false"`, and deleting the
+  field wrote:
+
+      name: string = ""; ; // add the ship tool
+
+  — `name`'s comment destroyed, `enableShip`'s own comment stranded where it
+  now falsely documents `name`, plus a stray `;`.
+- **python** — clean throughout; its comment is a sibling of the wrapping
+  statement, which the scan never reached.
+
+**Fix**, in two halves. `isTrailingComment` rejects a comment that has code
+before it on its line, so no declaration inherits its neighbour's; and
+`trailingCommentSpan` gives the comment to the declaration it actually trails,
+extending both the decl span and `::comment`. The second half is a BEHAVIOR
+CHANGE (USER's call 2026-08-01): a field node's text now carries its own
+comment, which is what makes the reported edit apply, and is the existing
+"a declaration OWNS its doc comment" rule pointed the other way — in go a
+field's trailing comment IS its godoc.
+
+**Two traps, both found by measurement rather than reasoning:**
+- Go's grammar puts an anonymous newline terminator between declarations that
+  ENDS at column 0 of the comment's own row, so a naive "previous sibling ends
+  on this row" test marks every doc comment in the language as trailing. The
+  column check is what makes the predicate sound.
+- Its mirror: c's `preproc_def` swallows its terminating newline, so
+  `#define A 1` reports an end at column 1 of the NEXT line and claimed the
+  comment trailing the `#define` below it. A sweep of 22,858 files / 2.2M
+  symbols showed **10,758 sibling span overlaps** against a baseline of 0
+  before the guard was added, and 0 after. That sweep is now
+  `TestSiblingSpansDoNotOverlap`, run against this repo by default and
+  widenable with `SWEEP_ROOT`.
+
+**Verified by negative control**: with both helpers stubbed out, the new tests
+fail with the reported symptoms — `C.B doc comment on line 4, want 5` and
+`typescript C.b: decl spans lines 2..3 … reached across into a neighbour`.
+
+**Not fixed, recorded so it is not re-investigated:** a java field's decl span
+still starts at the DECLARATOR (`name; // why`, not `String name; // why`).
+That is pre-existing `declRangeNode` behaviour — java's declarators are
+`variable_declarator` nodes, which its single-declarator count deliberately
+ignores — and is independent of comments.
+
 ## Stale diagnostics after an OUT-OF-BAND file change
 
 **Reported:** 2026-07-31

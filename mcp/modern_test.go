@@ -1737,3 +1737,90 @@ func TestModernNodeEditFileNodeExpandMiddle(t *testing.T) {
 		t.Errorf("expansion missing.\nFile:\n%s", string(after))
 	}
 }
+
+// A field's trailing comment is part of the field, so an edit naming it in
+// oldText applies. Reported from dogfooding: the agent wrote the field line
+// as it appears on screen, comment included, and got "oldText not found"
+// because the node stopped at the declaration.
+func TestModernNodeEditFieldTrailingComment(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+
+	src := "package main\n\ntype Config struct {\n" +
+		"\tName       string // the harness name\n" +
+		"\tEnableShip bool   // add the ship tool (enabled by default)\n" +
+		"\tTimeout    int\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "harness.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := s.callTool("node_read", map[string]any{"node": "harness.go#Config.EnableShip"})
+	if r.IsError {
+		t.Fatalf("node_read errored: %s", r.Content[0].Text)
+	}
+	if !strings.Contains(r.Content[0].Text, "add the ship tool") {
+		t.Errorf("the field's own comment is missing from its text: %s", r.Content[0].Text)
+	}
+	// ...and it must NOT have taken the comment belonging to the line above.
+	if strings.Contains(r.Content[0].Text, "the harness name") {
+		t.Errorf("field took the PREVIOUS field's comment: %s", r.Content[0].Text)
+	}
+
+	e := s.callTool("node_edit", map[string]any{
+		"node":    "harness.go#Config.EnableShip",
+		"oldText": "EnableShip bool   // add the ship tool (enabled by default)",
+		"newText": "EnableShip bool   // add the ship tool (opt-in)",
+	})
+	if e.IsError {
+		t.Fatalf("the reported edit still fails: %s", e.Content[0].Text)
+	}
+
+	after, err := os.ReadFile(filepath.Join(dir, "harness.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "package main\n\ntype Config struct {\n" +
+		"\tName       string // the harness name\n" +
+		"\tEnableShip bool   // add the ship tool (opt-in)\n" +
+		"\tTimeout    int\n}\n"
+	if string(after) != want {
+		t.Errorf("file after edit:\nwant %q\ngot  %q", want, string(after))
+	}
+}
+
+// Deleting a declaration takes its own trailing comment with it and leaves
+// the neighbour's alone. Before the span fix this did the exact opposite in
+// typescript: it destroyed the comment above and stranded its own.
+func TestModernNodeDeleteTakesOwnTrailingComment(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+
+	src := "export class Config {\n" +
+		"  name: string = \"\"; // the harness name\n" +
+		"  enableShip = false; // add the ship tool\n" +
+		"  timeout = 0;\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "web/conf.ts"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if r := s.callTool("node_edit", map[string]any{
+		"node": "web/conf.ts#Config.enableShip", "delete": true,
+	}); r.IsError {
+		t.Fatalf("delete errored: %s", r.Content[0].Text)
+	}
+
+	after, err := os.ReadFile(filepath.Join(dir, "web/conf.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(after)
+	if !strings.Contains(got, "// the harness name") {
+		t.Errorf("delete destroyed the PREVIOUS field's comment:\n%s", got)
+	}
+	if strings.Contains(got, "// add the ship tool") {
+		t.Errorf("delete stranded the deleted field's own comment:\n%s", got)
+	}
+	if !strings.Contains(got, "timeout = 0;") {
+		t.Errorf("delete damaged the field below:\n%s", got)
+	}
+}

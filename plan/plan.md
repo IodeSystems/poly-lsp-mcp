@@ -103,6 +103,23 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+✅ **A trailing comment now belongs to the line it sits on — 2026-08-01.** A
+dogfood `node_edit` wrote a struct field the way it appears on screen, comment
+included, and got "oldText not found". Behind it: both span rules asked only
+whether a comment ENDED on the line above a declaration, which a comment
+trailing the PREVIOUS declaration does. In go/java that mis-aimed `::comment`;
+in typescript/kotlin/c it pulled the neighbour's comment into the next
+declaration's span, so deleting a field DESTROYED the comment above it and
+stranded its own. A declaration now owns the comment trailing it (USER's call
+— the existing "owns its doc comment" rule, pointed the other way), and owns
+no other. Full forensics in `plan/bugs.md`.
+- **risks**: field node text is now wider wherever a trailing comment exists,
+  so a caller that matched on the bare declaration still works (substring) but
+  a caller comparing whole node text sees more. Java's decl span still starts
+  at the declarator — pre-existing, unrelated to comments, recorded in bugs.md.
+- **optional extensions**: widen the java field decl span to the whole
+  `field_declaration` so its text reads `String name; // why`.
+
 ✅ **The child LSP now hears about OUT-OF-BAND writes — 2026-07-31.** A
 `git rebase` run through a dun session's exec tool rewrote a file on disk; the
 fsnotify watcher re-indexed it and told the child LSP nothing, so gopls kept

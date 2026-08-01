@@ -109,8 +109,6 @@ func docBlockAboveClass() bugClass {
 			"xml":      "no grammar walk; comments are not modelled as docs",
 		},
 		known: map[string]string{
-			"typescript": "an EXPORTED declaration loses its doc comment: declRangeNode does not rise " +
-				"to export_statement, so the span is the bare function and starts after `export `",
 			"sql": "comments are not attached to statements at all — `-- doc` above CREATE TABLE is dropped",
 		},
 		fixtures: map[string]spanFixture{
@@ -119,8 +117,20 @@ func docBlockAboveClass() bugClass {
 				want: map[string]string{"F": "// doc for F\nfunc F() {}"},
 			},
 			"typescript": {
-				src:  "// doc for f\nexport function f() {}\n",
-				want: map[string]string{"f": "// doc for f\nexport function f() {}"},
+				// `export` wraps the declaration, and for `const` it wraps a
+				// lexical_declaration that wraps the declarator — two levels.
+				// Both shapes are here because fixing only the one-level case
+				// would have left `export const` broken and the class green.
+				src: "// doc for f\nexport function f() {}\n\n" +
+					"// doc for x\nexport const x = 1;\n\n" +
+					"// doc for C\nexport class C {}\n\n" +
+					"// doc for q\nconst q = 2;\n",
+				want: map[string]string{
+					"f": "// doc for f\nexport function f() {}",
+					"x": "// doc for x\nexport const x = 1;",
+					"C": "// doc for C\nexport class C {}",
+					"q": "// doc for q\nconst q = 2;",
+				},
 			},
 			"python": {
 				src:  "# doc for f\ndef f():\n    pass\n",

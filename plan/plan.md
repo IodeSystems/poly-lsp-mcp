@@ -139,16 +139,19 @@ verified by negative control.
 - **risks**: fixtures are per-language source, so a class costs real authoring
   per grammar — the pressure will be to write `n/a` instead of a fixture.
   `n/a` reasons are prose and nothing checks they are true.
-- **blocking decision (USER owns)** — two real defects, recorded as `KNOWN`
-  rather than silently absent:
-  - **typescript: an EXPORTED declaration loses its doc comment.**
-    `declRangeNode` does not rise to `export_statement`, so `// doc` above
-    `export function f` is outside the span and the span also starts after
-    `export `. Every exported symbol in a TS codebase — i.e. the ones that
-    matter — reads back undocumented, and node_edit replacing one strands its
-    comment. This is the SAME failure the go rule was written to prevent.
-  - **sql: comments are not attached to statements at all**, so `-- doc` above
-    a `CREATE TABLE` is dropped. (Column-level trailing comments DO work.)
+- The matrix surfaced two real defects on its first run. **typescript is
+  FIXED** (USER, 2026-08-01): an exported declaration lost its doc comment and
+  its `export` keyword. The wrappers nest — `export const x = 1` is a
+  declarator inside a lexical_declaration inside an export_statement — so
+  rising one level would have fixed `export function`, left `export const`
+  broken, and shown the class GREEN. `docCommentAnchor` loops instead, and the
+  fixture now covers all three shapes plus a bare `const`, which had no doc
+  comment either. 0 overlaps and identical TS symbol counts on a real
+  frontend, so the wider spans lose nothing.
+- **sql remains KNOWN**: comments are not attached to statements at all, so
+  `-- doc` above a `CREATE TABLE` is dropped. (Column-level trailing comments
+  DO work, so it is specifically the block-above rule.) Not yet a decision —
+  raise it if SQL docs start mattering.
 
 
 ✅ **The child LSP now hears about OUT-OF-BAND writes — 2026-07-31.** A

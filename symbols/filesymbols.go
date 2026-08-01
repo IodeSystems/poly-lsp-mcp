@@ -545,18 +545,41 @@ func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string
 // none separated from the declaration by a blank), so a floating comment
 // earlier in the file is not mistaken for the doc. Decorated (Python)
 // and exported (TS) declarations look above their wrapper.
-func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int) {
+// docCommentAnchor climbs from a symbol's node to the node the doc comment
+// actually sits above. The symbol is often the declarATOR, wrapped in one or
+// more nodes the comment precedes instead — and the wrappers NEST, which is
+// why this loops: `export const x = 1` puts a variable_declarator inside a
+// lexical_declaration inside an export_statement, and stopping at the first
+// wrapper finds no comment at all.
+func docCommentAnchor(node *sitter.Node) *sitter.Node {
 	anchor := node
-	if p := node.Parent(); p != nil {
+	for {
+		p := anchor.Parent()
+		if p == nil {
+			return anchor
+		}
 		switch p.Type() {
 		case "decorated_definition", "export_statement",
 			// C/C++ wrappers: the symbol is the declarator (or the
 			// templated declaration), but the comment sits above the
 			// whole declaration.
 			"declaration", "field_declaration", "template_declaration":
-			anchor = p
+		case "lexical_declaration", "variable_declaration":
+			// `const x = 1` — but `const a = 1, b = 2` has two symbols
+			// under one declaration, and neither may claim the whole
+			// thing or they would overlap.
+			if countVariableDeclarators(p) != 1 {
+				return anchor
+			}
+		default:
+			return anchor
 		}
+		anchor = p
 	}
+}
+
+func docCommentSpan(node *sitter.Node) (startLine, startCol, endLine, endCol int) {
+	anchor := docCommentAnchor(node)
 	nextTop := int(anchor.StartPoint().Row) + 1 // 1-based line the block must butt against
 	found := false
 	for s := anchor.PrevNamedSibling(); s != nil && isCommentNode(s.Type()); s = s.PrevNamedSibling() {
@@ -2722,7 +2745,7 @@ func declRangeNode(node *sitter.Node) *sitter.Node {
 		// the bare name (`name`, not `String name;`), and node_read handed
 		// back an identifier with no type. Same single-declarator rule:
 		// `int a, b;` keeps per-declarator ranges.
-		if countJavaDeclarators(p) == 1 {
+		if countVariableDeclarators(p) == 1 {
 			return p
 		}
 		// C/C++: the symbol is the declarator, but the DECLARATION is
@@ -2736,6 +2759,25 @@ func declRangeNode(node *sitter.Node) *sitter.Node {
 		}
 	case "template_declaration":
 		// The template header is part of the declaration it introduces.
+		return p
+	case "export_statement":
+		// TypeScript: `export` is part of the declaration, and the doc
+		// comment sits above the EXPORT, not above `function`. Without
+		// this the span was the bare `function f() {}` — every exported
+		// symbol, which is to say the ones a caller cares about, read
+		// back undocumented, and replacing one stranded its comment.
+		return p
+	case "lexical_declaration", "variable_declaration":
+		// `const x = 1` — the symbol is the declarator, but the keyword
+		// and the semicolon are part of the thing, and the doc comment
+		// precedes the keyword. `const a = 1, b = 2` keeps per-declarator
+		// ranges so the two do not overlap.
+		if countVariableDeclarators(p) != 1 {
+			return node
+		}
+		if g := p.Parent(); g != nil && g.Type() == "export_statement" {
+			return g
+		}
 		return p
 	}
 	return node
@@ -2752,11 +2794,12 @@ func countSpecChildren(p *sitter.Node) int {
 	return n
 }
 
-// countJavaDeclarators counts the variable_declarator children of a
-// field_declaration. Only java (and groovy, which shares the shape) spells
-// declarators this way — c and c++ use init_declarator and friends — so this
-// stays zero everywhere else and the C rule below is left untouched.
-func countJavaDeclarators(p *sitter.Node) int {
+// countVariableDeclarators counts the variable_declarator children of a
+// declaration. Java, groovy and typescript all spell declarators this way —
+// c and c++ use init_declarator and friends — so this stays zero for them and
+// the C rule is left untouched. More than one means `int a, b;`, where each
+// symbol must keep its own range or the two would overlap.
+func countVariableDeclarators(p *sitter.Node) int {
 	n := 0
 	for i := range int(p.NamedChildCount()) {
 		if p.NamedChild(i).Type() == "variable_declarator" {

@@ -82,27 +82,42 @@ Re-measured: 0 sibling span overlaps over 25,369 files / 2.24M symbols.
 ## Doc comments dropped in typescript exports and sql statements
 
 **Reported:** 2026-08-01, by `TestLanguageBugMatrix` on its first run
-**Status:** ❓ open — recorded as KNOWN entries in the matrix, awaiting a call
+**Status:** typescript ✅ fixed 2026-08-01 · sql ❓ open (KNOWN in the matrix)
 
 Both are the class above ("a declaration owns its documentation"), in the
-UPWARD direction, in languages the hand-written table never covered:
+UPWARD direction, in languages the hand-written table never covered.
 
-- **typescript** — `declRangeNode` does not rise to `export_statement`, so for
+**typescript — fixed.** `declRangeNode` did not rise to `export_statement`, so
 
-      // doc for f
-      export function f() {}
+    // doc for f
+    export function f() {}
 
-  `f`'s span is `function f() {}`: the doc comment is outside it and so is the
-  `export` keyword. Exported symbols are the ones a caller cares about, so in
-  practice this is most of a TS codebase reading back undocumented, and
-  node_edit replacing the function strands the comment above it — exactly what
-  `declLineCols` was written to prevent in go.
-- **sql** — comments are not attached to statements at all, so `-- doc` above
-  a `CREATE TABLE` is dropped. Column-level TRAILING comments do work
-  (`a int, -- doc`), so this is specifically the block-above rule.
+gave `f` the span `function f() {}`: the doc comment outside it, and the
+`export` keyword too. Exported symbols are the ones a caller cares about, so
+this was most of a TS codebase reading back undocumented, and node_edit
+replacing the function stranded the comment above it — exactly what
+`declLineCols` was written to prevent in go.
 
-Neither is silent: the matrix lists them as KNOWN with these reasons, and it
-FAILS if either starts passing without the entry being deleted.
+The wrappers NEST, which is what made this more than a one-line fix:
+`export const x = 1` is a `variable_declarator` inside a `lexical_declaration`
+inside an `export_statement`. Rising one level fixes `export function` and
+leaves `export const` broken — with the class showing green, since the first
+fixture only covered functions. So `docCommentAnchor` now LOOPS, `declRangeNode`
+handles both wrappers, and the matrix fixture covers `export function`,
+`export const`, `export class` and a bare `const` (which also had no doc
+comment before: nothing ever rose from a declarator to its `lexical_declaration`).
+`const a = 1, b = 2` keeps per-declarator ranges — one comment cannot document
+two symbols, and the spans would overlap.
+
+Measured: 0 sibling overlaps over 25,369 files / 2.24M symbols, and TS symbol
+counts identical with and without the change (812 files / 21,857 symbols on a
+real frontend), so the wider spans lose nothing.
+
+**sql — open.** Comments are not attached to statements at all, so `-- doc`
+above a `CREATE TABLE` is dropped. Column-level TRAILING comments DO work
+(`a int, -- doc`), so this is specifically the block-above rule. Recorded as
+KNOWN in the matrix, which FAILS if it starts passing without the entry being
+deleted.
 
 ## Stale diagnostics after an OUT-OF-BAND file change
 

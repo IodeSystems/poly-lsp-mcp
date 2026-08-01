@@ -1639,3 +1639,101 @@ func TestSkipScanDir_ToolState(t *testing.T) {
 		}
 	}
 }
+
+// oldText+newText on a FILE node (not a symbol) must rewrite the whole
+// file correctly — including when newText is larger than oldText and
+// appends content to the end. This reproduces a real failure mode where
+// the response reported success but the appended content was lost on disk.
+func TestModernNodeEditFileNodeAppend(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+
+	// Read the current file.
+	before, err := os.ReadFile(filepath.Join(dir, "notes.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStr := string(before)
+
+	// Append a block to the end of the file using oldText+newText on the
+	// file node (no symbol). oldText matches the last line; newText
+	// replaces it with the last line PLUS new content.
+	oldText := "# hello"
+	newText := "# hello\n\n## appended\n\nThis line was added by node_edit.\n"
+	r := s.callTool("node_edit", map[string]any{
+		"node":    "notes.md",
+		"oldText": oldText,
+		"newText": newText,
+	})
+	if r.IsError {
+		t.Fatalf("node_edit errored: %s", r.Content[0].Text)
+	}
+
+	// Verify the file on disk has the appended content.
+	after, err := os.ReadFile(filepath.Join(dir, "notes.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterStr := string(after)
+
+	// The old content should still be there (replaced, not removed).
+	if !strings.Contains(afterStr, "## appended") {
+		t.Errorf("appended section missing from disk.\nFile content:\n%s", afterStr)
+	}
+	if !strings.Contains(afterStr, "This line was added by node_edit.") {
+		t.Errorf("appended line missing from disk.\nFile content:\n%s", afterStr)
+	}
+
+	// The file should be larger than before.
+	if len(afterStr) <= len(beforeStr) {
+		t.Errorf("file did not grow: was %d bytes, now %d bytes", len(beforeStr), len(afterStr))
+	}
+
+	// Verify the exact expected content.
+	expected := "# hello\n\n## appended\n\nThis line was added by node_edit.\n\n"
+	if afterStr != expected {
+		t.Errorf("file content mismatch.\nwant %q\ngot  %q", expected, afterStr)
+	}
+}
+
+// oldText+newText on a file node where newText replaces a middle snippet
+// with a much larger block must not truncate the tail.
+func TestModernNodeEditFileNodeExpandMiddle(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+
+	// Start with a known file.
+	file := filepath.Join(dir, "expand.txt")
+	orig := "line1\nline2\nline3\nline4\n"
+	if err := os.WriteFile(file, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace "line2" with a much longer block.
+	r := s.callTool("node_edit", map[string]any{
+		"node":    "expand.txt",
+		"oldText": "line2",
+		"newText": "line2-expanded\nline2-extra\nline2-more",
+	})
+	if r.IsError {
+		t.Fatalf("node_edit errored: %s", r.Content[0].Text)
+	}
+
+	after, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Tail must be preserved.
+	if !strings.Contains(string(after), "line3\nline4\n") {
+		t.Errorf("tail was truncated.\nFile:\n%s", string(after))
+	}
+	// Head must be preserved.
+	if !strings.HasPrefix(string(after), "line1\n") {
+		t.Errorf("head was damaged.\nFile:\n%s", string(after))
+	}
+	// Expansion must be present.
+	if !strings.Contains(string(after), "line2-expanded") {
+		t.Errorf("expansion missing.\nFile:\n%s", string(after))
+	}
+}

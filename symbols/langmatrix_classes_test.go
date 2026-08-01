@@ -108,9 +108,6 @@ func docBlockAboveClass() bugClass {
 			"markdown": "a heading's prose IS its body; there is no separate doc block",
 			"xml":      "no grammar walk; comments are not modelled as docs",
 		},
-		known: map[string]string{
-			"sql": "comments are not attached to statements at all — `-- doc` above CREATE TABLE is dropped",
-		},
 		fixtures: map[string]spanFixture{
 			"go": {
 				src:  "package p\n\n// doc for F\nfunc F() {}\n",
@@ -157,8 +154,17 @@ func docBlockAboveClass() bugClass {
 				want: map[string]string{"f": "// doc for f\nint f() { return 0; }"},
 			},
 			"sql": {
-				src:  "-- doc for t\nCREATE TABLE t (a int);\n",
-				want: map[string]string{"t": "-- doc for t\nCREATE TABLE t (a int);"},
+				// Both comment styles: tree-sitter-sql calls a `--` line a
+				// comment but a /* … */ block `marginalia`, and only the
+				// first was recognised as a comment at all. The span stops
+				// before the `;`, which is a sibling of the statement — see
+				// the SQL known-limits note in plan/plan.md.
+				src: "-- doc for t\nCREATE TABLE t (a int);\n\n" +
+					"/* doc for u */\nCREATE TABLE u (b int);\n",
+				want: map[string]string{
+					"t": "-- doc for t\nCREATE TABLE t (a int)",
+					"u": "/* doc for u */\nCREATE TABLE u (b int)",
+				},
 			},
 		},
 	}

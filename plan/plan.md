@@ -148,10 +148,13 @@ verified by negative control.
   fixture now covers all three shapes plus a bare `const`, which had no doc
   comment either. 0 overlaps and identical TS symbol counts on a real
   frontend, so the wider spans lose nothing.
-- **sql remains KNOWN**: comments are not attached to statements at all, so
-  `-- doc` above a `CREATE TABLE` is dropped. (Column-level trailing comments
-  DO work, so it is specifically the block-above rule.) Not yet a decision —
-  raise it if SQL docs start mattering.
+- **sql is FIXED too** (USER, 2026-08-01): two separate causes, not one.
+  tree-sitter-sql calls a `--` line a `comment` but a `/* … */` block
+  `marginalia`, which `isCommentNode` did not know — so a sql block comment
+  was not a comment anywhere in the codebase. And every CREATE is wrapped in a
+  `statement` node with the doc comment as the WRAPPER's sibling, two levels
+  up from the symbol. Both classes are now `ok` in every language that has a
+  symbol grammar; the matrix carries no KNOWN entries.
 
 
 ✅ **The child LSP now hears about OUT-OF-BAND writes — 2026-07-31.** A
@@ -213,6 +216,10 @@ on extension alone.
     files stay empty); quoted identifiers keep their quotes
     (`"USER"."USER_pkey"`); index/view/type/trigger/sequence/constraint all
     collapse to class `type`, so a selector cannot ask for views specifically.
+    A statement's span also stops BEFORE its `;`, which tree-sitter-sql makes
+    a sibling of the statement rather than part of it — so deleting a table
+    leaves a bare `;` behind. Deliberate scope call 2026-08-01, not a
+    discovery: absorbing it is a separate behaviour change.
   - Go keeps pointer/slice decoration on return segments (`*Config`,
     `[]Schema`) while java/kotlin/typescript/c strip it — USER's call
     2026-07-27, documented on `goTypeSegment`.

@@ -572,7 +572,9 @@ func docCommentAnchor(node *sitter.Node) *sitter.Node {
 				return anchor
 			}
 		default:
-			return anchor
+			if !isStatementWrapper(p) {
+				return anchor
+			}
 		}
 		anchor = p
 	}
@@ -647,10 +649,24 @@ func markdownHeadingText(section *sitter.Node, content []byte) string {
 // block that ::comment, :contains and the decl range all depend on.
 func isCommentNode(t string) bool {
 	switch t {
-	case "comment", "line_comment", "multiline_comment", "block_comment":
+	case "comment", "line_comment", "multiline_comment", "block_comment",
+		// tree-sitter-sql spells a /* … */ block this way, so a sql block
+		// comment was not recognised as a comment at all.
+		"marginalia":
 		return true
 	}
 	return false
+}
+
+// isStatementWrapper reports whether p is a bare `statement` node holding a
+// single declaration — tree-sitter-sql wraps every CREATE in one, and the doc
+// comment is the WRAPPER's sibling, two levels up from the symbol.
+//
+// The single-child guard keeps this from firing on any other grammar that
+// happens to name a node `statement`: a wrapper around exactly one named
+// child is a pass-through, and adopting its range cannot swallow a sibling.
+func isStatementWrapper(p *sitter.Node) bool {
+	return p.Type() == "statement" && p.NamedChildCount() == 1
 }
 
 // isTrailingComment reports whether a comment node trails code on its own
@@ -2778,6 +2794,12 @@ func declRangeNode(node *sitter.Node) *sitter.Node {
 		if g := p.Parent(); g != nil && g.Type() == "export_statement" {
 			return g
 		}
+		return p
+	}
+	// SQL wraps every CREATE in a `statement` node, and the doc comment sits
+	// above the WRAPPER. Without this the span was the bare create_table and
+	// `-- doc` above it was dropped.
+	if isStatementWrapper(p) {
 		return p
 	}
 	return node

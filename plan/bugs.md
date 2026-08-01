@@ -82,7 +82,7 @@ Re-measured: 0 sibling span overlaps over 25,369 files / 2.24M symbols.
 ## Doc comments dropped in typescript exports and sql statements
 
 **Reported:** 2026-08-01, by `TestLanguageBugMatrix` on its first run
-**Status:** typescript ✅ fixed 2026-08-01 · sql ❓ open (KNOWN in the matrix)
+**Status:** ✅ both fixed 2026-08-01
 
 Both are the class above ("a declaration owns its documentation"), in the
 UPWARD direction, in languages the hand-written table never covered.
@@ -113,11 +113,28 @@ Measured: 0 sibling overlaps over 25,369 files / 2.24M symbols, and TS symbol
 counts identical with and without the change (812 files / 21,857 symbols on a
 real frontend), so the wider spans lose nothing.
 
-**sql — open.** Comments are not attached to statements at all, so `-- doc`
-above a `CREATE TABLE` is dropped. Column-level TRAILING comments DO work
-(`a int, -- doc`), so this is specifically the block-above rule. Recorded as
-KNOWN in the matrix, which FAILS if it starts passing without the entry being
-deleted.
+**sql — fixed.** `-- doc` above a `CREATE TABLE` was dropped while
+column-level TRAILING comments worked (`a int, -- doc`), which is what pinned
+it to the block-above rule. TWO independent causes sat behind that one
+symptom:
+
+- tree-sitter-sql calls a `--` line a `comment` but a `/* … */` block
+  `marginalia`. `isCommentNode` knew only the first, so a sql BLOCK comment
+  was not treated as a comment anywhere in the codebase — not as a doc, not as
+  a trailing comment, not by `:contains`.
+- Every CREATE is wrapped in a `statement` node, and the doc comment is the
+  WRAPPER's sibling — two levels up from the symbol, which is the
+  `create_table`. `isStatementWrapper` rises through it, guarded on the
+  wrapper having exactly one named child so no other grammar that happens to
+  name a node `statement` can be caught by it.
+
+Verified: both comment styles and `CREATE FUNCTION`, matrix green with no
+KNOWN entries left, 0 sibling overlaps over 25,376 files / 2.24M symbols.
+
+**Deliberately not fixed:** a sql statement's span stops before its `;`, which
+the grammar makes a sibling of the statement rather than part of it, so
+deleting a table leaves a bare `;`. Absorbing it is a separate behaviour
+change — recorded under SQL known-limits in plan.md.
 
 ## Stale diagnostics after an OUT-OF-BAND file change
 

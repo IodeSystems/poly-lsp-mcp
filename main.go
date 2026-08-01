@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"log"
@@ -135,7 +136,7 @@ func runMCP() {
 	if *validate {
 		log.Printf("mcp: VALIDATE — edits that introduce a new error are reverted")
 	}
-	srv.SetCachePath(filepath.Join(root, ".poly-lsp-mcp", "cache.gob"))
+	srv.SetCachePath(cachePathFor(root))
 	// Spawn child LSPs so node_edit / node_delete / node_refactor can
 	// surface publishDiagnostics in their responses. Manager.Start runs
 	// inside handleInitialize once we know which languages the
@@ -283,4 +284,33 @@ func loadConfigOrDie(path string) (*config.Config, *config.Registry) {
 		log.Printf("config: using defaults (no %s)", path)
 	}
 	return cfg, reg
+}
+
+// cachePathFor returns where this root's parse cache lives.
+//
+// It used to be <root>/.poly-lsp-mcp/cache.gob — inside the workspace being
+// indexed. That left an untracked directory in every repo poly-lsp was ever
+// pointed at: this project gitignores its own, but nobody else's repo does,
+// so `git status` came back dirty in trees where nothing had been edited.
+// Measured on dun: 30 of 34 "dirty" session worktrees were dirty for this
+// reason alone, and dun had to add `.poly-lsp-mcp/` to an artifact-exclusion
+// list to tell real work from our leftovers.
+//
+// The cache is derived data keyed by a path, which is what a user cache
+// directory is for. Roots are hashed rather than slugged so the name is
+// bounded and unambiguous; the leading path element is kept readable so the
+// directory can be browsed. Falls back to the old in-tree location only when
+// there is no user cache dir at all.
+func cachePathFor(root string) string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return filepath.Join(root, ".poly-lsp-mcp", "cache.gob")
+	}
+	sum := sha256.Sum256([]byte(abs))
+	name := fmt.Sprintf("%s-%x", filepath.Base(abs), sum[:8])
+	return filepath.Join(base, "poly-lsp-mcp", name, "cache.gob")
 }

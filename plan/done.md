@@ -3,6 +3,68 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## A zero-result query says which clause emptied it (DONE 2026-08-02)
+
+Moved from plan.md on completion. `mcp/query_hint.go` + the corpus tests in
+`mcp/modern_test.go` / `mcp/query_hint_test.go`.
+
+The rule was already held in two of the three places it belongs — `query.go`
+refuses a literal `|` at PARSE time, and a resolution ERROR carries
+`nearestSyms` + unknown-pseudo suggestions — but a syntactically perfect
+selector that matched nothing returned `{"matches":[],"returned":0}` and said
+nothing. Evidence: a dun session (2026-08-02) fixed a real data race with these
+tools and 4 of its 17 node_query calls hit nothing, the decisive pair being
+`method name~=newInputStream` (∅) followed by `func name~=newInputStream` (2
+matches) — the caller had to know the tag BEFORE it could ask, and a wrong
+guess is byte-identical to the symbol not existing.
+
+`returned == 0` now attaches a **`hint`** (a separate key from `note`: note says
+what happened to the query that ran, hint names the one thing to write instead).
+Four probes, tried in order of CERTAINTY — a fact about the workspace before a
+deduction from a probe:
+
+1. **dead path** — a `[path]` filter matching no file or dir. No evaluation at
+   all, just the tree walk's own file/dir nodes. Suggests a sibling only when
+   the DIRECTORY is real ("right folder, wrong filename"); nearest-path across
+   the whole workspace would be a guess dressed as an answer.
+2. **drop the tag** — re-run with the subject's tag removed. This is the
+   newInputStream case outright; the hint names the found node's real tag and
+   address, so the retry is one step.
+3. **near-miss name** — an exact name that is nearly right. The candidate comes
+   from `idx.Names()` but the ANSWER is verified against the tree
+   (`declsNamed`): suggesting off the index alone proposes `Println`, whose
+   declaration is in the stdlib, and hands back a retry that returns zero again.
+4. **drop the last attribute** — the general form. Fires only where something
+   NARROWING survives (another attr, or a chain element); a tag does not count,
+   because relaxing `func name^=Zzz` to `func` says only "your filter filtered".
+
+**One line, ONE alternative** is enforced by test (≤240 bytes, no newline). The
+moment a hint lists five candidates it is a search result wearing an error's
+clothes, and callers read hints instead of narrowing selectors.
+
+**Cost, measured on this repo (5 selectors, warm engine):** query 390–455 ms,
+hint 143 µs – 4.6 ms — **0.03%–1.05%** of the query it explains. Each probe
+stops at its FIRST match (`need=1`) and gets `min(50_000 ops, what the caller's
+own budget has left)`, so a caller who asked for 1000ops does not get a 50k
+explanation, and a spent budget buys no probe at all. A probe that runs out
+stays silent rather than hedging.
+
+**Probes reuse the LIVE engine** — a fresh one would re-walk the workspace and
+re-parse every file — so invisibility is proven, not assumed: `probeSnapshot` /
+`probeRestore` round-trip every field the evaluator writes and the payload later
+reads, and `TestProbeLeavesEngineUntouched` compares the whole `probeState` with
+`reflect.DeepEqual` (so it keeps holding as the struct grows). Without that
+restore, a probe that blows its allowance makes a query that finished fine
+report itself truncated. All three guards have a demonstrated negative control.
+
+**Known limit, deliberate:** an empty EDGE result carries no hint. `probeSafe`
+excludes ref and generated (`::grep`/`::comment`/`::signature`) elements —
+re-running a chain to explain it would spend child-LSP round-trips the caller
+never asked for, and a generated element filters nothing, so "which clause
+emptied it" has no answer in the containment tree. `#X::out > method` (a habit
+dun invented mid-session, never in the 39-selector corpus) is pinned as
+ANSWERED, not rejected, by `TestSelectorCorpus_EdgeFarEndTag`.
+
 ## Daemon mode — one shared poly-lsp per user (DONE 2026-07-27)
 
 Moved from plan.md when the arc completed. Verified live on 2026-07-28:

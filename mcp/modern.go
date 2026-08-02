@@ -308,6 +308,13 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		if n := literalRegexNote(p.Selector); n != "" {
 			payload["note"] = n
 		}
+		// Which CLAUSE emptied it. Separate key from `note` on purpose:
+		// note says what happened to the query that ran, hint names the
+		// one thing to write instead. Silent unless a probe finds a
+		// concrete alternative (see zeroResultHint).
+		if h := e.zeroResultHint(list); h != "" {
+			payload["hint"] = h
+		}
 	}
 	// What was SEARCHED differs from what was written — say so at any
 	// match count, and ahead of any note about the result set.

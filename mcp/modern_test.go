@@ -85,6 +85,7 @@ type queryResult struct {
 	Returned     int            `json:"returned"`
 	Truncated    bool           `json:"truncated"`
 	Note         string         `json:"note"`
+	Hint         string         `json:"hint"`
 	Edges        string         `json:"edges"`
 	Cost         []string       `json:"cost"`
 	Rollup       map[string]int `json:"rollup"`
@@ -1621,6 +1622,172 @@ func TestLiteralRegexNote(t *testing.T) {
 	n := literalRegexNote(`::grep('func.*refresh')`)
 	if !strings.Contains(n, "-E func.*refresh") {
 		t.Errorf("note should spell out the fix: %s", n)
+	}
+}
+
+// The corpus's SILENT class. Every selector below is syntactically perfect,
+// matches nothing, and used to return {"matches":[],"returned":0} — the same
+// silent no-op the parser refuses at parse time, arriving through the one door
+// still open.
+//
+// Three of the four came from a dun session that fixed a real data race with
+// these tools (2026-08-02); 4 of its 17 node_query calls hit nothing. The one
+// that matters is `method name~=newInputStream` (∅) followed immediately by
+// `func name~=newInputStream` (2 matches): the caller had to know the tag
+// BEFORE it could ask, and guessing wrong returns a result byte-identical to
+// the symbol not existing.
+func TestSelectorCorpus_ZeroResultNamesTheClause(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	cases := []struct {
+		name     string
+		selector string
+		want     []string
+	}{{
+		// The dun case, transposed onto the fixture: Start is a method.
+		name:     "wrong tag, right filter",
+		selector: "func name=Start",
+		want:     []string{"no func matches", "TAG", "method", "main.go#Server.Start"},
+	}, {
+		name:     "wrong tag the other way",
+		selector: "method name=topLevel",
+		want:     []string{"no method matches", "TAG", "func", "web/some_file.ts#topLevel"},
+	}, {
+		// dun guessed a filename from the TEST name; the symbol lived in
+		// main.go. The directory was right, so the nearest sibling is a
+		// correction rather than a shot in the dark.
+		name:     "invented filename in a real directory",
+		selector: "path=web/some_fil.ts",
+		want:     []string{"no file or dir is at path=web/some_fil.ts", "web/some_file.ts"},
+	}, {
+		name:     "path that names nothing at all",
+		selector: "path=cmd/dun/inputstream.go",
+		want:     []string{"no file or dir matches path=cmd/dun/inputstream.go", "workspace-relative"},
+	}, {
+		name:     "misspelt name",
+		selector: "name=Stat",
+		want:     []string{`nothing is named "Stat"`, "main.go#Server.Start", `Retry with "Start"`},
+	}, {
+		// The general form: two clauses, and the hint says which one did it.
+		name:     "one clause of several",
+		selector: "func path=web/some_file.ts name^=Call",
+		want:     []string{"[name^=Call] filter is what emptied it", "web/some_file.ts#topLevel"},
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := query(t, s, map[string]any{"selector": c.selector})
+			if q.TotalMatches != 0 {
+				t.Fatalf("fixture drift: %s matches %d, this corpus is about ZERO results",
+					c.selector, q.TotalMatches)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(q.Hint, w) {
+					t.Errorf("hint does not carry %q\ngot: %s", w, q.Hint)
+				}
+			}
+			// ONE line, ONE alternative. A hint that lists candidates is a
+			// search result wearing an error's clothes, and callers would read
+			// hints instead of narrowing selectors.
+			if strings.Contains(q.Hint, "\n") || len(q.Hint) > 240 {
+				t.Errorf("hint should be one short line, got %d bytes: %s", len(q.Hint), q.Hint)
+			}
+		})
+	}
+}
+
+// A hint is an explanation, not a second answer — so it must stay quiet
+// wherever it cannot name a clause honestly, and must never disturb what the
+// caller is told about their OWN query.
+func TestZeroResultHintStaysQuiet(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	// A result that isn't empty has nothing to explain.
+	if q := query(t, s, map[string]any{"selector": "func"}); q.Hint != "" {
+		t.Errorf("a non-empty result carries no hint; got %q", q.Hint)
+	}
+
+	// A budget blow already explains the emptiness. Blaming the selector for
+	// the clock would be a lie, and the probe would be spending a budget the
+	// caller has already run out of.
+	blown := query(t, s, map[string]any{"selector": "func name=Nope", "budget": "1ops"})
+	if blown.TotalMatches != 0 || !strings.Contains(blown.Note, "work budget") {
+		t.Fatalf("expected a budget-blown empty result; total=%d note=%q",
+			blown.TotalMatches, blown.Note)
+	}
+	if blown.Hint != "" {
+		t.Errorf("a budget blow must not be reported as a selector mistake; got %q", blown.Hint)
+	}
+
+	// A union's emptiness has no single clause to name.
+	if q := query(t, s, map[string]any{"selector": "func name=Stat, method name=Stat"}); q.Hint != "" {
+		t.Errorf("a union carries no hint; got %q", q.Hint)
+	}
+
+	// ::grep has its own answer for an empty result (literalRegexNote) and a
+	// generated element has no containment clause to relax.
+	grep := query(t, s, map[string]any{"selector": `file::grep('func.*Nope')`})
+	if grep.TotalMatches != 0 {
+		t.Fatalf("fixture drift: the literal pattern matched %d", grep.TotalMatches)
+	}
+	if !strings.Contains(grep.Note, "searched LITERALLY") {
+		t.Errorf("the grep note should still fire; got %q", grep.Note)
+	}
+	if grep.Hint != "" {
+		t.Errorf("::grep is answered by its own note, not a clause hint; got %q", grep.Hint)
+	}
+
+	// A lone filter has no OTHER clause to blame. Relaxing `func name^=Zzz`
+	// to `func` would report that some unrelated func exists, which reads as
+	// an answer and says only "your filter filtered".
+	if q := query(t, s, map[string]any{"selector": "func name^=Zzz"}); q.Hint != "" {
+		t.Errorf("a single narrowing clause has nothing to name; got %q", q.Hint)
+	}
+	// Add a second clause and the hint becomes information again.
+	two := query(t, s, map[string]any{"selector": "func path=main.go name^=Zzz"})
+	if !strings.Contains(two.Hint, "[name^=Zzz] filter is what emptied it") {
+		t.Errorf("two clauses, one culprit — say which; got %q", two.Hint)
+	}
+
+	// An occurrence is not a declaration. Println is indexed (main.go calls it)
+	// but declared in the stdlib, so suggesting it would hand back a retry that
+	// returns zero again — worse than the silence it replaced.
+	if q := query(t, s, map[string]any{"selector": "name=Printn"}); q.Hint != "" {
+		t.Errorf("a suggestion must be a real declaration; got %q", q.Hint)
+	}
+
+	// The probe runs on the live engine. It must leave no trace: no phantom
+	// truncation, no cost trace, no budget note stolen from its own run.
+	hinted := query(t, s, map[string]any{"selector": "func name=Start"})
+	if hinted.Hint == "" {
+		t.Fatal("expected a hint to have been probed for")
+	}
+	if hinted.Truncated || hinted.Note != "" || len(hinted.Cost) != 0 {
+		t.Errorf("the probe leaked into the caller's own result: truncated=%v note=%q cost=%v",
+			hinted.Truncated, hinted.Note, hinted.Cost)
+	}
+}
+
+// `#X::out > method` is a habit the 39-selector corpus never saw: dun invented
+// it mid-session and got ∅. It is legal syntax — the far end of an out-edge,
+// filtered to methods — so it must be ANSWERED, not rejected.
+//
+// An empty EDGE result carries no clause hint today: probeSafe excludes ref
+// elements because re-running the chain to explain it would spend child-LSP
+// round-trips the caller never asked for. Recorded as a limit, not a bug.
+func TestSelectorCorpus_EdgeFarEndTag(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	q := query(t, s, map[string]any{"selector": "#'main.go#CallsStart'::out > method"})
+	if !hasNode(q, "main.go#Server.Start") {
+		t.Errorf("::out > method should reach the called method; got %v", nodes(q))
+	}
+	// The same shape with a tag nothing satisfies: empty, and honestly so.
+	if e := query(t, s, map[string]any{"selector": "#'main.go#CallsStart'::out > interface"}); e.TotalMatches != 0 {
+		t.Errorf("no interface is called from CallsStart; got %v", nodes(e))
 	}
 }
 

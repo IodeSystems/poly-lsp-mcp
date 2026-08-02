@@ -3156,15 +3156,7 @@ func renderElem(el *selElem) string {
 			}
 		}
 		for _, a := range c.attrs {
-			if a.axis == attrID && a.op == selExact {
-				b.WriteString("#" + a.value)
-				continue
-			}
-			axis := "name"
-			if a.axis == attrPath {
-				axis = "path"
-			}
-			b.WriteString("[" + axis + selOpSpelling(a.op) + a.value + "]")
+			b.WriteString(renderAttr(a))
 		}
 		if len(c.pseudos) > 0 {
 			b.WriteString(":…")

@@ -134,8 +134,9 @@ trailing-comment fix listed five languages and silently omitted java, which was
 the one still broken. Two classes seeded ("owns the comment trailing it",
 "owns the doc block above it"); the harness's three failure modes are each
 verified by negative control.
-- **next**: decide the two violations the matrix surfaced on its first run
-  (below), then add a class per bug that turns out to be language-shaped.
+- **next**: nothing pending — both first-run violations are fixed (below) and
+  the matrix carries no KNOWN entries. Standing rule, not a task: add a class
+  whenever a bug turns out to be language-shaped.
 - **risks**: fixtures are per-language source, so a class costs real authoring
   per grammar — the pressure will be to write `n/a` instead of a fixture.
   `n/a` reasons are prose and nothing checks they are true.
@@ -276,12 +277,15 @@ named symbols (USER, 2026-07-27).
 
 
 ◐ **Adoption measurement — the existential question, now instrumented.**
-`llm-bench/` (own nested module, uses `agentkit` — `mcpmgr` spawns the server,
-`agent.Session` drives the model on llm.iodesystems.com) poses relationship-
-shaped code-nav tasks with BOTH the graph tools AND a strong grep/read/list
-baseline present, and tallies **reach-rate** — the fraction of tasks that call
-`node_query` at all. Compiles + the server binary spawns (verified); NOT yet
-run (needs `AGENTKIT_API_KEY` + network). **next**:
+The bench NO LONGER LIVES HERE. It is `corrallm`'s llm-bench
+(`cmd/llm-bench` + `internal/bench` + `probes/`, still agentkit-driven —
+`mcpmgr` spawns the server, `agent.Session` drives the model). poly-lsp is a
+first-class TOOLSET axis there (`polylsp`, `polylsp-ro`, `polylsp-validate`,
+each with a `cedeFileTools` switch), with four net-benefit probes already
+authored: `multi-file-refactor`, `cross-language-rename`,
+`codebase-navigation`, `find-render-entrypoints`. The old local `llm-bench/`
+module was never committed and is gone; the results below were taken with it
+and stand as recorded. **next**:
   - ◻ **Run the `asis` baseline.** Reach-rate high → adoption isn't the wall,
     engine work is justified. Low → the icebox's "0 calls / 8 runs" reproduces
     and everything below is premature.
@@ -309,8 +313,105 @@ run (needs `AGENTKIT_API_KEY` + network). **next**:
     So: node_query is *competitive as a peer* (real result), but "does it beat
     the model's native grep/read in a real agent" needs a REAL agent — and the
     one we had wired (autowork3) is a DEAD PROJECT (dropped 2026-07-21, user
-    call). The native-vs-newcomer asymmetry is now UNMEASURED with no vehicle;
-    llm-bench's standing value is A/B descriptions as peers, correctness, cost.
+    call). llm-bench's standing value is A/B descriptions as peers,
+    correctness, cost.
+  - ✅ **The vehicle question is RESOLVED — 2026-08-01 (USER): `dun` +
+    `agentkit`.** dun is a real agent with its OWN native tools, so grep/read
+    carry the reflexive home-field advantage llm-bench-mcp's advertised
+    `read_file` never had. corrallm's llm-bench stays the harness and
+    measurement lib; dun is the SUBJECT. Nothing in either repo mentions the
+    other yet (`grep -ri dun` over corrallm's bench + probes: zero hits), so
+    the wiring is unbuilt — that is the work, not the decision.
+  - ◻ **Wire dun as an llm-bench subject.** The axis that matters is
+    dun-with-poly-lsp vs dun-without, on the same probes, scoring whether
+    node_query is reached AT ALL while the model's native grep/read stay
+    present and untouched. corrallm's `cedeFileTools` switch is the existing
+    near-miss: it REMOVES the alternative, which is the thing already known to
+    force adoption. The finding lives in not removing it.
+  - ✅ **The exclusive lease is GONE from corrallm — 2026-08-01 (USER's call:
+    "no longer needed and is an anti-pattern").** A bench run is now an
+    ordinary caller: no lease, no eviction, nobody turned away. Rationale, in
+    the USER's framing: exclusivity existed to separate model time from queue
+    time, and the bench already measures queue wait directly (`OnRetry` →
+    `stageQueueWait`) and subtracts it — so the outage bought nothing.
+    Removed: `internal/proxy/calibration.go` + its two proxy hooks and
+    `X-Corrallm-Calibrating`; the three `/api/v1/calibrate/*` routes;
+    `--exclusive` through CLI → API → runner → UI; and the bench's
+    `Unload`/`UnloadAll` calls. Kept: `/api/v1/models/{load,unload,unload-all}`
+    for operators (USER: "we still want to be able to programatically unload
+    models"), and `ModeWarm`, since a `Load` takes nothing from anyone.
+    `RunMode` and its store column survive, so no schema migration.
+    Verified: `go build ./...`, `go test ./...` (exit 0), `llm-bench validate`
+    (20 probes, 0 invalid), `make gen` regenerated the SDL, `pnpm build`
+    typechecks. Pre-existing lint/gofmt debt confirmed pre-existing by
+    stash-diff and left alone.
+    - **the cost, recorded so it is not re-derived**: `run: cold|both` is gone,
+      so `capability-vision` is warm-only and the cold-path bug class it was
+      written for (2026-07-18: `ternary-bonsai-27b` dropped an attached image
+      on the first request after a cold load while `/props` said
+      `vision: true`, warm was fine) is **undetectable by the bench**. Flagged
+      before cutting; USER chose to drop cold anyway. Re-testing that path
+      needs a mechanism that does not evict on a shared box — observe the
+      first request after a load someone ELSE caused, rather than arranging
+      one. Written up in `probes/README.md` § "What losing cold mode costs".
+  - ◻ **Run policy on a contested box (USER, 2026-08-01): low priority,
+    generous 429 retry.** Retry is ALREADY right — `internal/bench/run/
+    client.go` sets `RetryBudget = -1` (unbounded, Retry-After-honouring, 429
+    only; 5xx stays bounded) and `OnRetry` accrues the wait so it is
+    subtracted back out of probe timings. Priority is NOT: corrallm.yaml's
+    `keys:` maps only `aw3→interactive` and `ragtag→batch`, so a bench run
+    falls through to the `default` group. Fix is in corrallm, not here: map a
+    bench token to `batch` and point the bench config's `apiKeyEnv` at it.
+    **`reject` is NOT a drop** (assistant got this wrong first pass, USER
+    corrected 2026-08-01): it returns a `BackpressureError` → 429 +
+    Retry-After + capacity/inflight/waiting headers, `429 not 503`
+    deliberately, and `Retry-After = ceil((waiting+1)/capacity) × dwellEWMA`
+    (floor 1s) is a real queue-position estimate. A default-group run gets
+    served; it retries into it. The two properties that DO argue for `batch`:
+    - `interruptible: true` — interactive can PREEMPT a running batch request
+      mid-flight (`pickVictim` → `victim.cancel(ErrPreempted)`). `default`
+      omits the flag, so a default-group bench run holds its slot AGAINST
+      interactive traffic. **But interruptible is WRONG for the bench as
+      wired** (USER asked, verified 2026-08-01): preemption cancels reqCtx
+      MID-GENERATION, and agentkit's retry covers only "up to and including
+      response headers — a stream that dies mid-generation is not resumable".
+      `llm.TransientUpstream` would classify it as infrastructure, but it has
+      NO CALLERS in agentkit or the bench, so `run.go` turns it into
+      `failedRows(Pass:false)` — an interactive user scores as the model
+      failing the task. That is verbatim the incident `transient.go`'s doc
+      comment was written about. So prefer a `bench` group: weight 1,
+      `local: {queue: true}`, `default: reject`, **`interruptible: false`** —
+      yields by queueing without destroying in-flight work. Cost, stated
+      plainly: with no interruptible victim `pickVictim` returns nil and
+      interactive takes `then: fallThrough`, spilling to claude at `$20/hr`.
+      Money instead of destroyed bench work — **USER's call.** Reusing the
+      existing `batch` group is not an option: `ragtag` shares it.
+    - `local: {queue: true}` — a `reject` caller is never appended to
+      `bs.waiters`, so it holds no position and its retries RACE for the freed
+      slot; a queued caller blocks server-side and `promote` picks it by
+      preempt-priority then weighted fairshare. Plus `dwell: 600s/min` caps
+      consumption.
+    Note the backoff hint is NOT lowered by being next in line —
+    `backpressure()` reads the backend's waiter count only, so weight-1 batch
+    and weight-10 interactive get the SAME Retry-After for the same state.
+    Priority decides promotion off the queue, not the hint. And for a reject
+    caller `waiting` counts only server-side waiters, so a saturated box with
+    nobody queued hands back ~one service time — an under-estimate under a
+    retry storm.
+    **Weight is proportional, not a reservation** (USER asked, verified
+    2026-08-01): `pickGrantableWaiter` picks `min(numerator/weight)`, so
+    repeated picks settle interactive at ~10× batch's CONCURRENT slots — but
+    only under sustained contention with both queued, it is work-conserving
+    (idle interactive ⇒ batch takes every slot), and it needs enough physical
+    slots to express (capacity 1 degrades it to a temporal share). Weight is
+    consulted ONLY among waiters, so a `default`-group caller's weight is
+    inert — it never enters `bs.waiters` at all. The real guarantee primitive
+    is `reservation.go`, keyed by LANE not weight (`effCapLocked = capacity −
+    reservedByOthers`, 5m TTL + heartbeat); nothing in corrallm.yaml reserves
+    anything today. And `numerator` is REQUEST COUNT (no group sets
+    `shareCurrency`), so the 10:1 is over concurrent requests, not GPU-seconds
+    — relevant when reading bench wall-clock. `dwell: 600s/min` is a separate
+    consumption limit, not the share currency.
   - ◻ **Collision canary** (`collision*`): grep AND lexical node_query both
     return the merged set (verified) — flips to a graph win only when the LSP
     precision pass resolves the site. Re-run with precision ON to show the
@@ -319,9 +420,23 @@ run (needs `AGENTKIT_API_KEY` + network). **next**:
 sets × three variants, the shipped spec-first desc already saturates reach and
 graph-first. The wording is not the bottleneck on neutral ground; if `inspired`
 taught anything it's that MORE prose is worse, not better.
-**blocking decision (USER owns)**: adoption can no longer be measured on
-home turf (autowork3 dead). Either find/build another real-agent vehicle, or
-accept the llm-bench peer result and let the roadmap ride on it.
+**blocking decision — CLOSED 2026-08-01.** The vehicle is dun/agentkit driven
+by corrallm's llm-bench; the roadmap does not have to ride on the peer result.
+- **risks**: dun's tool surface and prompt are moving targets, so a
+  with/without-poly-lsp diff is only honest if both arms run the same dun
+  revision. And on a contested box an un-queued (`default`-group) run retries
+  into a race rather than holding a fairshare position, so its wall clock is a
+  measurement of luck — the bench subtracts 429 waits, but not the extra
+  round-trips a lost race costs.
+- **blocking decision (USER owns)**: low-priority for the bench means a NEW
+  `bench` group (queue + weight 1 + `interruptible: false`), not `batch` —
+  preemption destroys in-flight generation that nothing retries or labels. The
+  price is interactive spilling to claude (`$20/hr`) instead. Pick one.
+- **latent bug found on the way, corrallm-side, worth filing there**:
+  `llm.TransientUpstream` / `TransientUpstreamReason` are fully written and
+  entirely UNCALLED, so every mid-stream upstream fault (deploy, restart,
+  preempt) still scores as a model failure — the exact regression the function
+  was written to prevent.
 
 ✅ **Cost visibility + estimator, edges, and the node model — all three trees
 COMPLETE → done.md.** `:explain` cost trees, the descendant-chain planner,

@@ -103,6 +103,43 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+◻ **A zero-result query must say which clause emptied it — 2026-08-02.** We
+already hold the rule and apply it in two of the three places it belongs.
+`query.go` refuses a literal `|` at PARSE time with the reasoning written out —
+"a silent no-op is the one outcome a filter must never have" — and an ERROR
+carries `nearestSyms`, unknown-pseudo suggestions and the `#id` hint. But a
+syntactically perfect selector that matches nothing returns
+`{"matches":[],"returned":0}` and says nothing, which is the same silent no-op
+arriving through the one door still open.
+- **The evidence (dun dogfood, 2026-08-02).** A dun session fixed a real data
+  race in its own repo using node_query, and 4 of its 17 tool calls hit nothing:
+  `path=cmd/dun/inputstream.go` (∅ — guessed the filename from the TEST name;
+  the symbol lives in `main.go`), `path=cmd/dun inputStream` (ERROR — the bare
+  path where an id belongs, corpus trap #1), `#inputStream::out > method` (∅ —
+  invented pseudo-syntax, NOT in the 39-selector corpus), and
+  `method name~=newInputStream` (∅), immediately followed by
+  `func name~=newInputStream` (2 matches).
+- **The one that matters is the last.** `setResetCb` IS a method, `newInputStream`
+  is a func, and the caller has to know which BEFORE it asks. Guessing wrong
+  returns a result byte-identical to the symbol not existing, so silence cannot
+  be told from absence — and one more unlucky guess ends with the model
+  concluding the function is not there.
+- **next:** when `returned == 0`, attach a `hint` (an established payload key —
+  node_read already uses it for "returned lines 1-64 of 114"). Four probes over
+  an index that is already in memory: drop the TYPE and keep the name filter
+  (answers the case above outright); drop the LAST attribute, which names the
+  clause that emptied the set and is the general form; a `path=` filter that
+  matched no file at all → nearest real paths; an exact name with a
+  fuzzy/case-insensitive neighbour → suggest it.
+- **risks:** a hint must not become a second query the caller pays for. One
+  line, ONE alternative. The moment it lists five candidates it is a search
+  result wearing an error's clothes, and callers will read hints instead of
+  narrowing selectors.
+- **how it stays honest:** `TestSelectorCorpus_ErrorsNameTheFix` /
+  `_ShellHabits` are already the place. The four selectors above drop in as
+  cases, and `::out > method` is a NEW habit the 39-selector corpus never saw —
+  worth adding whether or not the hint work happens.
+
 ✅ **A trailing comment now belongs to the line it sits on — 2026-08-01.** A
 dogfood `node_edit` wrote a struct field the way it appears on screen, comment
 included, and got "oldText not found". Behind it: both span rules asked only

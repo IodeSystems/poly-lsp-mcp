@@ -389,6 +389,7 @@ func (e *engine) refineFar(far []*treeNode, siteAbs string, line, col int) ([]*t
 	}
 	e.ensureLSPCap()
 	if e.lspLeft <= 0 || !e.s.lspAvailable(siteAbs) {
+		e.probeBlocked()         // a hint probe must not report an unsettled far end
 		return far, refUnsettled // ambiguous, nothing to settle it — a guess
 	}
 	e.lspLeft--
@@ -528,6 +529,7 @@ func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambig
 	}
 	e.ensureLSPCap()
 	if e.lspLeft <= 0 || !e.s.lspAvailable(siteAbs) {
+		e.probeBlocked()          // an existence CLAIM that flips under a probe is a lie
 		return true, refUnsettled // ambiguous, nothing to settle it — a guess
 	}
 	e.lspLeft--
@@ -553,6 +555,7 @@ func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambig
 func (e *engine) confirmSelfCall(n *treeNode, line, col int) bool {
 	e.ensureLSPCap()
 	if e.lspLeft <= 0 || !e.s.lspAvailable(n.abs) {
+		e.probeBlocked() // :recursive degrades to false — not an answer a hint may use
 		e.recursiveUnconfirmed = true
 		return false
 	}

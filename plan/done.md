@@ -57,13 +57,70 @@ reads, and `TestProbeLeavesEngineUntouched` compares the whole `probeState` with
 restore, a probe that blows its allowance makes a query that finished fine
 report itself truncated. All three guards have a demonstrated negative control.
 
-**Known limit, deliberate:** an empty EDGE result carries no hint. `probeSafe`
-excludes ref and generated (`::grep`/`::comment`/`::signature`) elements —
-re-running a chain to explain it would spend child-LSP round-trips the caller
-never asked for, and a generated element filters nothing, so "which clause
-emptied it" has no answer in the containment tree. `#X::out > method` (a habit
-dun invented mid-session, never in the 39-selector corpus) is pinned as
-ANSWERED, not rejected, by `TestSelectorCorpus_EdgeFarEndTag`.
+### The edge-selector limit, lifted the same day (USER's call)
+
+The first pass excluded ref and generated elements from `probeSafe` as a proxy
+for "do not spend child-LSP round-trips". That proxy was too blunt: **edges are
+memoized on the tree for the life of a query** (`refsOutLoaded`/`refsInLoaded`,
+`implRefCache`), so re-running a relaxed form of a chain the caller just ran
+reuses the exact edge objects their query already materialized and resolved —
+free, and as LSP-precise as the answer it explains.
+
+The proxy is replaced by an enforcement at the source, `probeBlocked()`: during
+a probe, `refNodes` / `implementsRefs` refuse to build an edge set that does not
+already exist, and the three LSP degradation paths (`refineFar`, `refineIn`,
+`confirmSelfCall`) mark the probe when they would have asked. Any such probe is
+**INCONCLUSIVE** — its result is discarded, not reported at lower confidence.
+`probe` returns `(hit, ok)` for exactly this: "nothing matches X" and "I stopped
+looking" are different claims and only one is safe to tell a caller deciding
+whether the code exists. `lspLeft` is also forced to 0 (with `lspCapReady`, or
+`ensureLSPCap` refills it), so no path — including one added later — can turn a
+hint into a round-trip. `probeSafe` now excludes only parenthesized groups.
+
+Two probes came out of it, both edge-shaped:
+
+5. **dead chain prefix** — the shortest prefix that already matches nothing.
+   This is the one the caller is least equipped to see: the tool's own recipes
+   teach "0 matches = unused", so `#Nope::in` read as a fact about the code when
+   the symbol simply does not exist. Sound because a top-level chain filters
+   progressively — prefix empty ⇒ chain empty.
+6. **wrong KIND class** — `::in.type` where the edge is `::in.call`. The edge
+   spelling of guess-before-you-ask, same failure as the tag. Reported with
+   `refTypeLabel`, now shared with the result rows so the hint and the `type`
+   field cannot drift into different vocabularies for the same edge.
+
+**The budget had to be rebuilt, and the case that forced it is worth keeping.**
+On this repo `interface method name=Zzzz` answers in **4 µs** — the planner
+seeds an exact-name tip from the index and `Zzzz` occurs nowhere, so nothing is
+walked. Every relaxation DROPS that anchor and falls back to a full forward
+walk: **415 ms of hint to explain 4 µs of query.** The ops cap missed it because
+one `spend(1)` can hide a tree-sitter parse. Fixes, in the order they were
+needed:
+- One allowance for the WHOLE hint (`openHintBudget`), not per probe: ops
+  **and** a wall clock. A hint may take about as long as the query it explains
+  (`time.Since(e.startedAt)`), floored at 10 ms so an instant query can still be
+  explained, capped at 50 ms so a slow one cannot be doubled.
+- `spend()` samples the clock **every** spend while probing, not every 256th —
+  at a 10 ms allowance a 256-spend stride overshoots by multiples of the budget
+  (measured 75 ms), and `time.Now()` at ~30 ns × 50k ops costs 1.5 ms.
+- `hintNearName` was spending **outside the budget entirely**: it verified its
+  candidate with `declsNamed`, which parses every file the name occurs in and
+  charges nothing — **67 ms** of the 80. It now verifies through `probe()` on a
+  hand-built `[name=…]` selector, and pre-filters candidates by length before
+  the edit-distance scan (5,043 names on this repo).
+
+**Re-measured on this repo, 9 selectors:** hints 156 µs – 8.3 ms against
+416–683 ms queries (0.03%–1.9%); the pathological case is 12.3 ms against a
+10 ms allowance and correctly produces NO hint. `lspAsked == 0` throughout.
+Overshoot is bounded by one file parse, since a parse is not interruptible.
+
+Five negative controls, all demonstrated: hint disabled, budget restore removed,
+budget clamp removed, `probeBlocked` neutered, `probeDegraded` ignored,
+`hintNearName` reverted to `declsNamed`, allowance not drawn down.
+
+A symbol with genuinely no incoming edges still gets NO hint — `#'Free'::in.call`
+is a correct answer, and inventing an explanation for a correct answer teaches
+the caller to distrust it.
 
 ## Daemon mode — one shared poly-lsp per user (DONE 2026-07-27)
 

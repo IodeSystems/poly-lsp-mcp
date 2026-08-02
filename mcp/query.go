@@ -352,6 +352,28 @@ type engine struct {
 	workLeft     int
 	workExceeded bool
 
+	// probing marks a zero-result HINT probe (query_hint.go), which reuses
+	// this engine to re-run a relaxed selector. A probe may spend the ops
+	// budget and read anything already computed, but it may NOT do new edge
+	// work: no child-LSP round-trip, no ref set built that the caller's own
+	// query did not already build. probeDegraded records that it tried —
+	// the probe's result is then discarded, because a hint assembled from a
+	// degraded edge set could name a node the caller's retry won't return.
+	probing       bool
+	probeDegraded bool
+
+	// hintOpsLeft / hintDeadline are the allowance shared by ALL probes for
+	// one zero result, set once by zeroResultHint. Two limits because
+	// neither alone is enough: ops are deterministic but do not price a
+	// tree-sitter parse (one spend, tens of ms), and the clock does not
+	// bound a tight in-memory loop.
+	hintOpsLeft  int
+	hintDeadline time.Time
+
+	// startedAt is when this query's tree was built — the baseline for
+	// "a hint may not cost more than the answer it explains".
+	startedAt time.Time
+
 	// deadline is a wall-clock budget (ms mode): spend() trips when the
 	// clock passes it. Zero = no time limit (ops mode only). timedOut
 	// records that the TIME limit tripped, not the work budget — the
@@ -397,7 +419,14 @@ func (e *engine) spend(n int) bool {
 		e.spendTick++
 		// Check on the first spend (an already-expired budget trips at
 		// once) then every 256th — finer sampling would tax a fast query.
-		if (e.spendTick == 1 || e.spendTick&0xff == 0) && time.Now().After(e.deadline) {
+		//
+		// A hint PROBE samples every spend instead. Its whole budget is
+		// ~10-50 ms, and one spend can hide a tree-sitter parse, so a
+		// 256-spend stride overshoots by multiples of the allowance rather
+		// than a fraction of it (measured: 75 ms against a 10 ms budget).
+		// A time.Now() per work unit is ~30 ns and the probe is capped at
+		// 50k of them; paying 1.5 ms to make the bound real is the trade.
+		if (e.probing || e.spendTick == 1 || e.spendTick&0xff == 0) && time.Now().After(e.deadline) {
 			e.workExceeded = true
 			e.timedOut = true
 			if len(e.costStack) > 0 {
@@ -531,7 +560,8 @@ func (s *Server) buildTree() (*engine, error) {
 		full:  filepath.Base(root),
 		abs:   root,
 	}
-	e := &engine{s: s, project: project, fileByRel: map[string]*treeNode{}, elemCost: map[*selElem]int{}}
+	e := &engine{s: s, project: project, fileByRel: map[string]*treeNode{},
+		elemCost: map[*selElem]int{}, startedAt: time.Now()}
 	if s.queryWorkBudget > 0 {
 		// An explicit server-level ops budget (tests, --legacy paths):
 		// deterministic, no wall clock.
@@ -3148,7 +3178,14 @@ func renderElem(el *selElem) string {
 		case c.root:
 			b.WriteString(":root")
 		case c.anyType:
-			b.WriteString("*")
+			// An IMPLIED universal was never written — `#Nope` is not
+			// `*#Nope`. Echo the caller's own spelling back, in the cost
+			// trace and in a zero-result hint alike; a rendering that adds
+			// syntax teaches syntax nobody used. Only skipped when the attrs
+			// will render something, so the element is never blank.
+			if !c.implied || len(c.attrs) == 0 {
+				b.WriteString("*")
+			}
 		default:
 			b.WriteString(c.class)
 			if c.langClass != "" {
@@ -4326,16 +4363,43 @@ func (e *engine) refNodes(n *treeNode, dir string) []*treeNode {
 	}
 	if dir == "out" {
 		if !n.refsOutLoaded {
+			if e.probeBlocked() {
+				return nil
+			}
 			n.refsOutLoaded = true
 			e.buildOutRefs(n)
 		}
 		return n.refsOut
 	}
 	if !n.refsInLoaded {
+		if e.probeBlocked() {
+			return nil
+		}
 		n.refsInLoaded = true
 		e.buildInRefs(n)
 	}
 	return n.refsIn
+}
+
+// probeBlocked reports whether the caller is a hint probe, and records
+// that it just reached work a probe is not allowed to do.
+//
+// This is what makes lifting the edge-selector limit sound. A probe re-runs
+// a relaxed selector to explain an empty result, and the edges it needs are
+// almost always the ones the caller's own query just materialized (they are
+// memoized on the tree for the life of the query) — so the common case is
+// free and as LSP-resolved as the answer it explains. The moment a probe
+// would build a NEW edge set, or ask a child LSP, it is over budget in a way
+// ops cannot express: the answer would cost round-trips the caller never
+// asked for, and under the degraded regime a probe runs in (lspLeft = 0) an
+// ambiguous edge resolves to a GUESS. Both are refused, and the probe's
+// result is thrown away rather than reported at lower confidence.
+func (e *engine) probeBlocked() bool {
+	if !e.probing {
+		return false
+	}
+	e.probeDegraded = true
+	return true
 }
 
 // implementsRefs builds `.implements` edges for a type-like host, on demand,
@@ -4360,6 +4424,9 @@ func (e *engine) implementsRefs(h *treeNode, dir string) []*treeNode {
 	}
 	if refs, ok := e.implRefCache[h][dir]; ok {
 		return refs
+	}
+	if e.probeBlocked() {
+		return nil
 	}
 	var refs []*treeNode
 	defer func() { e.implRefCache[h][dir] = refs }()

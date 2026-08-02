@@ -1774,9 +1774,11 @@ func TestZeroResultHintStaysQuiet(t *testing.T) {
 // it mid-session and got ∅. It is legal syntax — the far end of an out-edge,
 // filtered to methods — so it must be ANSWERED, not rejected.
 //
-// An empty EDGE result carries no clause hint today: probeSafe excludes ref
-// elements because re-running the chain to explain it would spend child-LSP
-// round-trips the caller never asked for. Recorded as a limit, not a bug.
+// An empty edge result now names its clause too. The probe re-runs the chain
+// against edges the caller's own query ALREADY materialized (they are memoized
+// on the tree for the life of a query), so it costs no child-LSP round-trip;
+// a probe that would need new edge work is discarded instead — see
+// TestProbeNeverDoesNewEdgeWork.
 func TestSelectorCorpus_EdgeFarEndTag(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
@@ -1785,9 +1787,58 @@ func TestSelectorCorpus_EdgeFarEndTag(t *testing.T) {
 	if !hasNode(q, "main.go#Server.Start") {
 		t.Errorf("::out > method should reach the called method; got %v", nodes(q))
 	}
-	// The same shape with a tag nothing satisfies: empty, and honestly so.
-	if e := query(t, s, map[string]any{"selector": "#'main.go#CallsStart'::out > interface"}); e.TotalMatches != 0 {
-		t.Errorf("no interface is called from CallsStart; got %v", nodes(e))
+
+	cases := []struct {
+		name     string
+		selector string
+		want     []string
+	}{{
+		// The dead ANCHOR. This is the damaging one: the tool's own recipes
+		// teach "0 matches = unused", so a misspelt symbol reads as a fact
+		// about the code — `#Nope::in` said "nothing calls it" when it should
+		// have said "there is no such thing".
+		name:     "the anchor does not exist",
+		selector: "#Nope::in",
+		want:     []string{"#Nope matches nothing", "rest of the chain never ran"},
+	}, {
+		name:     "dead anchor with a far-end tag behind it",
+		selector: "#Nope::out > method",
+		want:     []string{"#Nope matches nothing"},
+	}, {
+		// The far end's tag, same mistake as `method name~=newInputStream`.
+		name:     "wrong tag on the far end",
+		selector: "#'main.go#CallsStart'::out > interface",
+		want:     []string{"no interface matches", "TAG", "struct #'main.go#Server'"},
+	}, {
+		// The edge spelling of the same guess-before-you-ask: which KIND of
+		// use is it? A wrong kind returns the same ∅ as no edges at all.
+		name:     "wrong kind class",
+		selector: "#'main.go#Server.Start'::in.type",
+		want:     []string{"no ::in.type edge here", "KIND class", "::in.call", "main.go@"},
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := query(t, s, map[string]any{"selector": c.selector})
+			if e.TotalMatches != 0 {
+				t.Fatalf("fixture drift: %s matches %d", c.selector, e.TotalMatches)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(e.Hint, w) {
+					t.Errorf("hint does not carry %q\ngot: %s", w, e.Hint)
+				}
+			}
+			if strings.Contains(e.Hint, "\n") || len(e.Hint) > 240 {
+				t.Errorf("hint should be one short line, got %d bytes: %s", len(e.Hint), e.Hint)
+			}
+		})
+	}
+
+	// A symbol with genuinely no incoming edges gets NO hint: the empty result
+	// IS the answer ("0 matches = unused"), and inventing an explanation for a
+	// correct answer would teach the caller to distrust it.
+	if unused := query(t, s, map[string]any{"selector": "#'main.go#Free'::in.call"}); unused.Hint != "" {
+		t.Errorf("a truly unused symbol needs no hint; got %q", unused.Hint)
 	}
 }
 

@@ -219,14 +219,7 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 			// A ref row teaches the edge: its type IS the selector
 			// spelling, and the far end is keyed by direction so the row
 			// reads as the fact it states.
-			cls := "::" + n.refDir
-			if n.refPos != "" {
-				cls += "." + n.refPos
-			}
-			if n.refKind != "" {
-				cls += "." + n.refKind
-			}
-			m["type"] = cls
+			m["type"] = refTypeLabel(n)
 			// What settled this edge. A caller acting on "who calls Save"
 			// needs to know whether a language server said so (lsp), the
 			// name is unique so the match is certain anyway (lexical), or
@@ -355,6 +348,22 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		payload["cost"] = e.costTrace(list)
 	}
 	return jsonContent(payload), false, nil
+}
+
+// refTypeLabel spells an edge node back as the selector that names it —
+// "::in.param.call". This IS the row's `type` in a result, so a caller
+// can copy it straight back into a query; the zero-result hint uses the
+// same rendering, which is what keeps the two from drifting into
+// different vocabularies for the same edge.
+func refTypeLabel(n *treeNode) string {
+	cls := "::" + n.refDir
+	if n.refPos != "" {
+		cls += "." + n.refPos
+	}
+	if n.refKind != "" {
+		cls += "." + n.refKind
+	}
+	return cls
 }
 
 // fragmentRollup counts ::grep matches per file across the WHOLE result

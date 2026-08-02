@@ -105,20 +105,25 @@ Open frontier:
 
 ✅ **A zero-result query says which clause emptied it — 2026-08-02** →
 done.md. `mcp/query_hint.go`: `returned == 0` attaches a one-line `hint`
-naming ONE alternative, from four probes tried in order of certainty — a dead
-`[path]` filter, drop-the-tag (the `method name~=newInputStream` → `func` case
-that motivated it), a near-miss name verified against the tree, and
-drop-the-last-attribute as the general form. Measured at 0.03%–1.05% of the
-query it explains; each probe stops at the first match and gets
-`min(50k ops, the caller's remaining budget)`.
+naming ONE alternative, from six probes tried in order of certainty — a dead
+`[path]` filter, a dead chain PREFIX (`#Nope::in` no longer reads as "unused"),
+drop-the-tag (the `method name~=newInputStream` → `func` case that motivated
+it), the edge form of the same guess (wrong KIND class), a near-miss name
+verified against the tree, and drop-the-last-attribute as the general form.
+Edge selectors included: the limit was lifted the same day (USER). Measured at
+0.03%–1.9% of the query it explains, `lspAsked == 0`.
 - **risks**: probes reuse the LIVE engine, so a future field the evaluator
   writes and the payload reads must be added to `probeState` or a probe's
   budget blow will report the caller's own complete query as truncated.
   `TestProbeLeavesEngineUntouched` compares the whole struct, which catches
-  the omission only once the new field is IN the struct.
-- **known limit**: an empty EDGE result carries no hint — `probeSafe` excludes
-  ref/generated elements so a hint cannot spend child-LSP round-trips. Lifting
-  it needs the probe to consume (not refund) `lspLeft`.
+  the omission only once the new field is IN the struct. Likewise a future
+  child-LSP path reached during a probe must call `probeBlocked()`; `lspLeft
+  = 0` stops the round-trip either way, but without the mark the probe would
+  report a degraded answer as a confident one.
+- **assumption, recorded**: a hint's cost ceiling is derived from
+  `time.Since(e.startedAt)`, i.e. tree build + evaluation — what the caller
+  actually waited for. Overshoot is bounded by one tree-sitter parse, which is
+  not interruptible.
 
 ✅ **A trailing comment now belongs to the line it sits on — 2026-08-01.** A
 dogfood `node_edit` wrote a struct field the way it appears on screen, comment

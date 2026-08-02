@@ -3,7 +3,6 @@ package mcp
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -43,14 +42,19 @@ func (e *engine) zeroResultHint(list selectorList) string {
 	if !probeSafe(cx) {
 		return ""
 	}
+	e.openHintBudget()
 
 	// Order is by CERTAINTY, not by the plan's listing order. A path that
-	// names no file is a fact about the workspace; a relaxation is a
-	// deduction from one probe. State facts first.
+	// names no file is a fact about the workspace; a chain that is already
+	// empty halfway along makes every later clause irrelevant; a relaxation
+	// is a deduction from one probe. State facts first.
 	if h := e.hintDeadPath(cx); h != "" {
 		return h
 	}
-	if h := e.hintDropType(cx); h != "" {
+	if h := e.hintDeadPrefix(cx); h != "" {
+		return h
+	}
+	if h := e.hintDropTag(cx); h != "" {
 		return h
 	}
 	if h := e.hintNearName(cx); h != "" {
@@ -61,43 +65,57 @@ func (e *engine) zeroResultHint(list selectorList) string {
 
 // probeSafe reports whether a complex is one a probe may re-run.
 //
-// The exclusions are about COST and MEANING, not correctness of the
-// snapshot in probe(): a ref element would spend real child-LSP
-// round-trips to explain an empty result, a generated element (::grep /
-// ::comment / ::signature) mints nodes rather than filtering them so
-// "which clause emptied it" has no answer in the containment tree, and a
-// group has no single subject compound to relax.
+// Only one STRUCTURAL exclusion is left: a parenthesized group has no
+// single subject compound to relax, and cloneComplex has no compound to
+// copy. Edges and generated elements used to be excluded here on the
+// grounds that re-running them would spend child-LSP round-trips — that
+// is now enforced where it actually happens (probeBlocked in query.go /
+// precision.go), which is both stricter and less blunt: an edge chain
+// whose refs the caller's own query already materialized probes for free,
+// and one that would need new edge work is discarded rather than guessed.
 func probeSafe(cx selComplex) bool {
 	for i := range cx.elems {
-		c := cx.elems[i].comp
-		if c == nil {
+		if cx.elems[i].comp == nil {
 			return false // a parenthesized group
-		}
-		if c.isRef || c.isGenerated() {
-			return false
-		}
-		for _, ps := range c.pseudos {
-			if ps.kind == pseudoRecursive {
-				return false // :recursive asks a child LSP
-			}
 		}
 	}
 	return len(cx.elems) > 0
 }
 
-// hintProbeOps bounds ONE probe. A hint must not become a second query
-// the caller pays for, so a probe gets ~1% of the deterministic cap and —
-// because it stops at its FIRST match (need=1) — almost never approaches
-// it. A probe that runs out returns nothing: on a workspace big enough to
-// exhaust this, the result stays as silent as it is today rather than
-// becoming slow.
+// The allowance shared by ALL probes for one zero result. A hint must not
+// become a second query the caller pays for.
 //
-// The ACTUAL allowance is min(this, what the caller's own budget has
-// left). A caller who asked for 1000ops asked for a cheap answer, and
-// spending 50× that to explain it would be answering a question they
-// declined to pay for — so a tight budget buys a cheap probe, and a
-// spent one buys none.
-const hintProbeOps = 50_000
+// Ops alone were not enough, and the case that proved it is worth keeping:
+// on this repo `interface method name=Zzzz` answered in 4µs — the planner
+// seeds an exact-name tip straight from the INDEX, and `Zzzz` occurs
+// nowhere, so nothing is walked. Every relaxation of it DROPS that anchor
+// and falls back to a full forward walk: 415 ms of hint to explain 4 µs of
+// query. The ops cap did not catch it because one `spend(1)` can hide a
+// tree-sitter parse. So relaxing a selector can cost far more than the
+// selector, and the budget has to be wall-clock to see that.
+//
+// The clock is not enough either — it cannot bound a tight in-memory loop
+// deterministically — so both apply, and either one running out ends
+// probing. A hint is best-effort by construction: on a workspace where
+// explaining the result is slow, the result stays as silent as it was
+// before, rather than becoming slow.
+const (
+	hintProbeOps = 50_000 // ~1% of the deterministic cap
+	hintProbeMin = 10 * time.Millisecond
+	hintProbeMax = 50 * time.Millisecond
+)
+
+// openHintBudget opens the allowance for one zero result: a hint may take
+// about as long as the query it explains, floored so an instant query can
+// still be explained and capped so a slow one cannot be doubled.
+func (e *engine) openHintBudget() {
+	// min(…, workLeft): a caller who asked for 1000ops asked for a cheap
+	// answer, and spending 50× that to explain it would be answering a
+	// question they declined to pay for.
+	e.hintOpsLeft = min(hintProbeOps, e.workLeft)
+	e.hintDeadline = time.Now().Add(
+		min(max(time.Since(e.startedAt), hintProbeMin), hintProbeMax))
+}
 
 // probeState is every engine field a probe run can disturb.
 //
@@ -127,44 +145,62 @@ type probeState struct {
 	transUnsettled   int
 	hopCounted       map[*treeNode]bool
 
+	lspCapReady bool
+	probing     bool
+
 	recursiveUnconfirmed  bool
 	implementsUnavailable bool
 }
 
-// probe evaluates a relaxed selector on its own small budget and returns
-// its first match, or nil if it matched nothing / ran out of budget.
+// probe evaluates a relaxed selector on its own small budget.
 //
-// The two are deliberately indistinguishable to the caller: an
-// inconclusive probe and an empty one both mean "nothing to say", and a
-// hint that hedged ("possibly, but I stopped looking") would be worse
-// than silence.
-func (e *engine) probe(list selectorList) *treeNode {
-	ops := min(hintProbeOps, e.workLeft)
-	if ops <= 0 {
-		return nil // the caller's budget is spent; a hint is not worth borrowing against
+// ok=false means INCONCLUSIVE — the probe ran out of ops, or reached edge
+// work it is not allowed to do. It is not "no match", and no hint may be
+// built on it: "nothing matches X" and "I stopped looking" are different
+// claims, and only one of them is safe to tell a caller who is deciding
+// whether the code exists.
+func (e *engine) probe(list selectorList) (hit *treeNode, ok bool) {
+	ops := min(e.hintOpsLeft, e.workLeft)
+	if ops <= 0 || !time.Now().Before(e.hintDeadline) {
+		return nil, false // the allowance is gone; a hint is not worth borrowing against
 	}
 	saved := e.probeSnapshot()
-	// The probe's own world: a bounded ops budget, no clock (a hint must be
-	// reproducible run to run), and throwaway accumulators so nothing it
-	// counts can leak into what the caller is told.
+	// The probe's own world: the remaining hint allowance, throwaway
+	// accumulators so nothing it counts can leak into what the caller is
+	// told, and a SPENT LSP cap so no path — including one added later —
+	// can turn a hint into a round-trip. lspCapReady must be forced too, or
+	// ensureLSPCap would refill it.
 	e.workLeft, e.workExceeded, e.timedOut, e.spendTick = ops, false, false, 0
-	e.deadline = time.Time{}
+	e.deadline = e.hintDeadline
 	e.cap, e.capHit = 0, false
 	e.costStack, e.hopCounted = nil, nil
+	e.lspCapReady, e.lspLeft = true, 0
+	e.probing, e.probeDegraded = true, false
 
 	// need=1: stop at the first match. Every hint names ONE alternative,
 	// so a second match would be work spent on something never said.
 	rows, _ := e.evaluateCapped(list, 1)
-	blown := e.workExceeded
+	conclusive := !e.workExceeded && !e.probeDegraded
+	e.hintOpsLeft -= min(ops, ops-e.workLeft) // never credit a negative overspend
 
+	e.probeDegraded = false
 	e.probeRestore(saved)
 
-	if blown || len(rows) == 0 {
-		return nil
+	if !conclusive {
+		return nil, false
 	}
-	return rows[0]
+	if len(rows) == 0 {
+		return nil, true
+	}
+	return rows[0], true
 	// elemCost is not restored: every probe runs on CLONED elements, so
 	// its entries are keyed by pointers costTrace(list) never looks up.
+}
+
+// found is probe for the relaxation hints, which only ever act on a hit.
+func (e *engine) probeFound(list selectorList) *treeNode {
+	hit, _ := e.probe(list)
+	return hit
 }
 
 func (e *engine) probeSnapshot() probeState {
@@ -175,6 +211,7 @@ func (e *engine) probeSnapshot() probeState {
 		lspLeft: e.lspLeft, lspAsked: e.lspAsked, lspResolved: e.lspResolved,
 		maxHopReached: e.maxHopReached, unsettledFromHop: e.unsettledFromHop,
 		transUnsettled: e.transUnsettled, hopCounted: e.hopCounted,
+		lspCapReady: e.lspCapReady, probing: e.probing,
 		recursiveUnconfirmed:  e.recursiveUnconfirmed,
 		implementsUnavailable: e.implementsUnavailable,
 	}
@@ -188,6 +225,7 @@ func (e *engine) probeRestore(s probeState) {
 	e.lspLeft, e.lspAsked, e.lspResolved = s.lspLeft, s.lspAsked, s.lspResolved
 	e.maxHopReached, e.unsettledFromHop = s.maxHopReached, s.unsettledFromHop
 	e.transUnsettled, e.hopCounted = s.transUnsettled, s.hopCounted
+	e.lspCapReady, e.probing = s.lspCapReady, s.probing
 	e.recursiveUnconfirmed = s.recursiveUnconfirmed
 	e.implementsUnavailable = s.implementsUnavailable
 }
@@ -300,30 +338,105 @@ func nearestInDir(paths []string, want string) string {
 	return ""
 }
 
+// ---------------------------------------------------- probe: dead chain prefix
+
+// hintDeadPrefix finds the SHORTEST prefix of the chain that already
+// matches nothing. Everything after it is irrelevant: a chain filters
+// progressively, so once a position is empty no later clause can put
+// anything back.
+//
+// This is the probe that matters most for edges, and the one the caller
+// is least equipped to see. `#inputStream::out > method` returns ∅ whether
+// inputStream has no method callees or inputStream DOES NOT EXIST — and
+// the tool's own recipes teach "0 matches = unused", so a dead anchor
+// reads as a fact about the code rather than a typo in the question.
+//
+// Sound only for a top-level chain (relTop): a relative list can carry
+// bare position claims, whose truth is judged at a chain position rather
+// than filtered through it.
+func (e *engine) hintDeadPrefix(cx selComplex) string {
+	if cx.rel != relTop || len(cx.elems) < 2 {
+		return ""
+	}
+	for k := 1; k < len(cx.elems); k++ {
+		// A prefix shares the caller's compounds — nothing here mutates
+		// them, so there is no need to clone.
+		pre := selComplex{elems: cx.elems[:k], rel: cx.rel}
+		hit, ok := e.probe(selectorList{pre})
+		if !ok {
+			return "" // inconclusive: say nothing rather than blame this element
+		}
+		if hit != nil {
+			continue // this much of the chain is alive; look further right
+		}
+		culprit := renderElem(&cx.elems[k-1])
+		if k == 1 {
+			return fmt.Sprintf("%s matches nothing, so the rest of the chain never ran — "+
+				"an empty result here says nothing about what follows it. Fix that element first",
+				culprit)
+		}
+		return fmt.Sprintf("the chain is already empty at %s (element %d of %d), so nothing "+
+			"after it could match. Fix that element first", culprit, k, len(cx.elems))
+	}
+	return ""
+}
+
 // ------------------------------------------------------- probe: drop the tag
 
-// hintDropType re-runs the selector with the subject's TAG removed. This
+// hintDropTag re-runs the selector with the subject's TAG removed. This
 // is the `method name~=newInputStream` case outright: the filters are
 // right, the tag is wrong, and the caller had to know which of func /
 // method / field a symbol is BEFORE it could ask.
 //
+// An edge subject has the same failure in its own spelling — the KIND
+// class. `#X::in.call` and `#X::in.type` are the same guess-before-you-ask
+// about how a name is USED, and a wrong guess returns the same ∅ as no
+// edges at all.
+//
 // Reporting the found node's real tag and address makes the answer
 // actionable in one step — the address feeds straight into node_read.
-func (e *engine) hintDropType(cx selComplex) string {
-	sub := cx.elems[len(cx.elems)-1].comp
-	if sub.anyType || sub.class == "" {
+func (e *engine) hintDropTag(cx selComplex) string {
+	last := len(cx.elems) - 1
+	sub := cx.elems[last].comp
+
+	if sub.isRef {
+		if len(sub.refClasses) == 0 {
+			return "" // a bare ::in/::out has no kind to drop
+		}
+		relaxed := cloneComplex(cx)
+		c := relaxed.elems[last].comp
+		c.refClasses = nil
+		hit := e.probeFound(selectorList{relaxed})
+		if hit == nil {
+			return ""
+		}
+		return fmt.Sprintf("no ::%s%s edge here — the KIND class is what emptied it, not the "+
+			"anchor. Without it there is a %s edge at %s. Retry with that kind, or with a bare ::%s",
+			sub.refDir, refClassSuffix(sub.refClasses), refTypeLabel(hit), hit.addr(), sub.refDir)
+	}
+
+	if sub.isGenerated() || sub.anyType || sub.class == "" {
 		return "" // nothing written to drop
 	}
 	relaxed := cloneComplex(cx)
-	c := relaxed.elems[len(relaxed.elems)-1].comp
+	c := relaxed.elems[last].comp
 	c.class, c.anyType, c.implied = "", true, false
-	hit := e.probe(selectorList{relaxed})
+	hit := e.probeFound(selectorList{relaxed})
 	if hit == nil {
 		return ""
 	}
 	return fmt.Sprintf("no %s matches — the TAG is what emptied it, not the filters. "+
 		"Same query without it matches %s #'%s'. Retry with that tag, or with `*`",
 		sub.class, hit.class, hit.addr())
+}
+
+// refClassSuffix spells a ref compound's kind classes back (".call").
+func refClassSuffix(classes []string) string {
+	var b strings.Builder
+	for _, c := range classes {
+		b.WriteString("." + c)
+	}
+	return b.String()
 }
 
 // ------------------------------------------------------ probe: near-miss name
@@ -343,7 +456,7 @@ func (e *engine) hintDropType(cx selComplex) string {
 // filter, everything matches", which is true and useless.
 func (e *engine) hintNearName(cx selComplex) string {
 	idx := e.s.getIndex()
-	if idx == nil {
+	if idx == nil || !time.Now().Before(e.hintDeadline) {
 		return ""
 	}
 	sub := cx.elems[len(cx.elems)-1].comp
@@ -360,21 +473,50 @@ func (e *engine) hintNearName(cx selComplex) string {
 		if idx.NameFreq(a.value) > 0 {
 			continue // the name exists; something ELSE emptied the result
 		}
-		near := nearestName(a.value, idx.Names())
+		near := nearestName(a.value, nameNeighbours(idx.Names(), a.value))
 		if near == "" || near == a.value {
 			continue
 		}
-		// Index-seeded: only files that actually contain `near` are walked,
-		// never the workspace.
-		hits := e.declsNamed(near)
-		if len(hits) == 0 {
+		// Through probe(), so the tree lookup draws on the same ops and
+		// clock allowance as every other probe. Doing it directly (via
+		// declsNamed) parses every file the name occurs in, unbudgeted —
+		// measured at 67 ms on this repo, against a 10 ms allowance.
+		hit := e.probeFound(selectorList{nameSelector(near)})
+		if hit == nil {
 			continue // an occurrence, not a declaration — nothing to retry with
 		}
-		sort.Slice(hits, func(i, j int) bool { return nodeLess(hits[i], hits[j]) })
 		return fmt.Sprintf("nothing is named %q — the nearest thing that IS declared is "+
-			"%s #'%s'. Retry with %q", a.value, hits[0].class, hits[0].addr(), near)
+			"%s #'%s'. Retry with %q", a.value, hit.class, hit.addr(), near)
 	}
 	return ""
+}
+
+// nameNeighbours narrows the candidates nearestName scores. A near miss is
+// a typo or a case slip, and neither changes a name's length by much — so
+// the length filter costs nothing in recall and takes the edit-distance
+// scan off the full name list (5,043 names on this repo).
+func nameNeighbours(names []string, want string) []string {
+	out := make([]string, 0, len(names)/2)
+	for _, c := range names {
+		if d := len(c) - len(want); d <= nameNeighbourSlack && d >= -nameNeighbourSlack {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+const nameNeighbourSlack = 3
+
+// nameSelector builds `[name=<n>]` directly, without going through the
+// parser — the value is a workspace name, not caller text, so quoting it
+// into a selector string only to parse it back would be a round trip
+// through an escaping problem that need not exist.
+func nameSelector(n string) selComplex {
+	comp := &selCompound{
+		anyType: true, implied: true,
+		attrs: []selAttr{{axis: attrName, op: selExact, value: n}},
+	}
+	return selComplex{rel: relTop, elems: []selElem{{comp: comp, min: 1, max: 1}}}
 }
 
 // -------------------------------------------------- probe: drop the last clause
@@ -406,7 +548,7 @@ func (e *engine) hintDropLastAttr(cx selComplex) string {
 	relaxed := cloneComplex(cx)
 	c := relaxed.elems[elem].comp
 	c.attrs = append(c.attrs[:attr], c.attrs[attr+1:]...)
-	hit := e.probe(selectorList{relaxed})
+	hit := e.probeFound(selectorList{relaxed})
 	if hit == nil {
 		return ""
 	}

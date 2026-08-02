@@ -1,0 +1,72 @@
+name: find-render-entrypoints
+class: tooluse
+description: |
+  ## What this measures
+
+  A real "where does this text come from?" trace over a REAL codebase — poly-lsp's
+  own `mcp` package, roughly 8,300 lines, rather than a toy fixture. The model
+  must find every function or method from which a selector-grammar help string
+  can reach a user, and write them to `findings.txt` as `file.go#Symbol`.
+
+  ## Why it needs more than grep
+
+  The answer is a two-hop reference chain. The grammar text lives in one const;
+  it reaches a user through whoever references that const. `grep -r
+  selectorGrammarHelp` finds the SITES but cannot tell you which enclosing
+  function each site belongs to — and the enclosing function is the answer.
+
+  Ground truth, verified by hand against this corpus:
+
+  - `modern.go#handleModernNodeQuery` — the `selector:"?"` escape hatch
+  - `query.go#modSelParser.errf` — guided parse errors
+  - `query.go#modSelParser.parseAttr`
+  - `query.go#modSelParser.parsePseudo`
+
+  ## Reading a failure
+
+  Limits are 20 turns / 40 tool calls rather than the usual 8/24, and that is not
+  generosity — it is a correction. The fixture is 15-20x the size of the other
+  fixtures but originally shipped with default-order limits, so a model could run
+  out of turns AFTER solving it: Qwen3-6-27B-MPT listed all four correct symbols
+  in its turn-9 message, then spent its last turn re-verifying grep line numbers
+  instead of calling `write_file`. Both models hit "max turns exceeded" with
+  `findings.txt` never created, which measured the budget rather than the
+  multi-hop trace.
+
+  The task should still be hard at baseline — that is the premise. Hard means
+  "grep cannot cheaply answer it", not "cannot finish typing".
+workspace: _fixture/
+# A real "where does this phrase come from?" question over a REAL codebase
+# (poly-lsp's own mcp package, ~8.3k lines) rather than a toy fixture.
+#
+# The answer is a two-hop reference chain: the grammar text lives in one const,
+# and reaches a user through whoever references it — which is exactly what a
+# symbol index knows and grep does not. grep -r selectorGrammarHelp finds the
+# SITES; it can't tell you which enclosing FUNCTION each site belongs to.
+#
+# Ground truth (verified by hand against this corpus):
+#   modern.go#handleModernNodeQuery      — the selector:"?" escape hatch
+#   query.go#modSelParser.errf           — guided parse errors
+#   query.go#modSelParser.parseAttr
+#   query.go#modSelParser.parsePseudo
+# 20/40, not 10/20. This fixture is ~8.3k lines — 15-20x the toy fixtures the
+# other net-benefit tasks use — but shipped with limits the same order as the
+# 8/24 default, so baseline ran out of turns before it could RECORD an answer it
+# had already found: Qwen3-6-27B-MPT listed all four correct symbols in its turn-9
+# message, then spent its last turn re-verifying grep line numbers instead of
+# calling write_file. Both models hit "max turns exceeded" with findings.txt
+# never created. That measured budget, not the multi-hop trace under test.
+# The task SHOULD still be hard at baseline (that's the poly-lsp net-benefit
+# premise) — hard means "grep can't cheaply answer it", not "can't finish typing".
+limits: { maxTurnsPerStage: 20, maxToolCallsPerStage: 40 }
+stages:
+  - prompt: |
+      This Go package renders a selector-grammar help text to users. Find EVERY
+      function or method from which that grammar text can reach a user, and write
+      them to findings.txt — one workspace address per line, in the form
+      file.go#Symbol (e.g. query.go#someFunc). Nothing else in the file.
+    checks:
+      - file_contains: { path: findings.txt, text: "handleModernNodeQuery" }
+      - file_contains: { path: findings.txt, text: "errf" }
+      - file_contains: { path: findings.txt, text: "parseAttr" }
+      - file_contains: { path: findings.txt, text: "parsePseudo" }

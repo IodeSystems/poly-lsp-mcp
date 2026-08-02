@@ -1,0 +1,116 @@
+# poly-lsp's own benchmark config.
+#
+# We own what we measure. corrallm owns the HARNESS — the runner, scoring,
+# judge, journal, report, queue-wait subtraction, model iteration — and knows
+# nothing about poly-lsp. This file and bench/probes are the poly-lsp half, and
+# they live here so that changing a probe is a change in the repo whose
+# behaviour it describes.
+#
+#   llm-bench run --config bench/llm-bench.yaml --tasks-dir bench/probes
+#
+# Or register the directory once, on the box, in <corrallm-home>/llm-bench.yaml:
+#
+#   probeDirs:
+#     - ~/local/src/iodesystems/poly-lsp-mcp/bench/probes
+#
+# Then a UI-driven run picks up edits here with no restart and nothing copied.
+
+llm:
+  baseURL: "http://192.168.1.76:8111"
+  apiKeyEnv: LLM_BENCH_LLM_KEY
+
+models:
+  - gemma-4-12b
+  - ternary-bonsai-27b
+  - Qwen3-6-27B-MPT
+
+judge:
+  model: "chat"
+  maxTranscriptBytes: 65536
+
+# The probes this config is for. Named here so `--tasks-dir` is optional when
+# running from the repo root; a relative entry anchors to THIS FILE.
+probeDirs:
+  - ./probes
+
+# Toolsets are the experiment axis: each is a list of EXTRA MCP servers spawned
+# alongside llm-bench-mcp. "{{workspace}}" in an arg becomes the run's scratch
+# workspace. `poly-lsp-mcp mcp --root <workspace>`; build it onto $PATH first.
+toolsets:
+  # The control. Every poly-lsp number is a delta against this.
+  baseline: []
+
+  # poly-lsp owns read/edit/navigate (node_read + node_edit) — cede
+  # llm-bench-mcp's read_file/write_file/list_dir so the model sees ONE
+  # convention, not near-matching duplicates (write_file{path,content} vs
+  # node_edit{file,newText}). Only `run` stays: executing is poly-lsp's one gap.
+  polylsp:
+    cedeFileTools: true
+    servers:
+      - cmd: poly-lsp-mcp
+        args: ["mcp", "--root", "{{workspace}}"]
+
+  # Read-only: navigation + reading, no mutating tools registered. 2 tools
+  # (~620 tok) vs 3 (~990). For exploration/review, a tool the model cannot see
+  # is a tool it cannot call — enforcement, not an instruction.
+  #
+  # cedeFileTools is FALSE here, unlike the other poly-lsp sets: read-only has
+  # no node_edit, so ceding write_file too would leave nothing able to write at
+  # all. This is also the ADD-ON shape nothing else covers — poly-lsp alongside
+  # the normal file tools rather than replacing them: explore semantically,
+  # write with write_file.
+  polylsp-ro:
+    cedeFileTools: false
+    servers:
+      - cmd: poly-lsp-mcp
+        args: ["mcp", "--root", "{{workspace}}", "--read-only"]
+
+  # polylsp + edit validation. node_edit runs the child LSP after each write and
+  # REVERTS any edit that introduces a NEW error (revert-on-new-diagnostics).
+  # Byte-identical to `polylsp` except the --validate flag, so a
+  # polylsp-vs-polylsp-validate diff isolates EDIT SAFETY as the single variable.
+  polylsp-validate:
+    cedeFileTools: true
+    servers:
+      - cmd: poly-lsp-mcp
+        args: ["mcp", "--root", "{{workspace}}", "--validate"]
+
+  # No-run variants: withdraw llm-bench-mcp's `run` tool via baseArgs, so the
+  # model CANNOT build/test itself. This isolates edit validation's value — with
+  # no self-check, a broken edit either lands (polylsp-norun → the external
+  # check fails) or is reverted at edit time (…-validate → passes). The
+  # polylsp-norun vs polylsp-norun-validate delta is what --validate is worth
+  # when the model can't self-diagnose (the case a capable model + run washes
+  # out).
+  polylsp-norun:
+    cedeFileTools: true
+    baseArgs: ["--run-tool=false"]
+    servers:
+      - cmd: poly-lsp-mcp
+        args: ["mcp", "--root", "{{workspace}}"]
+  polylsp-norun-validate:
+    cedeFileTools: true
+    baseArgs: ["--run-tool=false"]
+    servers:
+      - cmd: poly-lsp-mcp
+        args: ["mcp", "--root", "{{workspace}}", "--validate"]
+
+  # The 9-tool surface the 3-tool one replaced. Identical to `polylsp` in every
+  # other respect, so a polylsp-vs-polylsp-legacy diff isolates the SURFACE —
+  # which is the thing under test. The 9 tools bill ~4327 tokens of definitions
+  # every turn against the 3 tools' ~900, and 55% of that bought 4% of usage.
+  polylsp-legacy:
+    cedeFileTools: true
+    servers:
+      - cmd: poly-lsp-mcp
+        args: ["mcp", "--root", "{{workspace}}", "--legacy-tools"]
+
+  # mcpshell (eval, a distinct interface that keeps its file tools) + poly-lsp.
+  # Cede anyway: node_edit is the near-match that confuses the model.
+  full:
+    cedeFileTools: true
+    servers:
+      - cmd: mcpshell
+        args: ["mcp"]
+      - cmd: poly-lsp-mcp
+        args: ["mcp", "--root", "{{workspace}}"]

@@ -299,15 +299,37 @@ named symbols (USER, 2026-07-27).
 
 
 ◐ **Adoption measurement — the existential question, now instrumented.**
-The bench NO LONGER LIVES HERE. It is `corrallm`'s llm-bench
-(`cmd/llm-bench` + `internal/bench` + `probes/`, still agentkit-driven —
-`mcpmgr` spawns the server, `agent.Session` drives the model). poly-lsp is a
-first-class TOOLSET axis there (`polylsp`, `polylsp-ro`, `polylsp-validate`,
-each with a `cedeFileTools` switch), with four net-benefit probes already
-authored: `multi-file-refactor`, `cross-language-rename`,
-`codebase-navigation`, `find-render-entrypoints`. The old local `llm-bench/`
-module was never committed and is gone; the results below were taken with it
-and stand as recorded. **next**:
+**We own what we measure — 2026-08-02 (USER).** The earlier "the bench NO
+LONGER LIVES HERE" was wrong in one direction: the HARNESS is corrallm's, but
+the probes were not. A probe asking "did the model reach for `node_query`" is a
+statement about poly-lsp's behaviour, and it was living in corrallm — reviewed
+by people with no reason to care, with `find-render-entrypoints` carrying a
+snapshot of our own `mcp` package as its fixture. USER's framing: llm-bench was
+made external precisely because what we want to test has no right to belong to
+corrallm.
+- **`bench/` is now ours**: `bench/llm-bench.yaml` (the seven `polylsp*`
+  toolsets + `full`) and `bench/probes/` (the four net-benefit probes). corrallm
+  keeps the harness — runner, scoring, judge, journal, report, queue-wait
+  subtraction — plus `baseline`/`mcpshell` and the probes that measure MODELS.
+  Run: `llm-bench run --config bench/llm-bench.yaml`.
+- **Directory REFERENCES, not copies** (corrallm `9f559cb`): `probeDirs` in a
+  bench config, and `--tasks-dir` / `--bench-probes`, take a LIST. A box names
+  `~/…/poly-lsp-mcp/bench/probes` once in `<corrallm-home>/llm-bench.yaml`;
+  edits here change what it runs, no restart, nothing copied. Relative entries
+  anchor to the config file, not the process cwd. Replace-not-merge is
+  unchanged and deliberate — naming dirs means those probes and no others.
+- **Two defects fell out of the move.** corrallm's `MaterializeBuiltins` never
+  pruned its long-lived temp extraction, so a probe deleted from the library
+  kept running on every box that had ever benched (library said 16, runner ran
+  20) — fixed in `bf4fea7`. And our own index swallowed the new fixture: a
+  pinned snapshot of `mcp/*.go` made `func name=handleModernNodeQuery` return
+  two matches, the `.dun`-worktree failure from the other direction.
+  `skipScanDir` now skips `_fixture` — narrow on purpose, since Jekyll's
+  `_posts` is real content.
+- **risks**: the `find-render-entrypoints` fixture is a pinned snapshot and
+  will drift from the real `mcp` package. Refreshing it moves the numbers, so
+  it has to be its own change, not a drive-by.
+**next**:
   - ◻ **Run the `asis` baseline.** Reach-rate high → adoption isn't the wall,
     engine work is justified. Low → the icebox's "0 calls / 8 runs" reproduces
     and everything below is premature.
@@ -350,6 +372,35 @@ and stand as recorded. **next**:
     present and untouched. corrallm's `cedeFileTools` switch is the existing
     near-miss: it REMOVES the alternative, which is the thing already known to
     force adoption. The finding lives in not removing it.
+    - **Where it lives — decided 2026-08-02 (USER): a GENERIC external-agent
+      subject in corrallm**, `subject: {cmd, args, protocol: jsonl}`. Driving an
+      external agent is a benching capability in a benching tool; the dun-ness
+      lives entirely in `bench/llm-bench.yaml` here. The test that keeps it
+      honest: no string in corrallm may say `dun` or `poly-lsp`. (Rationale
+      comments recording why a capability exists are exempt — that is history,
+      and `llm-bench-mcp`'s `--file-tools` note is worse without its motivating
+      case.)
+    - **Prerequisite, unverified**: whether dun's `-p` line-delimited JSON
+      events expose enough (tool name, args, result) to compute reach /
+      graph-first / grep-free. Everything downstream is blocked on that answer;
+      if they don't, the work is a dun change first.
+    - **The hooks that already exist** (checked 2026-08-02): `dun "task"` runs
+      headless and exits; `-p` emits/reads JSON events; `--url/--model/--key`
+      aim it at corrallm, so queue-wait subtraction and per-model comparison
+      keep working; poly-lsp is already a dun BUILT-IN (`id: code`, opt-in
+      `autostart`) and dun's config already uses `{{workspace}}`, "the same
+      token llm-bench toolsets use". So the with/without arm is a dun config
+      line, not new plumbing.
+    - **What has to be built**: `runOne` is ~380 lines with the mcpmgr Manager,
+      tool surface, `agent.Session`, dispatcher wrapper and stage loop all
+      inline — there is no subject seam to hang this on. And two controlled
+      variables are lost: `MaxToolCallsPerStage`/`MaxTurnsPerStage` and the
+      agentkit Shaper context budget are Session-level, but dun owns its own
+      compaction, so "the same context budget for every model" stops holding
+      unless dun exposes a knob.
+    - **risks**: both arms must run the same dun revision, or the diff measures
+      dun's churn instead of poly-lsp. `check.EvaluateAll` runs against the
+      scratch workspace, so pass/fail ports across unchanged.
   - ✅ **The exclusive lease is GONE from corrallm — 2026-08-01 (USER's call:
     "no longer needed and is an anti-pattern").** A bench run is now an
     ordinary caller: no lease, no eviction, nobody turned away. Rationale, in

@@ -1,0 +1,57 @@
+name: multi-file-refactor
+class: coding
+description: |
+  ## What this measures
+
+  A symbol rename that spans a whole module: `UserID` becomes `AccountID`. The
+  type is defined in `types.go` and referenced across four more files as a struct
+  field, function parameters, a map key type, call sites, and a test.
+
+  A structural rename covers every site in one pass. Hand editing has to grep out
+  each site and rewrite each file, and missing one breaks the build — which is
+  what the checks detect.
+
+  ## Why the checks are semantic, not textual
+
+  `go build` passing is the real proof that EVERY code reference was renamed: a
+  leftover `UserID` identifier would be undefined and fail to compile. So the
+  build is the check, rather than a grep for the absence of the old name.
+
+  That distinction matters. A correct symbol rename legitimately leaves a doc
+  COMMENT mentioning `UserID` untouched, and grepping for the bare string would
+  penalise it — rewarding blind text-replace over correct refactoring, which is
+  exactly backwards for what this task exists to measure. Only the type
+  DECLARATION is asserted textually.
+
+  ## Reading a failure
+
+  A build failure means the rename was partial. A build that passes with `type
+  AccountID` missing means nothing was actually renamed. `go test` last, to
+  confirm behaviour survived.
+workspace: _fixture/
+# Favors poly-lsp: `UserID` is defined in types.go and referenced across 4 more
+# files (struct field, func params, map key type, call sites, test). A structural
+# rename (node_references/node_refactor over file#sym) touches every site in one
+# pass; baseline read_file/write_file must grep out each site and rewrite each
+# file by hand, and MISSING ONE breaks the build (checked below).
+limits: { maxTurnsPerStage: 12, maxToolCallsPerStage: 30 }
+stages:
+  - prompt: |
+      Rename the `UserID` type to `AccountID` throughout this Go module. Update
+      every reference — the type definition, struct fields, function parameters,
+      map key types, call sites, and the test. Nothing else should change; the
+      module must still build and its tests must still pass.
+    checks:
+      # SEMANTIC, not textual: build passing proves EVERY code reference was
+      # renamed (a leftover `UserID` identifier would be undefined → won't
+      # compile). We deliberately do NOT grep for a bare "UserID" everywhere: a
+      # symbol rename (node_refactor) correctly leaves a doc COMMENT that mentions
+      # UserID alone, and penalizing that would reward blind text-replace over
+      # correct refactoring — exactly backwards for what this task measures.
+      - cmd_ok: "go build ./..."
+      # The rename actually happened (not a no-op): the type is now AccountID.
+      - cmd_ok: "grep -rq --include='*.go' 'type AccountID' ."
+      # The old TYPE declaration is gone (a code declaration, not a comment).
+      - cmd_ok: "! grep -rq --include='*.go' 'type UserID' ."
+      # Behaviour preserved.
+      - cmd_ok: "go test ./..."

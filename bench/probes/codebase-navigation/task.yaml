@@ -1,0 +1,55 @@
+name: codebase-navigation
+class: tooluse
+description: |
+  ## What this measures
+
+  Whether a model can answer exact structural questions about a Go codebase and
+  record them. Three questions, answered into `answers.txt` as labeled lines:
+  which functions call `Store.Save`, what `Server.Handle` returns, and every
+  struct with a `CreatedAt` field. Nothing is modified — this is a read-only
+  comprehension task.
+
+  ## Why these three questions
+
+  Each is chosen to punish naive text search:
+
+  - **Call sites** — receiver aliasing hides them. A plain `grep Save` misses the
+    `s.Save` and `store.Save` spellings that actually appear.
+  - **Return type** — has to be resolved, not matched. The answer (`*Response`)
+    is not adjacent to the string you would search for.
+  - **Shared field name** — `CreatedAt` appears on three different structs, and
+    under-counting is the easy failure.
+
+  A symbol index answers all three directly; grep-and-reason has to reconstruct
+  them. That gap is the capability under test.
+
+  ## Reading a failure
+
+  Checks assert each expected symbol appears in `answers.txt`, so a partial
+  answer scores partially. Missing `Register` or `Import` means call sites were
+  under-found; a missing struct name means the field search stopped early.
+workspace: _fixture/
+# Favors poly-lsp: read-only structural questions with exact answers. poly-lsp's
+# node_references answers "who calls Store.Save" precisely; node_query resolves
+# Server.Handle's return type and enumerates structs with a CreatedAt field.
+# Baseline must grep and reason by hand — `s.Save`/`store.Save` receiver aliasing
+# hides call sites from a naive `grep Save`, and a shared field name across three
+# structs is easy to under-count. No code changes required.
+limits: { maxTurnsPerStage: 12, maxToolCallsPerStage: 30 }
+stages:
+  - prompt: |
+      Answer these questions about this Go codebase. Write the answers to a file
+      named answers.txt with one labeled line per answer:
+        (1) Which functions/methods call `Store.Save`?
+        (2) What is the return type of the `Server.Handle` method?
+        (3) List every struct type that has a field named `CreatedAt`.
+    checks:
+      # Q1: the two call sites of Store.Save.
+      - file_contains: { path: answers.txt, text: "Register" }
+      - file_contains: { path: answers.txt, text: "Import" }
+      # Q2: Server.Handle's return type.
+      - file_contains: { path: answers.txt, text: "*Response" }
+      # Q3: the three structs with a CreatedAt field.
+      - file_contains: { path: answers.txt, text: "Record" }
+      - file_contains: { path: answers.txt, text: "Session" }
+      - file_contains: { path: answers.txt, text: "AuditEntry" }

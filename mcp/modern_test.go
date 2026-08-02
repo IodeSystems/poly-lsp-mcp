@@ -1856,6 +1856,20 @@ func TestSkipScanDir_ToolState(t *testing.T) {
 			t.Errorf("%s is real source and must be indexed", d)
 		}
 	}
+	// A bench probe's seed workspace. bench/probes/find-render-entrypoints
+	// pins a snapshot of THIS package as its corpus, so without the skip a
+	// workspace query returns the live symbol and a stale copy of it —
+	// indistinguishable, and one of them is wrong.
+	if !skipScanDir("_fixture") {
+		t.Error("_fixture is a probe seed workspace, not source of this repo")
+	}
+	// Narrow on purpose: the marker is the fixture convention, not the
+	// underscore. Jekyll's _posts is real content a markdown query should reach.
+	for _, d := range []string{"_posts", "_layouts", "_internal"} {
+		if skipScanDir(d) {
+			t.Errorf("%s is not a fixture dir and must stay indexed", d)
+		}
+	}
 }
 
 // oldText+newText on a FILE node (not a symbol) must rewrite the whole

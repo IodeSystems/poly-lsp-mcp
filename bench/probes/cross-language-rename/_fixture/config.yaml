@@ -1,0 +1,5 @@
+# Service config. The record.legacy_id key is the same field as model.go's
+# LegacyID (json:"legacy_id") and client.ts's legacyId.
+record:
+  legacy_id: ""
+  name: ""

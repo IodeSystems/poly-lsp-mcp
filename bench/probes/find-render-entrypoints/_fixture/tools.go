@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
@@ -32,10 +31,7 @@ type Tool struct {
 	Name        string
 	Description string
 	InputSchema json.RawMessage
-	// Handler runs the tool. sess names the calling client session (for
-	// per-session edit-batch isolation in the daemon); stdio passes
-	// localSession. Non-mutating handlers ignore it.
-	Handler func(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error)
+	Handler     func(s *Server, args json.RawMessage) ([]Content, bool, error)
 }
 
 // registerTools returns the 9-tool surface poly-lsp-mcp exposes. Each tool
@@ -233,7 +229,7 @@ func registerLegacyTools() map[string]Tool {
 				"`path` (default: workspace root) scopes the walk. " +
 				"`glob` (filepath.Match pattern over file basenames, e.g. `*.go`) filters which files get scanned. " +
 				"`limit` (default 100) caps hits; overflow surfaces as `droppedMatches`. " +
-				"`contextLines` (default 0 = off; a hit is the matched line) returns up to N lines before AND after each match for previewing; the WHOLE hit (match + context) is then byte-bounded, so short lines show all N and long lines fewer. " +
+				"`contextLines` (default 0) returns N lines before AND after each match for previewing. " +
 				"Matches are grouped by file, reusing the structure file shape: {\"matches\":[ {\"file\":…,\"lang\":…,\"#\":[ {\"sym\":\"<enclosing symbol or empty>\",\"class\":\"match\",\"@\":[line,line],\"col\":N,\"text\":\"<matched line>\"}, … ]}, … ]}. `sym` names the enclosing symbol when one is resolvable (so you can node_read it via \"<file>#<sym>\"); `class` is always \"match\". " +
 				"Use this for full-text search — comment hunting, finding stringly-typed magic values, etc. " +
 				"For symbol/file-NAME search use structure(grep=…) instead — it's tree-sitter aware. " +
@@ -245,7 +241,7 @@ func registerLegacyTools() map[string]Tool {
     "path":         {"type": "string", "description": "Workspace-relative or absolute. Default: workspace root."},
     "glob":         {"type": "string", "description": "filepath.Match pattern over basenames. Default: every file."},
     "limit":        {"type": "integer", "minimum": 1, "description": "Max hits. Default 100."},
-    "contextLines": {"type": "integer", "minimum": 0, "description": "Lines before/after each match for a preview window; whole hit byte-bounded. Default 0 (off): a hit is the matched line."}
+    "contextLines": {"type": "integer", "minimum": 0, "description": "Lines before/after each match. Default 0."}
   },
   "required": ["pattern"]
 }`),
@@ -326,7 +322,7 @@ func (a rangeArgs) validate() error {
 
 // -------------------------------------------------------------- search
 
-func handleSearch(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
+func handleSearch(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Pattern      string `json:"pattern"`
 		Path         string `json:"path"`
@@ -358,10 +354,6 @@ func handleSearch(s *Server, sess sessionID, args json.RawMessage) ([]Content, b
 		}
 		limit = *p.Limit
 	}
-	// Context is OFF by default: a hit is the matched line (grep's signal,
-	// paginated so cheap). contextLines>0 opts into a preview window, and
-	// the whole hit is then byte-bounded (symbols.BudgetHitContext) —
-	// short lines show all N, long lines fewer, min(bytes, lines).
 	ctxLines := 0
 	if p.ContextLines != nil {
 		if *p.ContextLines < 0 {
@@ -370,7 +362,7 @@ func handleSearch(s *Server, sess sessionID, args json.RawMessage) ([]Content, b
 		ctxLines = *p.ContextLines
 	}
 
-	hits, dropped, skippedGenerated, err := symbols.Search(root, re, symbols.SearchOptions{
+	hits, dropped, err := symbols.Search(root, re, symbols.SearchOptions{
 		Glob:         p.Glob,
 		Limit:        limit,
 		ContextLines: ctxLines,
@@ -424,10 +416,6 @@ func handleSearch(s *Server, sess sessionID, args json.RawMessage) ([]Content, b
 	if dropped > 0 {
 		payload["droppedMatches"] = dropped
 	}
-	if skippedGenerated > 0 {
-		payload["skippedGeneratedFiles"] = skippedGenerated
-		payload["note"] = fmt.Sprintf("%d file(s) with a very long line (generated/minified) were skipped; their matches would blow the token budget. Narrow with glob= or path=, or grep the specific file node with node_query ::grep.", skippedGenerated)
-	}
 	return jsonContent(payload), false, nil
 }
 
@@ -455,7 +443,7 @@ func contentEndPosition(content []byte) (int, int) {
 
 // -------------------------------------------------------------- node_references
 
-func handleNodeReferences(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeReferences(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var a rangeArgs
 	var wrap struct {
 		Node string `json:"node"`
@@ -562,65 +550,9 @@ type nodeReadArgs struct {
 // defaultReadCharBudget is the implicit cap when the agent doesn't
 // set lineLimit explicitly. Tuned to be "a reasonable preview" —
 // usually 30-60 lines of code, well under typical context budgets.
-//
-// The cap is not free. Measured on an agent run against a ~1100-line Java
-// file, 85% of node_read calls came back truncated and the agent re-read the
-// same three files 45 times to reassemble them. Each re-read is a round-trip:
-// a turn, plus the generated tokens to compose the next call. Against a flat
-// whole-file read on the same task that was 2.2x the turns and 2x the
-// generated tokens, while saving only input tokens — trading the expensive
-// channel for the cheap one.
-//
-// So it is tunable, in precedence order:
-//
-//	--read-char-budget N        the CLI flag, alongside --root and the rest
-//	POLY_LSP_READ_CHAR_BUDGET   fallback, for a client that can only set env
-//	2048                        default, unchanged
-//
-// The right value depends on the model's context window and on how dearly its
-// provider prices generation against input, so there is no good universal
-// number — hence a knob rather than a new constant.
-const defaultReadCharBudgetFallback = 2048
+const defaultReadCharBudget = 2048
 
-// defaultReadCharBudget is the resolved cap. Seeded from the environment at
-// init and overridden by SetReadCharBudget when the flag is passed.
-var defaultReadCharBudget = readCharBudgetFromEnv()
-
-// SetReadCharBudget applies the --read-char-budget flag. Non-positive values
-// are ignored so a caller passing 0 (the flag's "unset" value) keeps whatever
-// the environment or the default already resolved to.
-func SetReadCharBudget(n int) {
-	if n > 0 {
-		defaultReadCharBudget = n
-	}
-}
-
-func readCharBudgetFromEnv() int {
-	if v := os.Getenv("POLY_LSP_READ_CHAR_BUDGET"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultReadCharBudgetFallback
-}
-
-// readGeneratedLineLen is the length past which a single line is treated
-// as generated/minified (a JSON/data blob, a bundled JS line) rather than
-// hand-written source. Mirrors symbols.maxSearchLineBytes (search.go),
-// which skips such lines for the same reason. It sits FAR above any real
-// source line (measured max in this repo: 742) so a normal read is NEVER
-// clipped — only a genuine blob is. A line below this is returned WHOLE:
-// feeding an LLM a mid-content clip of real prose is worse than the extra
-// few hundred chars.
-const readGeneratedLineLen = 5000
-
-// readLongLinePreview is how much of a generated line we preview when
-// clipping one — enough to identify what it is, not enough to blow the
-// char budget. A caller that truly wants the whole blob passes an
-// explicit lineLength.
-const readLongLinePreview = 500
-
-func handleNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeRead(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var a nodeReadArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -750,25 +682,6 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	totalLines := len(lines)
 	totalChars := len(content)
 
-	// renderLine decides how a single line is emitted. Two regimes:
-	//   - caller SET lineLength: clip every line to it (explicit request).
-	//   - caller did NOT: return normal lines WHOLE (no strange mid-prose
-	//     clips fed to the model); only a pathological generated line
-	//     (> readGeneratedLineLen) is previewed, so the always-appended
-	//     first line can't dump megabytes in one read.
-	renderLine := func(ln string) (out string, clipped bool) {
-		if lineLength > 0 {
-			if len(ln) > lineLength {
-				return ln[:lineLength] + "…", true
-			}
-			return ln, false
-		}
-		if len(ln) > readGeneratedLineLen {
-			return ln[:readLongLinePreview] + "…", true
-		}
-		return ln, false
-	}
-
 	// Maximum line length in the SOURCE (pre-truncation). Useful
 	// signal that the agent is asking about a file with very long
 	// lines (minified JS, generated code).
@@ -803,11 +716,10 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	autoLimit := lineLimit == 0
 	budget := defaultReadCharBudget
 	endLine := startLine - 1
-	anyLineClipped := false
 	for i := startLine - 1; i < totalLines; i++ {
-		ln, clipped := renderLine(lines[i])
-		if clipped {
-			anyLineClipped = true
+		ln := lines[i]
+		if lineLength > 0 && len(ln) > lineLength {
+			ln = ln[:lineLength] + "…"
 		}
 		// Per-line "+1" accounts for the rejoining \n.
 		cost := len(ln) + 1
@@ -835,24 +747,12 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	out["endLine"] = endLine
 	out["text"] = text
 
-	// Classify the truncation: did the line count get clipped, and was
-	// any RETURNED line itself clipped (an explicit lineLength, or a
-	// generated line previewed)?
+	// Classify the truncation: did the line count get clipped?
+	// Did individual lines get truncated by lineLength?
 	clippedByCount := endLine < totalLines
-	clippedByLength := anyLineClipped
+	clippedByLength := lineLength > 0 && maxLineLen > lineLength
 	if !clippedByCount && !clippedByLength {
 		return out
-	}
-
-	// lineNote describes an in-line clip for the hint — different wording
-	// for an explicit lineLength vs an auto-previewed generated line.
-	lineNote := ""
-	if clippedByLength {
-		if lineLength > 0 {
-			lineNote = fmt.Sprintf("lines truncated to %d chars (max source line was %d). Pass a larger lineLength to keep full lines.", lineLength, maxLineLen)
-		} else {
-			lineNote = fmt.Sprintf("a generated/minified line (%d chars) was previewed to %d. Pass lineLength=N to read more of it, or search(pattern=) to target within it.", maxLineLen, readLongLinePreview)
-		}
 	}
 
 	// Choose the dominant reason for the agent's primary signal.
@@ -882,7 +782,7 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	case "auto":
 		fmt.Fprintf(&hint, "Returned lines %d-%d of %d (auto-capped at ~%d chars; ~%d more read(s) to page the rest). "+
 			"Avoid paging chunk-by-chunk: re-read with lineLimit=%d to get the whole file in ONE call, "+
-			"or use the search tool (pattern=<regex>) to jump straight to the code you need. "+
+			"or use the search tool (pattern=<regex>, contextLines=3) to jump straight to the code you need. "+
 			"To keep paging anyway, call again with startLine=%d.",
 			startLine, endLine, totalLines, defaultReadCharBudget, morePages, totalLines, endLine+1)
 	case "lineLimit":
@@ -891,11 +791,11 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 			"or call again with startLine=%d to continue.",
 			startLine, endLine, totalLines, lineLimit, morePages, totalLines, endLine+1)
 	case "lineLength":
-		// Capitalize the standalone lineNote sentence.
-		fmt.Fprintf(&hint, "%s%s", strings.ToUpper(lineNote[:1]), lineNote[1:])
+		fmt.Fprintf(&hint, "Lines truncated to %d chars (max source line was %d chars). Pass a larger lineLength to keep full lines.",
+			lineLength, maxLineLen)
 	}
 	if clippedByLength && reason != "lineLength" {
-		fmt.Fprintf(&hint, " Also: %s", lineNote)
+		fmt.Fprintf(&hint, " Also: lines truncated to %d chars (max source line was %d).", lineLength, maxLineLen)
 	}
 
 	out["truncated"] = true
@@ -944,7 +844,7 @@ type nodeEditArgs struct {
 	diagnosticOptions
 }
 
-func handleNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeEdit(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p nodeEditArgs
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -1019,7 +919,7 @@ type nodeDeleteArgs struct {
 	diagnosticOptions
 }
 
-func handleNodeDelete(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeDelete(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p nodeDeleteArgs
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, true, fmt.Errorf("bad arguments: %w", err)
@@ -1150,28 +1050,38 @@ func (s *Server) applyRangeRewrite(node string, a rangeArgs, newText string, opt
 	out = append(out, newText...)
 	out = append(out, content[endOff:]...)
 
-	oc, err := s.applyBytes(abs, content, out, info.Mode().Perm(), opts)
-	if err != nil {
-		return nil, true, err
+	tmp := abs + ".poly-lsp-mcp.tmp"
+	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+		return nil, true, fmt.Errorf("write temp: %w", err)
 	}
-	if c, isErr, handled := batchResponse(oc); handled {
-		return c, isErr, nil
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return nil, true, fmt.Errorf("rename: %w", err)
 	}
+
+	s.refreshFileInIndex(abs, out)
+
+	uri := pathToURI(abs)
+	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
+
 	// The lines are part of the target here: a range rewrite did NOT touch the
 	// whole file, and a note that said "updated app.go" would overstate it.
-	label := fmt.Sprintf("%s:%d-%d", a.File, a.StartLine, a.EndLine)
-	if oc.Rejected {
-		return jsonContent(oc.rejection(label)), true, nil
-	}
 	payload := map[string]any{
-		"note":         editNote("updated", label, endOff-startOff, len(newText)),
-		"node":         node,
-		"replacedFrom": map[string]int{"line": a.StartLine, "col": a.StartCol},
-		"replacedTo":   map[string]int{"line": a.EndLine, "col": a.EndCol},
-		"bytesRemoved": endOff - startOff,
-		"bytesAdded":   len(newText),
+		"note": editNote("updated",
+			fmt.Sprintf("%s:%d-%d", a.File, a.StartLine, a.EndLine),
+			endOff-startOff, len(newText)),
+		"node":                 node,
+		"replacedFrom":         map[string]int{"line": a.StartLine, "col": a.StartCol},
+		"replacedTo":           map[string]int{"line": a.EndLine, "col": a.EndCol},
+		"bytesRemoved":         endOff - startOff,
+		"bytesAdded":           len(newText),
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
 	}
-	oc.attach(payload)
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
 	return jsonContent(payload), false, nil
 }
 
@@ -1187,11 +1097,11 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 	}
 	created := false
 	mode := os.FileMode(0o644)
-	var orig []byte // pre-edit bytes for revert; nil on create
+	bytesRemoved := 0
 	if info, err := os.Stat(abs); err == nil {
 		mode = info.Mode().Perm()
 		if existing, err := os.ReadFile(abs); err == nil {
-			orig = existing
+			bytesRemoved = len(existing)
 		}
 	} else if os.IsNotExist(err) {
 		created = true
@@ -1203,28 +1113,35 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 	}
 
 	out := []byte(newText)
-	oc, err := s.applyBytes(abs, orig, out, mode, opts)
-	if err != nil {
-		return nil, true, err
+	tmp := abs + ".poly-lsp-mcp.tmp"
+	if err := os.WriteFile(tmp, out, mode); err != nil {
+		return nil, true, fmt.Errorf("write temp: %w", err)
 	}
-	if c, isErr, handled := batchResponse(oc); handled {
-		return c, isErr, nil
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return nil, true, fmt.Errorf("rename: %w", err)
 	}
-	if oc.Rejected {
-		return jsonContent(oc.rejection(file)), true, nil
-	}
+	s.refreshFileInIndex(abs, out)
+
+	uri := pathToURI(abs)
+	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
 	verb := "updated"
 	if created {
 		verb = "created"
 	}
 	payload := map[string]any{
-		"note":         editNote(verb, file, len(orig), len(out)),
-		"node":         file,
-		"created":      created,
-		"bytesRemoved": len(orig),
-		"bytesAdded":   len(out),
+		"note":                 editNote(verb, file, bytesRemoved, len(out)),
+		"node":                 file,
+		"created":              created,
+		"bytesRemoved":         bytesRemoved,
+		"bytesAdded":           len(out),
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
 	}
-	oc.attach(payload)
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
 	return jsonContent(payload), false, nil
 }
 
@@ -1251,22 +1168,29 @@ func (s *Server) applyDiffRewrite(file, diff string, opts diagnosticOptions) ([]
 		return nil, true, fmt.Errorf("apply diff: %w", err)
 	}
 
-	oc, err := s.applyBytes(abs, content, out, info.Mode().Perm(), opts)
-	if err != nil {
-		return nil, true, err
+	tmp := abs + ".poly-lsp-mcp.tmp"
+	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
+		return nil, true, fmt.Errorf("write temp: %w", err)
 	}
-	if c, isErr, handled := batchResponse(oc); handled {
-		return c, isErr, nil
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return nil, true, fmt.Errorf("rename: %w", err)
 	}
-	if oc.Rejected {
-		return jsonContent(oc.rejection(file)), true, nil
-	}
+	s.refreshFileInIndex(abs, out)
+
+	uri := pathToURI(abs)
+	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
 	payload := map[string]any{
-		"file":         file,
-		"bytesRemoved": len(content),
-		"bytesAdded":   len(out),
+		"file":                 file,
+		"bytesRemoved":         len(content),
+		"bytesAdded":           len(out),
+		"diagnosticsAvailable": diags.Available,
+		"diagnosticsTimedOut":  diags.TimedOut,
+		"diagnostics":          diags.Items,
 	}
-	oc.attach(payload)
+	if diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	}
 	return jsonContent(payload), false, nil
 }
 
@@ -1329,7 +1253,7 @@ func (r refactorOps) nonEmpty() bool {
 	return r.Rename != "" || r.Params != nil || r.Return != ""
 }
 
-func handleNodeRefactor(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
+func handleNodeRefactor(s *Server, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		rangeArgs
 		diagnosticOptions
@@ -1396,7 +1320,7 @@ func handleNodeRefactor(s *Server, sess sessionID, args json.RawMessage) ([]Cont
 	}
 	signatureOps := ops.Params != nil || ops.Return != ""
 	if !signatureOps {
-		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.Resolution.Mode, p.Resolution.Target, p.diagnosticOptions, nil)
+		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.Resolution.Mode, p.Resolution.Target, p.diagnosticOptions)
 	}
 	return s.refactorSignature(p.rangeArgs, ops, p.IncludeComments, p.diagnosticOptions)
 }
@@ -1419,11 +1343,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 	lang := s.languageForFile(abs)
 	if !signatureSupportedLanguage(lang) {
-		return nil, true, fmt.Errorf("signature refactor not supported for language %q "+
-			"(supported: go, typescript, python, java, kotlin, groovy, c, cpp, xml)", lang)
-	}
-	if lang == "xml" && ops.Return != "" {
-		return nil, true, errors.New("xml has no return type; use params to rewrite an element's attributes")
+		return nil, true, fmt.Errorf("signature refactor not supported for language %q (try go / typescript / python)", lang)
 	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
@@ -1459,10 +1379,6 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	if err != nil {
 		return nil, true, fmt.Errorf("stat %s: %w", a.File, err)
 	}
-	// One validation txn spans the whole refactor — the declaration file, the
-	// nested rename's files, and every caller — so a new error reverts them all.
-	txn := s.beginValidationTxn(dopts)
-	txn.record(pathToURI(abs), content)
 	tmp := abs + ".poly-lsp-mcp.tmp"
 	if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
 		return nil, true, fmt.Errorf("write temp: %w", err)
@@ -1483,7 +1399,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 	if ops.Rename != "" && ops.Rename != oldName {
 		nameRangeArgs := nameRangeAfterSignature(a, postSig, out)
-		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, "", "", diagnosticOptions{}, txn)
+		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, "", "", diagnosticOptions{})
 		if renameErr != nil {
 			return renameContent, renameIsErr, renameErr
 		}
@@ -1519,7 +1435,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	uris := []string{pathToURI(abs)}
 	contentsByURI := map[string][]byte{uris[0]: out}
 	if ops.Params != nil {
-		callResults, callContents := s.rewriteCallSites(lang, currentName, ops.Params, txn)
+		callResults, callContents := s.rewriteCallSites(lang, currentName, ops.Params)
 		for _, cr := range callResults {
 			if cr.File == results[0].File {
 				results[0].Edits += cr.Edits
@@ -1535,15 +1451,6 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 
 	diags := s.collectDiagnostics(uris, contentsByURI, dopts)
 
-	oc := txn.verify(diags)
-	if c, isErr, handled := batchResponse(oc); handled {
-		return c, isErr, nil
-	}
-	if oc.Rejected {
-		rej := oc.rejection(oldName + " signature")
-		rej["kind"], rej["oldName"], rej["newName"], rej["results"] = "signature", oldName, ops.Rename, results
-		return jsonContent(rej), true, nil
-	}
 	payload := map[string]any{
 		"kind":                 "signature",
 		"oldName":              oldName,
@@ -1557,23 +1464,14 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	if diags.DroppedDiagnostics > 0 {
 		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
 	}
-	oc.annotate(payload)
 	return jsonContent(payload), false, nil
 }
 
 // signatureSupportedLanguage reports whether RewriteSignature has a
-// per-language implementation.
-//
-// SQL, XML and Markdown are absent on purpose: a signature refactor
-// rewrites a callable AND its call sites, and none of the three has a
-// call expression to rewrite.
+// per-language implementation. Today: go / typescript / python.
 func signatureSupportedLanguage(lang string) bool {
 	switch lang {
-	case "go", "typescript", "python",
-		"java", "kotlin", "groovy", "c", "cpp",
-		// XML's parameter list is an element's ATTRIBUTES; it has no
-		// return type, which refactorSignature rejects explicitly.
-		"xml":
+	case "go", "typescript", "python":
 		return true
 	}
 	return false
@@ -1590,7 +1488,7 @@ func signatureSupportedLanguage(lang string) bool {
 //
 // Per-site outcomes return as applyResult entries (one per touched
 // file); contents-by-URI for the diagnostic round-trip.
-func (s *Server) rewriteCallSites(language, funcName string, params []refactorParam, txn *validationTxn) ([]applyResult, map[string][]byte) {
+func (s *Server) rewriteCallSites(language, funcName string, params []refactorParam) ([]applyResult, map[string][]byte) {
 	idx := s.getIndex()
 	if idx == nil {
 		return nil, nil
@@ -1658,7 +1556,6 @@ func (s *Server) rewriteCallSites(language, funcName string, params []refactorPa
 		if err != nil {
 			continue
 		}
-		txn.record(pathToURI(file), content)
 		tmp := file + ".poly-lsp-mcp.tmp"
 		if err := os.WriteFile(tmp, out, info.Mode().Perm()); err != nil {
 			continue
@@ -1723,14 +1620,7 @@ func byteOffsetToLineColPos(content []byte, offset int) (int, int) {
 	return line, col
 }
 
-// txn threads a shared validation transaction from a caller (refactorSignature
-// runs a nested rename inside its own txn). nil = standalone: this call owns a
-// fresh txn and verifies/reverts at the end.
-func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, applyCandidates bool, mode, target string, opts diagnosticOptions, txn *validationTxn) ([]Content, bool, error) {
-	ownTxn := txn == nil
-	if ownTxn {
-		txn = s.beginValidationTxn(opts)
-	}
+func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, applyCandidates bool, mode, target string, opts diagnosticOptions) ([]Content, bool, error) {
 	idx := s.getIndex()
 	if idx == nil {
 		return []Content{{Type: "text", Text: "index not built (no workspace root configured)"}}, true, nil
@@ -1769,54 +1659,7 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 		}
 	}
 
-	// Prefer a TYPE-SCOPED rename from the child language server: it resolves
-	// the symbol by its declaring type, so renaming payments.Gateway.IsLive
-	// touches only that method's decl/impls/usages, never the unrelated
-	// llm.Rewriter.IsLive. Only a tree-sitter-only language (no child LSP)
-	// falls through to the lexical path and its collision guard.
-	lspEdits, triedLSP, lspErr := s.goplsRenameEdits(a, newName)
-	if triedLSP && lspErr != nil {
-		// A server serves this file but refused — surface it. Do NOT fall
-		// back to lexical: that is the unsafe path this replaces.
-		return jsonContent(map[string]any{
-			"kind": "rename-error", "oldName": name, "newName": newName, "error": lspErr.Error(),
-		}), true, nil
-	}
-
-	var resolved []resolvedEdit
-	var candidates []symbols.Site
-	resolvedBy := "lsp"
-	if triedLSP {
-		resolved = lspEdits
-	} else {
-		resolvedBy = "lexical"
-		resolved, candidates = s.buildRenameEdits(name, newName, applyCandidates)
-		// GUARDRAIL (lexical path only): a lexical rename rewrites every
-		// occurrence of `name` workspace-wide. When the name is DECLARED in
-		// more than one package with no authoritative site coupling them,
-		// those declarations are almost certainly UNRELATED symbols that
-		// merely share the name — renaming all corrupts the ones the caller
-		// didn't mean (dogfood: ab_bench islive-rename). Refuse, show the
-		// collision, rather than silently damage code.
-		if collisions := s.lexicalRenameCollision(name, resolved, idx.LookupExisting(name)); len(collisions) > 0 {
-			pkgs := map[string]struct{}{}
-			for _, c := range collisions {
-				pkgs[c.Package] = struct{}{}
-			}
-			return jsonContent(map[string]any{
-				"kind":       "rename-blocked",
-				"reason":     "lexical-collision",
-				"oldName":    name,
-				"newName":    newName,
-				"packages":   len(pkgs),
-				"collisions": collisions,
-				"note": fmt.Sprintf(
-					"BLOCKED: %q is declared in %d packages by symbols that share the name but are probably UNRELATED. This rename is lexical (name-keyed, not type-scoped, because no language server serves this file), so applying it would rewrite EVERY %q across the workspace — including the declarations you did NOT mean — and corrupt them. Inspect `collisions`. To rename only the one you intend, edit its declaration and usages with scoped node_edit oldText/newText (unique per node).",
-					name, len(pkgs), name),
-			}), true, nil
-		}
-	}
-
+	resolved, candidates := s.buildRenameEdits(name, newName, applyCandidates)
 	if includeComments {
 		// Workspace-wide word-boundary scan picks up positions the
 		// index intentionally doesn't see — most commonly comments,
@@ -1840,11 +1683,6 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	for _, abs := range order {
 		edits := byFile[abs]
 		rel := edits[0].RelFile
-		if txn.active {
-			if orig, rerr := os.ReadFile(abs); rerr == nil {
-				txn.record(pathToURI(abs), orig)
-			}
-		}
 		n, err := applyFileEdits(abs, edits)
 		if err != nil {
 			results = append(results, applyResult{File: rel, Skipped: err.Error()})
@@ -1855,10 +1693,7 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 			s.refreshFileInIndex(abs, newContent)
 			newContents[pathToURI(abs)] = newContent
 		}
-		lines, truncated := touchedLines(edits)
-		results = append(results, applyResult{
-			File: rel, Edits: n, Lines: lines, LinesTruncated: truncated,
-		})
+		results = append(results, applyResult{File: rel, Edits: n})
 	}
 
 	uris := make([]string, 0, len(newContents))
@@ -1868,56 +1703,19 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	sort.Strings(uris)
 	diags := s.collectDiagnostics(uris, newContents, opts)
 
-	// Only the OWNER of the txn verifies — a nested rename (inside a signature
-	// refactor) just records into the shared txn; the outer op reverts.
-	var oc editOutcome
-	if ownTxn {
-		oc = txn.verify(diags)
-		if c, isErr, handled := batchResponse(oc); handled {
-			return c, isErr, nil
-		}
-		if oc.Rejected {
-			rej := oc.rejection(name + " → " + newName)
-			rej["kind"], rej["oldName"], rej["newName"], rej["results"] = "rename", name, newName, results
-			return jsonContent(rej), true, nil
-		}
-	}
-
 	payload := map[string]any{
 		"kind":                 "rename",
 		"oldName":              name,
 		"newName":              newName,
 		"filesChanged":         len(results),
 		"results":              results,
-		"resolvedBy":           resolvedBy,
 		"diagnosticsAvailable": diags.Available,
 		"diagnosticsTimedOut":  diags.TimedOut,
 		"diagnostics":          diags.Items,
 	}
-	// State that the job is DONE and workspace-wide, in the RESULT — models
-	// act on results, not tool descriptions. Dogfood: after ONE rename that
-	// reported filesChanged:9, the model re-ran it per-file (hitting "no such
-	// symbol" errors) and hand-patched comments, ~6 wasted calls after the
-	// task was already complete. This note closes the loop.
-	if len(results) > 0 {
-		scope := "type-scoped by the language server (only this symbol's declaration, implementations, and usages)"
-		if resolvedBy != "lsp" {
-			scope = "name-matched (no language server for this file; collision-guarded)"
-		}
-		note := fmt.Sprintf(
-			"DONE — rename %q → %q, %s, across %d file(s) in this ONE call. "+
-				"Every touched site is listed in results[].lines — check those if you want to verify, "+
-				"but do NOT re-run the rename per-file or search/replace to \"finish\".",
-			name, newName, scope, len(results))
-		if !includeComments {
-			note += " Any occurrences left are in comments/strings/prose (not identifiers) and were intentionally skipped — pass includeComments:true to rename those too."
-		}
-		payload["note"] = note
-	}
 	if diags.DroppedDiagnostics > 0 {
 		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
 	}
-	oc.annotate(payload)
 	// Guessed (lexical, cross-namespace) sites are RECOMMENDED, not actioned —
 	// surface them so the caller can review and opt in with applyCandidates:true.
 	if len(candidates) > 0 {
@@ -2010,37 +1808,10 @@ func (s *Server) findCommentMentions(name, newName string, existing []resolvedEd
 
 const maxScanSize = 1 << 20 // 1 MiB per file; mirrors the lexical pass
 
-// skipScanDir names directories that are never source: build output, vendored
-// copies, and TOOL STATE.
-//
-// That last class is the one that bites. A tool whose state lives inside the
-// workspace will index itself, and if that state contains a COPY of the
-// workspace the index becomes mostly copies. Measured in a real repo: dun keeps
-// its per-session git worktrees in .dun/worktrees, 16 of them had accumulated,
-// and every workspace-wide query came back 100% stale duplicates — the live
-// files did not fit under the limit at all. The agent driving it responded
-// rationally by giving up on workspace-wide search and grepping file by file.
-//
-// `_fixture` is the same class arriving from the other direction: a benchmark
-// probe's SEED workspace, copied into a scratch dir to run, never compiled in
-// place. The `_` prefix is why — the go tool skips `_`-prefixed directories for
-// package discovery, which is exactly how a fixture holding deliberately broken
-// code coexists with `go build ./...`. This index should honour the same marker
-// the toolchain does.
-//
-// Demonstrated on this repo the day bench/probes landed: its
-// find-render-entrypoints fixture is a pinned snapshot of our own mcp package,
-// so `func name=handleModernNodeQuery` returned TWO matches — the live one and a
-// stale copy — and a grep for `func skipScanDir` turned up this function twice.
-// Only `_fixture`, not every `_` name: Jekyll's `_posts` is real content a
-// markdown query should still reach.
 func skipScanDir(name string) bool {
 	switch name {
 	case ".git", "node_modules", "vendor", "__pycache__",
-		"dist", "build", ".idea", ".vscode",
-		".poly-lsp-mcp", // this tool's own index
-		".dun",          // dun's state: sessions AND per-session worktrees
-		"_fixture":      // a bench probe's seed workspace, not source of this repo
+		"dist", "build", ".idea", ".vscode", ".poly-lsp-mcp":
 		return true
 	}
 	return false
@@ -2099,37 +1870,6 @@ type applyResult struct {
 	File    string `json:"file"`
 	Edits   int    `json:"edits,omitempty"`
 	Skipped string `json:"skipped,omitempty"`
-	// Lines are the 1-based lines this op actually touched in File.
-	// Reporting them is what lets a caller VERIFY a rename instead of
-	// re-deriving it: dogfooding showed models spending ~30 calls
-	// grep-auditing a correct filesChanged:9 because the result gave
-	// them a count and nothing to check it against.
-	Lines          []int `json:"lines,omitempty"`
-	LinesTruncated int   `json:"linesTruncated,omitempty"`
-}
-
-// maxReportedLines caps the per-file line list. A rename across a huge
-// file should not blow the caller's budget echoing hundreds of numbers —
-// but the overflow is REPORTED, never silently dropped.
-const maxReportedLines = 20
-
-// touchedLines renders the sorted, de-duplicated lines a set of edits
-// covers, plus how many were withheld by the cap.
-func touchedLines(edits []resolvedEdit) ([]int, int) {
-	seen := map[int]bool{}
-	out := make([]int, 0, len(edits))
-	for _, e := range edits {
-		if seen[e.Line] {
-			continue
-		}
-		seen[e.Line] = true
-		out = append(out, e.Line)
-	}
-	sort.Ints(out)
-	if len(out) > maxReportedLines {
-		return out[:maxReportedLines], len(out) - maxReportedLines
-	}
-	return out, 0
 }
 
 // buildRenameEdits plans the rewrites for renaming `name` to `newName`. Returns the
@@ -2137,75 +1877,6 @@ func touchedLines(edits []resolvedEdit) ([]int, int) {
 // held back unless applyCandidates is set — see chooseRenameSites). Aliasing safety:
 // per-site on-disk text must equal name; mismatches are skipped so aliasing bindings
 // don't substitute the wrong token.
-// renameDecl is one declaration of a name found by the lexical-collision
-// guard: which package it lives in, the owning symbol path, and where.
-type renameDecl struct {
-	Package string `json:"package"`
-	Owner   string `json:"owner"`
-	File    string `json:"file"`
-	Line    int    `json:"line"`
-}
-
-// lexicalRenameCollision reports the colliding declarations when a LEXICAL
-// rename of `name` would be unsafe: the name is declared in MORE THAN ONE
-// package and no authoritative (declared-binding / child-LSP) site couples
-// those declarations. That is the signature of a coincidental name clash
-// (e.g. IsLive on three unrelated interfaces) rather than one symbol's
-// declaration plus its implementations — which stay within a package and so
-// don't trip this. Returns nil when the rename is safe to apply lexically.
-// Removed once semantic rename scopes edits by declaring type. Cheap: only
-// runs on the purely-lexical path, and only parses the touched files.
-func (s *Server) lexicalRenameCollision(name string, resolved []resolvedEdit, sites []symbols.Site) []renameDecl {
-	for _, st := range sites {
-		if st.Confidence >= symbols.ConfidenceDeclared {
-			return nil // a declared binding / LSP result couples these — intentional
-		}
-	}
-	byPkg := map[string][]renameDecl{}
-	seen := map[string]bool{}
-	for _, e := range resolved {
-		if seen[e.AbsFile] {
-			continue
-		}
-		seen[e.AbsFile] = true
-		lang := s.languageForFile(e.AbsFile)
-		if lang == "" {
-			continue
-		}
-		content, err := os.ReadFile(e.AbsFile)
-		if err != nil {
-			continue
-		}
-		syms, err := symbols.FileSymbols(lang, content)
-		if err != nil {
-			continue
-		}
-		pkg := filepath.Dir(e.RelFile)
-		for _, sym := range syms {
-			if lastSeg(sym.Sym) != name {
-				continue
-			}
-			byPkg[pkg] = append(byPkg[pkg], renameDecl{
-				Package: pkg, Owner: sym.Sym, File: e.RelFile, Line: sym.NameStartLine,
-			})
-		}
-	}
-	if len(byPkg) <= 1 {
-		return nil
-	}
-	var out []renameDecl
-	for _, ds := range byPkg {
-		out = append(out, ds...)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].File != out[j].File {
-			return out[i].File < out[j].File
-		}
-		return out[i].Line < out[j].Line
-	})
-	return out
-}
-
 func (s *Server) buildRenameEdits(name, newName string, applyCandidates bool) ([]resolvedEdit, []symbols.Site) {
 	idx := s.getIndex()
 	if idx == nil {

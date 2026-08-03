@@ -85,6 +85,20 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 	if err := renderQueryTree(w, paged, total, offset, end, e.workExceeded, e.timedOut, trace); err != nil {
 		return err
 	}
+	// The same hint the MCP path attaches as `hint`, rendered for a human.
+	//
+	// It was JSON-only, so `poly-lsp-mcp query` answered a zero-result selector
+	// with a bare "no matches" — the exact silence the hint exists to break,
+	// preserved for the one caller who cannot see the payload. An agent got told
+	// which clause emptied its selector and a person debugging the same selector
+	// by hand did not.
+	if total == 0 {
+		if h := e.zeroResultHint(list); h != "" {
+			if _, err := fmt.Fprintf(w, "\n%s\n", h); err != nil {
+				return err
+			}
+		}
+	}
 	// The CLI spawns no child LSP, so every edge it crossed is name-keyed
 	// (lexical) — a far end may be a same-named symbol, not the resolved
 	// one. The tree renders far ends without a conf column, so without

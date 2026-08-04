@@ -91,6 +91,35 @@ func TestRefSiteAddrRejectsLineWindowArgs(t *testing.T) {
 	}
 }
 
+// The most-repeated error in a measured session (3 of 7) was startLine on a
+// large symbol: the caller wants PART of something big, and "drop them" only
+// says how to stop being wrong — the observed recovery was reading a 500-line
+// method whole, or paging a file window. Name the form that answers it.
+func TestWholeNodeReadErrorOffersTheSpanForm(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	r := s.callTool("node_read", map[string]any{"node": "main.go#Server.Start", "startLine": 10})
+	if !r.IsError {
+		t.Fatal("startLine on a symbol should still be refused")
+	}
+	msg := r.Content[0].Text
+	if !strings.Contains(msg, "SPAN address") {
+		t.Errorf("the error should name the span form; got %q", msg)
+	}
+	// Runnable as printed, and it must be THIS node's span.
+	if !strings.Contains(msg, `"main.go@9-12"`) {
+		t.Errorf("the span should be the addressed node's own lines; got %q", msg)
+	}
+	m, isErr := readNode(t, s, map[string]any{"node": "main.go@9-12"})
+	if isErr {
+		t.Fatalf("the suggested address must work as printed: %+v", m)
+	}
+	if txt, _ := m["text"].(string); !strings.Contains(txt, "func (s *Server) Start") {
+		t.Errorf("it should read the lines it named; got %q", txt)
+	}
+}
+
 // An oldText edit is scoped to the ADDRESSED LINE. "init" appears on both
 // line 16 and line 18: whole-file scoping saw two occurrences (a spurious
 // ambiguity error, or worse, a hit on the wrong line).

@@ -897,9 +897,16 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		if rn.class == "ref" {
 			what = "a source line/span"
 		}
+		// Name the form that DOES answer the question being asked. The
+		// caller wanted part of something large; "drop them" only tells
+		// them how to stop being wrong, and the measured recovery was
+		// either the whole 500-line symbol or a file window they then had
+		// to page. A span address reads exactly the lines they named.
 		return nil, true, fmt.Errorf(
-			"node reads are always whole: %q addresses %s, so startLine/lineLimit don't apply (they browse a whole FILE). Drop them, or pass the file address %q",
-			p.Node, what, rn.file)
+			"node reads are always whole: %q addresses %s, so startLine/lineLimit don't apply (they browse a whole FILE). "+
+				"Drop them for the whole node, browse the file with %q, or read just those lines with the SPAN address %q",
+			p.Node, what, rn.file,
+			fmt.Sprintf("%s@%d-%d", rn.file, rn.decl.StartLine, rn.decl.EndLine))
 	}
 	text, err := readRangeText(content, rn.decl)
 	if err != nil {

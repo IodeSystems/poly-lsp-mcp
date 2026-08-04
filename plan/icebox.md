@@ -283,3 +283,37 @@ drifted to the host's built-in Edit + Bash. Why, filed as work:
   NOT eat the trailing newline. Pinned as-is by
   `TestRefSiteAddrDeleteEmptiesTheLineNotTheFile`, so the current answer is
   documented rather than accidental. Owner: user — a behaviour call, not a bug.
+
+- **FEATURE — `::mine func`: query the reconstructed side (2026-08-04).**
+  `::conflict` reports what each side DECLARES (names + classes) and whether
+  it reconstructs cleanly, but a side is not queryable: `::mine func` returns
+  nothing. The hard part is done — `sideContent` rebuilds a whole parseable
+  file per side and `symbols.ParsesCleanly` says whether to trust it — so what
+  is left is hanging the parallel trees off the side nodes.
+  **The blocker is ADDRESSING, not parsing.** A symbol found in a
+  reconstruction has a span in RECONSTRUCTED coordinates while the file on
+  disk still holds markers, so `f.go#Greet` minted there resolves against
+  different bytes than it was computed from — the silent-wrong-address class
+  this repo has spent real effort removing (see the `file@line` entry in
+  bugs.md). Needs an address form that either round-trips honestly or is
+  refused by node_read/node_edit; until that is decided, declarations-only is
+  the honest answer and it is what ships.
+
+- **FEATURE — workspace-scoped conflict resolve (2026-08-04).** `accept:` takes
+  one node, so a 30-file merge is 30 calls for an operation that is by
+  definition uniform. The natural form is node_edit against a SELECTOR rather
+  than a single node (`file::conflict` + `accept:"theirs"`), which is a bigger
+  change than it looks: every mutating op would inherit a fan-out, and "resolve
+  everything as theirs" is exactly the command someone runs by accident.
+  Deferred until a real merge makes the 30 calls annoying — the per-region form
+  is the one that matters and it exists.
+
+- **DECISION — the tool-surface token budget went 1160 → 1300 in one sitting
+  (2026-08-04).** Three raises, each buying a real capability and each
+  compressed first (the space rule; `accept`; the conflict views). Every raise
+  is justified in `tokcount_test.go`'s own comment, per that constant's
+  convention. If the ceiling is meant to BIND rather than track, the standing
+  lever is dropping `params`/`return` from the description (~27 tokens), which
+  `icebox` already records as MEASURED UNUSED — but that makes an op
+  undiscoverable, so it is a product decision about the surface, not a trim.
+  Owner: USER.

@@ -440,3 +440,58 @@ did not rebuild (no loop); and in `mcp` mode with a stale binary, stdout
 carried nothing but the JSON-RPC `initialize` response while "source changed —
 rebuilding…" went to stderr — the stdio pipe survives `syscall.Exec`, so the
 client never sees the swap.
+
+## A conflict crossing a function boundary produced a declaration from nowhere
+
+**Reported:** 2026-08-04 (USER asked what happens to "a messy diff, one that
+crosses two functions but doesn't complete them", then "and a second diff in
+one of the same functions")
+**Status:** ✅ fixed 2026-08-04 across four commits — refuse to write it
+(`e95d005`), reconstruct the sides (`33207b2`), warn on query and read
+(`500b0df`), withhold it from results (`7642cd1`).
+
+**Repro.** A conflict opening inside `A` and closing inside `B`:
+
+    func A() int {
+        x := 1
+    <<<<<<< HEAD
+        return x
+    }
+
+    func B() int {
+        z := 3
+    =======
+    …
+
+`path=m.go func` reported `func A 3-7`, `func B[1] 9-13`, `func B[2] 15-24`,
+and `node_read("m.go#B[1]")` handed back, with no warning:
+
+    func B() int {
+        z := 3
+    =======
+        return x + 1
+    }
+
+**Cause.** tree-sitter is error-TOLERANT: it recovers past the markers and
+builds declarations out of BOTH sides at once. `symbols.FileSymbols` therefore
+returns a symbol list for input that is not valid source in any commit — which
+is why `ParsesCleanly` had to be added, since "symbols came back" was never
+evidence the file parsed.
+
+**Two consequences worse than the phantom itself.** Editing `B[1]` would have
+written ACROSS the markers and corrupted the merge — there is no correct
+oldText for a span that is half of each side. And ordinal disambiguation
+counts what the index holds, so the phantom claimed `B[1]` and pushed the
+REAL function to `B[2]`: any address written down before the merge silently
+pointed elsewhere for its duration.
+
+**Fix.** Writes that straddle a marker are refused (containing one is fine —
+that is what `accept:` operates on). Straddling rows are withheld from query
+results, with the count and the file named, which also recomputes the ordinals
+over real declarations only. Each side is reconstructed WHOLE-FILE — a side
+alone is a fragment, the file with that side is what git writes on
+`--ours`/`--theirs` and parses — and when neither reconstructs, the region is
+rendered as diffed TEXT rather than a structural answer that would be invented.
+
+**Verified** on the shape that prompted it (two conflicts, one crossing a
+boundary and one wholly inside a function) and on a real `git merge`.

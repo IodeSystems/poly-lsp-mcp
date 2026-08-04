@@ -95,6 +95,19 @@ agents actually want the cross-lib answer unprompted.
 - **Daemon mode is COMPLETE** (→ done.md): `mcp --daemon` proxies to one
   shared per-user daemon over a unix socket — one warm index, one child-LSP
   fleet, one parse cache for every client.
+- **A space is always a node boundary** (2026-08-03, BREAKING, `656114e`). The
+  bare-attribute-attaches rule is gone: `func[path=a.go]` filters,
+  `func path=a.go` descends, a bare attr is its own `*[…]`. The old exception
+  lived only in the `?` help, which 2 of 426 measured calls ever asked for,
+  while the always-present description said "space=descendant" and nothing
+  else. Attribute booleans (`|`/`&`/grouping) shipped with it and are under
+  review — see Active work.
+- **Merge-conflict awareness** (2026-08-03/04): conflicts are NODES
+  (`::conflict`/`::mine`/`::theirs`/`::base`, sides carrying git's ref),
+  resolvable (`node_edit accept:`), unwriteable while straddled, withheld from
+  the flat index when a row exists on neither side, and ANNOUNCED unprompted —
+  poly-lsp declares `logging` and pushes on the transition, agentkit's mcpmgr
+  delivers it, dun lifts it into the conversation.
 
 ## Active work
 
@@ -102,6 +115,72 @@ Conventions for this file are at the top: current state + active work ONLY.
 Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
+
+⏸ **`|` in an attribute value: boolean OR, or regex alternation? — BLOCKED ON
+USER, 2026-08-04.** `656114e` made `|` and `&` boolean operators over whole
+attribute TESTS, with a quoted value as the escape for a literal pipe. The
+next session says that was the wrong trade:
+- **0** true boolean ORs (`name=a|name=b`) in 65 real selectors.
+- **18** uses of `|` inside ONE value (`func[name~=pending|queued|lifted]`) —
+  the form the change turned into an error.
+- Recovery from the migration message, 3 cases: two quoted correctly
+  (`[name~='a|b|c']`), one silently narrowed to `[name~=pending]` and dropped
+  three alternatives. That third is a wrong answer, quietly.
+The original defect was real — `func name~=A|name~=B` parsed as the regex
+`A|name~=B` and returned FEWER rows than one of its own alternatives — but the
+fix taxes the common case to enable one nobody uses.
+- **next**: USER decides. The narrower rule is to treat `|` as boolean ONLY
+  when the right-hand side parses as an attribute (`name=a|name=b` boolean,
+  `name~=a|b` regex). It was dismissed at design time as ambiguous; the
+  measurement says the ambiguity resolves cleanly and the current rule costs
+  more than it saves.
+- **risks**: a second grammar change in two days, on a surface agents are
+  already adapting to. Reverting to regex-default re-opens the original bug
+  unless the "right side is an attribute" test is exact.
+
+✅ **Merge conflicts are first-class — 2026-08-03/04.** A conflicted file was
+the one input where the index was CONFIDENTLY wrong: tree-sitter recovers past
+the markers, so both sides landed in the symbol table as peers and a conflict
+crossing a function boundary produced `func B[1]` — ours' header, a `=======`,
+theirs' tail. A declaration from no commit and no branch, read back without a
+warning and editable. Full forensics in `bugs.md`. The tree, in the order it
+was built: `accept:"mine"|"theirs"` (whole file or one block by its span);
+`::conflict` / `::mine` / `::theirs` / `::base` as nodes, sides carrying the
+REF git wrote; a refusal on any write STRADDLING a marker; whole-file
+reconstruction of each side with `symbols.ParsesCleanly` as the verdict and a
+diffed-TEXT fallback when neither parses; and finally withholding the phantoms
+from query results, which also repairs the ordinals of the real symbols around
+them.
+- **decided**: provenance is PRIMARY, not decoration. Under a rebase "ours" is
+  the upstream being replayed onto and "theirs" is your own commit — the
+  conflict that prompted this was exactly that shape — so sides report the ref
+  and the grammar says trust the ref, not the position.
+- **decided**: side declarations are names + classes, NEVER addresses. A symbol
+  found in a reconstruction has reconstructed-coordinate spans while the file
+  on disk still holds markers, so an address minted there would resolve against
+  different bytes than it was computed from.
+- **risks**: UNMEASURED in the wild. No conflict occurred in the three sessions
+  scanned on 08-04, so every part of this has passed tests and one scripted
+  live run and nothing else.
+- **next**: ◻ `::mine func` still does not QUERY the reconstructed side — the
+  trees are built and parsed, only their verdict and declaration list surface.
+  ◻ No workspace-scoped resolve: a 30-file merge is 30 calls, when `accept` is
+  by definition uniform.
+
+✅ **A conflict announces itself, out of band — 2026-08-04.** Three repos, and
+the keystone was missing rather than hard: mcp-go's client has always supported
+`OnNotification`; agentkit's `mcpmgr` never wired it, and dun built AROUND the
+gap (sub-agents are in-process purely so a child could notify a parent).
+poly-lsp declares `logging` and pushes on the conflict TRANSITION; `mcpmgr`
+grew `SetNotificationHandler`; dun lifts `notifications/message` into the
+conversation via `Notify`, so it lands inside the next tool result. Verified
+live end to end: the model read the notification, ran the selector it
+suggested, and offered both resolutions by branch name.
+- **note**: this makes dun's in-process sub-agent transport optional rather
+  than necessary. Not changed — it works, and the reason to revisit it is now a
+  different one.
+- **risks**: `mcpmgr` is shared infrastructure, so every MCP server behind dun
+  can now push. Nothing rate-limits or de-duplicates a chatty server.
 
 ✅ **A zero-result query says which clause emptied it — 2026-08-02** →
 done.md. `mcp/query_hint.go`: `returned == 0` attaches a one-line `hint`
@@ -349,6 +428,25 @@ corrallm.
     mover (asis/pattern 3/4, **inspired 2/4** — its longer prose induced MORE
     grep scaffolding; the verbose "inspirations" strategy underperforms tight
     recipes and even the plain spec).
+  - ✅ **Transcript scan replaces the bench for surface changes — 2026-08-04.**
+    Reading real dun sessions answers what the bench structurally cannot,
+    because it measures the model that actually ran, on real work, against the
+    surface as shipped. Three sessions after the 08-03 changes, 151 `node_*`
+    calls:
+    - **The read `outline` works.** Paging hints fell 36% → **16%** of reads,
+      and the "read it whole in one call" escape (`lineLimit`) was used **5
+      times after never being used once**. Not controlled — different work —
+      but the lineLimit shift has no other explanation.
+    - **The space change broke nothing.** ZERO selectors used the old attach
+      form; 21 used the bracketed filter. A breaking grammar change with no
+      observable breakage.
+    - **The booleans are unused and costly** — see the ⏸ slice at the top.
+    - Untested in the wild: every conflict feature (no conflict occurred), and
+      `hop`/multi-hop walks (0 uses; `via` twice).
+    **Method**: pair `tool_call`/`tool_result` out of `~/.dun/sessions/*.jsonl`
+    and count both the ERRORS and the corrective NOTES, which is where a
+    surface tells on itself. This is now the loop for any description or
+    grammar change: ship, scan the next sessions, keep or revert.
   - ❗ **The bench structurally CANNOT answer the absolute adoption question.**
     In-harness, grep is just another advertised tool with a one-line desc — it
     has NO home-field advantage. The icebox's "0 calls" was grep as the model's

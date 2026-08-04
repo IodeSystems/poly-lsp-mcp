@@ -2430,9 +2430,10 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 		if markdownHeadingText(node, content) == "" {
 			return "", false
 		}
-		// `module` is the shared vocabulary's named-container slot — the
-		// same one a Go package, a Kotlin package and a TS namespace use.
-		return "module", true
+		// A markdown file has many headings, not one named container
+		// like a Go package. Use "heading" to reflect that each section is
+		// a structural outline element, not a top-level namespace.
+		return "heading", true
 	case "c", "cpp":
 		if class, branch, ok := refinedClassC(node, parentClass, content); ok {
 			return class, branch

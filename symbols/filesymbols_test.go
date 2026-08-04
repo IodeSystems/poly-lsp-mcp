@@ -1123,8 +1123,8 @@ Beta body.
 			t.Errorf("missing section %q; have %+v", sym, syms)
 			continue
 		}
-		if got.Class != "module" {
-			t.Errorf("%q class = %q, want module", sym, got.Class)
+		if got.Class != "heading" {
+			t.Errorf("%q class = %q, want heading", sym, got.Class)
 		}
 		if got.DeclStartLine != span[0] || got.DeclEndLine != span[1] {
 			t.Errorf("%q spans L%d-%d, want L%d-%d — a section owns its BODY, not just its heading",

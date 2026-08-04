@@ -86,7 +86,7 @@ var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 
 const modernNodeReadDescription = `Read a node whole. node = an address from node_query's matches[].node ("<file>#<sym>" or "<file>"), or a selector matching exactly one node (2+ errors and lists candidates).
 An addressed symbol is NEVER truncated: you get the complete declaration, byte-for-byte the span node_edit's newText replaces.
-startLine/lineLimit are only for browsing a whole FILE (that view may be truncated, and says so).`
+startLine/lineLimit on ANY address read a file WINDOW anchored there — not the text oldText matches; it says so.`
 
 var modernNodeReadSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"node":{"type":"string","description":"Address or selector."},` +
@@ -924,22 +924,60 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			fileOutline(s.languageForFile(abs), content))), false, nil
 	}
 
-	// An addressed-node read is ALWAYS whole.
+	// An addressed node PLUS a window is a browse ANCHORED at that node.
+	//
+	// This used to be refused — "node reads are always whole" — and the
+	// refusal was the most persistent error class in the live sessions: 10
+	// hits in a day, still arriving after the message had been rewritten
+	// twice to name the span form. Worse, the last wording was WRONG for the
+	// commonest shape: given node "main.go@720" with lineLimit 20 it built
+	// the span from the node's own bounds and advised "main.go@720-720" —
+	// one line, when twenty were asked for.
+	//
+	// Nothing about the request is ambiguous: an anchor and a window. So
+	// answer it. startLine defaults to the node's first line and lineLimit to
+	// its length, which makes the bare address the same read it always was.
+	// The window is clipped to the FILE, not to the node — a site address is
+	// one line and "20 lines from here" is precisely what it is asked for.
+	//
+	// The note is the load-bearing half. What comes back is a FILE window, so
+	// it is not what you would write back: node_edit matches oldText against
+	// the NODE's text, and a window that overruns the node would fail there
+	// with nothing to explain it.
 	if p.StartLine != nil || p.LineLimit != nil {
-		what := "a symbol"
-		if rn.class == "ref" {
-			what = "a source line/span"
+		startLine := rn.decl.StartLine
+		if p.StartLine != nil {
+			if *p.StartLine < 1 {
+				return nil, true, errors.New("startLine must be >= 1")
+			}
+			startLine = *p.StartLine
 		}
-		// Name the form that DOES answer the question being asked. The
-		// caller wanted part of something large; "drop them" only tells
-		// them how to stop being wrong, and the measured recovery was
-		// either the whole 500-line symbol or a file window they then had
-		// to page. A span address reads exactly the lines they named.
-		return nil, true, fmt.Errorf(
-			"node reads are always whole: %q addresses %s, so startLine/lineLimit don't apply (they browse a whole FILE). "+
-				"Drop them for the whole node, browse the file with %q, or read just those lines with the SPAN address %q",
-			p.Node, what, rn.file,
-			fmt.Sprintf("%s@%d-%d", rn.file, rn.decl.StartLine, rn.decl.EndLine))
+		lineLimit := 0 // 0 = auto (the char budget)
+		if p.LineLimit != nil {
+			if *p.LineLimit < 1 {
+				return nil, true, errors.New("lineLimit must be >= 1")
+			}
+			lineLimit = *p.LineLimit
+		} else if n := rn.decl.EndLine - startLine + 1; n > 0 {
+			lineLimit = n // to the end of the node
+		}
+		out := buildReadPayload(content, rn.file, startLine, lineLimit, 0,
+			targetedSearchAdvice(rn.file, true),
+			fileOutline(s.languageForFile(abs), content))
+		out["node"] = rn.addr
+		out["@"] = []int{rn.decl.StartLine, rn.decl.EndLine}
+		// A one-line site address is the shape this exists for, and "drop them
+		// to read it whole" is not advice there — whole IS the one line.
+		span := fmt.Sprintf("spans lines %d-%d; drop startLine/lineLimit to read it whole",
+			rn.decl.StartLine, rn.decl.EndLine)
+		if rn.decl.StartLine == rn.decl.EndLine {
+			span = fmt.Sprintf("is line %d alone", rn.decl.StartLine)
+		}
+		out["note"] = fmt.Sprintf(
+			"a WINDOW of %s, not the node: %s %s. node_edit matches oldText against the NODE's text, "+
+				"which this view may cut short or overrun",
+			rn.file, rn.addr, span)
+		return jsonContent(out), false, nil
 	}
 	text, err := readRangeText(content, rn.decl)
 	if err != nil {

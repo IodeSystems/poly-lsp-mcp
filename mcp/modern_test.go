@@ -779,20 +779,42 @@ func TestModernNodeReadNeverTruncatesAddressedNode(t *testing.T) {
 	}
 }
 
-func TestModernNodeReadSymbolRejectsLineWindow(t *testing.T) {
+// A symbol address plus a window is a browse ANCHORED at the symbol.
+//
+// It used to be refused, and the refusal was the most persistent error class
+// in the live sessions — 10 in one day, still arriving after two rewordings.
+// The caller wants PART of something big; there is nothing ambiguous to ask
+// back about. Server.Start spans 9-12 in the fixture.
+func TestModernNodeReadSymbolWindows(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	r := s.callTool("node_read", map[string]any{"node": "main.go#Server.Start", "startLine": 2})
-	if !r.IsError {
-		t.Fatalf("startLine with a symbol-resolving node must error; got %s", r.Content[0].Text)
+	// startLine alone: from there to the END of the symbol.
+	m, isErr := readNode(t, s, map[string]any{"node": "main.go#Server.Start", "startLine": 10})
+	if isErr {
+		t.Fatalf("a window on a symbol should be answered: %+v", m)
 	}
-	if !strings.Contains(r.Content[0].Text, "always whole") {
-		t.Errorf("error should explain node reads are whole; got %q", r.Content[0].Text)
+	if got, _ := m["text"].(string); strings.TrimRight(got, "\n") != "\tfmt.Println(ctx)\n\treturn nil\n}" {
+		t.Errorf("startLine should anchor inside the symbol and run to its end; got %q", got)
 	}
-	// lineLimit is rejected the same way.
-	if r := s.callTool("node_read", map[string]any{"node": "main.go#Server.Start", "lineLimit": 3}); !r.IsError {
-		t.Error("lineLimit with a symbol node must error")
+	// The window is not what you would write back, and the note has to say so.
+	if note, _ := m["note"].(string); !strings.Contains(note, "WINDOW") || !strings.Contains(note, "9-12") {
+		t.Errorf("a windowed read must name the node's real span; note=%q", note)
+	}
+
+	// lineLimit alone: from the symbol's first line.
+	m, _ = readNode(t, s, map[string]any{"node": "main.go#Server.Start", "lineLimit": 2})
+	if got, _ := m["text"].(string); !strings.HasPrefix(got, "func (s *Server) Start") ||
+		strings.Contains(got, "return nil") {
+		t.Errorf("lineLimit should count from the symbol's first line; got %q", got)
+	}
+
+	// The bare address is unchanged: still the whole node, still no paging keys.
+	m, _ = readNode(t, s, map[string]any{"node": "main.go#Server.Start"})
+	for _, k := range []string{"truncated", "truncatedReason", "hint", "note"} {
+		if _, has := m[k]; has {
+			t.Errorf("an unwindowed node read must not carry %q; got %+v", k, m)
+		}
 	}
 }
 

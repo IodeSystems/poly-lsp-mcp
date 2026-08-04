@@ -75,45 +75,34 @@ func TestRefSiteAddrReadsASpan(t *testing.T) {
 	}
 }
 
-// startLine/lineLimit browse a whole FILE. On an addressed line they are a
-// category error, and the message must name what was actually addressed —
-// "a symbol" was wrong for a ref site and sent the model looking for one.
-func TestRefSiteAddrRejectsLineWindowArgs(t *testing.T) {
+// A window on a SITE address reads from that line onward — the exact shape the
+// old refusal got wrong.
+//
+// A site address spans one line, so building the suggested span from the
+// node's own bounds advised "main.go@10-10" to a caller who had asked for
+// twenty lines. The window is clipped to the FILE, not to the node: "20 lines
+// from here" is what a one-line anchor is for.
+func TestRefSiteAddrWindowsFromThatLine(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	r := s.callTool("node_read", map[string]any{"node": "main.go@10", "startLine": 1})
-	if !r.IsError {
-		t.Fatal("startLine on a ref-site address should be refused")
-	}
-	if msg := r.Content[0].Text; !strings.Contains(msg, "source line/span") {
-		t.Errorf("the error should say the address is a line/span, not a symbol; got %q", msg)
-	}
-}
-
-// The most-repeated error in a measured session (3 of 7) was startLine on a
-// large symbol: the caller wants PART of something big, and "drop them" only
-// says how to stop being wrong — the observed recovery was reading a 500-line
-// method whole, or paging a file window. Name the form that answers it.
-func TestWholeNodeReadErrorOffersTheSpanForm(t *testing.T) {
-	s, _ := startModern(t)
-	defer s.close()
-
-	r := s.callTool("node_read", map[string]any{"node": "main.go#Server.Start", "startLine": 10})
-	if !r.IsError {
-		t.Fatal("startLine on a symbol should still be refused")
-	}
-	msg := r.Content[0].Text
-	if !strings.Contains(msg, "SPAN address") {
-		t.Errorf("the error should name the span form; got %q", msg)
-	}
-	// Runnable as printed, and it must be THIS node's span.
-	if !strings.Contains(msg, `"main.go@9-12"`) {
-		t.Errorf("the span should be the addressed node's own lines; got %q", msg)
-	}
-	m, isErr := readNode(t, s, map[string]any{"node": "main.go@9-12"})
+	m, isErr := readNode(t, s, map[string]any{"node": "main.go@10", "lineLimit": 3})
 	if isErr {
-		t.Fatalf("the suggested address must work as printed: %+v", m)
+		t.Fatalf("a window on a site address should be answered: %+v", m)
+	}
+	// Lines 10-12 — past the one line the address names.
+	want := "\tfmt.Println(ctx)\n\treturn nil\n}"
+	if got, _ := m["text"].(string); strings.TrimRight(got, "\n") != want {
+		t.Errorf("window should run past the addressed line; got %q want %q", got, want)
+	}
+	if note, _ := m["note"].(string); !strings.Contains(note, "WINDOW") {
+		t.Errorf("a windowed read must say it is not the whole node; note=%q", note)
+	}
+
+	// The span address still reads exactly its own lines, unwindowed.
+	m, isErr = readNode(t, s, map[string]any{"node": "main.go@9-12"})
+	if isErr {
+		t.Fatalf("span read errored: %+v", m)
 	}
 	if txt, _ := m["text"].(string); !strings.Contains(txt, "func (s *Server) Start") {
 		t.Errorf("it should read the lines it named; got %q", txt)

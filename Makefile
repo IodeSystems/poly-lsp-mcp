@@ -37,6 +37,29 @@ install:
 install-release:
 	$(GO) install .
 
+# Benchmarks. Generated fixtures, so a number means the same thing next month
+# — never benchmark the live repo, it drifts with every commit.
+#
+#   make bench                     everything, quick
+#   make bench BENCH=QueryShapes   one family
+#   make bench-profile             + CPU profile into bench.cpu
+#
+# Compare two revisions with benchstat:
+#   make bench > old.txt ; <change> ; make bench > new.txt ; benchstat old.txt new.txt
+BENCH     ?= .
+BENCHTIME ?= 20x
+BENCHPKGS ?= ./mcp/ ./symbols/
+
+.PHONY: bench
+bench:
+	$(GO) test $(BENCHPKGS) -run XXX -bench '$(BENCH)' -benchtime $(BENCHTIME) -count=1
+
+.PHONY: bench-profile
+bench-profile:
+	$(GO) test ./mcp/ -run XXX -bench '$(BENCH)' -benchtime $(BENCHTIME) -count=1 \
+		-cpuprofile bench.cpu -memprofile bench.mem
+	@echo "profiles: bench.cpu bench.mem — inspect with: go tool pprof -top -cum bench.cpu"
+
 .PHONY: test
 test:
 	$(GO) test -short -count=1 -timeout $(TEST_TIMEOUT) $(PKGS)

@@ -201,3 +201,49 @@ func TestUpstreamWithRemotePrefix(t *testing.T) {
 		t.Errorf("UpstreamBranch = %q, want main (stripped origin/)", up)
 	}
 }
+
+// UnmergedPaths is git's own answer to "which files are mid-merge", which is
+// exact where a scan for "<<<<<<<" is not: a marker inside a string literal,
+// or a document about merge conflicts, is not an unmerged path.
+func TestUnmergedPaths(t *testing.T) {
+	dir := newRepo(t)
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("base\n")
+	mustGit(t, dir, "add", "-A")
+	mustGit(t, dir, "commit", "-qm", "base")
+
+	r := &Repo{Dir: dir}
+	if got := r.UnmergedPaths(); len(got) != 0 {
+		t.Fatalf("clean repo reports %v", got)
+	}
+
+	mustGit(t, dir, "checkout", "-qb", "feature")
+	write("theirs\n")
+	mustGit(t, dir, "commit", "-qam", "feature")
+	mustGit(t, dir, "checkout", "-q", "main")
+	write("mine\n")
+	mustGit(t, dir, "commit", "-qam", "mine")
+	// Expected to fail — that is the point.
+	cmd := exec.Command("git", "merge", "feature")
+	cmd.Dir = dir
+	_ = cmd.Run()
+
+	got := r.UnmergedPaths()
+	if len(got) != 1 || got[0] != "f.txt" {
+		t.Fatalf("UnmergedPaths = %v, want [f.txt]", got)
+	}
+
+	// A literal marker in tracked, merged content is NOT an unmerged path.
+	mustGit(t, dir, "merge", "--abort")
+	write("a line with <<<<<<< in it\n")
+	mustGit(t, dir, "add", "-A")
+	mustGit(t, dir, "commit", "-qm", "markers as content")
+	if got := r.UnmergedPaths(); len(got) != 0 {
+		t.Errorf("a marker in committed content reported as unmerged: %v", got)
+	}
+}

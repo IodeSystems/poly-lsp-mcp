@@ -182,3 +182,28 @@ func runIn(dir string, args ...string) (string, error) {
 	}
 	return stdout.String(), nil
 }
+
+// UnmergedPaths returns the working-tree-relative paths git considers
+// UNMERGED — the files a merge, rebase, or cherry-pick left with conflict
+// markers.
+//
+// This is git's own answer rather than a scan for "<<<<<<<". It is exact (a
+// marker inside a string literal or a document ABOUT merge conflicts is not
+// an unmerged path), it costs one process instead of a pass over the
+// workspace, and it is available before anything has been read.
+//
+// A non-repo, a missing git binary, or any git failure returns nil: the
+// caller's fallback is "assume clean", which is what it did before asking.
+func (r *Repo) UnmergedPaths() []string {
+	out, err := r.run("diff", "--name-only", "--diff-filter=U")
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths
+}

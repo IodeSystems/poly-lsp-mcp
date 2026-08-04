@@ -397,6 +397,12 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		if n := literalRegexNote(p.Selector); n != "" {
 			payload["note"] = n
 		}
+		// An open conflict makes "0 matches" untrustworthy — see
+		// zeroResultConflictNote. Outranks the regex note: that one critiques
+		// the selector, this one says the corpus is not what it looks like.
+		if n := s.zeroResultConflictNote(); n != "" {
+			payload["note"] = n
+		}
 		// Which CLAUSE emptied it. Separate key from `note` on purpose:
 		// note says what happened to the query that ran, hint names the
 		// one thing to write instead. Silent unless a probe finds a

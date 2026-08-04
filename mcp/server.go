@@ -626,6 +626,7 @@ func (s *Server) BuildIndex() error {
 	}
 	s.setIndex(idx)
 	s.logf("index: indexed %d names from %s", len(idx.Names()), root)
+	s.seedConflicted(root)
 
 	resolver := bindings.NewResolver(root)
 	if len(s.bindings) > 0 {

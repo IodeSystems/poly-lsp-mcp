@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"os"
 	"sort"
 	"strings"
@@ -798,4 +799,79 @@ func (s *Server) dropConflictChimeras(rows []*treeNode) ([]*treeNode, int, strin
 		out = append(out, n)
 	}
 	return out, dropped, where
+}
+
+// seedConflicted asks git which files are UNMERGED and records them.
+//
+// The set was previously filled only by the watcher, so it knew about a
+// conflict that APPEARED while the server ran and nothing about one that was
+// already there — which is the ordinary case, since the agent is started after
+// the merge that needs untangling. Everything keyed off the set was therefore
+// silent exactly when a human would most expect it to speak.
+func (s *Server) seedConflicted(root string) {
+	repo, err := git.FromCWD(root)
+	if err != nil {
+		return
+	}
+	paths := repo.UnmergedPaths()
+	s.conflictMu.Lock()
+	defer s.conflictMu.Unlock()
+	if s.conflicted == nil {
+		s.conflicted = map[string]bool{}
+	}
+	for _, p := range paths {
+		s.conflicted[p] = true
+	}
+	if len(paths) > 0 {
+		s.logf("index: %d file(s) hold unresolved merge conflicts: %s",
+			len(paths), strings.Join(paths, ", "))
+	}
+}
+
+// conflictedFiles returns the unmerged paths known right now.
+func (s *Server) conflictedFiles() []string {
+	s.conflictMu.Lock()
+	defer s.conflictMu.Unlock()
+	out := make([]string, 0, len(s.conflicted))
+	for f, yes := range s.conflicted {
+		if yes {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// zeroResultConflictNote warns that "not found" is not trustworthy while a
+// conflict is open.
+//
+// tree-sitter recovers past conflict markers by SWALLOWING what follows: in a
+// file conflicted at one function, the declaration above the markers absorbed
+// every declaration below it, so those symbols were not withheld — they were
+// never parsed. A caller asking for one of them got totalMatches:0 and no
+// note, and "0" reads as "that code does not exist" rather than "the file it
+// lives in is mid-merge".
+func (s *Server) zeroResultConflictNote() string {
+	files := s.conflictedFiles()
+	if len(files) == 0 {
+		return ""
+	}
+	shown := files
+	if len(shown) > 5 {
+		shown = shown[:5]
+	}
+	more := ""
+	if len(files) > len(shown) {
+		more = fmt.Sprintf(" (and %d more)", len(files)-len(shown))
+	}
+	subject := fmt.Sprintf("%s holds an UNRESOLVED merge conflict", shown[0])
+	if len(shown) > 1 {
+		subject = fmt.Sprintf("%s hold UNRESOLVED merge conflicts", strings.Join(shown, ", "))
+	}
+	return fmt.Sprintf(
+		"0 matches, but this is NOT a reliable \"not found\": %s%s, and a declaration below the "+
+			"markers is often swallowed by the one above it rather than indexed. "+
+			"`#'%s'::conflict` shows the regions and `::mine` / `::theirs` what each side declares; "+
+			"node_edit accept:\"mine\"|\"theirs\" resolves them, after which this query is worth retrying",
+		subject, more, shown[0])
 }

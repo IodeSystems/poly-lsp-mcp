@@ -93,3 +93,46 @@ func TestConflictViewsAreNotFlaggedAsChimeras(t *testing.T) {
 		}
 	}
 }
+
+// "0 matches" is not a reliable "not found" while a conflict is open.
+//
+// tree-sitter recovers past the markers by SWALLOWING what follows: a file
+// conflicted at one function had the declaration above the markers absorb
+// every declaration below it, so those symbols were never parsed — not
+// withheld, absent. Asking for one returned totalMatches:0 with no note at
+// all, and "0" reads as "that code does not exist" rather than "the file it
+// lives in is mid-merge".
+func TestZeroResultSaysTheWorkspaceIsMidMerge(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+	if err := os.WriteFile(filepath.Join(dir, "m.go"), []byte(straddleSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The set is normally seeded from git at index time; state it directly so
+	// the note is tested without standing up a repo mid-merge (git's side is
+	// covered by TestUnmergedPaths).
+	s.srv.conflictMu.Lock()
+	s.srv.conflicted = map[string]bool{"m.go": true}
+	s.srv.conflictMu.Unlock()
+
+	q := query(t, s, map[string]any{"selector": "func[name=DefinitelyNotIndexed]"})
+	if q.TotalMatches != 0 {
+		t.Fatalf("fixture drift: expected zero matches, got %d", q.TotalMatches)
+	}
+	for _, want := range []string{"NOT a reliable", "m.go", "::conflict", `accept:"mine"`} {
+		if !strings.Contains(q.Note, want) {
+			t.Errorf("zero-result note missing %q: %q", want, q.Note)
+		}
+	}
+}
+
+// A clean workspace must not acquire a conflict note — the warning is only
+// worth anything if it means something.
+func TestZeroResultIsQuietWithoutAConflict(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+	q := query(t, s, map[string]any{"selector": "func[name=DefinitelyNotIndexed]"})
+	if strings.Contains(q.Note, "merge conflict") {
+		t.Errorf("clean workspace warned about a conflict: %q", q.Note)
+	}
+}

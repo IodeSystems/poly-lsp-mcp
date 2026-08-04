@@ -354,11 +354,17 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 	if s := subjectLine(list); s != "" {
 		payload["subject"] = s
 	}
-	if capped {
-		// The walk stopped at the limit, so the count is a FLOOR, not a
-		// total. Rendered as the same ">N" the cost trace uses for a
-		// budget blow, and under a DIFFERENT key so a reader cannot
-		// mistake it for an exact figure.
+	// A walk that STOPPED EARLY knows a floor, not a total — whether it
+	// stopped at the row limit or ran out of budget. Both get the ">N" key
+	// the cost trace already uses, so a reader cannot mistake either for an
+	// exact figure.
+	//
+	// The budget case used to report `totalMatches` flat, which is the more
+	// dangerous of the two: `::in.call > *` blows the clock and answered
+	// "totalMatches: 0" — a positive claim of NONE for a walk that never
+	// finished, one field away from a note saying results may be incomplete.
+	// A limit cap at least stops at a number the caller chose.
+	if capped || e.workExceeded {
 		payload["totalMatchesAtLeast"] = ">" + commaInt(total)
 	} else {
 		payload["totalMatches"] = total
@@ -370,7 +376,7 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		payload["rollup"] = rollup
 	}
 	// Never cut off silently: say there's more, and how to reach it.
-	if end < total || capped {
+	if end < total || capped || e.workExceeded {
 		payload["truncated"] = true
 	}
 	switch {

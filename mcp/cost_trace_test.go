@@ -72,3 +72,37 @@ func TestNodeQueryEmitsCostOnBlow(t *testing.T) {
 		t.Error("a truncated node_query result must carry a cost trace")
 	}
 }
+
+// A walk that stopped EARLY knows a floor, not a total — whether it stopped
+// at the row limit or ran out of budget. The budget case used to report
+// `totalMatches` flat: `::in.call > *` blows the clock and answered
+// "totalMatches: 0", a positive claim of NONE for a walk that never finished,
+// one field away from a note saying results may be incomplete.
+func TestBudgetBlowReportsAFloorNotATotal(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	blown := query(t, s, map[string]any{
+		"selector": "::in.call > *", "limit": 3, "budget": "1ops",
+	})
+	if blown.TotalMatches != 0 {
+		t.Fatalf("fixture drift: expected the budget to blow; got %d", blown.TotalMatches)
+	}
+	if blown.TotalAtLeast == "" {
+		t.Error("a budget-blown count must be reported as a FLOOR, not an exact total")
+	}
+	if !blown.Truncated {
+		t.Error("and must be marked truncated")
+	}
+	if !strings.Contains(blown.Note, "INCOMPLETE") {
+		t.Errorf("the note should still say results may be incomplete; got %q", blown.Note)
+	}
+
+	// A query that finishes still reports an exact total — the floor key is
+	// for uncertainty, not for every answer.
+	done := query(t, s, map[string]any{"selector": "path=main.go func", "limit": 50})
+	if done.TotalMatches == 0 || done.TotalAtLeast != "" {
+		t.Errorf("a completed walk reports an exact total; got %d / %q",
+			done.TotalMatches, done.TotalAtLeast)
+	}
+}

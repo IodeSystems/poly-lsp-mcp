@@ -77,6 +77,10 @@ agents actually want the cross-lib answer unprompted.
   inverse. Bare `:any/:all/:empty` = position claims. Language classes
   (file.go), `:first`/`:last` per anchor. Attribute axes: `[name]` (called) vs
   `[path]` (lives), ops `= ^= $= *=` literal, `~=` regex (bracket-aware).
+  A workspace path IS an id, bare and anywhere a compound goes —
+  `harness.go > type`, `cmd/dun/tui.go ::grep('…')`, `a.go#Save::in.call` —
+  so node_query takes the address it prints (2026-08-04). An ABSOLUTE path is
+  still refused: addresses are workspace-relative.
   Shipped 2026-07-17 → done.md ("Graph selector language" + the per-feature
   entries) for the full record.
 - Trivia/metadata as NODES (→ done.md): `annotation` (decorators py/ts/kotlin/
@@ -116,220 +120,32 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
-✅ **Tier-3 schema auto-bindings swept — 2026-08-04.** Checked out end to end:
-proto, openapi and jsonschema all extract entities; sites land on the right
-lines (`openapi.yaml:8` for `UserProfile:`, `model.go:15` for `type Invoice`);
-the bindings CROSS, so a Go struct's `::in` reaches the proto message that
-declares it, from either language.
-  - **The defect: a schema that anchored NOTHING was silent** — the Tier-2
-    binding failure in its Tier-3 twin, and it needed the same fix. A wrong
-    path, a misspelled dialect, or a file the dialect cannot read produces no
-    anchors, which is exactly what declaring no schemas produces. All three
-    already had excellent stderr diagnostics; stderr does not reach the model.
-    Now on the two routes built for bindings (initialize health block +
-    `notifications/message`), quiet when the schema works.
-  - **Noted, not a defect**: the schema anchor is a hub — Go and TS each link
-    to the proto message, not to each other, so Go↔TS is two hops. The proto
-    declaration is reachable as an `::in` edge and by its `@line` address, but
-    NOT by `#Name`, because a file with no tree-sitter grammar contributes
-    binding SITES and no symbols. `#UserProfile` therefore answers with the Go
-    and TS declarations and omits the proto one that gives them their shared
-    identity. Worth revisiting if a session shows an agent tripping on it.
+✅ **Three refusals dropped — the scan loop run against its OWN fixes,
+2026-08-04** → done.md. Re-scanning the same corpus after a day of surface
+fixes is what the loop is for, and it earned its keep twice: it confirmed four
+classes dead (every hit predating its fix) and found two fixes that stopped one
+step short. A bare path is now the id it plainly is; `startLine`/`lineLimit` on
+any address read a WINDOW instead of erroring; `::grep` accepts `-r`.
 
-✅ **Conflicts swept against a REAL merge — 2026-08-04.** The plan had these
-recorded as never exercised in the wild; a genuine `git merge` conflict now
-runs the whole cycle. Working: chimera withholding, `::conflict` with
-`sides`/`mineDeclares`/`theirsDeclares`, `::mine`/`::theirs`,
-`accept:"theirs"`, the RESOLVED notification, and the "git still has it staged
-as unmerged" note.
-  - **The defect: "0 matches" was not a reliable "not found".** tree-sitter
-    recovers past markers by SWALLOWING what follows — in a two-function file
-    conflicted at the first, the second was not withheld as a chimera, it was
-    never parsed. Asking for it got `totalMatches:0` and NO note. The existing
-    warning is scoped to files present in the RESULT, which is right for a
-    non-empty page and structurally cannot fire with zero rows.
-  - **Why the set could not be consulted:** only the watcher filled
-    `s.conflicted`, so the server knew about a conflict that APPEARED while it
-    ran and nothing about one already there — the ordinary case, since the
-    agent starts after the merge. Seeded now from
-    `git diff --diff-filter=U` at index time: git's own answer, exact where a
-    scan for `<<<<<<<` is not (a marker in a string literal is not an unmerged
-    path), one process instead of a pass over the workspace.
-  - **Same seeding repaired the resolve announcement.** With the set empty, a
-    conflict resolved during a session moved false → false, so
-    `noteConflictTransition` returned early and "RESOLVED" never fired.
-  - ◻ **Optional, not built:** announce a PRE-EXISTING conflict at startup the
-    way the binding report does. The zero-result note fires where it matters
-    and a startup ping for the normal "I opened this to fix the merge" case may
-    be noise. USER's call.
+✅ **Tier-3 schema auto-bindings swept — 2026-08-04** → done.md. proto/openapi/jsonschema all extract, sites land on the right lines, bindings cross languages; a schema that anchored NOTHING now tells the client.
 
-✅ **Daemon multi-root, resources, and the zero-result hints swept —
-2026-08-04.** Three more surfaces, two defects.
-  - **The `resources` capability was claimed unconditionally.** The modern
-    3-tool surface ships no resources on purpose — cutting prompt tokens is
-    why it exists — so every client called `resources/list` for an empty
-    array, and the ones with a Resources panel got a permanently empty one.
-    Advertised now only when something is served. The same pass found the
-    bindings resource describing itself as "the same payload as the
-    `list_bindings` tool", which exists on neither surface; a test now keeps
-    any resource description from naming an unregistered tool.
-  - **A case slip was scored as the FURTHEST miss.** `nameNeighbours` exists
-    to catch "a typo or a case slip" and handled the case slip worst of
-    anything: comparing case-sensitively, every differing letter costs an edit
-    AND a leading difference zeroes the prefix credit, so `onlyina` for
-    `OnlyInA` scored like an unrelated word and got no hint, while a
-    one-letter typo got a good one.
-  - **Clean, no defect**: daemon multi-root isolation (two roots with
-    identical relative paths and identical symbol names, no bleed, warm index
-    reused); out-of-band create/append/delete all picked up; an unparseable
-    file still yields its symbols through error-tolerant parse; all three
-    legacy resources read correctly.
-  - **Deliberate, left alone**: a single filter that empties gets NO
-    "which clause" hint. `hintDropLastAttr` requires something narrowing to
-    survive the drop, because relaxing `func[name=Zzz]` to `func` reports that
-    some unrelated func exists — "your filter filtered", not "your filter
-    emptied it". Silence is the honest answer with one clause to blame.
+✅ **Conflicts swept against a REAL merge — 2026-08-04** → done.md. The whole cycle runs; the defect was "0 matches" reading as "not found" when tree-sitter swallowed a declaration past a marker, fixed by seeding the conflict set from `git diff --diff-filter=U`. The startup-announcement opt-in moved to icebox.
 
-✅ **An argument the tool does not have is REFUSED — 2026-08-04.** Swept the
-legacy 9-tool surface; the defect it turned up was never legacy-only.
-`encoding/json` drops unknown fields, so a misspelled or wrong-surface argument
-was discarded and the tool answered a different question — and the answer
-looked right. `structure(file:…)` ignored `file` (the arg is `path`) and listed
-the whole workspace; `search(pattern:…, file:"util.ts")` returned hits from
-another file; `node_read(node:…, lineLimt:2)` ignored the cap. The modern tools
-were protected only by their `required` fields, which is luck, not design.
-Checked at both dispatch paths against each tool's own declared schema, so no
-handler changed. Arguments that are off-schema on PURPOSE are now named in
-`Tool.Undeclared` (hidden `commit`/`rollback`, retired `grep`, node_read's v0.2
-aliases) with a test keeping that list from rotting into a copy of the schema.
-Also fixed two internal leaks found on the pass: `newErrors` serialized the
-error-fingerprint dedup keys verbatim (NUL bytes, `file://` URIs), and a
-missing range was reported by dumping the Go struct — the zero VALUES, never
-the missing ARGUMENTS.
-  - ◻ Known wart, left alone: legacy `node_read` with the v0.2 alias `limit`
-    on a `node` address errors naming `lineLimit / lineLength`, params the
-    caller never typed. It errors rather than silently ignoring, and the modern
-    surface already says this well.
+✅ **Daemon multi-root, resources and zero-result hints swept — 2026-08-04** → done.md. Two defects: `resources` advertised with nothing to serve, and a case slip scored as the furthest miss.
 
-✅ **A declared binding that did not resolve now TELLS the client — 2026-08-04.**
-A binding site is hand-written config, so the expected failure is a typo: a
-symbol not in that file, a jsonpath matching nothing, a regex that found only
-aliases. Every one produced a good stderr diagnostic and nothing else — and
-stderr does not reach the model. From the query side, a binding that failed to
-resolve is indistinguishable from one nobody declared: `::in`/`::out` simply
-does not cross, silently, exactly as if the config were absent. Two routes now
-carry it: a health block on the `initialize` response, and a warning pushed as
-`notifications/message`. A clean binding set stays quiet — a warning every
-startup would teach the model to ignore the channel. The report keeps
-bindings/sites/links apart; collapsing them printed "5 of 1 applied".
+✅ **An argument the tool does not have is REFUSED — 2026-08-04** → done.md. `encoding/json` dropped unknown fields, so a misspelled argument got a confident answer to a different question; checked now at both dispatch paths against each tool's own schema.
 
-✅ **Three usage misses found by scanning LIVE sessions — 2026-08-04.** The
-sweep loop, run against `~/.dun/sessions` filtered to the last two days. The
-date filter is the method, not a detail: the top error in the full corpus (50
-hits, a bare path read as a tag) was fixed on 07-30 and every hit predated it.
-Scanning without dating the corpus re-finds solved bugs.
-  - **`node_query` now accepts the address it prints.** `matches[].node` is
-    `"<file>#<sym>"`, `node_read` and `node_edit` both take it, and
-    `node_query` rejected it — four times in one day, always an agent
-    composing on an address it had just been handed. The refusal also gave
-    advice that cannot work: `path=<file>#<sym>` matches nothing, because no
-    path equals that string.
-  - **An `oldText` bigger than the node is a wrong ADDRESS.** `::grep` hands
-    back a one-line site address; it reads as a starting point, so the next
-    call carries the whole enclosing block as `oldText`. Five hits, the top
-    `node_edit` failure. The old error invited trimming the text when the fix
-    is to widen the address, so it now names the enclosing declaration.
-  - **"did you mean" is ranked by similarity, not file order.** It listed the
-    package name and every import; a list that cannot contain the answer reads
-    as "the symbol is not here". `A.B` where `A` exists shows A's members.
+✅ **A declared binding that did not resolve TELLS the client — 2026-08-04** → done.md. A typo'd binding was indistinguishable from an undeclared one; reported now on the initialize health block and as `notifications/message`, quiet when clean.
 
-✅ **`|` is an operator only before another test — 2026-08-04 (USER).** The
-boolean attribute grammar shipped on 08-03 made every `|` an operator, with a
-quoted value as the escape. The next session's transcripts said that was the
-wrong trade: **0** true boolean ORs in 97 real selectors against **19** regex
-alternations inside one value (`func[name~=pending|queued|lifted|midTurn]`),
-which the change turned into an error — and one recovery silently narrowed to
-`[name~=pending]`, dropping three alternatives without a word.
-USER's call, and the framing that settled it: *"those are not attribute
-phrases … it's cheaper to parse more than it is to llm turn."* `|`/`&` now end
-a value only when what FOLLOWS is another attribute test or a group, so
-`[name=a|name=b]` is boolean and `[name~=a|b]` is one regex. Both readings
-survive; the tax is gone.
-- **and the reading RENDERS the decision** (USER's other half: "we render an
-  explain for a query right? … That should clear it up"). It had to stop
-  reading `c.attrs`, which holds only top-level conjuncts and therefore
-  rendered NOTHING for an OR — the one shape where seeing the parse matters.
-- **measured cost of the round trip**: ~6 errors and one wrong answer over two
-  days, against a feature with no users. The lesson is in the adoption slice:
-  ship, scan, keep or revert — the scan is what caught it.
+✅ **Three usage misses found by scanning LIVE sessions — 2026-08-04** → done.md. node_query accepts the address it prints; an oversized `oldText` is a wrong ADDRESS; "did you mean" ranks by similarity.
 
-✅ **Budget semantics: charge the real work, scale with the corpus, stop on
-breadth — 2026-08-04 (USER).** Asking what the budget's semantics WERE turned
-up three defects at once.
-- **It did not bind.** `spend(1)` was charged per matched SITE while the
-  expensive work (`declsOf`/`LookupExisting`) is per NODE and was free, so a
-  wide query burned seconds while barely spending and the clock — sampled
-  every 256th spend — was never consulted. Measured against a 2.3s tree build:
-  a 1ms budget took 5.06s, a 1000ms budget 23.33s. Charging before the lookup:
-  1.91s and 3.43s.
-- **A fixed default measures the wrong thing.** Work scales with the corpus
-  AND the tree build comes out of the same budget and also grows, so a flat
-  10s shrinks in the only term that matters as a workspace grows. Now 10s
-  floor + 1s per 1,000 indexed names, clamped to the SAME 30s ceiling an
-  explicit budget already had.
-- **Nothing curtailed BREADTH, and the exploding shape is the one the planner
-  skips**: `planReorder` is sound only for pure-descendant chains and excludes
-  edges/`{m,n}`/`>`/`*`; `estCard` has no figure for an edge. The guard
-  therefore MEASURES rather than estimates — expand 64 tips, project the rate,
-  stop when it cannot fit — and names the tip count, since "the clock ran out"
-  is true of every blown query. 23.0s → 6.0s on `::in.call > *`.
-- **risks**: the guard needs 64 tips to sample, so it never applies to a small
-  workspace (its test builds a 400-symbol one rather than skipping). The
-  scaled default means a big corpus can now legitimately spend 30s.
+✅ **`|` is an operator only before another test — 2026-08-04 (USER)** → done.md. 0 real boolean ORs against 19 regex alternations; the reading now renders the parse. The scan is what caught it.
 
-✅ **Merge conflicts are first-class — 2026-08-03/04.** A conflicted file was
-the one input where the index was CONFIDENTLY wrong: tree-sitter recovers past
-the markers, so both sides landed in the symbol table as peers and a conflict
-crossing a function boundary produced `func B[1]` — ours' header, a `=======`,
-theirs' tail. A declaration from no commit and no branch, read back without a
-warning and editable. Full forensics in `bugs.md`. The tree, in the order it
-was built: `accept:"mine"|"theirs"` (whole file or one block by its span);
-`::conflict` / `::mine` / `::theirs` / `::base` as nodes, sides carrying the
-REF git wrote; a refusal on any write STRADDLING a marker; whole-file
-reconstruction of each side with `symbols.ParsesCleanly` as the verdict and a
-diffed-TEXT fallback when neither parses; and finally withholding the phantoms
-from query results, which also repairs the ordinals of the real symbols around
-them.
-- **decided**: provenance is PRIMARY, not decoration. Under a rebase "ours" is
-  the upstream being replayed onto and "theirs" is your own commit — the
-  conflict that prompted this was exactly that shape — so sides report the ref
-  and the grammar says trust the ref, not the position.
-- **decided**: side declarations are names + classes, NEVER addresses. A symbol
-  found in a reconstruction has reconstructed-coordinate spans while the file
-  on disk still holds markers, so an address minted there would resolve against
-  different bytes than it was computed from.
-- **risks**: UNMEASURED in the wild. No conflict occurred in the three sessions
-  scanned on 08-04, so every part of this has passed tests and one scripted
-  live run and nothing else.
-- **next**: ◻ `::mine func` still does not QUERY the reconstructed side — the
-  trees are built and parsed, only their verdict and declaration list surface.
-  ◻ No workspace-scoped resolve: a 30-file merge is 30 calls, when `accept` is
-  by definition uniform.
+✅ **Budget semantics — 2026-08-04 (USER)** → done.md. Three defects at once: the budget did not bind, did not scale with the corpus, and did not stop on breadth.
 
-✅ **A conflict announces itself, out of band — 2026-08-04.** Three repos, and
-the keystone was missing rather than hard: mcp-go's client has always supported
-`OnNotification`; agentkit's `mcpmgr` never wired it, and dun built AROUND the
-gap (sub-agents are in-process purely so a child could notify a parent).
-poly-lsp declares `logging` and pushes on the conflict TRANSITION; `mcpmgr`
-grew `SetNotificationHandler`; dun lifts `notifications/message` into the
-conversation via `Notify`, so it lands inside the next tool result. Verified
-live end to end: the model read the notification, ran the selector it
-suggested, and offered both resolutions by branch name.
-- **note**: this makes dun's in-process sub-agent transport optional rather
-  than necessary. Not changed — it works, and the reason to revisit it is now a
-  different one.
-- **risks**: `mcpmgr` is shared infrastructure, so every MCP server behind dun
-  can now push. Nothing rate-limits or de-duplicates a chatty server.
+✅ **Merge conflicts are first-class — 2026-08-03/04** → done.md. Conflicts are nodes (`::conflict`/`::mine`/`::theirs`/`::base`), resolvable with `accept:`, unwriteable while straddled, withheld from the flat index when a row exists on neither side.
+
+✅ **A conflict announces itself, out of band — 2026-08-04** → done.md. poly-lsp declares `logging` and pushes on the transition, agentkit's mcpmgr delivers it, dun lifts it into the conversation.
 
 ✅ **A zero-result query says which clause emptied it — 2026-08-02** →
 done.md. `mcp/query_hint.go`: `returned == 0` attaches a one-line `hint`
@@ -353,24 +169,7 @@ Edge selectors included: the limit was lifted the same day (USER). Measured at
   actually waited for. Overshoot is bounded by one tree-sitter parse, which is
   not interruptible.
 
-✅ **A trailing comment now belongs to the line it sits on — 2026-08-01.** A
-dogfood `node_edit` wrote a struct field the way it appears on screen, comment
-included, and got "oldText not found". Behind it: both span rules asked only
-whether a comment ENDED on the line above a declaration, which a comment
-trailing the PREVIOUS declaration does. In go/java that mis-aimed `::comment`;
-in typescript/kotlin/c it pulled the neighbour's comment into the next
-declaration's span, so deleting a field DESTROYED the comment above it and
-stranded its own. A declaration now owns the comment trailing it (USER's call
-— the existing "owns its doc comment" rule, pointed the other way), and owns
-no other. Full forensics in `plan/bugs.md`.
-- **risks**: field node text is now wider wherever a trailing comment exists,
-  so a caller that matched on the bare declaration still works (substring) but
-  a caller comparing whole node text sees more.
-- Java's field span was widened in the same pass (USER, 2026-08-01): a java
-  field's range was the bare declarator (`name`), now the whole
-  `field_declaration` — `@Inject String name; // why`, modifiers and
-  annotations included. Same single-declarator rule as C: `int a, b;` keeps
-  per-declarator ranges so siblings cannot overlap.
+✅ **A trailing comment belongs to the line it sits on — 2026-08-01** → done.md. Both span rules asked only whether a comment ENDED above a declaration; deleting a field destroyed the comment above it. Java's field span was widened in the same pass (USER).
 
 ◻ **Bug CLASSES are asserted across the whole language registry —
 2026-08-01.** `TestLanguageBugMatrix` (+ `langmatrix_classes_test.go`) states a
@@ -408,41 +207,9 @@ verified by negative control.
   symbol grammar; the matrix carries no KNOWN entries.
 
 
-✅ **The child LSP now hears about OUT-OF-BAND writes — 2026-07-31.** A
-`git rebase` run through a dun session's exec tool rewrote a file on disk; the
-fsnotify watcher re-indexed it and told the child LSP nothing, so gopls kept
-type-checking against a proactively-`didOpen`'d overlay that had been wrong
-for twenty minutes — confidently, with `diagnosticsTimedOut:false`, while
-`go build`, `node_read` and `node_query` all agreed on the truth. The watcher
-now pushes what it indexes (`notifyChildOfExternalChange`, `didClose` on
-delete), hash-guarded so the tool's own writes aren't echoed back. Full
-forensics in `plan/bugs.md`; pinned by a test with a demonstrated negative
-control. Two ergonomics fixes rode along, both from the same session corpus:
-an empty `oldText` now CREATES a file instead of answering "no such file",
-and a shell-double-quoted `::grep('-E "a|b"')` is answered with the search the
-caller meant plus a note saying what was stripped, where it used to be an
-error (and before that, a silent zero-match).
-- **risks**: an out-of-band change now costs a `didChange` round-trip per
-  watched file, so a branch switch across hundreds of files is a burst the
-  child must absorb; the debounce coalesces per path, not across the batch.
-  Untested at that scale.
-- **optional extensions**: register `workspace/didChangeWatchedFiles`
-  properly, which would also cover files that were never opened — it needs
-  client capabilities beyond `{}` and a `client/registerCapability` handler,
-  neither of which the current fix requires.
+✅ **The child LSP hears about OUT-OF-BAND writes — 2026-07-31** → done.md. A rebase through an exec tool left gopls type-checking a stale overlay for twenty minutes, confidently. The watcher now pushes what it indexes, hash-guarded.
 
-✅ **Edit parity across every callable language — 2026-07-28.** The gap that
-headed this list is closed. `node_refactor` signature rewriting now covers
-java, kotlin, groovy, c and c++ alongside go/typescript/python
-(`symbols/refactor_langs.go`), and Java gained the `.annotation` children five
-other languages already had. XML followed: an element's ATTRIBUTES are
-its parameter list, through its own non-grammar path. Only SQL and Markdown
-remain out — a stored function's callers are strings inside other statements,
-and a document section has no call site. (Rename always worked everywhere,
-including XML; it runs over the index, not the grammar.) Found and fixed while exercising it:
-a C++ out-of-line rename spanned the whole `Widget::area`, deleting the class
-scope and silently detaching the definition — now pinned by
-`TestCppQualifiedRenameKeepsScope`.
+✅ **Edit parity across every callable language — 2026-07-28** → done.md. Signature rewriting covers java/kotlin/groovy/c/c++ alongside go/ts/py, XML attributes are a parameter list; only SQL and Markdown stay out, by design.
 
 ✅ **Verification debts closed — 2026-07-28** → done.md. Idiomatic Java is
 now measured on JDK 21's `java.base` (3,498 hand-written files, 246k symbols,
@@ -475,6 +242,10 @@ on extension alone.
   - Markdown keeps inline backtick spans in the index. Assistant's judgement,
     not an instruction: dropping them breaks the prose-rename claim and two
     polyglot tests. Reversible in one line.
+  - Legacy `node_read` with the v0.2 alias `limit` on a `node` address errors
+    naming `lineLimit` / `lineLength`, params the caller never typed. It
+    errors rather than silently ignoring, and the modern surface says this
+    well; left alone 2026-08-04.
   - TypeScript arrow components (`const Foo = () => …`) get no
     `.argument`/`.return` children. Measured at 9 of 331 declarators (3%) on a
     real React frontend, so left alone; revisit against a codebase that

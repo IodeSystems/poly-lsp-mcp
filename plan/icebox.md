@@ -5,6 +5,19 @@ graph-selector design record this used to hold.
 
 ---
 
+## Announce a PRE-EXISTING merge conflict at startup
+
+Deferred 2026-08-04, USER's call to make. The conflict sweep left this as the
+one unbuilt half: a conflict that APPEARED while the server runs is announced,
+and one that was already there when it started is not. The zero-result note
+fires where it matters, and a startup ping for the ordinary "I opened this
+repo to fix the merge" case may be pure noise — which is the question. The
+machinery is all there: `s.conflicted` is seeded from `git diff
+--diff-filter=U` at index time, and `noteConflictTransition` already owns the
+push.
+
+---
+
 ## Worktree COW index overlay (daemon step 6) — MEASURED, not worth it now
 
 Deferred by MEASUREMENT (2026-07-25), not by decision-avoidance. Step 6's

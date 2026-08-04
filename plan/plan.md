@@ -116,6 +116,38 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+✅ **A declared binding that did not resolve now TELLS the client — 2026-08-04.**
+A binding site is hand-written config, so the expected failure is a typo: a
+symbol not in that file, a jsonpath matching nothing, a regex that found only
+aliases. Every one produced a good stderr diagnostic and nothing else — and
+stderr does not reach the model. From the query side, a binding that failed to
+resolve is indistinguishable from one nobody declared: `::in`/`::out` simply
+does not cross, silently, exactly as if the config were absent. Two routes now
+carry it: a health block on the `initialize` response, and a warning pushed as
+`notifications/message`. A clean binding set stays quiet — a warning every
+startup would teach the model to ignore the channel. The report keeps
+bindings/sites/links apart; collapsing them printed "5 of 1 applied".
+
+✅ **Three usage misses found by scanning LIVE sessions — 2026-08-04.** The
+sweep loop, run against `~/.dun/sessions` filtered to the last two days. The
+date filter is the method, not a detail: the top error in the full corpus (50
+hits, a bare path read as a tag) was fixed on 07-30 and every hit predated it.
+Scanning without dating the corpus re-finds solved bugs.
+  - **`node_query` now accepts the address it prints.** `matches[].node` is
+    `"<file>#<sym>"`, `node_read` and `node_edit` both take it, and
+    `node_query` rejected it — four times in one day, always an agent
+    composing on an address it had just been handed. The refusal also gave
+    advice that cannot work: `path=<file>#<sym>` matches nothing, because no
+    path equals that string.
+  - **An `oldText` bigger than the node is a wrong ADDRESS.** `::grep` hands
+    back a one-line site address; it reads as a starting point, so the next
+    call carries the whole enclosing block as `oldText`. Five hits, the top
+    `node_edit` failure. The old error invited trimming the text when the fix
+    is to widen the address, so it now names the enclosing declaration.
+  - **"did you mean" is ranked by similarity, not file order.** It listed the
+    package name and every import; a list that cannot contain the answer reads
+    as "the symbol is not here". `A.B` where `A` exists shows A's members.
+
 ✅ **`|` is an operator only before another test — 2026-08-04 (USER).** The
 boolean attribute grammar shipped on 08-03 made every `|` an operator, with a
 quoted value as the escape. The next session's transcripts said that was the

@@ -35,6 +35,8 @@ type Resolver struct {
 	ignores *git.IgnoreSet
 	// failures from the last Apply, for the caller to surface. See Failures.
 	failures []string
+	// schemaFailures from the last ApplySchemas. See SchemaFailures.
+	schemaFailures []string
 }
 
 func NewResolver(root string) *Resolver {

@@ -34,15 +34,25 @@ type SchemaEntity struct {
 // store clean even when user bindings and schema bindings overlap.
 func (r *Resolver) ApplySchemas(idx *symbols.Index, schemas []config.Schema) int {
 	inserted := 0
+	r.schemaFailures = nil
 	for _, sch := range schemas {
 		n, err := r.applySchema(idx, sch)
 		inserted += n
 		if err != nil {
 			log.Printf("schemas: %s (%s): %v", sch.File, sch.Dialect, err)
+			r.schemaFailures = append(r.schemaFailures,
+				fmt.Sprintf("%s (%s): %v", sch.File, sch.Dialect, err))
 		}
 	}
 	return inserted
 }
+
+// SchemaFailures returns the per-schema problems from the last ApplySchemas —
+// a path that does not exist, an unknown dialect, a file the dialect cannot
+// read. Same reasoning as Failures: a declared schema that anchored NOTHING is
+// indistinguishable from one nobody declared, because the only visible effect
+// either way is that ::in/::out does not cross.
+func (r *Resolver) SchemaFailures() []string { return r.schemaFailures }
 
 func (r *Resolver) applySchema(idx *symbols.Index, sch config.Schema) (int, error) {
 	if sch.File == "" {

@@ -81,6 +81,7 @@ type Server struct {
 	// pushed as a warning when any site failed. See setBindingReport.
 	bindingMu     sync.Mutex
 	bindingReport bindingReport
+	schemaReport  schemaReport
 
 	// conflicted tracks which files currently hold merge markers, so the
 	// watcher announces the TRANSITION rather than every save of a file
@@ -654,6 +655,13 @@ func (s *Server) BuildIndex() error {
 	if len(s.schemas) > 0 {
 		n := resolver.ApplySchemas(idx, s.schemas)
 		s.logf("index: applied %d schema-anchored site(s)", n)
+		// Tier-3 has the same silent-failure shape as Tier-2: a declared
+		// schema that anchored nothing looks exactly like no schema at all.
+		s.setSchemaReport(schemaReport{
+			Declared: len(s.schemas),
+			Sites:    n,
+			Failures: resolver.SchemaFailures(),
+		})
 	}
 	// Tier-3 auto: gat @derived(operationId) + sqlc derived:"table.column"
 	// edges → declared source bindings, and the derivation-root registry the
@@ -719,6 +727,9 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	// built and so never sees the warning notification.
 	if b := s.bindingHealth(); b != nil {
 		res["bindings"] = b
+	}
+	if sc := s.schemaHealth(); sc != nil {
+		res["schemas"] = sc
 	}
 	s.reply(req, res)
 }
@@ -1146,4 +1157,52 @@ func checkToolArgs(tool *Tool, args json.RawMessage) error {
 	return fmt.Errorf("%s has no argument %s. It takes: %s. "+
 		"Nothing was run — an ignored argument would have answered a different question than the one you asked",
 		tool.Name, strings.Join(msgs, ", "), strings.Join(known, ", "))
+}
+
+// schemaReport is what BuildIndex learned about the declared Tier-3 schemas.
+type schemaReport struct {
+	Declared int // schema files declared
+	Sites    int // schema-anchored sites inserted
+	Failures []string
+}
+
+// setSchemaReport records the outcome and warns the client when a declared
+// schema anchored nothing.
+//
+// Identical reasoning to setBindingReport, and the same failure shape: a
+// schema whose path is wrong, whose dialect is misspelled, or which the
+// dialect cannot read produces no anchors at all — and no anchors is exactly
+// what "I declared no schemas" produces. The stderr diagnostic is excellent
+// and the model never sees it.
+func (s *Server) setSchemaReport(r schemaReport) {
+	s.bindingMu.Lock()
+	s.schemaReport = r
+	s.bindingMu.Unlock()
+	if len(r.Failures) == 0 {
+		return
+	}
+	s.sendNotification("notifications/message", map[string]any{
+		"level":  "warning",
+		"logger": "poly-lsp-mcp/schemas",
+		"data": fmt.Sprintf(
+			"%d of %d declared schema(s) anchored NOTHING, so no cross-language identity was "+
+				"established from them and ::in/::out will not cross there: %s",
+			len(r.Failures), r.Declared, strings.Join(r.Failures, "; ")),
+	})
+}
+
+// schemaHealth is the initialize-time view, for a client that connects after
+// the index is built and never sees the notification.
+func (s *Server) schemaHealth() map[string]any {
+	s.bindingMu.Lock()
+	r := s.schemaReport
+	s.bindingMu.Unlock()
+	if r.Declared == 0 {
+		return nil
+	}
+	out := map[string]any{"declared": r.Declared, "sites": r.Sites}
+	if len(r.Failures) > 0 {
+		out["failed"] = r.Failures
+	}
+	return out
 }

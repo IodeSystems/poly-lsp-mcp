@@ -2927,3 +2927,84 @@ func TestResourcesCapabilityMatchesWhatIsServed(t *testing.T) {
 		s.close()
 	}
 }
+
+// Tier-3 has the same silent-failure shape as Tier-2 and needed the same
+// treatment: a declared schema whose path is wrong, whose dialect is
+// misspelled, or which the dialect cannot read anchors NOTHING — and no
+// anchors is exactly what declaring no schemas produces. The stderr
+// diagnostic is excellent and the model never sees it.
+func TestSchemaFailureSurfacesOnInitializeAndAsNotification(t *testing.T) {
+	root := polyglotFixture(t)
+	cases := []struct {
+		name   string
+		schema config.Schema
+		want   string
+	}{
+		{"missing file", config.Schema{File: "nope.proto", Dialect: "proto"}, "no such file"},
+		{"unknown dialect", config.Schema{File: "api.proto", Dialect: "nonsense"}, "unknown dialect"},
+		{"dialect cannot read it", config.Schema{File: "openapi.yaml", Dialect: "proto"}, "no entities"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := startSessionFull(t, root, nil, []config.Schema{c.schema})
+			defer s.close()
+			resp := s.request("initialize", map[string]any{})
+			var got struct {
+				Schemas struct {
+					Declared int      `json:"declared"`
+					Sites    int      `json:"sites"`
+					Failed   []string `json:"failed"`
+				} `json:"schemas"`
+			}
+			if err := json.Unmarshal(resp.Result, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Schemas.Declared != 1 || got.Schemas.Sites != 0 {
+				t.Errorf("declared=%d sites=%d, want 1 and 0",
+					got.Schemas.Declared, got.Schemas.Sites)
+			}
+			if len(got.Schemas.Failed) != 1 || !strings.Contains(got.Schemas.Failed[0], c.want) {
+				t.Fatalf("failed = %v, want one naming %q", got.Schemas.Failed, c.want)
+			}
+			var warned bool
+			for _, n := range s.serverNotes("notifications/message") {
+				if strings.Contains(string(n.Params), "poly-lsp-mcp/schemas") {
+					warned = true
+					if !strings.Contains(string(n.Params), "anchored NOTHING") {
+						t.Errorf("notification does not say nothing was anchored: %s", n.Params)
+					}
+				}
+			}
+			if !warned {
+				t.Error("no schemas notification pushed")
+			}
+		})
+	}
+}
+
+// A schema that DOES anchor must stay quiet — a warning every startup teaches
+// the model to ignore the channel.
+func TestWorkingSchemaReportsSitesAndSendsNoWarning(t *testing.T) {
+	s := startSessionFull(t, polyglotFixture(t), nil,
+		[]config.Schema{{File: "api.proto", Dialect: "proto"}})
+	defer s.close()
+	resp := s.request("initialize", map[string]any{})
+	var got struct {
+		Schemas map[string]any `json:"schemas"`
+	}
+	json.Unmarshal(resp.Result, &got)
+	if got.Schemas == nil {
+		t.Fatal("declared a schema but no report on initialize")
+	}
+	if _, bad := got.Schemas["failed"]; bad {
+		t.Errorf("working schema reported as failed: %v", got.Schemas)
+	}
+	if n, _ := got.Schemas["sites"].(float64); n <= 0 {
+		t.Errorf("anchored %v sites, want > 0", got.Schemas["sites"])
+	}
+	for _, n := range s.serverNotes("notifications/message") {
+		if strings.Contains(string(n.Params), "poly-lsp-mcp/schemas") {
+			t.Errorf("warned on a working schema: %s", n.Params)
+		}
+	}
+}

@@ -322,6 +322,11 @@ type engine struct {
 	transUnsettled   int
 	hopCounted       map[*treeNode]bool
 
+	// breadthBlown is the tip count an edge element was asked to expand when
+	// the breadth guard stopped it — the number that explains the result far
+	// better than "the clock ran out" does.
+	breadthBlown int
+
 	// firstHop is the hop at which each node was FIRST reached by a
 	// transitive edge walk. The walk is a level-synchronous BFS, so
 	// first-reached is fewest-hops — no priority queue needed, the frontier
@@ -470,7 +475,41 @@ func (e *engine) spend(n int) bool {
 	return true
 }
 
-const defaultBudgetMs = 10_000 // omitted-budget default: 10s wall clock
+// defaultBudgetMs is the omitted-budget wall clock for a SMALL workspace,
+// and the floor for every other one. See defaultBudget.
+const defaultBudgetMs = 10_000
+
+// budgetPerKSite is how much clock a workspace earns per 1,000 indexed
+// names, on top of the floor.
+//
+// A fixed budget measures the wrong thing. The work a given selector implies
+// scales with the corpus — the same `::in.call` crosses ten times the edges
+// in a repo ten times the size — so a flat 10s is generous on a small tree
+// and, on a large one, is spent before the walk is interesting. Worse, the
+// tree BUILD comes out of it: on this repo that is already ~2.3s of the 10,
+// and it grows with the corpus too, so the fixed budget shrinks in the only
+// term that matters as the workspace grows.
+//
+// Deliberately gentle (1s per 1,000 names) and clamped to the SAME ceiling
+// an explicit budget gets (maxBudgetMs): this is a timeout, and a timeout
+// that scales without limit is not one. A caller who genuinely wants more
+// passes an explicit budget — and hits the same wall.
+const budgetPerKSite = 1_000 // ms per 1,000 indexed names
+
+// breadthSample is how many tips an edge element expands before the breadth
+// guard projects the rest. Big enough that one unusually cheap or expensive
+// name does not set the rate, small enough that the sample itself is not the
+// cost being avoided.
+const breadthSample = 64
+
+// defaultBudget returns the omitted-budget wall clock for this workspace.
+func (s *Server) defaultBudget() time.Duration {
+	ms := defaultBudgetMs
+	if idx := s.getIndex(); idx != nil {
+		ms += idx.Cardinality() * budgetPerKSite / 1000
+	}
+	return time.Duration(min(ms, maxBudgetMs)) * time.Millisecond
+}
 
 // kids returns n's children, parsing a file's symbols on first use.
 // A ref node's children are its FAR END(s) — that is how a chain
@@ -609,11 +648,11 @@ func (s *Server) buildTree() (*engine, error) {
 		// deterministic, no wall clock.
 		e.workLeft = s.queryWorkBudget
 	} else {
-		// Omitted default: a 10s wall-clock budget with the ops cap as a
-		// backstop. Most queries finish well under it (so stay
+		// Omitted default: a corpus-scaled wall-clock budget with the ops
+		// cap as a backstop. Most queries finish well under it (so stay
 		// deterministic); only a genuinely huge one hits the clock. A
 		// caller wanting reproducibility passes an Nops budget.
-		e.deadline = time.Now().Add(defaultBudgetMs * time.Millisecond)
+		e.deadline = time.Now().Add(s.defaultBudget())
 		e.workLeft = maxBudgetOps
 	}
 	// lspLeft is set lazily on the first round-trip (ensureLSPCap), so a
@@ -3596,7 +3635,36 @@ func (e *engine) selectOrdered(cand map[*treeNode]bool, comp *selCompound, relax
 // asked about is structure; the kind and ids are the tested property.
 func (e *engine) refMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
 	out := map[*treeNode]bool{}
-	for _, h := range ordered(hosts) {
+	tips := ordered(hosts)
+	started, sampled := time.Now(), 0
+	for _, h := range tips {
+		// BREADTH GUARD. An edge element expands EVERY tip, so a broad one
+		// (`::in.call` over a whole workspace: 8,991 tips here) grinds to the
+		// deadline and returns a truncated floor. The information that it
+		// could not finish is available long before the clock says so —
+		// measure the rate over a sample, project it across the remaining
+		// tips, and stop as soon as the projection cannot fit.
+		//
+		// Estimating INSTEAD of measuring is what this avoids: estCard has no
+		// figure for an edge (it returns ok=false), and per-node cost varies
+		// by orders of magnitude with name frequency. A sample of the actual
+		// work is the only honest predictor.
+		//
+		// Conservative by construction: it trips only when the projection
+		// EXCEEDS the budget, so a query that would have finished still does.
+		// The stop reuses the existing truncation path, so the result is the
+		// same honest floor — just seconds earlier, with a note that names
+		// breadth as the cause.
+		if sampled == breadthSample && !e.deadline.IsZero() {
+			per := time.Since(started) / time.Duration(sampled)
+			if projected := per * time.Duration(len(tips)); time.Now().Add(projected).After(e.deadline) {
+				e.workExceeded, e.timedOut = true, true
+				e.breadthBlown = len(tips)
+				return out
+			}
+		}
+		sampled++
+
 		cand := map[*treeNode]bool{}
 		// The compound names its direction (::in / ::out), so build only
 		// that half — the other is pure waste for this query.
@@ -4253,6 +4321,21 @@ func (e *engine) anyInEdge(n *treeNode, comp *selCompound) bool {
 	if idx == nil {
 		return false
 	}
+	// Charge for the PER-NODE setup before doing it. declsOf and
+	// LookupExisting are the expensive part of an edge expansion, and both
+	// used to be free: the budget was charged per matched SITE, so a wide
+	// query over many nodes with few sites each burned real seconds while
+	// barely spending — and the clock, sampled every 256th spend, was
+	// almost never consulted. Measured before this: `::in.call` took 5.06s
+	// under a 1ms budget and 23.3s under 1000ms, against a 2.3s tree build.
+	//
+	// spend()'s own comment predicted exactly this for hint probes ("one
+	// spend can hide a tree-sitter parse") and fixed it there by sampling
+	// every spend. The main path needed the other half of the fix: charge
+	// where the work IS.
+	if !e.spend(1) {
+		return false
+	}
 	owner, isLocal := localOwner(n)
 	ambiguous := len(e.declsOf(n.leaf)) > 1
 	for _, site := range idx.LookupExisting(n.leaf) {
@@ -4703,6 +4786,13 @@ func (e *engine) buildInRefs(n *treeNode) {
 	// that can reference it are inside its own function. Every other
 	// occurrence of the name is a coincidence, not a caller.
 	owner, isLocal := localOwner(n)
+
+	// Charge for the per-node setup before doing it — see anyInEdge. declsOf
+	// and LookupExisting are where an edge expansion's time actually goes,
+	// and leaving them free is what let a wall-clock budget miss by 23x.
+	if !e.spend(1) {
+		return
+	}
 
 	// Sites are offered because the NAME matches. If n is the only thing
 	// answering to that name there is nothing to settle; otherwise a

@@ -463,7 +463,21 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		if e.timedOut {
 			lim = "the TIME limit (results are NON-deterministic — vary run to run; pass an `ops` budget for a reproducible cut)"
 		}
-		payload["note"] = "evaluation stopped at " + lim + " — results may be INCOMPLETE. Two levers: (1) NARROW — cost[] names the element that ate the budget; add a kind class (::in.call), a filter (:parents(func)), or bounded hops ({1,3}) THERE. (2) RAISE — retry with a higher `budget` (Nms or Nops) if the query is genuinely large. Narrowing is usually right."
+		note := "evaluation stopped at " + lim + " — results may be INCOMPLETE. Two levers: (1) NARROW — cost[] names the element that ate the budget; add a kind class (::in.call), a filter (:parents(func)), or bounded hops ({1,3}) THERE. (2) RAISE — retry with a higher `budget` (Nms or Nops) if the query is genuinely large. Narrowing is usually right."
+		// When BREADTH is why, say the number. "the clock ran out" is true of
+		// every blown query; "an edge over 8,991 tips" is the one fact that
+		// tells a caller which lever to pull, and it is known seconds before
+		// the deadline would have been reached.
+		if e.breadthBlown > 0 {
+			note = fmt.Sprintf(
+				"stopped EARLY on BREADTH: an edge element was asked to expand %s tips, and a "+
+					"sample of the work projected past the budget — so this stopped instead of "+
+					"grinding to the deadline. Results are INCOMPLETE. Narrow what the edge runs "+
+					"over (anchor it: #'file.go#Sym'::in.call, or filter the hosts) rather than "+
+					"raising the budget; %s tips is the cost, not the clock.",
+				commaInt(e.breadthBlown), commaInt(e.breadthBlown))
+		}
+		payload["note"] = note
 		// The per-element cost trace points at what ate the budget, so
 		// the model narrows the RIGHT element instead of guessing.
 		payload["cost"] = e.costTrace(list)

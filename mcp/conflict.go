@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
 // Merge-conflict awareness.
@@ -457,4 +459,142 @@ func conflictChimeraErr(file, addr string, from, to int, cs []conflictRegion) er
 // is runnable as printed.
 func conflictAddr(file string, c conflictRegion) string {
 	return fmt.Sprintf("%s@%d-%d", file, c.at[0], c.at[1])
+}
+
+// ------------------------------------------------- two-version reconstruction
+
+// sideContent rebuilds the WHOLE FILE as it would read if `side` won every
+// conflict in it.
+//
+// Whole file, not the region's lines: a side taken alone is usually a
+// syntactic fragment — a conflict that opens in one function and closes in
+// another leaves each side holding half a declaration — while the file WITH
+// that side is exactly what git would write on `--ours`/`--theirs`, and
+// parses. That is the difference between a version and a snippet.
+//
+// Every region resolves the same way, because a partial reconstruction is
+// not a version of anything: it is a fourth file, which is the problem being
+// fixed rather than a new flavour of it.
+func sideContent(content []byte, side string) []byte {
+	regions := parseConflicts(content)
+	if len(regions) == 0 {
+		return content
+	}
+	lines := splitNodeReadLines(content)
+	for i := len(regions) - 1; i >= 0; i-- {
+		r := regions[i]
+		keep := r.ours
+		switch side {
+		case "theirs":
+			keep = r.theirs
+		case "base":
+			if r.base == nil {
+				keep = conflictSide{} // no ancestor recorded: the side is empty
+			} else {
+				keep = *r.base
+			}
+		}
+		tail := append([]string{}, lines[r.at[1]:]...)
+		lines = append(lines[:r.at[0]-1], append(append([]string{}, keep.lines...), tail...)...)
+	}
+	out := strings.Join(lines, "\n")
+	if endsWithNewline(content) && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return []byte(out)
+}
+
+// sideParse is one reconstructed version and whether it can be trusted as a
+// parse tree.
+type sideParse struct {
+	content []byte
+	clean   bool
+}
+
+// reconstructSides builds both versions and reports whether each parses.
+// BEST EFFORT: a side that parses is usable even if the other does not, which
+// is the common case when one branch is mid-edit.
+func (s *Server) reconstructSides(file string, content []byte) (ours, theirs sideParse) {
+	lang := s.languageForFile(file)
+	ours.content = sideContent(content, "mine")
+	theirs.content = sideContent(content, "theirs")
+	ours.clean = symbols.ParsesCleanly(lang, ours.content)
+	theirs.clean = symbols.ParsesCleanly(lang, theirs.content)
+	return ours, theirs
+}
+
+// conflictView is what a caller is told about a region: the versions when
+// they can be parsed, and a DIFF when they cannot.
+type conflictView struct {
+	MineParses   bool   `json:"mineParses"`
+	TheirsParses bool   `json:"theirsParses"`
+	Diff         string `json:"diff,omitempty"`
+	Note         string `json:"note,omitempty"`
+}
+
+// viewOf decides how to present a conflict.
+//
+// When at least one side reconstructs into parseable source, the structural
+// view is meaningful and the caller gets it. When NEITHER does — a conflict
+// inside a string literal, a half-written branch, a language with no grammar
+// — there is no honest tree to show, and a structural answer would be
+// invented. Fall back to what is always true: the two texts, and their
+// difference.
+func (s *Server) viewOf(file string, content []byte, r conflictRegion) conflictView {
+	ours, theirs := s.reconstructSides(file, content)
+	v := conflictView{MineParses: ours.clean, TheirsParses: theirs.clean}
+	if ours.clean || theirs.clean {
+		if !ours.clean {
+			v.Note = "mine does not parse — treat its symbols as unreliable"
+		} else if !theirs.clean {
+			v.Note = "theirs does not parse — treat its symbols as unreliable"
+		}
+		return v
+	}
+	v.Diff = lineDiff(r.ours.lines, r.theirs.lines)
+	v.Note = "neither side reconstructs into parseable source, so this is shown as TEXT: no symbol view of this conflict would be real"
+	return v
+}
+
+// lineDiff renders a minimal line diff of two blocks: "-" is mine, "+" is
+// theirs, " " is common. Longest-common-subsequence, so unchanged lines stay
+// unchanged instead of the whole block reading as replaced.
+func lineDiff(mine, theirs []string) string {
+	n, m := len(mine), len(theirs)
+	// lcs[i][j] = length of the LCS of mine[i:] and theirs[j:]
+	lcs := make([][]int, n+1)
+	for i := range lcs {
+		lcs[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if mine[i] == theirs[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else {
+				lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+			}
+		}
+	}
+	var b strings.Builder
+	i, j := 0, 0
+	for i < n && j < m {
+		switch {
+		case mine[i] == theirs[j]:
+			fmt.Fprintf(&b, "  %s\n", mine[i])
+			i, j = i+1, j+1
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			fmt.Fprintf(&b, "- %s\n", mine[i])
+			i++
+		default:
+			fmt.Fprintf(&b, "+ %s\n", theirs[j])
+			j++
+		}
+	}
+	for ; i < n; i++ {
+		fmt.Fprintf(&b, "- %s\n", mine[i])
+	}
+	for ; j < m; j++ {
+		fmt.Fprintf(&b, "+ %s\n", theirs[j])
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }

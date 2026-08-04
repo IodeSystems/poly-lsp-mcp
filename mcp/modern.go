@@ -276,6 +276,21 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 					sides["base"] = n.conflict.base.label
 				}
 				m["sides"] = sides
+				// Whether each side RECONSTRUCTS into parseable source, and
+				// the text diff when neither does. Without this a caller
+				// cannot tell a structural answer from a recovered guess.
+				if abs, err := s.resolveFileArg(n.file); err == nil {
+					if content, err := os.ReadFile(abs); err == nil {
+						v := s.viewOf(n.file, content, *n.conflict)
+						m["mineParses"], m["theirsParses"] = v.MineParses, v.TheirsParses
+						if v.Diff != "" {
+							m["diff"] = v.Diff
+						}
+						if v.Note != "" {
+							m["note"] = v.Note
+						}
+					}
+				}
 			}
 		case "signature", "body":
 			// A generated decl-head / body node carries its source INLINE,

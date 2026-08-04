@@ -90,21 +90,25 @@ type queryResult struct {
 	Cost         []string       `json:"cost"`
 	Rollup       map[string]int `json:"rollup"`
 	Matches      []struct {
-		Node   string            `json:"node"`
-		Class  string            `json:"type"`
-		At     []int             `json:"@"`
-		In     string            `json:"in"`
-		Text   string            `json:"text"`
-		Before []string          `json:"before"`
-		After  []string          `json:"after"`
-		From   []string          `json:"from"`
-		To     []string          `json:"to"`
-		Conf   string            `json:"conf"`
-		Via    string            `json:"via"`
-		Hop    int               `json:"hop"`
-		Ref    string            `json:"ref"`
-		Sides  map[string]string `json:"sides"`
-		Domain string            `json:"domain"`
+		Node         string            `json:"node"`
+		Class        string            `json:"type"`
+		At           []int             `json:"@"`
+		In           string            `json:"in"`
+		Text         string            `json:"text"`
+		Before       []string          `json:"before"`
+		After        []string          `json:"after"`
+		From         []string          `json:"from"`
+		To           []string          `json:"to"`
+		Conf         string            `json:"conf"`
+		Via          string            `json:"via"`
+		Hop          int               `json:"hop"`
+		Ref          string            `json:"ref"`
+		Sides        map[string]string `json:"sides"`
+		MineParses   bool              `json:"mineParses"`
+		TheirsParses bool              `json:"theirsParses"`
+		Diff         string            `json:"diff"`
+		Note         string            `json:"note"`
+		Domain       string            `json:"domain"`
 	} `json:"matches"`
 }
 

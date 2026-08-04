@@ -2278,6 +2278,17 @@ func classifyJava(t, parent string) symRole {
 func classifyGo(t, parent string) symRole {
 	switch t {
 	case "import_declaration", "import_spec_list",
+		// var is the ONLY one of the four grouped declaration forms that
+		// wraps its specs in a list node: tree-sitter-go parses grouped
+		// `var (…)` as var_declaration > var_spec_list > var_spec, while
+		// grouped const/type/import go straight to their spec (import has
+		// a list, and it was already handled). Without var_spec_list here
+		// the gather() walk skipped the whole subtree, so EVERY name in a
+		// grouped var block was absent from the index — not mis-classed,
+		// invisible. Measured cost: two dogfood sessions burned 11 calls
+		// each hunting a `var (…)` style constant that no selector could
+		// ever match.
+		"var_spec_list",
 		"const_declaration", "var_declaration",
 		"type_declaration",
 		"struct_type", "field_declaration_list",
@@ -2792,6 +2803,15 @@ func declRangeNode(node *sitter.Node) *sitter.Node {
 	case "type_declaration", "const_declaration", "var_declaration":
 		if countSpecChildren(p) == 1 {
 			return p
+		}
+	case "var_spec_list":
+		// Grouped `var (…)` puts a list node between the spec and the
+		// declaration, so the single-spec rule has to reach one further
+		// up — otherwise `var ( x = 1 )` reads back as `x = 1` while the
+		// identical `const ( x = 1 )` reads back with its keyword and
+		// parens, and deleting the spec would strand an empty `var ()`.
+		if countSpecChildren(p) == 1 && p.Parent() != nil {
+			return p.Parent()
 		}
 	case "declaration", "field_declaration":
 		// Java spells its declarator variable_declarator, which the C

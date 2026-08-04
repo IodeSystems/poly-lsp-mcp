@@ -1470,6 +1470,9 @@ func TestSelectorCorpus_ErrorsNameTheFix(t *testing.T) {
 		selector: "func:arg:contains(x)",
 		want:     []string{"did you mean :arity"},
 	}}
+	// A "<file>#<sym>" ADDRESS is not in that list, and must not be: it is
+	// node_query's own output and node_read/node_edit both take it. See
+	// TestNodeAddressIsAcceptedAsASelector.
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2079,5 +2082,47 @@ func TestModernNodeDeleteTakesOwnTrailingComment(t *testing.T) {
 	}
 	if !strings.Contains(got, "timeout = 0;") {
 		t.Errorf("delete damaged the field below:\n%s", got)
+	}
+}
+
+// node_query prints "<file>#<sym>" in matches[].node, and node_read/node_edit
+// both take that string. node_query refusing it was the odd one out — and the
+// refusal advised `path=<file>#<sym>`, which matches NOTHING, because no path
+// equals that string. So the caller followed the fix and got an empty result,
+// which is the failure the corpus test above exists to prevent.
+//
+// Four of these in one day of recorded sessions, every one of them the agent
+// composing on an address it had just been handed.
+func TestNodeAddressIsAcceptedAsASelector(t *testing.T) {
+	s, root := startModern(t)
+	defer s.close()
+	_ = root
+
+	// Take an address from node_query itself, then feed it back.
+	res := query(t, s, map[string]any{"selector": "func", "limit": 1})
+	if len(res.Matches) == 0 {
+		t.Fatal("fixture has no funcs")
+	}
+	addr := res.Matches[0].Node
+	if !strings.Contains(addr, "#") {
+		t.Fatalf("expected a file#sym address, got %q", addr)
+	}
+
+	for _, sel := range []string{addr, "#" + addr, "#'" + addr + "'"} {
+		t.Run(sel, func(t *testing.T) {
+			got := query(t, s, map[string]any{"selector": sel})
+			if len(got.Matches) != 1 {
+				t.Fatalf("%s matched %d nodes, want exactly the addressed one",
+					sel, len(got.Matches))
+			}
+			if got.Matches[0].Node != addr {
+				t.Errorf("%s resolved to %q, want %q", sel, got.Matches[0].Node, addr)
+			}
+		})
+	}
+
+	// The address composes: an edge hangs off it like any other subject.
+	if r := s.callTool("node_query", map[string]any{"selector": addr + "::in.call"}); r.IsError {
+		t.Errorf("address + edge: %s", r.Content[0].Text)
 	}
 }

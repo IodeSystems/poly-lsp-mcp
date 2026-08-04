@@ -1697,7 +1697,23 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 			// '.', so the plain unknown-type error names only the first segment
 			// and sends the caller to `#terminal-view`, which fails again on
 			// the rest of the path. Read the whole path and quote it for them.
-			if path := p.peekPathTail(comp.class); path != "" {
+			if path, end := p.scanPathTail(comp.class); path != "" {
+				// "<file>#<sym>" is a node ADDRESS — the exact string
+				// node_query prints in matches[].node, and the one node_read
+				// and node_edit both take. node_query refusing its own output
+				// was the odd one out, and the refusal was worse than useless:
+				// it advised `path=<file>#<sym>`, which matches nothing at all
+				// because no path equals that string. Accept the address; it
+				// means what `#'<file>#<sym>'` means.
+				if strings.ContainsRune(path, '#') {
+					p.i = end
+					comp.class = ""
+					comp.anyType = true
+					comp.implied = true
+					comp.addAttrExpr(&attrExpr{op: attrExprLeaf,
+						leaf: selAttr{op: selExact, value: path}})
+					break
+				}
 				return comp, pathIsAnIDErr(path)
 			}
 			return comp, unknownTypeErr(comp.class)
@@ -1821,7 +1837,14 @@ func (p *modSelParser) readID() (string, error) {
 	// the leftovers then fail as "expected a combinator". This is the SECOND
 	// half of the commonest mistake: the caller was told a path is an id, wrote
 	// #path, and hit a different wall. Quote it for them.
-	if path := p.peekPathTail(id); path != "" {
+	if path, end := p.scanPathTail(id); path != "" {
+		// `#<file>#<sym>` unquoted — the caller wrote the address they were
+		// handed and reached for the id sigil. It IS the id; take it rather
+		// than sending them to `path=`, which cannot match an address.
+		if strings.ContainsRune(path, '#') {
+			p.i = end
+			return path, nil
+		}
 		return "", pathIsAnIDErr(path)
 	}
 	return id, nil
@@ -2477,11 +2500,18 @@ func selectorTypeList() []string {
 // the first character that cannot be in one — so `Foo.java::grep('x')` yields
 // `Foo.java` and stops at the pseudo-element.
 func (p *modSelParser) peekPathTail(first string) string {
+	path, _ := p.scanPathTail(first)
+	return path
+}
+
+// scanPathTail also reports where the path ENDS, so a caller that decides to
+// accept the path (rather than error on it) can consume exactly it.
+func (p *modSelParser) scanPathTail(first string) (string, int) {
 	if p.eof() {
-		return ""
+		return "", 0
 	}
-	if c := p.peek(); c != '/' && c != '.' {
-		return ""
+	if c := p.peek(); c != '/' && c != '.' && c != '#' {
+		return "", 0
 	}
 	j := p.i
 	for j < len(p.s) {
@@ -2492,10 +2522,10 @@ func (p *modSelParser) peekPathTail(first string) string {
 		j++
 	}
 	tail := strings.TrimRight(string(p.s[p.i:j]), ".")
-	if tail == "" || !strings.ContainsAny(tail, "/.") {
-		return ""
+	if tail == "" || !strings.ContainsAny(tail, "/.#") {
+		return "", 0
 	}
-	return first + tail
+	return first + tail, p.i + len(tail)
 }
 
 // selectorPseudoNames is the pseudo-class vocabulary, for errors and

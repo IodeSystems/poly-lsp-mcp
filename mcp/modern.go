@@ -88,11 +88,11 @@ var modernNodeReadSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"required":["node"]}`)
 
 const modernNodeEditDescription = `Edit one node of the projection. node = an address from node_query's matches[].node, or a selector matching exactly one node (2+ errors and lists candidates).
-RENAMING a symbol (type/func/method/var/field)? Use the rename op — ONE call renames the declaration AND every usage across the WHOLE workspace, atomically. Do NOT rename by hand-editing files one at a time with oldText/newText: that misses usages and leaves the build broken between edits.
+RENAMING a symbol? Use the rename op — ONE call renames the declaration AND every usage across the WHOLE workspace, atomically. Do NOT rename by hand-editing files one at a time with oldText/newText: that misses usages and leaves the build broken between edits.
 Exactly ONE op:
-rename:"NewName" — workspace-wide semantic rename (the right tool for ANY rename); lexical guesses reported under candidates, never applied.
-oldText+newText — replace a snippet inside the node. oldText must occur exactly once in the node; the address scopes it, so it need only be unique WITHIN that node — keep it short. Pass the node's whole text to rewrite it entirely.
-newText alone — CREATE the node; only where the address resolves to nothing yet (a new path makes a file node).
+rename:"NewName" — workspace-wide semantic rename; lexical guesses reported under candidates, never applied.
+oldText+newText — replace a snippet inside the node. oldText must occur exactly once in the node; the address scopes it, so it need only be unique WITHIN that node — keep it short. Pass the node's whole text to rewrite it entirely, or that text + a new declaration to ADD one next to it.
+newText alone — CREATE a FILE at a path that does not exist yet; it does NOT insert a symbol into an existing file.
 delete:true — excise the node.
 params — [{name,type}] rebuilds the parameter list (go/typescript/python).
 return — rebuilds the return type.
@@ -405,6 +405,18 @@ type modernNode struct {
 	name rangeArgs // identifier — rename / signature refactors
 }
 
+// wholeFile reports whether this address targets the ENTIRE file.
+//
+// NOT the same as sym == "". A ref-site address ("<file>@<line>", which is
+// exactly what ::grep / edge / ::signature / ::body rows hand back) has no
+// dotted sym either, but it DOES carry a decl span. Using sym == "" as the
+// whole-file test silently widened every ref-site op to the whole file:
+// node_read returned page 1 instead of the addressed line, an oldText edit
+// matched the first occurrence anywhere in the file rather than on that
+// line, and delete:true removed the FILE instead of the line. Test the
+// class, which is the thing that actually distinguishes them.
+func (n *modernNode) wholeFile() bool { return n.sym == "" && n.class != "ref" }
+
 // ordinalSuffix matches the "[n]" disambiguator renderSegment emits.
 var ordinalSuffix = regexp.MustCompile(`\[\d+\]`)
 
@@ -630,7 +642,19 @@ func (s *Server) resolveClassicAddr(file, symPath string) (*modernNode, error) {
 	}
 	switch len(hits) {
 	case 0:
-		return nil, fmt.Errorf("no symbol %q in %s; did you mean: %s", symPath, file, nearestSyms(symPath, syms))
+		// Answer the OTHER reading of this address too. "file#NotThereYet"
+		// is just as often "add this" as "typo", and the did-you-mean list
+		// only serves the typo — a model that meant to ADD a symbol saw no
+		// way forward and fell back to passing the entire file as newText
+		// (observed: 93 KB of newText to insert one function). newText-alone
+		// creates a new FILE, not a new symbol inside one, so name the idiom
+		// that does work.
+		return nil, fmt.Errorf("no symbol %q in %s; did you mean: %s. "+
+			"To ADD it instead: there is no insert op — grow a NEIGHBOUR. "+
+			"node_read a symbol next to where it belongs, then node_edit that address with "+
+			"oldText=<its whole text> and newText=<its whole text>+\"\\n\\n\"+<the new declaration>. "+
+			"(newText alone creates a new FILE; a whole-file address works but rewrites the file.)",
+			symPath, file, nearestSyms(symPath, syms))
 	case 1:
 		sym := hits[0]
 		return &modernNode{
@@ -689,7 +713,7 @@ func (s *Server) nodeCurrentText(rn *modernNode) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", rn.file, err)
 	}
-	if rn.sym == "" {
+	if rn.wholeFile() {
 		return string(content), nil
 	}
 	return readRangeText(content, rn.decl)
@@ -732,7 +756,7 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	// auto-cap behavior applies, and a truncated view says so. That is
 	// WYSIWYG — what you read is what you'd write back — unlike a
 	// silently-clipped declaration.
-	if rn.sym == "" {
+	if rn.wholeFile() {
 		startLine := 1
 		if p.StartLine != nil {
 			if *p.StartLine < 1 {
@@ -747,14 +771,19 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			}
 			lineLimit = *p.LineLimit
 		}
-		return jsonContent(buildReadPayload(content, rn.file, startLine, lineLimit, 0)), false, nil
+		return jsonContent(buildReadPayload(content, rn.file, startLine, lineLimit, 0,
+			targetedSearchAdvice(rn.file, true))), false, nil
 	}
 
 	// An addressed-node read is ALWAYS whole.
 	if p.StartLine != nil || p.LineLimit != nil {
+		what := "a symbol"
+		if rn.class == "ref" {
+			what = "a source line/span"
+		}
 		return nil, true, fmt.Errorf(
-			"node reads are always whole: %q addresses a symbol, so startLine/lineLimit don't apply (they browse a whole FILE). Drop them, or pass the file address %q",
-			p.Node, rn.file)
+			"node reads are always whole: %q addresses %s, so startLine/lineLimit don't apply (they browse a whole FILE). Drop them, or pass the file address %q",
+			p.Node, what, rn.file)
 	}
 	text, err := readRangeText(content, rn.decl)
 	if err != nil {
@@ -1021,9 +1050,13 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	}
 
 	if p.Delete != nil {
-		if rn.sym == "" {
+		if rn.wholeFile() {
 			return s.applyWholeFileDelete(rn.file, p.diagnosticOptions)
 		}
+		// A ref-site span empties in place (the newline is outside the
+		// span), leaving a blank line rather than closing it up. That is
+		// the same splice every other span delete does — and it is the
+		// point: `file@12` must never reach applyWholeFileDelete.
 		return s.applyRangeRewrite(rn.addr, rn.decl, "", p.diagnosticOptions)
 	}
 
@@ -1048,7 +1081,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		}
 		off := offs[0]
 		updated := cur[:off] + *p.NewText + cur[off+len(*p.OldText):]
-		if rn.sym == "" {
+		if rn.wholeFile() {
 			if updated == "" {
 				return nil, true, fmt.Errorf(
 					"that edit would empty %s; pass delete:true if you meant to remove the file", rn.file)

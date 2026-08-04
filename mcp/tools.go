@@ -720,8 +720,22 @@ func handleNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Content,
 		lineLimit = *a.LineLimit
 	}
 
-	out := buildReadPayload(content, a.File, startLine, lineLimit, lineLength)
+	out := buildReadPayload(content, a.File, startLine, lineLimit, lineLength, targetedSearchAdvice(a.File, false))
 	return jsonContent(out), false, nil
+}
+
+// targetedSearchAdvice is the "don't page, SEARCH" half of the read hint,
+// written for whichever surface asked. Both forms are spelled as a
+// ready-to-run call over the file in hand rather than a tool name, because
+// the observed failure was not knowing a search existed but not knowing how
+// to address one file with it.
+func targetedSearchAdvice(file string, modern bool) string {
+	if modern {
+		return fmt.Sprintf("jump straight to the code you need with "+
+			"node_query(selector: %q) — ::grep is literal unless you pass -E",
+			fmt.Sprintf("path=%s ::grep('-E <regex>')", file))
+	}
+	return "use the search tool (pattern=<regex>) to jump straight to the code you need"
 }
 
 // buildReadPayload builds the response map for the line-based read
@@ -745,7 +759,15 @@ func handleNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Content,
 //
 // When multiple causes apply at once, the priority is auto >
 // lineLimit > lineLength and the hint mentions all of them.
-func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLength int) map[string]any {
+//
+// targeted is the surface's way to SEARCH the file instead of paging it
+// (see targetedSearchAdvice). It is a parameter because the two surfaces
+// have different answers and this payload is shared: the hint used to
+// name the classic `search` tool unconditionally, which on the modern
+// three-tool surface is advice for a tool that isn't there — so the only
+// actionable half left was "call again with startLine=N", i.e. exactly
+// the chunk-by-chunk paging the hint exists to prevent.
+func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLength int, targeted string) map[string]any {
 	lines := splitNodeReadLines(content)
 	totalLines := len(lines)
 	totalChars := len(content)
@@ -882,14 +904,14 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	case "auto":
 		fmt.Fprintf(&hint, "Returned lines %d-%d of %d (auto-capped at ~%d chars; ~%d more read(s) to page the rest). "+
 			"Avoid paging chunk-by-chunk: re-read with lineLimit=%d to get the whole file in ONE call, "+
-			"or use the search tool (pattern=<regex>) to jump straight to the code you need. "+
+			"or %s. "+
 			"To keep paging anyway, call again with startLine=%d.",
-			startLine, endLine, totalLines, defaultReadCharBudget, morePages, totalLines, endLine+1)
+			startLine, endLine, totalLines, defaultReadCharBudget, morePages, totalLines, targeted, endLine+1)
 	case "lineLimit":
 		fmt.Fprintf(&hint, "Returned lines %d-%d of %d (lineLimit=%d; ~%d more read(s) to finish). "+
-			"Re-read with lineLimit=%d for the whole file in one call, or use the search tool (pattern=<regex>) to target a section, "+
+			"Re-read with lineLimit=%d for the whole file in one call, or %s, "+
 			"or call again with startLine=%d to continue.",
-			startLine, endLine, totalLines, lineLimit, morePages, totalLines, endLine+1)
+			startLine, endLine, totalLines, lineLimit, morePages, totalLines, targeted, endLine+1)
 	case "lineLength":
 		// Capitalize the standalone lineNote sentence.
 		fmt.Fprintf(&hint, "%s%s", strings.ToUpper(lineNote[:1]), lineNote[1:])

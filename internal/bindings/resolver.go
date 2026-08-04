@@ -33,6 +33,8 @@ type Resolver struct {
 	// binding scans call walkFiles six times across android/derived/
 	// derived_sql, and each load is a git subprocess.
 	ignores *git.IgnoreSet
+	// failures from the last Apply, for the caller to surface. See Failures.
+	failures []string
 }
 
 func NewResolver(root string) *Resolver {
@@ -43,11 +45,21 @@ func NewResolver(root string) *Resolver {
 // Missing references (the symbol isn't found in the file) are logged
 // and counted but never fatal — partial bindings still improve the
 // index. The returned int is the number of declared sites inserted.
+// Failures returns the per-site problems from the last Apply — a typo'd
+// symbol, a jsonpath that matches nothing, a regex that only found aliases.
+//
+// They were logged and nothing else, which is fine for a human running the
+// server and useless to the agent driving it: a declared cross-language link
+// that silently did not happen looks exactly like one that was never
+// declared. The caller surfaces these; the log stays for the human.
+func (r *Resolver) Failures() []string { return r.failures }
+
 func (r *Resolver) Apply(idx *symbols.Index, bindings []config.Binding) (int, error) {
 	var (
 		inserted int
 		errs     []error
 	)
+	r.failures = nil
 	for _, b := range bindings {
 		if b.Name == "" {
 			errs = append(errs, errors.New("binding has empty name"))
@@ -62,6 +74,7 @@ func (r *Resolver) Apply(idx *symbols.Index, bindings []config.Binding) (int, er
 			inserted += n
 			if err != nil {
 				log.Printf("bindings: %s: %v", b.Name, err)
+				r.failures = append(r.failures, fmt.Sprintf("%s: %v", b.Name, err))
 			}
 		}
 	}

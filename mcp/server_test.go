@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,6 +28,9 @@ type mcpSession struct {
 	clientW *io.PipeWriter
 	done    chan error
 	nextID  int64
+
+	notesMu sync.Mutex
+	notes   []jsonrpc.Message
 }
 
 func startSession(t *testing.T, root string) *mcpSession {
@@ -75,14 +79,38 @@ func (s *mcpSession) request(method string, params any) *jsonrpc.Message {
 	s.sendMessage(&jsonrpc.Message{
 		JSONRPC: "2.0", ID: rawID, Method: method, Params: rawParams,
 	})
-	var resp jsonrpc.Message
-	if err := s.clientR.Decode(&resp); err != nil {
-		s.t.Fatalf("decode response for %s: %v", method, err)
+	// The server pushes unsolicited notifications (binding failures, conflict
+	// transitions), which can land ahead of the reply. Set them aside rather
+	// than mistaking one for the response.
+	for {
+		var resp jsonrpc.Message
+		if err := s.clientR.Decode(&resp); err != nil {
+			s.t.Fatalf("decode response for %s: %v", method, err)
+		}
+		if len(resp.ID) == 0 && resp.Method != "" {
+			s.notesMu.Lock()
+			s.notes = append(s.notes, resp)
+			s.notesMu.Unlock()
+			continue
+		}
+		if string(resp.ID) != string(rawID) {
+			s.t.Fatalf("id mismatch on %s: sent %s got %s", method, rawID, resp.ID)
+		}
+		return &resp
 	}
-	if string(resp.ID) != string(rawID) {
-		s.t.Fatalf("id mismatch on %s: sent %s got %s", method, rawID, resp.ID)
+}
+
+// serverNotes returns the unsolicited notifications seen so far.
+func (s *mcpSession) serverNotes(method string) []jsonrpc.Message {
+	s.notesMu.Lock()
+	defer s.notesMu.Unlock()
+	var out []jsonrpc.Message
+	for _, n := range s.notes {
+		if n.Method == method {
+			out = append(out, n)
+		}
 	}
-	return &resp
+	return out
 }
 
 func (s *mcpSession) notify(method string, params any) {
@@ -2649,5 +2677,112 @@ func TestUnknownToolReturnsInvalidParams(t *testing.T) {
 	})
 	if resp.Error == nil || resp.Error.Code != -32602 {
 		t.Errorf("expected -32602, got %+v", resp.Error)
+	}
+}
+
+// ---- declared-binding health ----
+
+// A binding site that does not resolve is the expected failure for
+// hand-written config, and from the query side it is INDISTINGUISHABLE from a
+// binding nobody declared: ::in/::out simply does not cross. Both the
+// initialize response and the pushed warning have to say so.
+func TestBindingFailureSurfacesOnInitializeAndAsNotification(t *testing.T) {
+	root := polyglotFixture(t)
+	bs := []config.Binding{{
+		Name: "UserID",
+		Sites: []config.BindingSite{
+			{File: "main.go", Symbol: "UserID"},
+			{File: "main.go", Symbol: "NoSuchSymbolAnywhere"},
+		},
+	}}
+	s := startSessionFull(t, root, bs, nil)
+	defer s.close()
+
+	resp := s.request("initialize", map[string]any{})
+	var got struct {
+		Bindings struct {
+			Bindings int      `json:"bindings"`
+			Sites    int      `json:"sites"`
+			Failed   []string `json:"failed"`
+		} `json:"bindings"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Bindings.Bindings != 1 || got.Bindings.Sites != 2 {
+		t.Errorf("bindings=%d sites=%d, want 1 and 2 (counts are different units)",
+			got.Bindings.Bindings, got.Bindings.Sites)
+	}
+	if len(got.Bindings.Failed) != 1 {
+		t.Fatalf("failed = %v, want the one unresolvable site", got.Bindings.Failed)
+	}
+	if !strings.Contains(got.Bindings.Failed[0], "UserID") {
+		t.Errorf("failure %q does not name the binding", got.Bindings.Failed[0])
+	}
+
+	notes := s.serverNotes("notifications/message")
+	var found bool
+	for _, n := range notes {
+		var p struct {
+			Level  string `json:"level"`
+			Logger string `json:"logger"`
+			Data   string `json:"data"`
+		}
+		json.Unmarshal(n.Params, &p)
+		if p.Logger != "poly-lsp-mcp/bindings" {
+			continue
+		}
+		found = true
+		if p.Level != "warning" {
+			t.Errorf("level = %q, want warning", p.Level)
+		}
+		if !strings.Contains(p.Data, "NoSuchSymbolAnywhere") {
+			t.Errorf("notification does not name the bad site: %q", p.Data)
+		}
+	}
+	if !found {
+		t.Errorf("no bindings notification among %d server note(s)", len(notes))
+	}
+}
+
+// All sites resolving must stay quiet on the notification channel — a warning
+// per startup would train the model to ignore the channel.
+func TestBindingSuccessReportsCountsAndSendsNoWarning(t *testing.T) {
+	root := polyglotFixture(t)
+	bs := []config.Binding{{
+		Name:  "UserID",
+		Sites: []config.BindingSite{{File: "main.go", Symbol: "UserID"}},
+	}}
+	s := startSessionFull(t, root, bs, nil)
+	defer s.close()
+
+	resp := s.request("initialize", map[string]any{})
+	var got struct {
+		Bindings map[string]any `json:"bindings"`
+	}
+	json.Unmarshal(resp.Result, &got)
+	if got.Bindings == nil {
+		t.Fatal("declared bindings but no report on initialize")
+	}
+	if _, bad := got.Bindings["failed"]; bad {
+		t.Errorf("report claims a failure: %v", got.Bindings)
+	}
+	for _, n := range s.serverNotes("notifications/message") {
+		if strings.Contains(string(n.Params), "poly-lsp-mcp/bindings") {
+			t.Errorf("warned on a clean binding set: %s", n.Params)
+		}
+	}
+}
+
+// No declared bindings means no report at all, rather than a zeroed one that
+// reads as "bindings exist and none applied".
+func TestNoDeclaredBindingsOmitsReport(t *testing.T) {
+	s := startSession(t, polyglotFixture(t))
+	defer s.close()
+	resp := s.request("initialize", map[string]any{})
+	var got map[string]any
+	json.Unmarshal(resp.Result, &got)
+	if _, present := got["bindings"]; present {
+		t.Errorf("report present with nothing declared: %v", got["bindings"])
 	}
 }

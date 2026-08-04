@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"time"
@@ -74,6 +75,11 @@ type Server struct {
 
 	writeMu sync.Mutex
 	enc     *json.Encoder
+
+	// bindings report from the last BuildIndex, surfaced on initialize and
+	// pushed as a warning when any site failed. See setBindingReport.
+	bindingMu     sync.Mutex
+	bindingReport bindingReport
 
 	// conflicted tracks which files currently hold merge markers, so the
 	// watcher announces the TRANSITION rather than every save of a file
@@ -627,6 +633,21 @@ func (s *Server) BuildIndex() error {
 			s.logf("index: some bindings failed validation: %v", err)
 		}
 		s.logf("index: applied %d declared binding site(s)", n)
+		// Surface the outcome to the CLIENT, not just the log. A declared
+		// cross-language link that silently did not happen is
+		// indistinguishable from one nobody declared, and bindings are
+		// hand-written config — a typo'd symbol or jsonpath is the expected
+		// failure, not an exotic one.
+		sites := 0
+		for _, b := range s.bindings {
+			sites += len(b.Sites)
+		}
+		s.setBindingReport(bindingReport{
+			Bindings: len(s.bindings),
+			Sites:    sites,
+			Links:    n,
+			Failures: resolver.Failures(),
+		})
 	}
 	if len(s.schemas) > 0 {
 		n := resolver.ApplySchemas(idx, s.schemas)
@@ -667,7 +688,7 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		log.Print("mcp initialize: no workspace root configured; tools will return errors")
 	}
 
-	s.reply(req, map[string]any{
+	res := map[string]any{
 		"protocolVersion": protocolVersion,
 		"capabilities": map[string]any{
 			"tools":     map[string]any{},
@@ -683,7 +704,13 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 			"name":    "poly-lsp-mcp",
 			"version": "0.0.0",
 		},
-	})
+	}
+	// Declared-binding outcome, for a client that connects after the index is
+	// built and so never sees the warning notification.
+	if b := s.bindingHealth(); b != nil {
+		res["bindings"] = b
+	}
+	s.reply(req, res)
 }
 
 // handleToolsList returns the registered tool catalog. Order is
@@ -977,4 +1004,61 @@ func (s *Server) maybeSaveCache() {
 		return
 	}
 	log.Printf("mcp: saved %d entries to %s", s.parseCache.Len(), s.cachePath)
+}
+
+// bindingReport is what BuildIndex learned about the declared bindings.
+//
+// The three counts are DIFFERENT units and the report keeps them apart: a
+// binding declares several sites, and a site resolves to any number of graph
+// links. Collapsing them produces "5 of 1 applied", which is worse than
+// saying nothing.
+type bindingReport struct {
+	Bindings int // declared bindings
+	Sites    int // declared sites across them
+	Links    int // graph links actually inserted
+	Failures []string
+}
+
+// setBindingReport records the outcome and, when a site failed, TELLS the
+// client rather than only the log.
+//
+// Bindings are hand-written config declaring cross-language identity, so the
+// expected failure is a typo — a symbol that is not in that file, a jsonpath
+// matching nothing, a regex that found only aliases. Every one of those looks
+// exactly like "no binding was declared" from the query side, which is the
+// worst way for configuration to fail.
+func (s *Server) setBindingReport(r bindingReport) {
+	s.bindingMu.Lock()
+	s.bindingReport = r
+	s.bindingMu.Unlock()
+	if len(r.Failures) == 0 {
+		return
+	}
+	s.sendNotification("notifications/message", map[string]any{
+		"level":  "warning",
+		"logger": "poly-lsp-mcp/bindings",
+		"data": fmt.Sprintf(
+			"%d of %d declared binding site(s) failed to resolve; their cross-language links DO NOT EXIST, so ::in/::out will not cross there: %s",
+			len(r.Failures), r.Sites, strings.Join(r.Failures, "; ")),
+	})
+}
+
+// bindingSummary is the initialize-time view of the same thing, for a client
+// that connects after the index is built and never sees the notification.
+func (s *Server) bindingHealth() map[string]any {
+	s.bindingMu.Lock()
+	r := s.bindingReport
+	s.bindingMu.Unlock()
+	if r.Bindings == 0 {
+		return nil
+	}
+	out := map[string]any{
+		"bindings": r.Bindings,
+		"sites":    r.Sites,
+		"links":    r.Links,
+	}
+	if len(r.Failures) > 0 {
+		out["failed"] = r.Failures
+	}
+	return out
 }

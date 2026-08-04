@@ -78,6 +78,15 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 		return renderExplain(w, e.explainRows(list), e.workExceeded)
 	}
 
+	// The reading goes ABOVE the matches, on every query. A selector that
+	// parses but means the wrong thing produces a result set that looks
+	// entirely legitimate — wrong, but never empty enough to question. The
+	// caller who most needs the reading is the one who does not yet know to
+	// ask for it, so it is not behind a flag.
+	if err := renderReading(w, list); err != nil {
+		return err
+	}
+
 	var trace []string
 	if e.workExceeded {
 		trace = e.costTrace(list)

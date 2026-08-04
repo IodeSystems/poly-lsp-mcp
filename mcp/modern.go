@@ -271,6 +271,17 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		"returned": len(paged),
 		"matches":  matches,
 	}
+	// The same reading the CLI prints above the matches. Both paths must
+	// agree about what a selector MEANS for the same reason they already
+	// agree about what it matches: a tool that explains a selector one way
+	// to a person and another way to a model is a liar in a subtler
+	// register. It is also the output that teaches — a model reading back
+	// "returns the `argument` nodes, NOT the `func` nodes" writes a better
+	// selector next turn than one that only sees rows.
+	payload["read"] = describeSelector(list)
+	if s := subjectLine(list); s != "" {
+		payload["subject"] = s
+	}
 	if capped {
 		// The walk stopped at the limit, so the count is a FLOOR, not a
 		// total. Rendered as the same ">N" the cost trace uses for a

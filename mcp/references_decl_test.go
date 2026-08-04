@@ -44,7 +44,11 @@ func TestParentsExcludesTheDeclarationItself(t *testing.T) {
 	if !strings.Contains(text, "main.go#Caller") {
 		t.Errorf("want Caller (the real caller); got: %s", text)
 	}
-	if strings.Contains(text, "main.go#Save") {
+	// Scoped to the MATCH rows on purpose. The payload also carries the
+	// reading, which quotes the caller's own selector back — and the selector
+	// names Save. A bare substring test over the whole payload would call
+	// that an occurrence of Save-as-a-result and fail on a correct answer.
+	if strings.Contains(text, `"node":"main.go#Save"`) {
 		t.Errorf("Save does not call itself — its declaration is not a reference: %s", text)
 	}
 }

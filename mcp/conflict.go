@@ -412,3 +412,49 @@ func conflictText(content []byte, r conflictRegion) string {
 	}
 	return strings.Join(lines[r.at[0]-1:r.at[1]], "\n")
 }
+
+// ------------------------------------------------- chimera protection
+
+// conflictOverlap returns the conflict regions an arbitrary span straddles.
+//
+// This is the sharp edge of an unresolved merge. tree-sitter recovers past
+// the markers, so it happily builds symbols out of BOTH sides at once:
+// measured on a conflict opening in one function and closing in another, the
+// index reported `func B[1]` spanning ours' header, a `=======` marker, and
+// theirs' tail — a declaration from no commit and no branch, and not valid
+// source in any of them.
+//
+// Reading one is merely misleading. EDITING one writes across a marker and
+// corrupts the merge itself, which is why node_edit refuses rather than
+// warns: there is no correct oldText for a span that is half of each side.
+func conflictOverlap(content []byte, from, to int) []conflictRegion {
+	var out []conflictRegion
+	for _, c := range parseConflicts(content) {
+		// Straddling, not containing: a node that WRAPS whole conflicts
+		// (a function holding a conflicted statement, or the file) is a
+		// legitimate target — accept: and a whole-node rewrite both work on
+		// it. What cannot be edited is a span that starts or ends INSIDE a
+		// region, because that span is part-ours-part-theirs.
+		startsInside := from > c.at[0] && from <= c.at[1]
+		endsInside := to >= c.at[0] && to < c.at[1]
+		if startsInside || endsInside {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// conflictChimeraErr explains a refused edit and names every way forward.
+func conflictChimeraErr(file, addr string, from, to int, cs []conflictRegion) error {
+	return fmt.Errorf(
+		"%s (lines %d-%d) straddles an unresolved merge conflict at %s, so its text is part MINE and part THEIRS — "+
+			"a declaration that exists on neither side. Editing it would write across the markers and corrupt the merge. "+
+			"Resolve first: node_edit(node:%q, accept:\"mine\"|\"theirs\"), or read the versions apart with ::mine / ::theirs",
+		addr, from, to, conflictSpans(cs), conflictAddr(file, cs[0]))
+}
+
+// conflictAddr is a region's span address, file included so the suggestion
+// is runnable as printed.
+func conflictAddr(file string, c conflictRegion) string {
+	return fmt.Sprintf("%s@%d-%d", file, c.at[0], c.at[1])
+}

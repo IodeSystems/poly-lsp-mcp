@@ -1127,6 +1127,18 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	if p.Accept != nil {
 		return s.applyConflictAccept(rn, *p.Accept, p.diagnosticOptions)
 	}
+	// Every OTHER mutating op is refused on a span that is half of each side
+	// of an unresolved conflict. accept: is exempt above — it is the op that
+	// exists to end this state.
+	if !rn.wholeFile() && rn.class != "conflict" {
+		if abs, err := s.resolveFileArg(rn.file); err == nil {
+			if content, err := os.ReadFile(abs); err == nil {
+				if cs := conflictOverlap(content, rn.decl.StartLine, rn.decl.EndLine); len(cs) > 0 {
+					return nil, true, conflictChimeraErr(rn.file, rn.addr, rn.decl.StartLine, rn.decl.EndLine, cs)
+				}
+			}
+		}
+	}
 	if p.Delete != nil {
 		if rn.wholeFile() {
 			return s.applyWholeFileDelete(rn.file, p.diagnosticOptions)

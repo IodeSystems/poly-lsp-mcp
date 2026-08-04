@@ -1,6 +1,16 @@
 # poly-lsp-mcp — convenience targets. Go is the only required tool;
 # `make smoke-editor` / `make smoke-llm` need python3, and a few tests
 # need gopls + git on PATH (skipped otherwise).
+#
+# `make build` / `make install` STAMP the source directory into the binary
+# (-X main.srcDir), which turns on dev self-update: the binary rebuilds itself
+# from this tree and re-execs whenever a .go file is newer than it. That
+# matters here because poly-lsp-mcp is always SPAWNED (by dun, by an editor),
+# never launched by hand, so nothing else in the loop notices it is stale.
+# See selfupdate.go. Disable at runtime with POLY_LSP_NO_AUTOBUILD=1.
+#
+# A plain `go install .` leaves srcDir empty and never self-updates — that is
+# the release build, and `make install-release` spells it out.
 
 GO              ?= go
 BINARY          ?= poly-lsp-mcp
@@ -8,16 +18,23 @@ PREFIX          ?= $(HOME)/go/bin
 PKGS            := ./...
 RACE_TIMEOUT    ?= 300s
 TEST_TIMEOUT    ?= 180s
+SRCDIR          := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+LDFLAGS         := -X main.srcDir=$(SRCDIR)
 
 .PHONY: default
 default: build
 
 .PHONY: build
 build:
-	$(GO) build -o $(BINARY) .
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) .
 
 .PHONY: install
 install:
+	$(GO) install -ldflags "$(LDFLAGS)" .
+
+# The release build: no source stamp, so no self-update.
+.PHONY: install-release
+install-release:
 	$(GO) install .
 
 .PHONY: test

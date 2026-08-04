@@ -1153,9 +1153,11 @@ func TestModernNodeEditOldTextOnMissingAddress(t *testing.T) {
 	if !r.IsError || !strings.Contains(r.Content[0].Text, "no such file") {
 		t.Errorf("expected not-found; got %+v", r.Content)
 	}
-	// A missing SYMBOL is the existing guided resolution error.
+	// A missing SYMBOL is the existing guided resolution error. Use a name
+	// with a near match — suggestions are offered only when something in the
+	// file resembles the request (see TestMissingSymbolSuggestsTheNearestName).
 	r = s.callTool("node_edit", map[string]any{
-		"node": "main.go#NoSuchSym", "oldText": "a", "newText": "b",
+		"node": "main.go#Serverr", "oldText": "a", "newText": "b",
 	})
 	if !r.IsError || !strings.Contains(r.Content[0].Text, "did you mean") {
 		t.Errorf("expected guided symbol error; got %+v", r.Content)
@@ -2190,4 +2192,89 @@ func TestOldTextLargerThanSiteAddressNamesTheEnclosingSymbol(t *testing.T) {
 	if strings.Contains(r.Content[0].Text, "Do not trim") {
 		t.Errorf("a same-line miss was reported as a wrong address:\n%s", r.Content[0].Text)
 	}
+}
+
+// A suggestion list that CANNOT contain the answer is worse than none — it
+// reads as "the symbol is not here."
+//
+// The list used to pull exact last-segment matches forward and leave everything
+// else in FILE order, so a miss in any real file suggested the package name and
+// every import: twenty candidates, none related, the actual near-miss far past
+// the cut.
+func TestMissingSymbolSuggestsTheNearestName(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+	// Imports first, so file order and similarity order disagree sharply.
+	body := "package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"os\"\n\t\"sort\"\n\t\"strings\"\n)\n\n" +
+		"func alpha() {}\nfunc beta() {}\nfunc gamma() {}\n" +
+		"func collectTheThingWithALongName() {}\n\n" +
+		"var _ = json.Marshal\nvar _ = fmt.Sprint\nvar _ = os.Exit\nvar _ = sort.Ints\nvar _ = strings.Title\n"
+	if err := os.WriteFile(filepath.Join(dir, "sug.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A truncated name: the caller had the right start and stopped early.
+	msg := readErr(t, s, "sug.go#collectTheThing")
+	first := firstSuggestion(msg)
+	if first != "collectTheThingWithALongName" {
+		t.Errorf("truncated name suggested %q first, want collectTheThingWithALongName\ngot: %s", first, msg)
+	}
+
+	// Wrong case only — an exact match modulo case must outrank fuzzy ones.
+	msg = readErr(t, s, "sug.go#GAMMA")
+	if first := firstSuggestion(msg); first != "gamma" {
+		t.Errorf("case-only miss suggested %q first, want gamma\ngot: %s", first, msg)
+	}
+
+	// Nothing resembles it: do not list arbitrary symbols as if they were guesses.
+	msg = readErr(t, s, "sug.go#Zqxjkwvbn")
+	if strings.Contains(msg, "did you mean") {
+		t.Errorf("guessed at a name with no near match:\n%s", msg)
+	}
+	if !strings.Contains(msg, "nothing in it is close") {
+		t.Errorf("did not say the file holds nothing similar:\n%s", msg)
+	}
+}
+
+// "A.B" where A exists is a different mistake: the right container and the
+// wrong member. Listing names that merely resemble B talks past that.
+func TestMissingMemberListsTheContainersMembers(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+	body := "package main\n\ntype Harness struct{}\n\n" +
+		"func (h *Harness) Run() {}\nfunc (h *Harness) Stop() {}\n\nfunc Start() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "h.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msg := readErr(t, s, "h.go#Harness.Start")
+	if !strings.Contains(msg, `"Harness" exists`) {
+		t.Errorf("did not say the container exists:\n%s", msg)
+	}
+	for _, m := range []string{"Harness.Run", "Harness.Stop"} {
+		if !strings.Contains(msg, m) {
+			t.Errorf("member %s not listed:\n%s", m, msg)
+		}
+	}
+}
+
+func readErr(t *testing.T, s *mcpSession, node string) string {
+	t.Helper()
+	r := s.callTool("node_read", map[string]any{"node": node})
+	if !r.IsError {
+		t.Fatalf("node_read %s should have errored, got %s", node, r.Content[0].Text)
+	}
+	return r.Content[0].Text
+}
+
+// firstSuggestion pulls the first name out of a "did you mean: a, b, c" error.
+func firstSuggestion(msg string) string {
+	i := strings.Index(msg, "did you mean: ")
+	if i < 0 {
+		return ""
+	}
+	rest := msg[i+len("did you mean: "):]
+	if j := strings.IndexAny(rest, ",."); j >= 0 {
+		rest = rest[:j]
+	}
+	return strings.TrimSpace(rest)
 }

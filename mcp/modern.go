@@ -784,7 +784,7 @@ func (s *Server) resolveClassicAddr(file, symPath string) (*modernNode, error) {
 		// (observed: 93 KB of newText to insert one function). newText-alone
 		// creates a new FILE, not a new symbol inside one, so name the idiom
 		// that does work.
-		return nil, fmt.Errorf("no symbol %q in %s; did you mean: %s. "+
+		return nil, fmt.Errorf("no symbol %q in %s; %s. "+
 			"To ADD it instead: there is no insert op — grow a NEIGHBOUR. "+
 			"node_read a symbol next to where it belongs, then node_edit that address with "+
 			"oldText=<its whole text> and newText=<its whole text>+\"\\n\\n\"+<the new declaration>. "+

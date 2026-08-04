@@ -518,23 +518,127 @@ func parseSeg(s string) (name string, idx int) {
 // nearestSyms renders a candidate list for a resolution-failure error,
 // preferring syms whose last segment matches the query's last segment.
 func nearestSyms(query string, syms []symbols.Symbol) string {
-	qLast := lastSeg(query)
-	var near, rest []string
-	for _, s := range syms {
-		if lastSeg(s.Sym) == qLast {
-			near = append(near, s.Sym)
-		} else {
-			rest = append(rest, s.Sym)
+	if len(syms) == 0 {
+		return "the file declares no symbols at all"
+	}
+	// "A.B" where A exists is a different mistake from a misspelling: the
+	// caller has the right container and the wrong member, and listing names
+	// that merely resemble "B" talks past that. Say what A actually has.
+	if i := strings.LastIndex(query, "."); i > 0 {
+		parent := query[:i]
+		var members []string
+		parentExists := false
+		for _, s := range syms {
+			if s.Sym == parent {
+				parentExists = true
+			}
+			if strings.HasPrefix(s.Sym, parent+".") {
+				members = append(members, s.Sym)
+			}
+		}
+		if parentExists {
+			if len(members) == 0 {
+				return fmt.Sprintf("%q exists but declares no members at all", parent)
+			}
+			// If one of the members is itself a near miss, that IS the answer;
+			// listing the whole container talks past a plain typo.
+			// Only a STRONG member match (exact, case-only, or prefix) beats
+			// listing the container. A fuzzy one — "Start" against "Stop" —
+			// is weak evidence, and the caller who has the right container
+			// and the wrong member is better served by seeing the members.
+			if near := rankNames(lastSeg(query), members, 3); len(near) > 0 {
+				return "did you mean: " + strings.Join(near, ", ")
+			}
+			if len(members) > 12 {
+				members = members[:12]
+			}
+			return fmt.Sprintf("%q exists; its members are: %s", parent, strings.Join(members, ", "))
 		}
 	}
-	cands := append(near, rest...)
-	if len(cands) > 20 {
-		cands = cands[:20]
+
+	all := make([]string, 0, len(syms))
+	for _, s := range syms {
+		all = append(all, s.Sym)
 	}
-	if len(cands) == 0 {
-		return "(file has no symbols)"
+	if ranked := rankNames(lastSeg(query), all, 7); len(ranked) > 0 {
+		return "did you mean: " + strings.Join(ranked, ", ")
 	}
-	return strings.Join(cands, ", ")
+
+	// Nothing resembles it. Listing arbitrary symbols would only mislead, so
+	// say what the file holds instead of pretending to guess.
+	names := all
+	if len(names) > 8 {
+		names = names[:8]
+	}
+	return fmt.Sprintf("nothing in it is close — the file declares %d symbol(s), starting with %s "+
+		"(node_query \"path=<file> > *\" lists them all)",
+		len(syms), strings.Join(names, ", "))
+}
+
+// rankNames returns the candidates closest to qLast, nearest first, or nil
+// when none resembles it.
+//
+// Ranking by SIMILARITY is the whole point. The previous version only pulled
+// exact last-segment matches forward and left everything else in FILE order,
+// so a miss in a real file suggested the package name and every import —
+// twenty candidates, none related, the actual near-miss far past the cut. A
+// suggestion list that cannot contain the answer is worse than no list: it
+// reads as "the symbol is not here."
+func rankNames(qLast string, candidates []string, maxScore int) []string {
+	qLow := strings.ToLower(qLast)
+	type cand struct {
+		sym   string
+		score int // lower is closer
+	}
+	ranked := make([]cand, 0, len(candidates))
+	for _, sym := range candidates {
+		last := lastSeg(sym)
+		low := strings.ToLower(last)
+		switch {
+		case last == qLast:
+			ranked = append(ranked, cand{sym, 0})
+		case low == qLow:
+			ranked = append(ranked, cand{sym, 1})
+		case strings.HasPrefix(low, qLow):
+			// The commonest miss by far: the caller had the right start and a
+			// truncated end ("Server.oldTextOutsizes" for
+			// "Server.oldTextOutsizesNodeErr"). Rank this ABOVE the reverse —
+			// a shorter name the query merely starts with is a weaker guess
+			// and would otherwise tie and win on file order.
+			ranked = append(ranked, cand{sym, 2})
+		case strings.HasPrefix(qLow, low):
+			ranked = append(ranked, cand{sym, 3})
+		case strings.Contains(low, qLow) || strings.Contains(qLow, low):
+			ranked = append(ranked, cand{sym, 4})
+		default:
+			// The prefix discount must not go NEGATIVE, or a long shared
+			// prefix scores a fuzzy match below an exact one: with a raw
+			// discount, "handlemodernnoderead" ranked handleModernNodeQuery
+			// above the case-insensitive exact handleModernNodeRead.
+			d := editDistance(qLow, low) - 2*commonPrefixLen(qLow, low)
+			if d < 0 {
+				d = 0
+			}
+			if d <= 2 {
+				ranked = append(ranked, cand{sym, 5 + d})
+			}
+		}
+	}
+	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score < ranked[j].score })
+	for len(ranked) > 0 && ranked[len(ranked)-1].score > maxScore {
+		ranked = ranked[:len(ranked)-1]
+	}
+	if len(ranked) == 0 {
+		return nil
+	}
+	if len(ranked) > 8 {
+		ranked = ranked[:8]
+	}
+	out := make([]string, 0, len(ranked))
+	for _, c := range ranked {
+		out = append(out, c.sym)
+	}
+	return out
 }
 
 func lastSeg(sym string) string {

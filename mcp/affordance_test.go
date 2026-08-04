@@ -54,8 +54,12 @@ func TestMissingSymbolErrorTeachesHowToAddOne(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
+	// A name with a NEAR MATCH in the file, so both readings genuinely apply:
+	// suggestions are only offered when something resembles the request (a
+	// name with nothing close gets "nothing in it is close" instead — see
+	// TestMissingSymbolSuggestsTheNearestName).
 	r := s.callTool("node_edit", map[string]any{
-		"node": "main.go#NotThereYet", "newText": "func NotThereYet() {}",
+		"node": "main.go#Server.Startt", "newText": "func (s *Server) Startt() {}",
 	})
 	if !r.IsError {
 		t.Fatal("newText alone on a missing SYMBOL should not silently create a file")

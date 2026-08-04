@@ -330,7 +330,10 @@ func TestNodeAddressUnknownSymGuidedErrorNoWrite(t *testing.T) {
 		t.Fatalf("expected guided error for unknown node, got %+v", r.Content)
 	}
 	msg := r.Content[0].Text
-	if !strings.Contains(msg, "did you mean") {
+	// Either guidance form counts: a near-miss suggestion, or — as here, where
+	// the container is right and only the member is wrong — the container's
+	// member list. Both name the candidate, which is what this asserts.
+	if !strings.Contains(msg, "did you mean") && !strings.Contains(msg, "its members are") {
 		t.Errorf("error should guide with candidates; got %q", msg)
 	}
 	if !strings.Contains(msg, "Server.Start") {

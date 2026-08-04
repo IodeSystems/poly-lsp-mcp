@@ -1530,9 +1530,17 @@ func TestSelectorCorpus_ShellHabits(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	msg := queryErr(t, s, map[string]any{"selector": `::grep('-E' 'sum.mjs')`})
-	if !strings.Contains(msg, "ONE quoted argument") || !strings.Contains(msg, `::grep('-E sum.mjs')`) {
-		t.Errorf("separate-word flags should be corrected inline; got %s", msg)
+	// Shell habits are now ACCEPTED rather than corrected. They meant
+	// something unambiguous, and an error bought a round-trip and nothing
+	// else — see TestGrepArgAcceptsShellQuoting for the full set.
+	canonical := query(t, s, map[string]any{"selector": `::grep('-E Server')`, "limit": 50})
+	if canonical.TotalMatches == 0 {
+		t.Fatal("fixture drift: the canonical grep should match something")
+	}
+	shell := query(t, s, map[string]any{"selector": `::grep('-E' 'Server')`, "limit": 50})
+	if shell.TotalMatches != canonical.TotalMatches {
+		t.Errorf("separate-word flags should reach the SAME rows: %d vs %d",
+			shell.TotalMatches, canonical.TotalMatches)
 	}
 	abs := queryErr(t, s, map[string]any{"selector": "/tmp/ws/cmd/dun/tui.go"})
 	if !strings.Contains(abs, "workspace-RELATIVE") {

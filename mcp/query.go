@@ -1423,37 +1423,10 @@ func (p *modSelParser) parseFragmentElement() (selCompound, error) {
 		return comp, p.errf("'(' after ::grep, e.g. ::grep('-w TODO')")
 	}
 	p.i++
-	p.skipWS()
-	q := p.peek()
-	if q != '"' && q != '\'' {
-		return comp, p.errf("a quoted pattern, e.g. ::grep('-i -A2 derp')")
+	text, terr := p.parseGrepArg()
+	if terr != nil {
+		return comp, terr
 	}
-	p.i++
-	start := p.i
-	for !p.eof() && p.s[p.i] != q {
-		p.i++
-	}
-	if p.eof() {
-		return comp, p.errf(fmt.Sprintf("a closing %c for ::grep", q))
-	}
-	text := string(p.s[start:p.i])
-	p.i++
-	p.skipWS()
-	if p.peek() != ')' {
-		// The other half of the shell habit: ::grep('-E' 'pattern') — flags and
-		// pattern as SEPARATE argv words, the way a shell takes them. Same
-		// answer as the double-quoting case, and worth saying rather than
-		// reprinting the grammar over a missing paren.
-		if c := p.peek(); c == '"' || c == '\'' || c == '-' {
-			rest := strings.TrimRight(strings.TrimSpace(string(p.s[p.i:])), ")")
-			rest = strings.Trim(rest, "\"'")
-			return comp, fmt.Errorf(
-				"::grep takes ONE quoted argument — flags and pattern go inside the same quotes, "+
-					"not as separate words. Write ::grep('%s %s')", text, rest)
-		}
-		return comp, p.errf("')' to close ::grep")
-	}
-	p.i++
 	g, err := parseFragmentSpec(text)
 	if err != nil {
 		return comp, fmt.Errorf("bad ::grep(%q): %w", text, err)
@@ -5300,24 +5273,26 @@ func shellQuotedNote(selector string) string {
 }
 
 // grepArg returns the raw text inside the first ::grep(…) of a selector.
+// grepArg returns the pattern a ::grep selector actually searched.
+//
+// It runs the REAL argument parser rather than re-extracting from the raw
+// text. The old version read only the first quoted segment, which was correct
+// while ::grep took exactly one — and silently wrong the moment segments
+// concatenated: `::grep('a'|'b')` searches "a|b" but reported "a", so the
+// literal-vs-regex note stopped firing on the one shape that needs it most.
+// Two parsers for one syntax is how a note comes to describe a query nobody
+// ran.
 func grepArg(selector string) (string, bool) {
 	i := strings.Index(selector, "::grep(")
 	if i < 0 {
 		return "", false
 	}
-	rest := selector[i+len("::grep("):]
-	if len(rest) < 2 {
+	p := &modSelParser{s: []rune(selector[i+len("::grep("):])}
+	arg, err := p.parseGrepArg()
+	if err != nil {
 		return "", false
 	}
-	q := rest[0]
-	if q != '\'' && q != '"' {
-		return "", false
-	}
-	end := strings.IndexByte(rest[1:], q)
-	if end < 0 {
-		return "", false
-	}
-	return rest[1 : 1+end], true
+	return arg, true
 }
 
 // splitGrepFlags splits a ::grep argument into its leading flag words and
@@ -5617,4 +5592,76 @@ func (p *modSelParser) parseAttrPrimary(bare bool) (*attrExpr, error) {
 		return nil, err
 	}
 	return &attrExpr{op: attrExprLeaf, leaf: a}, nil
+}
+
+// parseGrepArg reads ::grep's argument as a shell-style CONCATENATION of
+// segments, running to the closing ')'.
+//
+// It used to demand exactly one quoted string, and real sessions kept writing
+// shell instead:
+//
+//	::grep('-E ''queued''')                     doubled quotes
+//	::grep('-E 'queuedMsgs|queuedTexts')        unterminated
+//	::grep('a\s*='|'\.b\s*=\s*c')               quoted | quoted
+//	::grep('-E' 'pattern')                      separate argv words
+//
+// Every one of those means something unambiguous, and rejecting them bought
+// nothing but a round-trip. Shell's own rule resolves all four: ADJACENT
+// segments concatenate with nothing between them, and segments separated by
+// WHITESPACE join with a single space — which is exactly the "flags pattern"
+// shape parseFragmentSpec already expects.
+//
+// An unterminated quote runs to the final ')' rather than erroring. That is
+// more forgiving than a shell, deliberately: the alternative is a parse error
+// on input whose intent is plain, which is the trade this whole function
+// exists to stop making.
+func (p *modSelParser) parseGrepArg() (string, error) {
+	var b strings.Builder
+	for {
+		gap := p.skipWS()
+		if p.eof() {
+			return "", p.errf("')' to close ::grep")
+		}
+		if p.peek() == ')' {
+			p.i++
+			if b.Len() == 0 {
+				return "", p.errf("a pattern inside ::grep(…), e.g. ::grep('-i -A2 derp')")
+			}
+			return b.String(), nil
+		}
+		// Whitespace between segments was an argv boundary; the internal form
+		// is one string, so it becomes the single space that separated them.
+		if gap && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		if c := p.peek(); c == '"' || c == '\'' {
+			p.i++
+			start := p.i
+			for !p.eof() && p.s[p.i] != c {
+				p.i++
+			}
+			if p.eof() {
+				// Unterminated: take everything up to the LAST ')' as content.
+				if cut := strings.LastIndexByte(string(p.s[start:]), ')'); cut >= 0 {
+					b.WriteString(string(p.s[start : start+cut]))
+					p.i = start + cut + 1
+					return b.String(), nil
+				}
+				return "", p.errf(fmt.Sprintf("a closing %c for ::grep", c))
+			}
+			b.WriteString(string(p.s[start:p.i]))
+			p.i++
+			continue
+		}
+		// A bare run: everything up to a quote, whitespace, or the close.
+		start := p.i
+		for !p.eof() && p.s[p.i] != '\'' && p.s[p.i] != '"' && p.s[p.i] != ')' &&
+			p.s[p.i] != ' ' && p.s[p.i] != '\t' {
+			p.i++
+		}
+		if p.i == start {
+			return "", p.errf("')' to close ::grep")
+		}
+		b.WriteString(string(p.s[start:p.i]))
+	}
 }

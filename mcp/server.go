@@ -934,7 +934,11 @@ func (s *Server) maybeLoadCache() {
 		log.Printf("mcp: load cache %s: %v (continuing with empty cache)", s.cachePath, err)
 		return
 	}
-	log.Printf("mcp: loaded %d entries from %s", s.parseCache.Len(), s.cachePath)
+	// logf, not log.Printf: this is workspace bring-up commentary, and the
+	// `query` CLI answers on stdout and must stay quiet on stderr (e4c4c63).
+	// Loading the cache from the CLI re-introduced exactly the noise that
+	// commit removed.
+	s.logf("mcp: loaded %d entries from %s", s.parseCache.Len(), s.cachePath)
 }
 
 // maybeSaveCache writes the current cache back to disk when

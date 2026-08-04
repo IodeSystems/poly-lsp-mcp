@@ -1,7 +1,11 @@
 package mcp
 
 import (
+	"bytes"
 	"errors"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -108,5 +112,48 @@ func TestQueryTextMarksCallerFixableErrors(t *testing.T) {
 	}
 	if err := s.QueryText("func", 0, -1, "", &b); !errors.As(err, &se) {
 		t.Errorf("a negative offset is caller-fixable, got %T", err)
+	}
+}
+
+// The CLI answers on stdout and stays silent on stderr unless --verbose; see
+// the "answers quietly" fix. Loading the parse cache re-introduced exactly
+// the bring-up line that removed, because maybeLoadCache used log.Printf
+// rather than the server's quiet-aware logf — and because LoadCache ran
+// before SetQuiet.
+func TestCacheLoadRespectsQuiet(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package q\n\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(dir, "cache.gob")
+
+	// Write a cache, then load it back with quiet on.
+	warm := newQueryServer(t, dir)
+	warm.SetCachePath(cache)
+	warm.maybeSaveCache()
+
+	var logged bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(old)
+
+	s := newQueryServer(t, dir)
+	s.SetQuiet(true)
+	s.SetCachePath(cache)
+	s.LoadCache()
+	if strings.Contains(logged.String(), "loaded") {
+		t.Errorf("a quiet server must not narrate its cache load; got %q", logged.String())
+	}
+
+	logged.Reset()
+	v := newQueryServer(t, dir)
+	v.SetQuiet(false)
+	v.SetCachePath(cache)
+	v.LoadCache()
+	if !strings.Contains(logged.String(), "loaded") {
+		t.Errorf("--verbose should still report it; got %q", logged.String())
 	}
 }

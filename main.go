@@ -200,12 +200,14 @@ func runQuery() {
 	// re-parses the workspace from scratch — the dominant cost of a one-shot
 	// query, and pure waste when the MCP server has already parsed the same
 	// bytes. Load-only: see LoadCache.
+	// Quiet FIRST: LoadCache logs what it loaded, and bring-up commentary on
+	// stderr is what --verbose gates.
+	srv.SetQuiet(!*verbose)
 	srv.SetCachePath(cachePathFor(root))
 	srv.LoadCache()
 	// A successful query prints its answer and nothing else. The bring-up
 	// commentary (index size, binding passes) is a server's startup record;
 	// here it is a preamble the caller re-reads on every invocation.
-	srv.SetQuiet(!*verbose)
 	if err := srv.QueryText(selector, *limit, *offset, *budget, os.Stdout); err != nil {
 		// A selector error is the answer to what was asked, so it prints as
 		// prose. Only a genuine tool failure gets the log furniture.

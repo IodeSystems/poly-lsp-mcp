@@ -2126,3 +2126,68 @@ func TestNodeAddressIsAcceptedAsASelector(t *testing.T) {
 		t.Errorf("address + edge: %s", r.Content[0].Text)
 	}
 }
+
+// The "grep, then edit the block" mistake — the top node_edit failure in a
+// day of recorded sessions, five times.
+//
+// ::grep and edge rows hand back a SITE address: one line. That reads as a
+// starting point, so the follow-up edit arrives with an oldText covering the
+// whole enclosing block. It cannot match, and the plain not-found error prints
+// the one line and says oldText must be a substring of it — which invites
+// trimming the oldText, when the address is what is wrong.
+func TestOldTextLargerThanSiteAddressNamesTheEnclosingSymbol(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+	body := "package main\n\nfunc Dispatch(ev string) {\n\tswitch ev {\n\tcase \"ready\":\n\t\tprintln(1)\n\t\tprintln(2)\n\t}\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "blk.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Take the site address the way an agent does: from ::grep.
+	q := query(t, s, map[string]any{"selector": `path=blk.go ::grep("ready")`})
+	if len(q.Matches) != 1 {
+		t.Fatalf("grep matched %d, want 1", len(q.Matches))
+	}
+	site := q.Matches[0].Node
+
+	r := s.callTool("node_edit", map[string]any{
+		"node":    site,
+		"oldText": "\tcase \"ready\":\n\t\tprintln(1)\n\t\tprintln(2)\n",
+		"newText": "\tcase \"ready\":\n",
+	})
+	if !r.IsError {
+		t.Fatal("an oldText larger than the addressed line must not apply")
+	}
+	msg := r.Content[0].Text
+	for _, want := range []string{
+		"blk.go#Dispatch", // the address to widen to
+		"can never fit",   // why trimming will not help
+		"Do not trim",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error missing %q\ngot: %s", want, msg)
+		}
+	}
+
+	// The named address is the one that works.
+	r = s.callTool("node_edit", map[string]any{
+		"node":    "blk.go#Dispatch",
+		"oldText": "\t\tprintln(1)\n\t\tprintln(2)\n",
+		"newText": "\t\tprintln(3)\n",
+	})
+	if r.IsError {
+		t.Fatalf("the suggested address failed: %s", r.Content[0].Text)
+	}
+
+	// A same-size-or-smaller oldText that simply misses keeps the plain error:
+	// there the caller's text IS the thing to fix.
+	r = s.callTool("node_edit", map[string]any{
+		"node": site, "oldText": "nope", "newText": "x",
+	})
+	if !r.IsError {
+		t.Fatal("a genuine miss must still error")
+	}
+	if strings.Contains(r.Content[0].Text, "Do not trim") {
+		t.Errorf("a same-line miss was reported as a wrong address:\n%s", r.Content[0].Text)
+	}
+}

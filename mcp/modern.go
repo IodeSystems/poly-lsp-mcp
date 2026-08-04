@@ -1250,6 +1250,12 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		switch len(offs) {
 		case 1:
 		case 0:
+			// An oldText LARGER than the node it must fit inside is not a
+			// near-miss to be diffed — it is the wrong address, and no
+			// amount of adjusting the text will make it fit.
+			if err := s.oldTextOutsizesNodeErr(rn, cur, *p.OldText); err != nil {
+				return nil, true, err
+			}
 			return nil, true, oldTextNotFoundErr(rn.addr, cur)
 		default:
 			return nil, true, oldTextAmbiguousErr(rn.addr, cur, *p.OldText, offs)
@@ -1302,4 +1308,43 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		}
 		return s.refactorSignature(rn.name, ro, p.IncludeComments, p.diagnosticOptions)
 	}
+}
+
+// oldTextOutsizesNodeErr answers the "I grepped, then edited the block"
+// mistake, and returns nil when that is not what happened.
+//
+// ::grep and edge rows hand back a SITE address — one line, or the few lines
+// of a span. That address reads as a starting point, so the next call arrives
+// with an oldText covering the whole enclosing block, which cannot possibly be
+// a substring of one line. Five of these in one day of recorded sessions.
+//
+// Printing the node's text and "oldText must be an exact substring" is true
+// and unhelpful here: it invites the caller to trim their oldText, when the
+// fix is to widen the ADDRESS. So name the enclosing symbol, which is almost
+// always the block they were holding.
+func (s *Server) oldTextOutsizesNodeErr(rn *modernNode, cur, oldText string) error {
+	if rn.wholeFile() || rn.sym != "" {
+		return nil // a whole file / a symbol is not an under-sized address
+	}
+	oldLines := strings.Count(oldText, "\n") + 1
+	curLines := strings.Count(cur, "\n") + 1
+	if oldLines <= curLines {
+		return nil
+	}
+
+	widen := ""
+	if abs, err := s.resolveFileArg(rn.file); err == nil {
+		if sym := s.enclosingSymPath(abs, rn.decl.StartLine, map[string][]symbols.Symbol{}); sym != "" {
+			widen = fmt.Sprintf("%s#%s", rn.file, sym)
+		}
+	}
+	fix := fmt.Sprintf("address the enclosing declaration instead — node_query %q to find it", rn.file)
+	if widen != "" {
+		fix = fmt.Sprintf("address the enclosing declaration instead: %q", widen)
+	}
+	return fmt.Errorf(
+		"oldText is %d lines but %s is only %d — that address is a SITE (one line, or a span), "+
+			"not the block around it, so this oldText can never fit inside it. "+
+			"Do not trim the oldText: %s. The node's whole text is:\n---\n%s\n---",
+		oldLines, rn.addr, curLines, fix, cur)
 }

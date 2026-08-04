@@ -2212,6 +2212,15 @@ func selOpSpelling(op selOp) string {
 		return "$="
 	case selContains:
 		return "*="
+	case selRegex:
+		// Without this case ~= fell to the "=" default, so every rendering
+		// of a regex attr — the cost trace, the zero-result hint, the
+		// reading — echoed [name~=parse] back as [name=parse]: a REGEX
+		// match quoted as a LITERAL one. That is the precise confusion the
+		// alternation guard above exists to prevent, reproduced by the
+		// tool's own output, on the selector the caller was already
+		// debugging.
+		return "~="
 	}
 	return "="
 }

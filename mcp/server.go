@@ -66,6 +66,12 @@ type Server struct {
 	rootMu sync.RWMutex
 	root   string
 
+	// symCache memoizes FileSymbols across QUERIES. buildTree makes a fresh
+	// engine per node_query, so without a server-level cache every query
+	// re-read and re-parsed every file its selector descended into —
+	// measured at 64% of a cold query's CPU, all of it repeat work.
+	symCache *symbols.SymbolCache
+
 	writeMu sync.Mutex
 	enc     *json.Encoder
 
@@ -274,6 +280,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 	}
 	s.SetLegacyTools(false)
 	s.parseCache = symbols.NewParseCache()
+	s.symCache = symbols.NewSymbolCache()
 	return s
 }
 
@@ -893,6 +900,18 @@ func (s *Server) send(m *jsonrpc.Message) {
 		log.Printf("write: %v", err)
 	}
 }
+
+// LoadCache warms the parse cache from disk without starting a server.
+//
+// For the `query` CLI, which re-parses the whole workspace on every
+// invocation because it never calls Serve — measured at a ~1.8s floor on this
+// repo for even `:root > *`, which touches almost nothing. The cache is keyed
+// by (language, content HASH), so sharing the MCP server's file is safe by
+// construction: a stale entry can only be hit by byte-identical content.
+//
+// Load-only on purpose. A short-lived CLI that also SAVED would write its
+// partial view over the richer cache a long-running server had built.
+func (s *Server) LoadCache() { s.maybeLoadCache() }
 
 // maybeLoadCache pulls a previously-saved cache off disk when
 // persistence is configured. Missing files are silently OK (first

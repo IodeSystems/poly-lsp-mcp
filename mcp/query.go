@@ -557,8 +557,19 @@ func (e *engine) loadFileSymbols(f *treeNode) {
 	if err != nil {
 		return
 	}
-	syms, err := symbols.FileSymbols(lang, content)
-	if err != nil || len(syms) == 0 {
+	// Through the server-level cache: buildTree makes a fresh engine per
+	// query, so parsing here is repeat work from the second query onward.
+	// Keyed by content hash, so an edited file simply misses.
+	syms, ok := e.s.symCache.Get(lang, content)
+	if !ok {
+		var err error
+		syms, err = symbols.FileSymbols(lang, content)
+		if err != nil {
+			return
+		}
+		e.s.symCache.Put(lang, content, syms)
+	}
+	if len(syms) == 0 {
 		return
 	}
 	bySym := make(map[string]*treeNode, len(syms))

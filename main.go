@@ -196,6 +196,12 @@ func runQuery() {
 	// No SetManager / no Serve: a query is read-only and touches
 	// neither child LSPs nor the persisted index.
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+	// It DOES want the parse cache, though. Without it every invocation
+	// re-parses the workspace from scratch — the dominant cost of a one-shot
+	// query, and pure waste when the MCP server has already parsed the same
+	// bytes. Load-only: see LoadCache.
+	srv.SetCachePath(cachePathFor(root))
+	srv.LoadCache()
 	// A successful query prints its answer and nothing else. The bring-up
 	// commentary (index size, binding passes) is a server's startup record;
 	// here it is a preamble the caller re-reads on every invocation.

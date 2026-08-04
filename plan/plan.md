@@ -116,6 +116,27 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+✅ **An argument the tool does not have is REFUSED — 2026-08-04.** Swept the
+legacy 9-tool surface; the defect it turned up was never legacy-only.
+`encoding/json` drops unknown fields, so a misspelled or wrong-surface argument
+was discarded and the tool answered a different question — and the answer
+looked right. `structure(file:…)` ignored `file` (the arg is `path`) and listed
+the whole workspace; `search(pattern:…, file:"util.ts")` returned hits from
+another file; `node_read(node:…, lineLimt:2)` ignored the cap. The modern tools
+were protected only by their `required` fields, which is luck, not design.
+Checked at both dispatch paths against each tool's own declared schema, so no
+handler changed. Arguments that are off-schema on PURPOSE are now named in
+`Tool.Undeclared` (hidden `commit`/`rollback`, retired `grep`, node_read's v0.2
+aliases) with a test keeping that list from rotting into a copy of the schema.
+Also fixed two internal leaks found on the pass: `newErrors` serialized the
+error-fingerprint dedup keys verbatim (NUL bytes, `file://` URIs), and a
+missing range was reported by dumping the Go struct — the zero VALUES, never
+the missing ARGUMENTS.
+  - ◻ Known wart, left alone: legacy `node_read` with the v0.2 alias `limit`
+    on a `node` address errors naming `lineLimit / lineLength`, params the
+    caller never typed. It errors rather than silently ignoring, and the modern
+    surface already says this well.
+
 ✅ **A declared binding that did not resolve now TELLS the client — 2026-08-04.**
 A binding site is hand-written config, so the expected failure is a typo: a
 symbol not in that file, a jsonpath matching nothing, a regex that found only

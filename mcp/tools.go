@@ -36,6 +36,20 @@ type Tool struct {
 	// per-session edit-batch isolation in the daemon); stdio passes
 	// localSession. Non-mutating handlers ignore it.
 	Handler func(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error)
+
+	// Undeclared names the arguments a handler accepts that InputSchema
+	// deliberately omits, so checkToolArgs does not refuse them.
+	//
+	// Two reasons an argument is off the schema on purpose. It can be HIDDEN
+	// — commit/rollback drive staged transactions and are revealed by the
+	// rejection help only when a multi-stage edit is actually needed, so they
+	// cost no schema budget on every other turn. Or it can be RETIRED —
+	// node_query's `grep`, where the handler owns a tailored "use ::grep"
+	// message that is better than a generic unknown-argument error.
+	//
+	// Anything NOT listed here and not in the schema is a typo, and refusing
+	// it is the point: a dropped argument answers a different question.
+	Undeclared []string
 }
 
 // registerTools returns the 9-tool surface poly-lsp-mcp exposes. Each tool
@@ -130,6 +144,8 @@ func registerLegacyTools() map[string]Tool {
   "required": []
 }`),
 			Handler: handleNodeRead,
+			// v0.2 aliases, still accepted but discouraged in the description.
+			Undeclared: []string{"line", "limit", "offset"},
 		},
 		"node_edit": {
 			Name: "node_edit",
@@ -153,7 +169,8 @@ func registerLegacyTools() map[string]Tool {
   },
   "required": []
 }`),
-			Handler: handleNodeEdit,
+			Handler:    handleNodeEdit,
+			Undeclared: []string{"commit", "rollback", "diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
 		},
 		"node_delete": {
 			Name: "node_delete",
@@ -174,7 +191,8 @@ func registerLegacyTools() map[string]Tool {
   },
   "required": []
 }`),
-			Handler: handleNodeDelete,
+			Handler:    handleNodeDelete,
+			Undeclared: []string{"commit", "rollback", "diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
 		},
 		"node_refactor": {
 			Name: "node_refactor",
@@ -224,7 +242,8 @@ func registerLegacyTools() map[string]Tool {
   },
   "required": []
 }`),
-			Handler: handleNodeRefactor,
+			Handler:    handleNodeRefactor,
+			Undeclared: []string{"commit", "rollback", "diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
 		},
 		"search": {
 			Name: "search",
@@ -266,7 +285,8 @@ func registerLegacyTools() map[string]Tool {
   },
   "required": ["from", "to"]
 }`),
-			Handler: handleNodeRenameFile,
+			Handler:    handleNodeRenameFile,
+			Undeclared: []string{"diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
 		},
 		"node_query": {
 			Name: "node_query",
@@ -314,7 +334,14 @@ func (a rangeArgs) validate() error {
 		return errors.New("file is required")
 	}
 	if a.StartLine < 1 || a.StartCol < 1 || a.EndLine < 1 || a.EndCol < 1 {
-		return fmt.Errorf("line and col must be >= 1 (got %+v)", a)
+		// The commonest way to land here is a `file` with no range at all,
+		// which the %+v struct dump answered with "StartLine:0 StartCol:0
+		// EndLine:0 EndCol:0" — the zero VALUES, never the missing ARGUMENTS.
+		return fmt.Errorf(
+			"%s needs a position: either node=\"%s#<sym>\" (addresses the symbol for you) "+
+				"or all four of startLine/startCol/endLine/endCol covering the identifier "+
+				"(got startLine=%d startCol=%d endLine=%d endCol=%d; all must be >= 1)",
+			a.File, a.File, a.StartLine, a.StartCol, a.EndLine, a.EndCol)
 	}
 	if a.EndLine < a.StartLine || (a.EndLine == a.StartLine && a.EndCol < a.StartCol) {
 		return fmt.Errorf("range end before start: %+v", a)

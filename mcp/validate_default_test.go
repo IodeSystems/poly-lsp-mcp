@@ -109,3 +109,35 @@ func TestValidateDoesNotBlockAnUnvalidatableWorkspace(t *testing.T) {
 		t.Errorf("the edit should have applied:\n%s", got)
 	}
 }
+
+// newErrors carried errorFingerprintAll's dedup KEYS — "uri\x00code\x00message"
+// — straight into the response, NUL bytes and file:// URIs included: an
+// internal identity leaking out as an explanation.
+func TestReadableNewErrors(t *testing.T) {
+	got := readableNewErrors([]string{
+		"file:///ws/svc.go\x00MissingFieldOrMethod\x00s.Halt undefined",
+		"file:///ws/a.ts\x00\x00Cannot find name 'x'",
+		"not a fingerprint",
+	})
+	want := []string{
+		"/ws/svc.go: MissingFieldOrMethod: s.Halt undefined",
+		"/ws/a.ts: Cannot find name 'x'",
+		"not a fingerprint",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, g := range got {
+		if strings.ContainsRune(g, 0) {
+			t.Errorf("NUL byte survived into %q", g)
+		}
+	}
+	if readableNewErrors(nil) != nil {
+		t.Error("nil in, nil out")
+	}
+}

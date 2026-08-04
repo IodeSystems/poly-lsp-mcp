@@ -2786,3 +2786,82 @@ func TestNoDeclaredBindingsOmitsReport(t *testing.T) {
 		t.Errorf("report present with nothing declared: %v", got["bindings"])
 	}
 }
+
+// ---- unknown tool arguments ----
+
+// An argument the tool does not have used to be DROPPED by encoding/json, so
+// the tool answered a different question than the one asked — and the answer
+// looked right, which is what made it bad.
+func TestUnknownToolArgumentIsRefused(t *testing.T) {
+	root := polyglotFixture(t)
+	s := startSession(t, root)
+	defer s.close()
+	s.srv.SetLegacyTools(true)
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+
+	cases := []struct {
+		tool string
+		args map[string]any
+		bad  string
+		near string // suggested spelling, "" when none is close
+	}{
+		// structure scopes with `path`; `file` silently returned the whole
+		// workspace listing.
+		{"structure", map[string]any{"file": "main.go"}, "file", ""},
+		// search scopes with `path`; `file` returned hits from other files.
+		{"search", map[string]any{"pattern": "func", "file": "main.go"}, "file", ""},
+		// A plain misspelling of an optional arg: the cap was ignored.
+		{"node_read", map[string]any{"node": "main.go", "lineLimt": 2}, "lineLimt", "lineLimit"},
+	}
+	for _, c := range cases {
+		t.Run(c.tool+"/"+c.bad, func(t *testing.T) {
+			r := s.callTool(c.tool, c.args)
+			if !r.IsError {
+				t.Fatalf("%s accepted unknown %q: %s", c.tool, c.bad, r.Content[0].Text)
+			}
+			msg := r.Content[0].Text
+			if !strings.Contains(msg, c.bad) {
+				t.Errorf("error does not name the offending argument: %s", msg)
+			}
+			if !strings.Contains(msg, "Nothing was run") {
+				t.Errorf("error does not say the call was refused: %s", msg)
+			}
+			if c.near != "" && !strings.Contains(msg, c.near) {
+				t.Errorf("error does not suggest %q: %s", c.near, msg)
+			}
+		})
+	}
+
+	// The declared arguments still work.
+	if r := s.callTool("structure", map[string]any{"path": "main.go"}); r.IsError {
+		t.Errorf("valid args rejected: %s", r.Content[0].Text)
+	}
+	// Protocol-level keys are not tool arguments and must pass through.
+	if r := s.callTool("structure", map[string]any{"path": "main.go", "_meta": map[string]any{"x": 1}}); r.IsError {
+		t.Errorf("_meta rejected: %s", r.Content[0].Text)
+	}
+}
+
+// The Undeclared list is a deliberate exception to checkToolArgs, so it has to
+// stay honest: a name that IS in the schema does not belong there (it would
+// hide a real declaration behind an exception), and a stale entry silently
+// re-opens the hole this check exists to close.
+func TestUndeclaredArgsAreNotAlsoInTheSchema(t *testing.T) {
+	for _, tools := range []map[string]Tool{registerLegacyTools(), registerModernTools()} {
+		for name, tool := range tools {
+			var schema struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+			}
+			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+				t.Errorf("%s: schema does not parse: %v", name, err)
+				continue
+			}
+			for _, u := range tool.Undeclared {
+				if _, dup := schema.Properties[u]; dup {
+					t.Errorf("%s: %q is declared in the schema and listed as Undeclared", name, u)
+				}
+			}
+		}
+	}
+}

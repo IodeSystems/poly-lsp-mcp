@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -814,6 +815,13 @@ func (s *Server) handleToolsCall(req *jsonrpc.Message) {
 		s.replyError(req, errInvalidParams, fmt.Sprintf("unknown tool: %s", p.Name))
 		return
 	}
+	if err := checkToolArgs(&tool, p.Arguments); err != nil {
+		s.reply(req, map[string]any{
+			"content": []Content{{Type: "text", Text: err.Error()}},
+			"isError": true,
+		})
+		return
+	}
 	content, isError, err := tool.Handler(s, localSession, p.Arguments)
 	if err != nil {
 		content = []Content{{Type: "text", Text: err.Error()}}
@@ -1061,4 +1069,72 @@ func (s *Server) bindingHealth() map[string]any {
 		out["failed"] = r.Failures
 	}
 	return out
+}
+
+// checkToolArgs rejects an argument this tool does not have.
+//
+// Every handler decodes with encoding/json, which DROPS unknown fields, so a
+// misspelled or wrong-surface argument was silently discarded and the tool
+// answered a different question than the one asked. The results looked right,
+// which is what makes it bad: structure(file:"svc.go") ignored `file` (the
+// arg is `path`) and returned the whole workspace listing;
+// search(pattern:…, file:"util.ts") returned hits from a different file;
+// node_read(node:…, lineLimt:2) ignored the cap and returned everything.
+//
+// The schema already lists what each tool takes, so this needs no per-handler
+// change: compare the keys actually sent against the declared properties, and
+// suggest the nearest declared name.
+func checkToolArgs(tool *Tool, args json.RawMessage) error {
+	if len(args) == 0 {
+		return nil
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(args, &got); err != nil {
+		return nil // let the handler report a malformed payload in its own terms
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.InputSchema, &schema); err != nil || len(schema.Properties) == 0 {
+		return nil
+	}
+	known := make([]string, 0, len(schema.Properties))
+	for k := range schema.Properties {
+		known = append(known, k)
+	}
+	sort.Strings(known)
+	allowed := make(map[string]bool, len(schema.Properties)+len(tool.Undeclared))
+	for k := range schema.Properties {
+		allowed[k] = true
+	}
+	for _, k := range tool.Undeclared {
+		allowed[k] = true
+	}
+
+	var unknown []string
+	for k := range got {
+		// "_meta" and friends are protocol-level, not tool arguments.
+		if strings.HasPrefix(k, "_") {
+			continue
+		}
+		if !allowed[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+
+	msgs := make([]string, 0, len(unknown))
+	for _, u := range unknown {
+		if near := rankNames(u, known, 7); len(near) > 0 {
+			msgs = append(msgs, fmt.Sprintf("%q (did you mean %q?)", u, near[0]))
+		} else {
+			msgs = append(msgs, fmt.Sprintf("%q", u))
+		}
+	}
+	return fmt.Errorf("%s has no argument %s. It takes: %s. "+
+		"Nothing was run — an ignored argument would have answered a different question than the one you asked",
+		tool.Name, strings.Join(msgs, ", "), strings.Join(known, ", "))
 }

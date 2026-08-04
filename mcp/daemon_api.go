@@ -81,6 +81,12 @@ func (s *Server) CallTool(sess, name string, args json.RawMessage, opts CallOpti
 	if !ok {
 		return nil, true, fmt.Errorf("unknown tool: %s", name)
 	}
+	// Same argument check the stdio dispatch runs — the daemon serves the same
+	// tools, so an argument the tool does not have must be refused here too
+	// rather than being silently dropped into a different answer.
+	if err := checkToolArgs(&tool, args); err != nil {
+		return []Content{{Type: "text", Text: err.Error()}}, true, nil
+	}
 	// A validate connection forces validate:true onto edits (the tool already
 	// honors a per-call validate flag); non-edit tools ignore the extra field.
 	if opts.Validate && IsMutatingTool(name) {

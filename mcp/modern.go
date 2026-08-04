@@ -41,6 +41,9 @@ func registerModernTools() map[string]Tool {
 			Description: modernNodeQueryDescription,
 			InputSchema: modernNodeQuerySchema,
 			Handler:     handleModernNodeQuery,
+			// `grep` is RETIRED and the handler owns a tailored "use ::grep"
+			// message, which beats a generic unknown-argument error.
+			Undeclared: []string{"grep"},
 		},
 		"node_read": {
 			Name:        "node_read",
@@ -53,6 +56,10 @@ func registerModernTools() map[string]Tool {
 			Description: modernNodeEditDescription,
 			InputSchema: modernNodeEditSchema,
 			Handler:     handleModernNodeEdit,
+			// commit/rollback are HIDDEN, not missing: the rejection help
+			// reveals them exactly when a multi-stage edit is needed, so they
+			// cost no schema budget on every other turn.
+			Undeclared: []string{"commit", "rollback", "diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
 		},
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -67,7 +68,7 @@ type editOutcome struct {
 // or a failed commit.
 type editBatch struct {
 	s         *Server
-	sess      sessionID         // owning session (for per-file claims)
+	sess      sessionID // owning session (for per-file claims)
 	validate  bool
 	baseline  map[string]int      // workspace error fingerprint at open (if validating)
 	originals map[string][]byte   // uri → pre-batch bytes (first write wins) — for revert
@@ -420,12 +421,12 @@ func batchResponse(oc editOutcome) (content []Content, isErr, handled bool) {
 func batchCommitPayload(oc editOutcome) map[string]any {
 	if oc.Conflict {
 		return map[string]any{
-			"committed": false,
-			"conflict":  true,
-			"pending":   oc.Pending,
+			"committed":    false,
+			"conflict":     true,
+			"pending":      oc.Pending,
 			"changedFiles": oc.Conflicts,
-			"note": fmt.Sprintf("commit ABORTED — %d staged file(s) changed on disk since you staged them; nothing was overwritten or reverted", len(oc.Conflicts)),
-			"help": "the batch is still OPEN. Inspect the outside changes, then either re-stage over them (commit:false) and commit, or rollback:true to discard your staged edits back to the pre-batch state.",
+			"note":         fmt.Sprintf("commit ABORTED — %d staged file(s) changed on disk since you staged them; nothing was overwritten or reverted", len(oc.Conflicts)),
+			"help":         "the batch is still OPEN. Inspect the outside changes, then either re-stage over them (commit:false) and commit, or rollback:true to discard your staged edits back to the pre-batch state.",
 		}
 	}
 	if !oc.Rejected {
@@ -440,7 +441,7 @@ func batchCommitPayload(oc editOutcome) map[string]any {
 	p := map[string]any{
 		"committed": false,
 		"pending":   oc.Pending,
-		"newErrors": oc.NewErrors,
+		"newErrors": readableNewErrors(oc.NewErrors),
 	}
 	if oc.RevertFailed {
 		p["revertFailed"], p["revertError"] = true, oc.RevertErr
@@ -581,7 +582,7 @@ func (oc editOutcome) annotate(p map[string]any) {
 func (oc editOutcome) rejection(label string) map[string]any {
 	p := map[string]any{
 		"rejected":    true,
-		"newErrors":   oc.NewErrors,
+		"newErrors":   readableNewErrors(oc.NewErrors),
 		"diagnostics": oc.Diags.Items,
 	}
 	if oc.RevertFailed {
@@ -594,4 +595,31 @@ func (oc editOutcome) rejection(label string) map[string]any {
 		p["help"] = rejectHelp
 	}
 	return p
+}
+
+// readableNewErrors turns the internal error fingerprints into something a
+// reader can use.
+//
+// NewErrors carries errorFingerprintAll's dedup KEYS — "uri\x00code\x00message"
+// — and they were serialized into the response as-is, NUL bytes and file://
+// URIs included. That is an internal identity leaking out as an explanation.
+func readableNewErrors(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts := strings.Split(k, "\x00")
+		if len(parts) != 3 {
+			out = append(out, k)
+			continue
+		}
+		file := strings.TrimPrefix(parts[0], "file://")
+		if parts[1] == "" || parts[1] == "<nil>" {
+			out = append(out, fmt.Sprintf("%s: %s", file, parts[2]))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s: %s: %s", file, parts[1], parts[2]))
+	}
+	return out
 }

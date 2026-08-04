@@ -94,9 +94,8 @@ rename:"NewName" — workspace-wide semantic rename; lexical guesses reported un
 oldText+newText — replace a snippet inside the node. oldText must occur exactly once in the node; the address scopes it, so it need only be unique WITHIN that node — keep it short. Pass the node's whole text to rewrite it entirely, or that text + a new declaration to ADD one next to it.
 newText alone — REPLACES a span address (@start-end: ::body/::signature/::grep/a conflict); CREATES a file at a new path; refused on a symbol (use oldText) and never inserts one.
 delete:true — excise the node.
-accept:"mine"|"theirs" — resolve merge conflicts (whole file, or one block by its @start-end span); markers go too. A conflicted file indexes BOTH sides as peers.
-params — [{name,type}] rebuilds the parameter list (go/typescript/python).
-return — rebuilds the return type.
+accept:"mine"|"theirs" — resolve merge conflicts (whole file, or one block by its @start-end span); markers go too. A conflicted file indexes both sides as PEERS; ::conflict/::mine/::theirs/::base read them apart (sides carry their ref).
+params [{name,type}] / return — rebuild the parameter list / return type (go/typescript/python).
 includeComments / resolution:{mode,target} — rename only.`
 
 var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
@@ -258,6 +257,25 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 			}
 			if len(n.frag.After) > 0 {
 				m["after"] = n.frag.After
+			}
+		case "conflict", "mine", "theirs", "base":
+			// A conflict node carries its source INLINE and, for a side, the
+			// REF it came from. The ref is the side's real identity: under a
+			// rebase "ours" is the upstream and "theirs" is your own commit,
+			// so a caller told only "mine/theirs" is being told the thing
+			// that misleads them.
+			m["type"] = "::" + n.class
+			m["in"] = n.parent.addr()
+			m["text"] = n.genText
+			if n.conflictLabel != "" {
+				m["ref"] = n.conflictLabel
+			}
+			if n.conflict != nil {
+				sides := map[string]any{"mine": n.conflict.ours.label, "theirs": n.conflict.theirs.label}
+				if n.conflict.base != nil {
+					sides["base"] = n.conflict.base.label
+				}
+				m["sides"] = sides
 			}
 		case "signature", "body":
 			// A generated decl-head / body node carries its source INLINE,

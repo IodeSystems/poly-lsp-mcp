@@ -272,3 +272,143 @@ func conflictSpans(cs []conflictRegion) string {
 	}
 	return strings.Join(out, ", ")
 }
+
+// ------------------------------------------------- conflict as nodes
+
+// parseConflictElement parses ::conflict / ::mine / ::theirs / ::base.
+//
+// Like ::comment and ::body these take no kind, id or attribute — they ARE
+// the region and its sides — but they accept trailing filter pseudos, so
+// `::theirs:contains('panic')` works.
+func (p *modSelParser) parseConflictElement(name string) (selCompound, error) {
+	comp := selCompound{isConflict: true, class: name}
+	if name != "conflict" {
+		comp.conflictSide = name
+	}
+	for {
+		switch p.peek() {
+		case ':':
+			if p.peekIsPseudoElement() {
+				return comp, nil // chained: ::mine::grep is a new element
+			}
+			if err := p.parsePseudo(&comp); err != nil {
+				return comp, err
+			}
+		case '.', '#', '[':
+			return comp, fmt.Errorf("::%s has no kind, id or attr — it IS the conflict %s; filter it with :contains('…')",
+				name, map[bool]string{true: "region", false: "side"}[name == "conflict"])
+		default:
+			return comp, nil
+		}
+	}
+}
+
+// conflictMatches materializes conflict nodes.
+//
+// Two shapes, keyed by what was asked for:
+//
+//   - `::conflict` on a FILE yields ONE NODE PER REGION — a file can have
+//     many, and collapsing them would make per-region resolution
+//     unaddressable, which is the thing that matters most (conflicts rarely
+//     all go the same way).
+//   - `::mine` / `::theirs` / `::base` yield that side. Written against a
+//     conflict node they read it directly; written against a FILE they imply
+//     the region, so `path=f.go ::theirs` is every incoming side in the file
+//     without naming each block first.
+func (e *engine) conflictMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed bool) map[*treeNode]bool {
+	out := map[*treeNode]bool{}
+	for _, h := range ordered(hosts) {
+		for _, g := range e.conflictNodesOf(h, comp.conflictSide) {
+			for n := range e.selectOrdered(map[*treeNode]bool{g: true}, comp, relaxed) {
+				out[n] = true
+			}
+		}
+	}
+	return out
+}
+
+// conflictNodesOf returns the conflict nodes a host yields. side == "" asks
+// for the regions themselves.
+func (e *engine) conflictNodesOf(h *treeNode, side string) []*treeNode {
+	if h.class == "conflict" {
+		if side == "" || h.conflict == nil {
+			return nil // a region has no nested regions
+		}
+		if s := sideOf(h.conflict, side); s != nil {
+			return []*treeNode{e.conflictSideNode(h, side, *s)}
+		}
+		return nil
+	}
+	if h.class != "file" {
+		return nil
+	}
+	content, err := os.ReadFile(h.abs)
+	if err != nil {
+		return nil
+	}
+	regions := parseConflicts(content)
+	out := make([]*treeNode, 0, len(regions))
+	for i := range regions {
+		r := regions[i]
+		region := &treeNode{
+			class: "conflict",
+			file:  h.file, abs: h.abs, at: r.at,
+			parent: h, depth: h.depth + 1,
+			fileOrd: h.fileOrd, symOrd: h.symOrd,
+			genText:  conflictText(content, r),
+			conflict: &r,
+		}
+		if side == "" {
+			out = append(out, region)
+			continue
+		}
+		if s := sideOf(&r, side); s != nil {
+			out = append(out, e.conflictSideNode(region, side, *s))
+		}
+	}
+	return out
+}
+
+// conflictSideNode builds the node for one side of a region.
+//
+// An EMPTY side (one alternative deletes what the other adds) still gets a
+// node, spanning the marker it sits between. "this side is empty" is a real
+// answer to "what does theirs say here", and returning nothing instead would
+// read as "there is no conflict".
+func (e *engine) conflictSideNode(region *treeNode, side string, s conflictSide) *treeNode {
+	at := s.at
+	if at[0] == 0 { // empty side: pin it inside the region so the span is valid
+		at = [2]int{region.at[0], region.at[0]}
+	}
+	return &treeNode{
+		class: side,
+		file:  region.file, abs: region.abs, at: at,
+		parent: region, depth: region.depth + 1,
+		fileOrd: region.fileOrd, symOrd: region.symOrd,
+		genText:       s.text(),
+		conflictLabel: s.label,
+	}
+}
+
+// sideOf maps a selector name onto the region's side. "mine" is git's "ours".
+func sideOf(r *conflictRegion, side string) *conflictSide {
+	switch side {
+	case "mine":
+		return &r.ours
+	case "theirs":
+		return &r.theirs
+	case "base":
+		return r.base // nil unless diff3 wrote one
+	}
+	return nil
+}
+
+// conflictText is the region's source, markers included, so a ::conflict node
+// reads back byte-for-byte what node_edit would replace.
+func conflictText(content []byte, r conflictRegion) string {
+	lines := splitNodeReadLines(content)
+	if r.at[0] < 1 || r.at[1] > len(lines) {
+		return ""
+	}
+	return strings.Join(lines[r.at[0]-1:r.at[1]], "\n")
+}

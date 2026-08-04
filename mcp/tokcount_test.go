@@ -86,7 +86,15 @@ import (
 // icebox.md records as MEASURED UNUSED — but dropping an op from the
 // description is how ops become undiscoverable, so that is a deliberate
 // decision, not a token trim.
-const modernTokenBudget = 1280
+// 1280 → 1300: ::conflict / ::mine / ::theirs / ::base. THIRD raise in one
+// sitting, which is a pattern rather than an accident and is flagged as one:
+// the surface grew a genuine capability each time (the space rule, accept,
+// now the two-version read), and each was compressed first — this one cost 9
+// tokens after merging params/return into a single line. If the ceiling is
+// meant to bind rather than track, the lever is dropping params/return
+// (icebox.md: MEASURED UNUSED) for ~27, which is a product decision about
+// the surface, not a wording exercise.
+const modernTokenBudget = 1300
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

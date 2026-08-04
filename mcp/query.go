@@ -101,6 +101,16 @@ type treeNode struct {
 	refPos  string      // "return" | "param" | "field" | "var" | ""  (the POSITION axis)
 	refConf string      // refLexical (name-unique) | refLSP (child LSP settled it) | refUnsettled (ambiguous guess)
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
+	// conflict is set on a ::conflict node: the parsed region, so ::mine /
+	// ::theirs / ::base are a lookup rather than a re-parse, and so the
+	// result can report which ref each side came from.
+	conflict *conflictRegion
+	// conflictLabel is the ref a SIDE came from, as git wrote it on the
+	// marker: "HEAD", a branch, or "e0cfa59 (subject)". It is the side's
+	// real identity — under a rebase "ours" is the upstream being replayed
+	// onto and "theirs" is your own commit, so position alone misleads
+	// exactly when a caller is most confused.
+	conflictLabel string
 
 	// The node's generated ref children, materialized lazily and kept OUT
 	// of children so containment walks and `*` never see them.
@@ -140,7 +150,7 @@ func (n *treeNode) addr() string {
 		return n.file
 	case "ref", "fragment", "comment":
 		return fmt.Sprintf("%s@%d", n.file, n.at[0])
-	case "signature", "body":
+	case "signature", "body", "conflict", "mine", "theirs", "base":
 		// A RANGE address so node_read/node_edit hit the whole span (these
 		// are multi-line, unlike a ref/grep line).
 		return fmt.Sprintf("%s@%d-%d", n.file, n.at[0], n.at[1])
@@ -790,6 +800,10 @@ type selCompound struct {
 	// block, generated from the stored body-start line. Same generated-
 	// element contract as ::comment.
 	genPart string
+	// isConflict marks ::conflict / ::mine / ::theirs / ::base. conflictSide
+	// is "" for the region itself and the side name for its children.
+	isConflict   bool
+	conflictSide string
 
 	// langClass scopes a real-node compound to one language: file.go,
 	// func.ts. Languages are a closed vocabulary (the registry), which
@@ -825,7 +839,7 @@ type selCompound struct {
 // on demand, invisible to `*`, that the cardinality planner and containment
 // walk must not treat as ordinary tree nodes.
 func (c *selCompound) isGenerated() bool {
-	return c.isFrag || c.isComment || c.genPart != ""
+	return c.isFrag || c.isComment || c.genPart != "" || c.isConflict
 }
 
 // selElem is one chain element — a compound or a parenthesized group —
@@ -1302,6 +1316,8 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 		return p.parseCommentElement()
 	case "signature", "body":
 		return p.parseGenPartElement(name)
+	case "conflict", "mine", "theirs", "base":
+		return p.parseConflictElement(name)
 	case "ref":
 		return comp, fmt.Errorf("the reference elements are named by DIRECTION: ::in (who points here) and ::out (what this points at) — e.g. ::out.call, ::in.type")
 	default:
@@ -2608,6 +2624,10 @@ SPEC
          splits into one return child per type. #error = leaf, #'io.Writer' = via the full alias.
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
+  CONFLICT ::conflict = each <<<<<<< block as a node; ::mine / ::theirs / ::base its
+         versions (base only under diff3). Sides carry the REF git wrote — under a
+         rebase "ours" is the upstream and "theirs" is YOUR commit, so trust the ref,
+         not the position. Resolve with node_edit accept:"mine"|"theirs".
   ATTR   Brackets optional when the value has no space: path=a/b.go ≡ *[path=a/b.go],
          name^=Test ≡ *[name^=Test]. A bare attribute is ALWAYS its own element —
          a space is a node boundary, never a filter. To FILTER an element, bracket
@@ -3545,6 +3565,9 @@ func (e *engine) evalInstance(tips map[*treeNode]bool, el *selElem, min, max int
 	}
 	if comp.isComment {
 		return e.commentMatches(tips, comp, relaxed)
+	}
+	if comp.isConflict {
+		return e.conflictMatches(tips, comp, relaxed)
 	}
 	if comp.genPart != "" {
 		return e.genPartMatches(tips, comp, relaxed)

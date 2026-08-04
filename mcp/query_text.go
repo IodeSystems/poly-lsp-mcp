@@ -24,10 +24,31 @@ import (
 // limit <= 0 means "no limit": a human at a terminal wants the whole
 // answer, where the model's tight default window exists to push it
 // toward a narrower selector.
+// SelectorError marks a failure the CALLER can fix in the text they typed —
+// an unknown pseudo-class, a bad regex, a missing bracket. These messages are
+// the tool's most careful output: they name the fix, list the legal set, and
+// quote a working alternative.
+//
+// They are separated from operational failures because the two want opposite
+// framing. A selector error is an ANSWER, and printing it through the logger
+// dressed it as a log event:
+//
+//	poly-lsp-mcp 17:39:39.411083 query: unknown pseudo-class ":arg" — did you…
+//
+// A timestamp and a program name push the useful clause rightward past where a
+// narrow terminal wraps, and they tell the reader this line is diagnostics to
+// scroll past. Measured: hunting for exactly this message, I filtered it out
+// as log noise twice in a row and concluded the command printed nothing. An
+// index or permission failure IS a tool failure and keeps the log framing.
+type SelectorError struct{ Err error }
+
+func (e *SelectorError) Error() string { return e.Err.Error() }
+func (e *SelectorError) Unwrap() error { return e.Err }
+
 func (s *Server) QueryText(selector string, limit, offset int, budget string, w io.Writer) error {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
-		return errors.New("selector is required (e.g. \":root > *\" for the top-level tour)")
+		return &SelectorError{errors.New("selector is required (e.g. \":root > *\" for the top-level tour)")}
 	}
 	// "?" answers with the grammar — same contract as the MCP tool.
 	if selector == "?" {
@@ -35,13 +56,13 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 		return err
 	}
 	if offset < 0 {
-		return errors.New("offset must be >= 0")
+		return &SelectorError{errors.New("offset must be >= 0")}
 	}
 
 	selector, explain := splitExplain(selector)
 	list, err := parseModernSelector(selector)
 	if err != nil {
-		return err
+		return &SelectorError{err}
 	}
 	// Reference edges resolve through the symbol index, which the MCP
 	// server builds during `initialize`. A one-shot CLI run has no

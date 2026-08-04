@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -72,5 +73,40 @@ func TestQueryTextRendersTheZeroResultHint(t *testing.T) {
 	// A selector with matches carries no hint — it is only for emptiness.
 	if out := run(`func`); strings.Contains(out, "emptied it") {
 		t.Errorf("a query WITH matches must not carry a zero-result hint; got:\n%s", out)
+	}
+}
+
+// A selector error is an ANSWER, not a log event, so the CLI must be able to
+// tell it apart from a tool failure and print it without the log furniture.
+//
+// It shipped through log.Fatalf, which stamped the tool's most carefully
+// written output with a program name and a microsecond timestamp:
+//
+//	poly-lsp-mcp 17:39:39.411083 query: unknown pseudo-class ":arg" — did you…
+//
+// That framing says "diagnostics, scroll past" about the one line that
+// answers the question, and it pushes the useful clause past the wrap column
+// of a narrow terminal. Hunting for exactly this message, I filtered it out as
+// log noise twice running and reported that the command printed nothing.
+func TestQueryTextMarksCallerFixableErrors(t *testing.T) {
+	s := newQueryServer(t, writeRefPosFixture(t))
+	var b strings.Builder
+
+	var se *SelectorError
+	err := s.QueryText("func:arg", 0, 0, "", &b)
+	if !errors.As(err, &se) {
+		t.Fatalf("a bad pseudo-class is the caller's to fix, got %T: %v", err, err)
+	}
+	// The message itself must survive the wrapping intact — the whole point
+	// is the guidance, not the classification.
+	if !strings.Contains(se.Error(), ":arity") {
+		t.Errorf("the suggestion was lost in the wrapping: %q", se.Error())
+	}
+	// An empty selector and a bad offset are equally the caller's to fix.
+	if err := s.QueryText("", 0, 0, "", &b); !errors.As(err, &se) {
+		t.Errorf("an empty selector is caller-fixable, got %T", err)
+	}
+	if err := s.QueryText("func", 0, -1, "", &b); !errors.As(err, &se) {
+		t.Errorf("a negative offset is caller-fixable, got %T", err)
 	}
 }

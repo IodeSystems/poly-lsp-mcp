@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -195,6 +196,13 @@ func runQuery() {
 	// neither child LSPs nor the persisted index.
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
 	if err := srv.QueryText(selector, *limit, *offset, *budget, os.Stdout); err != nil {
+		// A selector error is the answer to what was asked, so it prints as
+		// prose. Only a genuine tool failure gets the log furniture.
+		var se *mcp.SelectorError
+		if errors.As(err, &se) {
+			fmt.Fprintln(os.Stderr, se.Error())
+			os.Exit(1)
+		}
 		log.Fatalf("query: %v", err)
 	}
 }

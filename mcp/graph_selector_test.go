@@ -743,13 +743,27 @@ func TestAttrRegexIsTheOrOperator(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	// OR: the union of two literal filters, in one test.
+	// OR is now a BOOLEAN operator between attribute tests, not alternation
+	// smuggled through a regex value. Both spellings of the union must agree
+	// with the sum of the parts.
 	ts := query(t, s, map[string]any{"selector": `func[path*=app]`, "limit": 50})
 	util := query(t, s, map[string]any{"selector": `func[path*=util]`, "limit": 50})
-	either := query(t, s, map[string]any{"selector": `func[path~=app|util]`, "limit": 50})
+	either := query(t, s, map[string]any{"selector": `func[path*=app|path*=util]`, "limit": 50})
 	if either.TotalMatches != ts.TotalMatches+util.TotalMatches {
-		t.Errorf("[path~=a|b] must be the union: app=%d util=%d either=%d",
+		t.Errorf("[a|b] must be the union: app=%d util=%d either=%d",
 			ts.TotalMatches, util.TotalMatches, either.TotalMatches)
+	}
+	// A quoted value keeps its pipes, so regex alternation is still available
+	// — it just has to say it is one pattern.
+	quoted := query(t, s, map[string]any{"selector": "func[path~='app|util']", "limit": 50})
+	if quoted.TotalMatches != either.TotalMatches {
+		t.Errorf("a quoted alternation must equal the boolean union: %d vs %d",
+			quoted.TotalMatches, either.TotalMatches)
+	}
+	// And an UNQUOTED pipe whose right side is not an attribute names the
+	// migration instead of complaining about an unknown attribute.
+	if msg := queryErr(t, s, map[string]any{"selector": `func[path~=app|util]`}); !strings.Contains(msg, "BOOLEAN operators") {
+		t.Errorf("an unquoted alternation should name the boolean rule; got: %s", msg)
 	}
 
 	// Anchors subsume ^= and $= exactly.
@@ -815,8 +829,8 @@ func TestLiteralOpRefusesAlternationAndNamesRegex(t *testing.T) {
 
 	msg := queryErr(t, s, map[string]any{"selector": `func:not([path*=test|smoke])`})
 	for _, want := range []string{
-		"silently no-ops",
-		"[path~=test|smoke]", // the repair, spelled out
+		"BOOLEAN operators", // `|` is an operator now, so `smoke` is the error
+		"quote the value",   // the repair for a real literal pipe
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("literal-op alternation must name the regex fix; missing %q in: %s", want, msg)

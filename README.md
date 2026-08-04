@@ -138,13 +138,13 @@ func:recursive                                         funcs that call themselve
 func:arity(0,0)                                         no-argument funcs
 func::signature                                        every function signature (one-query overview)
 interface#Reader::in.implements > *                    types that implement Reader (LSP-resolved)
-func:not(#main):not(#init):not([name^=Test]):empty(::in)   dead code
+func:not([name^=Test]):empty(::in)                     dead code
 file:has(func:where(::out.call{15,16}))                files whose funcs call 15–16 deep
 import#huma::in.call::grep('-E (Get|Post)\(')          endpoints of a dependency
 :root > *                                              tour the workspace
 ```
 
-Take any match's `node` (`<file>#<sym>`) straight to `node_read` / `node_edit`. Attribute axes: `[name]` (what it's called) vs `[path]` (where it lives); operators `= ^= $= *=` (literal) and `~=` (regex). Bare `:any/:all/:empty` are position claims; `:parents(sel)` is the one inverse (upstream). `{m,n}` is regex repetition on elements, edge *hops* on an edge (`::in.call{1,}` = transitive). Reference **kind** is a class (`.call`/`.type`/`.import`), **position** another (`.return`/`.param`/`.field`). A callable's **return type** and **parameters** are addressable children (`return#error`, `argument#ctx`), and `:arity(m,n)` / `:recursive` filter by signature size and self-recursion.
+Take any match's `node` (`<file>#<sym>`) straight to `node_read` / `node_edit`. Attribute axes: `[name]` (what it's called) vs `[path]` (where it lives); operators `= ^= $= *=` (literal) and `~=` (regex). A **space is always a node boundary** — to filter an element, bracket onto it (`func[path=a.go]` = funcs in that file; `func path=a.go` = anything in that file *inside* a func), and a bare attribute is its own `*[…]` element. Inside brackets, `|` is OR, `&` is AND and `()` groups, over whole tests (`[name=a|(name^=T&path=b.go)]`); a value that really contains one is quoted (`[path~='a|b']`). Bare `:any/:all/:empty` are position claims; `:parents(sel)` is the one inverse (upstream). `{m,n}` is regex repetition on elements, edge *hops* on an edge (`::in.call{1,}` = transitive). Reference **kind** is a class (`.call`/`.type`/`.import`), **position** another (`.return`/`.param`/`.field`). A callable's **return type** and **parameters** are addressable children (`return#error`, `argument#ctx`), and `:arity(m,n)` / `:recursive` filter by signature size and self-recursion.
 
 **Edges carry a confidence label.** The index is name-keyed by default; a running child LSP settles the true target, stamped per edge: `lexical` (name is unique — certain), `lsp` (resolved), or `unsettled` (several same-named decls, no LSP — a labelled guess). A far end the LSP resolves *outside* the git root (stdlib, a dependency) becomes a read-only **external stub** — `to: ["strings#Split"], domain: "external"` — nameable, never a false local. Partiality is always surfaced — a budget-exhausted query says so, an ambiguous edge says so — so an agent never mistakes a guess for a fact.
 

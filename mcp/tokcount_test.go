@@ -63,7 +63,17 @@ import (
 // ::in.return.type / precision `conf`. Re-audited at 1133: every line is a
 // footgun or a measured recipe, no sprawl to shave. Back to the prior
 // high-water ceiling, not past it.
-const modernTokenBudget = 1160
+// 1160 → 1210: the space rule. A space is now ALWAYS a node boundary — the
+// bare-attribute-attaches exception is gone — and the surface has to SAY so,
+// including the boolean attribute grammar (| & and grouping) that replaced
+// the regex-alternation workaround. This is the one line the old surface got
+// actively wrong: it said "space=descendant" and nothing else, while the
+// exception lived only in the `?` help, which 2 of 426 measured calls ever
+// asked for. Paid for first by cutting what was derivable or duplicated (the
+// grouped-boolean example, the transitive-callers recipe that is the
+// previous recipe plus {1,}, two of three :not()s in the dead-code recipe,
+// "(a b){2} groups"); the remaining 44 are the correction itself.
+const modernTokenBudget = 1210
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

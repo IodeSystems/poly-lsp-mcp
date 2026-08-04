@@ -241,9 +241,44 @@ func cloneComplex(cx selComplex) selComplex {
 	for i := range out.elems {
 		c := *out.elems[i].comp
 		c.attrs = append([]selAttr(nil), c.attrs...)
+		// The expression is a TREE the probes rewrite (hintDropLastAttr drops
+		// a leaf); sharing it would edit the caller's own selector, which is
+		// exactly what this function exists to prevent.
+		c.attrExpr = cloneAttrExpr(c.attrExpr)
 		out.elems[i].comp = &c
 	}
 	return out
+}
+
+// hasAttrOr reports whether an expression contains an OR anywhere.
+func hasAttrOr(x *attrExpr) bool {
+	if x == nil {
+		return false
+	}
+	if x.op == attrExprOr {
+		return true
+	}
+	for _, k := range x.kids {
+		if hasAttrOr(k) {
+			return true
+		}
+	}
+	return false
+}
+
+// cloneAttrExpr deep-copies an attribute expression tree.
+func cloneAttrExpr(x *attrExpr) *attrExpr {
+	if x == nil {
+		return nil
+	}
+	out := *x
+	if len(x.kids) > 0 {
+		out.kids = make([]*attrExpr, len(x.kids))
+		for i, k := range x.kids {
+			out.kids[i] = cloneAttrExpr(k)
+		}
+	}
+	return &out
 }
 
 // ------------------------------------------------------- probe: dead path
@@ -544,10 +579,17 @@ func (e *engine) hintDropLastAttr(cx selComplex) string {
 	if elem < 0 || narrowing < 2 {
 		return ""
 	}
+	// Only a pure AND can have "one clause" dropped: under an OR no single
+	// leaf is what emptied the result, and relaxing one would describe a
+	// query the caller never wrote.
+	if hasAttrOr(cx.elems[elem].comp.attrExpr) {
+		return ""
+	}
 	dropped := cx.elems[elem].comp.attrs[attr]
 	relaxed := cloneComplex(cx)
 	c := relaxed.elems[elem].comp
 	c.attrs = append(c.attrs[:attr], c.attrs[attr+1:]...)
+	c.setAttrsAsAnd(c.attrs)
 	hit := e.probeFound(selectorList{relaxed})
 	if hit == nil {
 		return ""

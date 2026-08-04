@@ -62,7 +62,7 @@ func TestQueryTextRendersTheZeroResultHint(t *testing.T) {
 	}
 
 	// Wrong TAG on a name that exists under another one: the hint must name it.
-	out := run(`method name~=build`)
+	out := run(`method[name~=build]`)
 	if !strings.Contains(out, "no matches") {
 		t.Fatalf("expected an empty answer; got:\n%s", out)
 	}

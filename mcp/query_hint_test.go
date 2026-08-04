@@ -132,7 +132,7 @@ func TestHintBudgetIsSharedAndSpent(t *testing.T) {
 // touching the selector the caller wrote. A shared compound would corrupt the
 // cost trace and, worse, the :explain rendering of the caller's own query.
 func TestCloneComplexDoesNotAliasTheCallersSelector(t *testing.T) {
-	list, err := parseModernSelector("func path=main.go name^=S")
+	list, err := parseModernSelector("func[path=main.go][name^=S]")
 	if err != nil {
 		t.Fatal(err)
 	}

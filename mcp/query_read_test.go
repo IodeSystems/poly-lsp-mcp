@@ -59,7 +59,7 @@ func TestReading_FlagsRegexPunctuationUnderALiteralOp(t *testing.T) {
 		t.Errorf("a literal path must not be flagged as a botched pattern:\n%s", s)
 	}
 	// And ~= itself is never suspicious — it IS the pattern operator.
-	if s := readingOf(t, "func[name~=parse|scan]"); strings.Contains(s, "LITERAL here") {
+	if s := readingOf(t, "func[name~='parse|scan']"); strings.Contains(s, "LITERAL here") {
 		t.Errorf("a regex op must not be warned about:\n%s", s)
 	}
 }

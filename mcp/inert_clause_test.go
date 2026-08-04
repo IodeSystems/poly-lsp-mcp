@@ -12,16 +12,15 @@ func hintFor(t *testing.T, s *mcpSession, sel string) (int, string) {
 	return q.TotalMatches, q.Hint
 }
 
-// `path=a.go path=b.go` reads like "things in b under things in a" and is
-// neither: a bare attribute after a space FILTERS the element before it, so
-// both paths land on ONE compound and the selector asks for a node living in
-// two files. It answers 0 and the old hint blamed the last filter, which is
-// true but does not explain why no filter could have worked.
+// Two exact paths on ONE compound asks for a node living in two files. Since
+// a space became a node boundary this needs the explicit bracketed spelling —
+// `path=a.go path=b.go` is now an honest (and correctly empty) containment
+// chain — but the contradiction is still reachable and still worth naming.
 func TestInertNote_TwoPathsOnOneElement(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	n, hint := hintFor(t, s, "path=main.go path=notes.md")
+	n, hint := hintFor(t, s, "*[path=main.go][path=notes.md]")
 	if n != 0 {
 		t.Fatalf("one node cannot live in two files; got %d matches", n)
 	}
@@ -34,14 +33,23 @@ func TestInertNote_TwoPathsOnOneElement(t *testing.T) {
 
 // The dangerous one. `{0,…}` lets a clause VANISH, so a selector whose tail
 // can never match still answers — with the prefix alone, at full confidence.
-// This is the shape that returned 129 rows on the real workspace while the
-// correct answer to the question being asked was zero.
+// On the real workspace that returned 129 rows where the answer was zero.
+//
+// The spelling that produced it (`path=a *{0,3} path=b`) is now empty and
+// honest, because a bare attribute no longer attaches to the element before
+// it. The HAZARD is not gone though: written out, a repeated element with a
+// zero lower bound still contributes only its skip path, so the check stays.
 func TestInertNote_VanishingClauseStillReported(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
+	// The shape that used to be written by accident is now simply empty.
+	if n, _ := hintFor(t, s, "path=main.go *{0,3} path=notes.md"); n != 0 {
+		t.Errorf("a space is a node boundary, so this is a containment chain across files: got %d", n)
+	}
+
 	bare, _ := hintFor(t, s, "path=main.go")
-	n, hint := hintFor(t, s, "path=main.go *{0,3} path=notes.md")
+	n, hint := hintFor(t, s, "path=main.go *[path=notes.md]{0,3}")
 	if n != bare {
 		t.Fatalf("the {0,…} clause vanishes, so this is just the prefix: got %d, prefix alone is %d", n, bare)
 	}

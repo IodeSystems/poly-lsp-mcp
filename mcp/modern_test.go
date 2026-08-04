@@ -1553,30 +1553,35 @@ func TestBareAttribute(t *testing.T) {
 			t.Errorf("%s: %s", sel, r.Content[0].Text)
 		}
 	}
-	// A space before a bare attribute FILTERS what precedes it — nobody asking
-	// "the callers in main.go" means "things at main.go nested inside the
-	// callers", which is what the CSS descendant reading would give.
-	filt := query(t, s, map[string]any{"selector": "file path=main.go", "limit": 50})
-	if got := nodes(filt); len(got) != 1 || got[0] != "main.go" {
-		t.Errorf("`file path=main.go` should filter files to that path, got %v", got)
+	// A space is a NODE BOUNDARY, always. `file path=main.go` is two
+	// elements — files, then anything at that path inside them — exactly what
+	// it looks like. It used to ATTACH the attribute to the element before it,
+	// so the same space meant "descend" before a tag and "filter" before an
+	// attribute, with nothing in the result saying which you got. That rule
+	// lived only in the `?` grammar help, which 2 of 426 real calls ever
+	// asked for, while the always-present tool description said
+	// "space=descendant" and nothing else.
+	desc := query(t, s, map[string]any{"selector": "file path=main.go", "limit": 50})
+	attached := query(t, s, map[string]any{"selector": "file[path=main.go]", "limit": 50})
+	if len(nodes(desc)) <= len(nodes(attached)) {
+		t.Errorf("a space should descend, not filter: `file path=main.go`=%v vs `file[path=main.go]`=%v",
+			nodes(desc), nodes(attached))
 	}
-	// Equivalent to attaching it, which is the point of the sugar.
-	if a, b := nodes(filt), nodes(query(t, s, map[string]any{"selector": "file[path=main.go]", "limit": 50})); len(a) != len(b) {
-		t.Errorf("bare and bracketed filters disagree: %v vs %v", a, b)
+	if got := nodes(attached); len(got) != 1 || got[0] != "main.go" {
+		t.Errorf("the bracketed form is the filter, got %v", got)
 	}
-	// Several in a row chain onto the same compound (AND).
-	if r := s.callTool("node_query", map[string]any{"selector": "func path=main.go name^=S", "limit": 5}); r.IsError {
-		t.Errorf("chained bare attrs should attach: %s", r.Content[0].Text)
-	}
-	// A TAG after a space still descends — only attributes attach, so
-	// "path=main.go func" keeps meaning "funcs in that file".
-	if q := query(t, s, map[string]any{"selector": "path=main.go func", "limit": 50}); q.TotalMatches == 0 {
-		t.Error("a tag after a bare attribute must still descend")
-	}
-	// The explicit axes stay available and unchanged.
-	if a, b := nodes(query(t, s, map[string]any{"selector": "file > * path=main.go", "limit": 50})),
+	// A bare attribute is sugar for `*[…]` — one element, same as writing it.
+	if a, b := nodes(query(t, s, map[string]any{"selector": "file > path=main.go", "limit": 50})),
 		nodes(query(t, s, map[string]any{"selector": "file > *[path=main.go]", "limit": 50})); len(a) != len(b) {
-		t.Errorf("`> * path=x` should equal `> *[path=x]`: %v vs %v", a, b)
+		t.Errorf("a bare attr must equal *[attr]: %v vs %v", a, b)
+	}
+	// And the two readings are now VISIBLY different, which is the point:
+	// `> * path=x` is three elements (a child, then a descendant filtered by
+	// path), `> *[path=x]` is one filtered child. Under the old attach rule
+	// they were the same query written two ways, and nothing said so.
+	if a, b := nodes(query(t, s, map[string]any{"selector": "file > * path=main.go", "limit": 50})),
+		nodes(query(t, s, map[string]any{"selector": "file > *[path=main.go]", "limit": 50})); len(a) == len(b) {
+		t.Errorf("`> * path=x` descends and `> *[path=x]` filters — they should differ: %v vs %v", a, b)
 	}
 	// An unknown attribute name is still an error, not a silent tag.
 	if msg := queryErr(t, s, map[string]any{"selector": "bogus=x"}); !strings.Contains(msg, "unknown attribute") {
@@ -1649,11 +1654,11 @@ func TestSelectorCorpus_ZeroResultNamesTheClause(t *testing.T) {
 	}{{
 		// The dun case, transposed onto the fixture: Start is a method.
 		name:     "wrong tag, right filter",
-		selector: "func name=Start",
+		selector: "func[name=Start]",
 		want:     []string{"no func matches", "TAG", "method", "main.go#Server.Start"},
 	}, {
 		name:     "wrong tag the other way",
-		selector: "method name=topLevel",
+		selector: "method[name=topLevel]",
 		want:     []string{"no method matches", "TAG", "func", "web/some_file.ts#topLevel"},
 	}, {
 		// dun guessed a filename from the TEST name; the symbol lived in
@@ -1673,7 +1678,7 @@ func TestSelectorCorpus_ZeroResultNamesTheClause(t *testing.T) {
 	}, {
 		// The general form: two clauses, and the hint says which one did it.
 		name:     "one clause of several",
-		selector: "func path=web/some_file.ts name^=Call",
+		selector: "func[path=web/some_file.ts][name^=Call]",
 		want:     []string{"[name^=Call] filter is what emptied it", "web/some_file.ts#topLevel"},
 	}}
 
@@ -1714,7 +1719,7 @@ func TestZeroResultHintStaysQuiet(t *testing.T) {
 	// A budget blow already explains the emptiness. Blaming the selector for
 	// the clock would be a lie, and the probe would be spending a budget the
 	// caller has already run out of.
-	blown := query(t, s, map[string]any{"selector": "func name=Nope", "budget": "1ops"})
+	blown := query(t, s, map[string]any{"selector": "func[name=Nope]", "budget": "1ops"})
 	if blown.TotalMatches != 0 || !strings.Contains(blown.Note, "work budget") {
 		t.Fatalf("expected a budget-blown empty result; total=%d note=%q",
 			blown.TotalMatches, blown.Note)
@@ -1744,11 +1749,11 @@ func TestZeroResultHintStaysQuiet(t *testing.T) {
 	// A lone filter has no OTHER clause to blame. Relaxing `func name^=Zzz`
 	// to `func` would report that some unrelated func exists, which reads as
 	// an answer and says only "your filter filtered".
-	if q := query(t, s, map[string]any{"selector": "func name^=Zzz"}); q.Hint != "" {
+	if q := query(t, s, map[string]any{"selector": "func[name^=Zzz]"}); q.Hint != "" {
 		t.Errorf("a single narrowing clause has nothing to name; got %q", q.Hint)
 	}
 	// Add a second clause and the hint becomes information again.
-	two := query(t, s, map[string]any{"selector": "func path=main.go name^=Zzz"})
+	two := query(t, s, map[string]any{"selector": "func[path=main.go][name^=Zzz]"})
 	if !strings.Contains(two.Hint, "[name^=Zzz] filter is what emptied it") {
 		t.Errorf("two clauses, one culprit — say which; got %q", two.Hint)
 	}

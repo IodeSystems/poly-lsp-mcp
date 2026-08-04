@@ -797,6 +797,10 @@ type selCompound struct {
 	langClass string
 
 	attrs []selAttr
+	// attrExpr is the FULL attribute test when booleans are used; attrs
+	// holds only the leaves that must unconditionally hold (see
+	// requiredAttrs), so the planner's index shortcuts stay sound under OR.
+	attrExpr *attrExpr
 
 	// ordSel picks from the compound's matches PER ANCHOR in document
 	// order — :first / :last (jQuery-level selection, scoped to the
@@ -1065,6 +1069,10 @@ func parseModernSelector(input string) (selectorList, error) {
 type modSelParser struct {
 	s []rune
 	i int
+	// afterBoolOp marks that the cursor sits just past a `|` or `&`, so a
+	// bad attribute name there can be diagnosed as the migration it almost
+	// always is (regex alternation inside a value, now a boolean operator).
+	afterBoolOp bool
 }
 
 func (p *modSelParser) eof() bool { return p.i >= len(p.s) }
@@ -1172,27 +1180,23 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 				comb = selChild
 			} else if !sawWS {
 				return cx, p.errf("a combinator, ',' or end of selector")
-			} else if p.peekIsBareAttr() && len(cx.elems) > 0 {
-				// ` path=x` after something — FILTER what we just landed on,
-				// not descend into it.
-				//
-				// The space is doing different work here than before a tag, and
-				// deliberately so. Space-as-descendant answers "what is inside
-				// this?", which for a TYPE is the whole point (`path=a.go func`)
-				// but for an attribute is almost never the question: nobody
-				// means "things at path x nested inside the callers", they mean
-				// "the callers at path x". Written the CSS way that is
-				// `> *[path=x]` — three punctuation marks to say the obvious.
-				//
-				// A tag after a space still descends, so `path=a.go func` and
-				// `func::in.call path=a.go` both read the way they look. The
-				// explicit forms stay available and unchanged: `> path=x` is
-				// still the child axis, `[path=x]` still attaches.
-				if err := p.attachBareAttrs(cx.elems[len(cx.elems)-1].comp); err != nil {
-					return cx, err
-				}
-				continue
 			}
+			// A bare attribute after a space used to ATTACH to the element
+			// before it — `method name=X` was one node, not two. That made the
+			// space mean two different things depending on what followed it,
+			// with nothing in the result saying which you got, and it is gone:
+			// a space is a node boundary, always. `method name=X` now reads as
+			// the descendant it looks like, and the filter is spelled the way
+			// every other filter is — `method[name=X]`.
+			//
+			// The old rule was documented only in the `?` grammar help, which
+			// 2 of 426 real calls ever asked for, while the always-present tool
+			// description said "space=descendant" and nothing else. Uniformity
+			// is cheaper to teach than an exception nobody reads.
+			//
+			// No migration path: the sessions that used the old reading are
+			// history, and the fix for the future is the schema telling agents
+			// the truth rather than the engine guessing at intent.
 		}
 
 		// A claimed position is terminal: nothing may follow it.
@@ -1323,13 +1327,13 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 			if err != nil {
 				return comp, err
 			}
-			comp.attrs = append(comp.attrs, selAttr{op: selExact, value: id})
+			comp.addAttrExpr(&attrExpr{op: attrExprLeaf, leaf: selAttr{op: selExact, value: id}})
 		case '[':
-			a, err := p.parseAttr()
+			x, err := p.parseBracketExpr()
 			if err != nil {
 				return comp, err
 			}
-			comp.attrs = append(comp.attrs, a)
+			comp.addAttrExpr(x)
 		case ':':
 			if p.peekIsPseudoElement() {
 				// The caller chains it: X::out::grep('…') greps the SITE.
@@ -1600,11 +1604,11 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 		//
 		// Purely additive: a bare word followed by '=' is not a tag and never
 		// parsed before, so no selector that worked yesterday changes meaning.
-		a, err := p.parseBareAttr()
+		x, err := p.parseBareAttrExpr()
 		if err != nil {
 			return comp, err
 		}
-		comp.attrs = append(comp.attrs, a)
+		comp.addAttrExpr(x)
 		comp.anyType = true
 		comp.implied = true
 		sawType = true
@@ -1675,11 +1679,11 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 			// `#id` is exactly sugar for `[name=id]`.
 			comp.attrs = append(comp.attrs, selAttr{op: selExact, value: id})
 		case '[':
-			a, err := p.parseAttr()
+			x, err := p.parseBracketExpr()
 			if err != nil {
 				return comp, err
 			}
-			comp.attrs = append(comp.attrs, a)
+			comp.addAttrExpr(x)
 		case ':':
 			if err := p.parsePseudo(&comp); err != nil {
 				return comp, err
@@ -1750,26 +1754,6 @@ func (p *modSelParser) readID() (string, error) {
 	return id, nil
 }
 
-// attachBareAttrs folds one or more space-separated bare attributes onto an
-// already-parsed compound, so `X path=a name^=B` filters X by both.
-func (p *modSelParser) attachBareAttrs(comp *selCompound) error {
-	if comp == nil {
-		return fmt.Errorf("a bare attribute has nothing to filter here — write it as its own step (*[…]) or attach it with brackets")
-	}
-	for {
-		a, err := p.parseBareAttr()
-		if err != nil {
-			return err
-		}
-		comp.attrs = append(comp.attrs, a)
-		save := p.i
-		if !p.skipWS() || !p.peekIsBareAttr() {
-			p.i = save
-			return nil
-		}
-	}
-}
-
 // peekIsBareAttr reports whether the cursor is on an unbracketed attribute —
 // an identifier followed directly by an operator and '='. Lookahead only.
 func (p *modSelParser) peekIsBareAttr() bool {
@@ -1792,26 +1776,43 @@ func (p *modSelParser) peekIsBareAttr() bool {
 // parseBareAttr parses `path=a/b.go`, `name^=Test`, `path~=test|smoke` — the
 // same attribute grammar as the bracketed form, with the value running to the
 // next whitespace or combinator instead of to ']'.
-func (p *modSelParser) parseBareAttr() (selAttr, error) {
-	// Reuse the bracketed parser by lending it brackets: the alternative is a
-	// second copy of the name/op/regex handling, which would drift.
-	name := p.readIdentAt(p.i)
-	rest := p.i + len(name)
-	end := rest
-	for end < len(p.s) && !strings.ContainsRune(" \t,>)]", p.s[end]) {
-		if p.s[end] == ':' { // `path=x::grep(…)` — the value stops at the element
-			break
+// parseBareAttrExpr parses an UNBRACKETED attribute expression — the sugar
+// that makes `name=a|name=b` mean `*[name=a|name=b]`. It runs to whitespace,
+// which is what bounds it: a space is a node boundary, so the expression is
+// exactly the run of non-space text.
+//
+// Reuses the bracketed parser by lending it brackets; a second copy of the
+// name/op/regex/boolean handling would drift from it.
+func (p *modSelParser) parseBareAttrExpr() (*attrExpr, error) {
+	end := p.i
+	depth := 0
+	for end < len(p.s) && !strings.ContainsRune(" \t,>]", p.s[end]) {
+		switch p.s[end] {
+		case '(':
+			depth++
+		case ')':
+			// A ')' at depth 0 closes something OUTSIDE this attribute —
+			// :not(path=x) — so the expression ends before it.
+			if depth == 0 {
+				goto done
+			}
+			depth--
+		case ':': // `path=x::grep(…)` — the value stops at the element
+			if depth == 0 {
+				goto done
+			}
 		}
 		end++
 	}
+done:
 	inner := string(p.s[p.i:end])
 	sub := &modSelParser{s: []rune("[" + inner + "]")}
-	a, err := sub.parseAttr()
+	x, err := sub.parseBracketExpr()
 	if err != nil {
-		return a, err
+		return nil, err
 	}
 	p.i = end
-	return a, nil
+	return x, nil
 }
 
 // readIdentAt reads an identifier at an arbitrary offset without moving the
@@ -1824,9 +1825,26 @@ func (p *modSelParser) readIdentAt(i int) string {
 	return string(p.s[i:j])
 }
 
+// parseAttr parses a whole `[…]` holding exactly one test. Kept for the
+// callers that build a bracketed attribute from a fragment of text; the
+// selector grammar itself goes through parseBracketExpr, which allows
+// booleans.
 func (p *modSelParser) parseAttr() (selAttr, error) {
-	var a selAttr
 	p.i++ // '['
+	a, err := p.parseAttrTerm()
+	if err != nil {
+		return a, err
+	}
+	if p.peek() != ']' {
+		return a, p.errf("']'")
+	}
+	p.i++
+	return a, nil
+}
+
+// parseAttrTerm parses ONE `name op value` test, brackets already handled.
+func (p *modSelParser) parseAttrTerm() (selAttr, error) {
+	var a selAttr
 	p.skipWS()
 	name := p.readIdent()
 	if name == "" {
@@ -1838,6 +1856,17 @@ func (p *modSelParser) parseAttr() (selAttr, error) {
 	case "path":
 		a.axis = attrPath
 	default:
+		// The migration case, and by far the likeliest way to land here:
+		// `|` used to be regex alternation INSIDE a value and is now the
+		// boolean OR between terms, so `[path~=app|util]` reaches this with
+		// "util" as a would-be attribute name. Say that, rather than
+		// enumerating the attribute list at someone who knows it.
+		if p.afterBoolOp {
+			return a, fmt.Errorf("%q is not an attribute: `|` and `&` are BOOLEAN operators between "+
+				"attribute tests, so each side needs its own `name`/`path` test — write "+
+				"[%s~=…|%s~=…]. For a `|` inside ONE pattern, quote the value: [%s~='a|b']",
+				name, "path", "path", "path")
+		}
 		return a, fmt.Errorf("unknown attribute %q: [name] (what it's CALLED — leaf or dotted path) "+
 			"and [path] (where it LIVES — workspace-relative file path) are the attributes "+
 			"(ops: = ^= $= *=)\n\n%s", name, selectorGrammarHelp)
@@ -1899,10 +1928,6 @@ func (p *modSelParser) parseAttr() (selAttr, error) {
 			name, selOpSpelling(a.op), a.value, selOpSpelling(a.op), a.value,
 			name, a.value, name, selOpSpelling(a.op), a.value)
 	}
-	if p.peek() != ']' {
-		return a, p.errf("']'")
-	}
-	p.i++
 	return a, nil
 }
 
@@ -2287,6 +2312,13 @@ func (p *modSelParser) readAttrValue(regex bool) (string, bool) {
 		if c == ']' && depth == 0 {
 			break // the attribute's closing bracket
 		}
+		// An UNQUOTED value ends at a boolean operator or a closing group:
+		// `|` and `&` belong to the expression, not to the string. A value
+		// that really contains one is quoted — `[path~='test|smoke']` — which
+		// is the same escape the literal-op guard below already taught.
+		if depth == 0 && (c == '|' || c == '&' || c == ')') {
+			break
+		}
 		if regex {
 			if c == '[' {
 				depth++
@@ -2546,7 +2578,7 @@ TASK → QUERY
   what is here?               :root > *            then descend:  #web > *
   find something by name      #Save                anywhere;  #'store.go#Save' pins one
   what is in a file           path=store.go func   (bare attr: no quotes, even with / in it)
-  who calls X, only in a file #'X'::in.call > * path=main.go   (a bare attr after a space FILTERS)
+  who calls X, only in a file #'X'::in.call > *[path=main.go]  (bracket to FILTER an element)
                               #'store.go' func     (the id form; pins the file node itself)
   who calls X                 #'store.go#Save'::in.call          rows carry from: + a file@line site
   what does X call            #'store.go#Save'::out.call > *
@@ -2576,16 +2608,18 @@ SPEC
          splits into one return child per type. #error = leaf, #'io.Writer' = via the full alias.
   ID     #bare ([A-Za-z_][A-Za-z0-9_.-]*) or #'anything else' — quote, never escape. A symbol
          answers to leaf, dotted path, "<file>#<sym>"; an edge answers to its far end's ids.
-  ATTR   Brackets optional when the value has no space: path=a/b.go ≡ [path=a/b.go],
-         name^=Test ≡ [name^=Test]. A bare attribute after a space FILTERS what
-         precedes it (X path=a.go ≡ X[path=a.go]) — chain them to AND. Leading, or
-         after a combinator, it is *[…]: "path=a.go func" = funcs in that file,
-         "::in.call > * path=a.go" = the callers that live there. A TAG after a space
-         still descends; only attributes attach.
+  ATTR   Brackets optional when the value has no space: path=a/b.go ≡ *[path=a/b.go],
+         name^=Test ≡ *[name^=Test]. A bare attribute is ALWAYS its own element —
+         a space is a node boundary, never a filter. To FILTER an element, bracket
+         it onto that element: "func[path=a.go]" = funcs in that file; "func path=a.go"
+         = anything in that file that sits INSIDE a func. Several brackets AND:
+         func[name^=T][path=a.go].
          [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES
          (workspace-relative file path; a symbol answers with its FILE's).
          OPS  = ^= $= *= are LITERAL (exact/prefix/suffix/contains).  ~= is a regex.
-         OR   is the regex: [path~=test|smoke].  Quote a literal '|': [path*='a|b'].
+         BOOL | is OR, & is AND, () groups — over whole TESTS, not inside a value:
+              [name=a|name=b], [name^=T&path=a.go], [name=a|(name^=T&path=b.go)].
+              A value that really contains one is quoted: [path~='test|smoke'].
          AND  is just two attrs — [path*=ma][path*=in] — CSS conjoins a compound.
          Non-test funcs: func:not([path~=test|smoke]).
          #id spans both axes and adds the "<file>#<sym>" address; it is never a regex.
@@ -3967,6 +4001,9 @@ func (e *engine) positionalMatch(n *treeNode, comp *selCompound) bool {
 			return false
 		}
 	}
+	if comp.attrExpr != nil {
+		return matchAttrExpr(n, comp.attrExpr)
+	}
 	for _, a := range comp.attrs {
 		if !matchSelAttr(n, a) {
 			return false
@@ -5320,4 +5357,241 @@ func looksLikeRegex(p string) bool {
 		}
 	}
 	return false
+}
+
+// ------------------------------------------------ attribute expressions
+
+// attrExprOp is a node in an attribute boolean expression.
+type attrExprOp uint8
+
+const (
+	attrExprLeaf attrExprOp = iota
+	attrExprAnd
+	attrExprOr
+)
+
+// attrExpr is a boolean combination of attribute tests: `|` is OR, `&` is
+// AND, and parentheses group — `[name~=a|(name=b&name=c)]`.
+//
+// Before this, attributes on a compound could only conjoin, and OR had to be
+// smuggled through a regex value (`[path~=test|smoke]`). That worked for one
+// axis and one operator and nothing else: there was no way to say "named X or
+// living in Y", and the workaround silently changed meaning the moment the op
+// was literal rather than regex.
+//
+// Disambiguation is by QUOTING, which the language already used for exactly
+// this: an unquoted `|` is the boolean operator, a quoted value keeps its
+// pipes (`[path~='test|smoke']`). That inverts the old default, and
+// deliberately — `func name~=A|name~=B` was a real and common way to write a
+// union that silently matched only the first alternative, because the value
+// parsed as the regex `A|name~=B`.
+type attrExpr struct {
+	op   attrExprOp
+	leaf selAttr     // attrExprLeaf
+	kids []*attrExpr // attrExprAnd / attrExprOr
+}
+
+// matchAttrExpr evaluates the tree against a node.
+func matchAttrExpr(n *treeNode, x *attrExpr) bool {
+	switch x.op {
+	case attrExprOr:
+		for _, k := range x.kids {
+			if matchAttrExpr(n, k) {
+				return true
+			}
+		}
+		return false
+	case attrExprAnd:
+		for _, k := range x.kids {
+			if !matchAttrExpr(n, k) {
+				return false
+			}
+		}
+		return true
+	default:
+		return matchSelAttr(n, x.leaf)
+	}
+}
+
+// requiredAttrs returns the leaves that must hold for the expression to hold
+// — the top-level conjuncts. The planner uses attributes to pick a cheap
+// starting set (an exact name reads the index instead of walking), and that
+// is only sound for a test the result cannot avoid. A leaf under an OR can be
+// false in a matching node, so it is deliberately NOT returned: the cost of
+// forgetting that is a wrong answer, not a slow one.
+func requiredAttrs(x *attrExpr) []selAttr {
+	if x == nil {
+		return nil
+	}
+	switch x.op {
+	case attrExprLeaf:
+		return []selAttr{x.leaf}
+	case attrExprAnd:
+		var out []selAttr
+		for _, k := range x.kids {
+			out = append(out, requiredAttrs(k)...)
+		}
+		return out
+	default:
+		return nil // an OR guarantees nothing
+	}
+}
+
+// renderAttrExpr spells an expression back, for the reading and for errors.
+func renderAttrExpr(x *attrExpr) string {
+	switch x.op {
+	case attrExprLeaf:
+		return renderAttr(x.leaf)
+	case attrExprAnd, attrExprOr:
+		sep := "&"
+		if x.op == attrExprOr {
+			sep = "|"
+		}
+		parts := make([]string, 0, len(x.kids))
+		for _, k := range x.kids {
+			s := renderAttrExpr(k)
+			if k.op != attrExprLeaf {
+				s = "(" + s + ")"
+			}
+			parts = append(parts, s)
+		}
+		return strings.Join(parts, sep)
+	}
+	return ""
+}
+
+// addAttrExpr folds one attribute expression into the compound. Several
+// bracket groups on one compound conjoin, as they always did:
+// `func[name^=T][path=a.go]` is both.
+func (c *selCompound) addAttrExpr(x *attrExpr) {
+	if x == nil {
+		return
+	}
+	if c.attrExpr == nil {
+		c.attrExpr = x
+	} else {
+		c.attrExpr = &attrExpr{op: attrExprAnd, kids: []*attrExpr{c.attrExpr, x}}
+	}
+	c.attrs = requiredAttrs(c.attrExpr)
+}
+
+// setAttrsAsAnd rebuilds the expression as a plain conjunction of attrs. The
+// matcher reads attrExpr when it is set, so a probe that rewrites attrs has
+// to rewrite the tree with it or it re-runs the query it meant to relax.
+func (c *selCompound) setAttrsAsAnd(attrs []selAttr) {
+	c.attrs = attrs
+	switch len(attrs) {
+	case 0:
+		c.attrExpr = nil
+	case 1:
+		c.attrExpr = &attrExpr{op: attrExprLeaf, leaf: attrs[0]}
+	default:
+		kids := make([]*attrExpr, len(attrs))
+		for i, a := range attrs {
+			kids[i] = &attrExpr{op: attrExprLeaf, leaf: a}
+		}
+		c.attrExpr = &attrExpr{op: attrExprAnd, kids: kids}
+	}
+}
+
+// parseBracketExpr parses `[ … ]` where the contents are a boolean
+// expression over attributes.
+func (p *modSelParser) parseBracketExpr() (*attrExpr, error) {
+	p.i++ // '['
+	x, err := p.parseAttrOr(false)
+	if err != nil {
+		return nil, err
+	}
+	p.skipWS()
+	if p.peek() != ']' {
+		return nil, p.errf("']'")
+	}
+	p.i++
+	return x, nil
+}
+
+// parseAttrOr parses `a|b|c` — the loosest binding, so it reads the way it
+// looks: `name=a&path=x|name=b` is (name=a AND path=x) OR name=b.
+func (p *modSelParser) parseAttrOr(bare bool) (*attrExpr, error) {
+	first, err := p.parseAttrAnd(bare)
+	if err != nil {
+		return nil, err
+	}
+	kids := []*attrExpr{first}
+	for {
+		if !bare {
+			p.skipWS()
+		}
+		if p.peek() != '|' {
+			break
+		}
+		p.i++
+		p.afterBoolOp = true
+		next, err := p.parseAttrAnd(bare)
+		p.afterBoolOp = false
+		if err != nil {
+			return nil, err
+		}
+		kids = append(kids, next)
+	}
+	if len(kids) == 1 {
+		return kids[0], nil
+	}
+	return &attrExpr{op: attrExprOr, kids: kids}, nil
+}
+
+// parseAttrAnd parses `a&b&c`.
+func (p *modSelParser) parseAttrAnd(bare bool) (*attrExpr, error) {
+	first, err := p.parseAttrPrimary(bare)
+	if err != nil {
+		return nil, err
+	}
+	kids := []*attrExpr{first}
+	for {
+		if !bare {
+			p.skipWS()
+		}
+		if p.peek() != '&' {
+			break
+		}
+		p.i++
+		p.afterBoolOp = true
+		next, err := p.parseAttrPrimary(bare)
+		p.afterBoolOp = false
+		if err != nil {
+			return nil, err
+		}
+		kids = append(kids, next)
+	}
+	if len(kids) == 1 {
+		return kids[0], nil
+	}
+	return &attrExpr{op: attrExprAnd, kids: kids}, nil
+}
+
+// parseAttrPrimary parses a parenthesized group or one attribute test.
+func (p *modSelParser) parseAttrPrimary(bare bool) (*attrExpr, error) {
+	if !bare {
+		p.skipWS()
+	}
+	if p.peek() == '(' {
+		p.i++
+		x, err := p.parseAttrOr(bare)
+		if err != nil {
+			return nil, err
+		}
+		if !bare {
+			p.skipWS()
+		}
+		if p.peek() != ')' {
+			return nil, p.errf("')' to close the attribute group")
+		}
+		p.i++
+		return x, nil
+	}
+	a, err := p.parseAttrTerm()
+	if err != nil {
+		return nil, err
+	}
+	return &attrExpr{op: attrExprLeaf, leaf: a}, nil
 }

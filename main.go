@@ -82,13 +82,32 @@ func runMCP() {
 	rootPath := flag.String("root", ".", "workspace root directory the symbol index covers")
 	legacyTools := flag.Bool("legacy-tools", false, "expose the legacy 9-tool MCP surface instead of the 3-tool surface")
 	readOnly := flag.Bool("read-only", false, "hide every mutating tool (node_edit/node_delete/node_refactor/node_rename_file); navigation + reading only")
-	validate := flag.Bool("validate", false, "revert-on-new-diagnostics: an edit that introduces a new error is rolled back instead of landing (needs a child LSP)")
+	// ON by default. A safety net that must be asked for is a safety net
+	// nobody has: dun spawns this server with no flags, so every agent edit
+	// ran unvalidated until now — and node_edit's `return` op will happily
+	// leave a signature the body no longer satisfies.
+	//
+	// Safe to default because it degrades rather than blocks: with no child
+	// LSP for the language it is off entirely, and when diagnostics are
+	// unavailable or time out the edit APPLIES and is flagged (fail-open,
+	// Skipped: no-lsp / lsp-timeout). It cannot make an unvalidatable
+	// workspace uneditable.
+	//
+	// --no-validate is the escape hatch, for when validation itself is the
+	// problem — the known one being a never-analyzed file with pre-existing
+	// errors, which has no baseline and can false-revert its first edit.
+	validate := flag.Bool("validate", true, "revert-on-new-diagnostics: an edit that introduces a new error is rolled back instead of landing (needs a child LSP; degrades to apply-and-flag without one)")
+	noValidate := flag.Bool("no-validate", false, "turn OFF revert-on-new-diagnostics (see --validate); for when validation itself misfires, e.g. a never-analyzed file with pre-existing errors")
 	daemonMode := flag.Bool("daemon", false, "proxy tool calls to the shared per-user poly-lsp daemon (auto-starting it) instead of building the index in-process; one warm index + child-LSP fleet is shared across every client")
 	readCharBudget := flag.Int("read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
 	flag.Parse()
 
 	if *readCharBudget > 0 {
 		mcp.SetReadCharBudget(*readCharBudget)
+	}
+
+	if *noValidate {
+		*validate = false
 	}
 
 	root, err := filepath.Abs(*rootPath)
@@ -139,8 +158,11 @@ func runMCP() {
 		log.Printf("mcp: READ-ONLY — mutating tools are not registered")
 	}
 	srv.SetValidateEdits(*validate)
-	if *validate {
-		log.Printf("mcp: VALIDATE — edits that introduce a new error are reverted")
+	// Log the SURPRISING state. Validation is the default now, so announcing
+	// it every run is noise; running WITHOUT it is the fact worth recording,
+	// because an edit that breaks the build will then simply land.
+	if !*validate {
+		log.Printf("mcp: --no-validate — edits that introduce a new error will LAND, not revert")
 	}
 	srv.SetCachePath(cachePathFor(root))
 	// Spawn child LSPs so node_edit / node_delete / node_refactor can
@@ -232,7 +254,10 @@ func runDaemon() {
 	configPath := flag.String("config", "poly-lsp-mcp.yaml", "language registry config file")
 	socket := flag.String("socket", "", "unix socket path (default $XDG_RUNTIME_DIR/poly-lsp/daemon.sock)")
 	readOnly := flag.Bool("read-only", false, "host every root read-only (mutating tools hidden)")
-	validate := flag.Bool("validate", false, "revert-on-new-diagnostics for every hosted root's edits")
+	// Same default as the stdio server (see runMCP): on, degrading to
+	// apply-and-flag where diagnostics are unavailable.
+	validate := flag.Bool("validate", true, "revert-on-new-diagnostics for every hosted root's edits")
+	noValidate := flag.Bool("no-validate", false, "turn OFF revert-on-new-diagnostics for hosted roots")
 	stop := flag.Bool("stop", false, "stop the running daemon and exit")
 	restart := flag.Bool("restart", false, "restart the running daemon (replaying its flags) and exit")
 	var allow multiFlag
@@ -244,6 +269,9 @@ func runDaemon() {
 			log.Fatal(err)
 		}
 		return
+	}
+	if *noValidate {
+		*validate = false
 	}
 	if *restart {
 		if err := daemon.Restart(stripBoolFlags(daemonFlags, "stop", "restart")); err != nil {

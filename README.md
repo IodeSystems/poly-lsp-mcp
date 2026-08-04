@@ -3,7 +3,7 @@
 A polyglot LSP + MCP server in Go. One binary, two surfaces:
 
 - **LSP server** (`poly-lsp-mcp`) — editor integration. Multiplexes child language servers (gopls / tsserver / pylsp / …) and falls back to tree-sitter where no child exists.
-- **MCP server** (`poly-lsp-mcp mcp`) — LLM agent integration. The same workspace machinery exposed as **three tools** (`node_query` / `node_read` / `node_edit`) over a unified node tree, driven by a **CSS-inspired selector language** that queries containment *and* the reference graph. Edits are **LSP-validated** (`--validate`) so an agent can't leave the workspace broken.
+- **MCP server** (`poly-lsp-mcp mcp`) — LLM agent integration. The same workspace machinery exposed as **three tools** (`node_query` / `node_read` / `node_edit`) over a unified node tree, driven by a **CSS-inspired selector language** that queries containment *and* the reference graph. Edits are **LSP-validated by default** so an agent can't leave the workspace broken — an edit that introduces a new error is reverted, and `--no-validate` turns that off.
 - **Query CLI** (`poly-lsp-mcp query <selector>`) — run one selector from the shell, no editor or agent.
 - **Daemon mode** (`poly-lsp-mcp mcp --daemon`) — every client proxies to ONE shared per-user daemon over a unix socket, so the workspace index, the child-LSP fleet and the parse cache exist once instead of once per session. Auto-starts on first use; `poly-lsp-mcp daemon --stop` / `--restart` manage it, `--read-only` / `--validate` are enforced per connection.
 

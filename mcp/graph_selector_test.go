@@ -760,10 +760,10 @@ func TestAttrRegexIsTheOrOperator(t *testing.T) {
 		t.Errorf("a quoted alternation must equal the boolean union: %d vs %d",
 			quoted.TotalMatches, either.TotalMatches)
 	}
-	// And an UNQUOTED pipe whose right side is not an attribute names the
-	// migration instead of complaining about an unknown attribute.
-	if msg := queryErr(t, s, map[string]any{"selector": `func[path~=app|util]`}); !strings.Contains(msg, "BOOLEAN operators") {
-		t.Errorf("an unquoted alternation should name the boolean rule; got: %s", msg)
+	// An UNQUOTED pipe whose right side is not an attribute stays part of the
+	// pattern, so this is the same union — `util` is not an attribute phrase.
+	if unq := query(t, s, map[string]any{"selector": `func[path~=app|util]`, "limit": 50}); unq.TotalMatches != either.TotalMatches {
+		t.Errorf("an unquoted alternation is one regex: %d vs %d", unq.TotalMatches, either.TotalMatches)
 	}
 
 	// Anchors subsume ^= and $= exactly.
@@ -829,8 +829,8 @@ func TestLiteralOpRefusesAlternationAndNamesRegex(t *testing.T) {
 
 	msg := queryErr(t, s, map[string]any{"selector": `func:not([path*=test|smoke])`})
 	for _, want := range []string{
-		"BOOLEAN operators", // `|` is an operator now, so `smoke` is the error
-		"quote the value",   // the repair for a real literal pipe
+		"silently no-ops",
+		"[path~=test|smoke]", // the repair, spelled out
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("literal-op alternation must name the regex fix; missing %q in: %s", want, msg)

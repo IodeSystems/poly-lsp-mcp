@@ -1666,7 +1666,7 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 				return comp, err
 			}
 			// `#id` is exactly sugar for `[name=id]`.
-			comp.attrs = append(comp.attrs, selAttr{op: selExact, value: id})
+			comp.addAttrExpr(&attrExpr{op: attrExprLeaf, leaf: selAttr{op: selExact, value: id}})
 		case '[':
 			x, err := p.parseBracketExpr()
 			if err != nil {
@@ -2301,11 +2301,24 @@ func (p *modSelParser) readAttrValue(regex bool) (string, bool) {
 		if c == ']' && depth == 0 {
 			break // the attribute's closing bracket
 		}
-		// An UNQUOTED value ends at a boolean operator or a closing group:
-		// `|` and `&` belong to the expression, not to the string. A value
-		// that really contains one is quoted — `[path~='test|smoke']` — which
-		// is the same escape the literal-op guard below already taught.
-		if depth == 0 && (c == '|' || c == '&' || c == ')') {
+		if depth == 0 && c == ')' {
+			break
+		}
+		// `|` and `&` end the value only when what FOLLOWS them is another
+		// attribute test, or a parenthesized group. Otherwise they are part
+		// of the pattern.
+		//
+		// Measured: 97 real selectors, ZERO boolean ORs, 19 regex
+		// alternations inside one value — `[name~=pending|queued|lifted]`.
+		// Treating every `|` as an operator taxed the only form anyone
+		// writes, and one recovery silently narrowed to `[name~=pending]`,
+		// dropping three alternatives without a word.
+		//
+		// USER's framing, and the reason this is worth the lookahead: it is
+		// cheaper to parse more than it is to spend an LLM turn. The
+		// ambiguity is only apparent — `queued` is not an attribute phrase
+		// and `name=derp` is, so the two readings never actually collide.
+		if depth == 0 && (c == '|' || c == '&') && p.boolOpFollows(p.i+1) {
 			break
 		}
 		if regex {
@@ -2610,9 +2623,9 @@ SPEC
          [name…] = what it's CALLED (leaf, dotted path).  [path…] = where it LIVES
          (workspace-relative file path; a symbol answers with its FILE's).
          OPS  = ^= $= *= are LITERAL (exact/prefix/suffix/contains).  ~= is a regex.
-         BOOL | is OR, & is AND, () groups — over whole TESTS, not inside a value:
-              [name=a|name=b], [name^=T&path=a.go], [name=a|(name^=T&path=b.go)].
-              A value that really contains one is quoted: [path~='test|smoke'].
+         BOOL | is OR, & is AND, () groups — but ONLY when the next thing is another
+              TEST or a group. [name=a|name=b] is boolean; [name~=a|b] is one regex,
+              since b is not an attribute. The reading says which it took.
          AND  is just two attrs — [path*=ma][path*=in] — CSS conjoins a compound.
          Non-test funcs: func:not([path~=test|smoke]).
          #id spans both axes and adds the "<file>#<sym>" address; it is never a regex.
@@ -5664,4 +5677,42 @@ func (p *modSelParser) parseGrepArg() (string, error) {
 		}
 		b.WriteString(string(p.s[start:p.i]))
 	}
+}
+
+// boolOpFollows reports whether the text at i begins another attribute test
+// or a parenthesized group — i.e. whether the `|`/`&` just before it is a
+// BOOLEAN operator rather than a character in the value.
+//
+// The test is deliberately narrow: an attribute axis (`name`/`path`) followed
+// by one of the five operators, or an opening paren. Anything else — a bare
+// word, a regex fragment, punctuation — leaves the pipe in the pattern where
+// callers put it.
+func (p *modSelParser) boolOpFollows(i int) bool {
+	for i < len(p.s) && (p.s[i] == ' ' || p.s[i] == '\t') {
+		i++
+	}
+	if i >= len(p.s) {
+		return false
+	}
+	if p.s[i] == '(' {
+		return true
+	}
+	name := p.readIdentAt(i)
+	if name != "name" && name != "path" {
+		return false
+	}
+	j := i + len(name)
+	for j < len(p.s) && (p.s[j] == ' ' || p.s[j] == '\t') {
+		j++
+	}
+	if j >= len(p.s) {
+		return false
+	}
+	switch p.s[j] {
+	case '=':
+		return true
+	case '^', '$', '*', '~':
+		return j+1 < len(p.s) && p.s[j+1] == '='
+	}
+	return false
 }

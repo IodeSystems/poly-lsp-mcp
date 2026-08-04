@@ -99,18 +99,17 @@ func TestQuotedValueKeepsItsPipes(t *testing.T) {
 	}
 }
 
-// The migration case, and the likeliest way to reach a bad attribute name:
-// `|` used to be regex alternation INSIDE a value. The error has to name that
-// rather than recite the attribute list at someone who knows it.
-func TestUnquotedAlternationNamesTheBooleanRule(t *testing.T) {
+// A pipe before something that is NOT an attribute stays in the pattern, so
+// the whole migration this once needed is gone: `[path~=app|util]` means what
+// it always meant. What remains is the case an attribute name really is
+// misspelt, which still reports the attribute list.
+func TestUnknownAttributeStillReportsTheAxes(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
 
-	msg := queryErr(t, s, map[string]any{"selector": "func[path~=app|util]"})
-	for _, want := range []string{"BOOLEAN operators", "quote the value"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("the error should teach the migration (%q missing): %s", want, msg)
-		}
+	msg := queryErr(t, s, map[string]any{"selector": "func[bogus=x]"})
+	if !strings.Contains(msg, "unknown attribute") {
+		t.Errorf("a real typo should still name the axes; got: %s", msg)
 	}
 }
 
@@ -138,5 +137,89 @@ func TestRequiredAttrsIgnoresLeavesUnderAnOr(t *testing.T) {
 	}
 	if got := list[0].elems[0].comp.attrs; len(got) != 0 {
 		t.Errorf("a conjunct UNDER an or is still not required; got %v", got)
+	}
+}
+
+// `|` is an operator only when what FOLLOWS it is another attribute test or a
+// group. Otherwise it belongs to the pattern.
+//
+// Measured: 97 real selectors, ZERO boolean ORs, 19 regex alternations inside
+// one value. Treating every pipe as an operator taxed the only form anyone
+// writes, and one recovery silently narrowed `[name~=pending|queued|lifted|
+// midTurn]` to `[name~=pending]` — three alternatives dropped without a word.
+func TestPipeIsAnOperatorOnlyBeforeAnAttribute(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	count := func(sel string) int {
+		return query(t, s, map[string]any{"selector": sel, "limit": 200}).TotalMatches
+	}
+	free, callsStart := count("func[name=Free]"), count("func[name=CallsStart]")
+	if free == 0 || callsStart == 0 {
+		t.Fatal("fixture drift")
+	}
+	// `queued` is not an attribute phrase, so this is ONE regex.
+	if got, want := count("func[name~=Free|CallsStart]"), free+callsStart; got != want {
+		t.Errorf("regex alternation in a value should match either: got %d want %d", got, want)
+	}
+	// `name=` is, so this is the boolean.
+	if got, want := count("func[name=Free|name=CallsStart]"), free+callsStart; got != want {
+		t.Errorf("boolean OR should match either: got %d want %d", got, want)
+	}
+	// A group counts as an operand too.
+	if got := count("func[name=CallsStart|(name=Free&path=main.go)]"); got != free+callsStart {
+		t.Errorf("a parenthesized operand should be boolean; got %d", got)
+	}
+	// And a value that merely LOOKS like an axis stays a pattern: there is
+	// no operator after `pathological`, so nothing splits.
+	if count("func[name~=Free|pathological]") != free {
+		t.Error("a word beginning with an axis name is still part of the pattern")
+	}
+}
+
+// boolOpFollows is the whole decision, so pin it directly — the query-level
+// tests above can only observe it through match counts.
+func TestBoolOpFollowsIsNarrow(t *testing.T) {
+	for _, tc := range []struct {
+		rest string
+		want bool
+	}{
+		{"name=x]", true}, {"path~=x]", true}, {"name ^= x]", true},
+		{"(name=x)]", true}, {"  name=x]", true},
+		{"queued|lifted]", false}, {"pathological]", false},
+		{"nameless]", false}, {"name]", false}, {"name.x]", false},
+		{"", false}, {"]", false},
+	} {
+		p := &modSelParser{s: []rune(tc.rest)}
+		if got := p.boolOpFollows(0); got != tc.want {
+			t.Errorf("boolOpFollows(%q) = %v, want %v", tc.rest, got, tc.want)
+		}
+	}
+}
+
+// The reading has to SHOW which way a pipe went. Reading c.attrs would render
+// nothing for an OR — requiredAttrs returns none under one — which is the
+// exact shape where a caller most needs to see the decision.
+func TestReadingShowsHowThePipeWasRead(t *testing.T) {
+	regex := readingOf(t, "func[name~=parseConflicts|straddlesAny]")
+	if !strings.Contains(regex, "REGEX") {
+		t.Errorf("a pattern pipe should read as one regex:\n%s", regex)
+	}
+	if strings.Contains(regex, "EITHER side") {
+		t.Errorf("and must not claim a boolean:\n%s", regex)
+	}
+	boolean := readingOf(t, "func[name=a|name=b]")
+	if !strings.Contains(boolean, "EITHER side") {
+		t.Errorf("a boolean pipe should read as an operator:\n%s", boolean)
+	}
+	for _, want := range []string{"[name=a]", "[name=b]"} {
+		if !strings.Contains(boolean, want) {
+			t.Errorf("both operands should be named (%q missing):\n%s", want, boolean)
+		}
+	}
+	// A group nests, so the tree reads as the tree it is.
+	grouped := readingOf(t, "func[name=a|(name^=T&path=b.go)]")
+	if !strings.Contains(grouped, "BOTH sides match") {
+		t.Errorf("an AND inside an OR should read as nested:\n%s", grouped)
 	}
 }

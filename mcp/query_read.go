@@ -107,17 +107,17 @@ func describeCompound(c *selCompound, depth int) []readRow {
 	// and teaches syntax nobody used — the same rule renderElem follows.
 	// Only skipped when the attrs will render something, so a bare `*`
 	// (which WAS written, or is all there is) still gets its line.
-	if !(c.anyType && c.implied && len(c.attrs) > 0) {
+	// attrExpr is the truth; c.attrs holds only the top-level conjuncts, so
+	// reading it would render NOTHING for an OR — the one shape where a
+	// caller most needs to see which way `|` was taken. Whether a pipe was
+	// read as a boolean operator or as part of a pattern is decided by
+	// lookahead (see boolOpFollows), and this is where that decision becomes
+	// visible instead of something to infer from the result count.
+	wrote := c.attrExpr != nil
+	if !(c.anyType && c.implied && wrote) {
 		rows = append(rows, readRow{Clause: baseClause(c), Means: baseMeaning(c), Depth: depth})
 	}
-	for _, a := range c.attrs {
-		row := readRow{Clause: renderAttr(a), Means: attrMeaning(a), Depth: depth}
-		if why, risky := attrCaution(a); risky {
-			row.Means += " — " + why
-			row.Caution = true
-		}
-		rows = append(rows, row)
-	}
+	rows = append(rows, attrExprRows(c.attrExpr, depth)...)
 	switch c.ordSel {
 	case 1:
 		rows = append(rows, readRow{Clause: ":first", Means: "only the FIRST match per anchor, in document order", Depth: depth})
@@ -441,6 +441,32 @@ func claimMeaning(k selPseudoKind) string {
 		return "∄ — none may match"
 	}
 	return ""
+}
+
+// attrExprRows renders an attribute expression as reading rows: a leaf reads
+// as it always did, and an operator gets its own line with its operands
+// nested under it, so a grouped expression reads as the tree it is.
+func attrExprRows(x *attrExpr, depth int) []readRow {
+	if x == nil {
+		return nil
+	}
+	if x.op == attrExprLeaf {
+		row := readRow{Clause: renderAttr(x.leaf), Means: attrMeaning(x.leaf), Depth: depth}
+		if why, risky := attrCaution(x.leaf); risky {
+			row.Means += " — " + why
+			row.Caution = true
+		}
+		return []readRow{row}
+	}
+	clause, means := "|", "EITHER side matches (boolean OR over whole tests — a `|` inside one value is part of the pattern)"
+	if x.op == attrExprAnd {
+		clause, means = "&", "BOTH sides match (boolean AND over whole tests)"
+	}
+	rows := []readRow{{Clause: clause, Means: means, Depth: depth}}
+	for _, k := range x.kids {
+		rows = append(rows, attrExprRows(k, depth+1)...)
+	}
+	return rows
 }
 
 // ------------------------------------------------------------ subject

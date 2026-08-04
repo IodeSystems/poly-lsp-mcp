@@ -2557,10 +2557,17 @@ func unknownPseudoErr(name string) error {
 // from ":arity" — but it shares "ar" with the one that was meant. Weighting the
 // shared prefix fixes it without a special case.
 func nearestName(want string, candidates []string) string {
+	// Score case-INSENSITIVELY. A pure case slip ("onlyina" for "OnlyInA") is
+	// the case this is worst at otherwise: every differing letter costs an
+	// edit AND the leading difference zeroes the prefix credit, so the closest
+	// possible miss scores like the furthest. Only the comparison folds — the
+	// candidate is returned as declared, which is what the caller must retype.
+	wantLow := strings.ToLower(want)
 	best, bestScore, bestPre := "", 1<<30, 0
 	for _, c := range candidates {
-		pre := commonPrefixLen(want, c)
-		score := editDistance(want, c) - 2*pre
+		cLow := strings.ToLower(c)
+		pre := commonPrefixLen(wantLow, cLow)
+		score := editDistance(wantLow, cLow) - 2*pre
 		if score < bestScore {
 			best, bestScore, bestPre = c, score, pre
 		}

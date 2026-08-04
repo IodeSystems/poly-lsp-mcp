@@ -1699,6 +1699,15 @@ func TestSelectorCorpus_ZeroResultNamesTheClause(t *testing.T) {
 		selector: "name=Stat",
 		want:     []string{`nothing is named "Stat"`, "main.go#Server.Start", `Retry with "Start"`},
 	}, {
+		// A pure CASE slip. Scoring used to be case-SENSITIVE, which made this
+		// the worst-scoring miss possible: every differing letter costs an edit
+		// AND the leading difference zeroes the prefix credit, so the closest
+		// thing a caller can write scored like an unrelated word and got no
+		// hint at all.
+		name:     "right name, wrong case",
+		selector: "name=start",
+		want:     []string{`nothing is named "start"`, `Retry with "Start"`},
+	}, {
 		// The general form: two clauses, and the hint says which one did it.
 		name:     "one clause of several",
 		selector: "func[path=web/some_file.ts][name^=Call]",

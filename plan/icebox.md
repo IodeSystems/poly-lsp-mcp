@@ -260,3 +260,26 @@ drifted to the host's built-in Edit + Bash. Why, filed as work:
   reclaim the schema tokens. Note they also DON'T cascade to call sites (they
   rewrite the declaration only), so on this task they'd have saved just the one
   signature edit — marginal. Measure adoption before investing.
+
+- **FEATURE — a real INSERT op for `node_edit` (2026-08-03).** There is no way
+  to add a symbol to an existing file. The idiom that works — address a
+  neighbour, `oldText`=its whole text, `newText`=that + the new declaration —
+  is now taught by the missing-symbol error (see `bugs.md`), and it is
+  O(neighbour) rather than the O(file) rewrite that was observed (93 KB of
+  `newText` to insert one function). But it is still an anchor trick: the
+  caller must read a neighbour it does not otherwise care about, and choose one
+  whose text is short. A first-class op — `after:"<addr>"` / `before:"<addr>"`
+  with `newText`, splicing at the neighbour's decl end — costs a few schema
+  tokens against a budget that is already tight
+  (`TestModernToolSurfaceTokenBudget`). **Measure first**: re-run a session
+  with the corrected error text and see whether the anchor idiom is actually
+  reached before paying for the op.
+
+- **DECISION — should `delete:true` on a single-line `@N` close the line up?
+  (2026-08-03)** It currently empties the line in place; the newline sits
+  outside the ref-site span, so a blank line remains. Defensible either way,
+  and the two readings genuinely differ by address shape: `@N` from `::grep`
+  reads as "remove this line", while `@start-end` from `::body` clearly should
+  NOT eat the trailing newline. Pinned as-is by
+  `TestRefSiteAddrDeleteEmptiesTheLineNotTheFile`, so the current answer is
+  documented rather than accidental. Owner: user — a behaviour call, not a bug.

@@ -380,6 +380,17 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 			payload["hint"] = h
 		}
 	}
+	// Symbols from a conflicted file may combine both sides, so say so on
+	// the rows that carry the risk. Placed ahead of the clause notes: a
+	// selector critique is advice, this is "what you are holding may not be
+	// real".
+	if w := s.conflictWarning(paged); w != "" {
+		if prev, ok := payload["note"].(string); ok && prev != "" {
+			payload["note"] = w + ". " + prev
+		} else {
+			payload["note"] = w
+		}
+	}
 	// A clause that could never contribute, at ANY match count. This one
 	// must not be gated on total == 0 like zeroResultHint: its worst case is
 	// precisely the NON-empty one, where a vanishing {0,…} clause leaves the
@@ -878,13 +889,24 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			"declaration too large to return whole (%d bytes, limit %d); browse it by file+line window instead: node_read(node:%q, startLine:%d)",
 			len(text), maxNodeReadBytes, rn.file, rn.decl.StartLine)
 	}
-	return jsonContent(map[string]any{
+	out := map[string]any{
 		"node": rn.addr,
 		"file": rn.file,
 		"type": rn.class, // "type", matching the tag grammar — see node_query
 		"@":    []int{rn.decl.StartLine, rn.decl.EndLine},
 		"text": text,
-	}), false, nil
+	}
+	// Reading a declaration that straddles a marker hands back source from
+	// no commit and no branch. node_edit refuses to write it; this is where
+	// a caller SEES it, so this is where it has to be said.
+	if cs := conflictOverlap(content, rn.decl.StartLine, rn.decl.EndLine); len(cs) > 0 {
+		out["note"] = fmt.Sprintf(
+			"this span straddles an UNRESOLVED merge conflict at %s, so the text above is part MINE and part THEIRS — "+
+				"a declaration that exists on neither side. Read the versions with ::mine / ::theirs, or resolve with "+
+				"node_edit(node:%q, accept:\"mine\"|\"theirs\")",
+			conflictSpans(cs), conflictAddr(rn.file, cs[0]))
+	}
+	return jsonContent(out), false, nil
 }
 
 // ---------------------------------------------------------- node_edit

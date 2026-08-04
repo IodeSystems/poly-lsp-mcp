@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
@@ -597,4 +598,82 @@ func lineDiff(mine, theirs []string) string {
 		fmt.Fprintf(&b, "+ %s\n", theirs[j])
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// ------------------------------------------------- warning on read/query
+
+// maxNamedConflictFiles bounds the names in a warning. A note that lists
+// twenty files is a result set wearing a warning's clothes, and callers learn
+// to skip it.
+const maxNamedConflictFiles = 3
+
+// conflictWarning reports that returned rows come from files with unresolved
+// conflicts, and names any row that STRADDLES a marker.
+//
+// Scoped to the files actually in the result rather than the workspace: it
+// costs one read per distinct file in the page (bounded by limit), the scan
+// short-circuits on a single Contains for the overwhelmingly common clean
+// case, and — more importantly — a warning about a file nobody asked about is
+// noise, while one about the symbols just handed back is the answer.
+//
+// This is the poll-shaped substitute for a server→client event. It arrives
+// late (on the next query rather than when the conflict appears) but it needs
+// no push channel, and it is right where the damage would otherwise be done:
+// attached to the symbols a caller is about to act on.
+func (s *Server) conflictWarning(rows []*treeNode) string {
+	seen := map[string][]conflictRegion{}
+	var files []string
+	var chimeras []string
+	for _, n := range rows {
+		if n.file == "" || n.abs == "" {
+			continue
+		}
+		cs, ok := seen[n.file]
+		if !ok {
+			content, err := os.ReadFile(n.abs)
+			if err != nil {
+				seen[n.file] = nil
+				continue
+			}
+			cs = parseConflicts(content)
+			seen[n.file] = cs
+			if len(cs) > 0 {
+				files = append(files, n.file)
+			}
+		}
+		if len(cs) == 0 || n.class == "conflict" || n.class == "mine" ||
+			n.class == "theirs" || n.class == "base" {
+			continue // the conflict views are ABOUT this; they are not victims of it
+		}
+		if straddlesAny(cs, n.at[0], n.at[1]) && len(chimeras) < maxNamedConflictFiles {
+			chimeras = append(chimeras, n.addr())
+		}
+	}
+	if len(files) == 0 {
+		return ""
+	}
+	sort.Strings(files)
+	named := files
+	extra := ""
+	if len(named) > maxNamedConflictFiles {
+		named, extra = named[:maxNamedConflictFiles], fmt.Sprintf(" (+%d more)", len(files)-maxNamedConflictFiles)
+	}
+	msg := fmt.Sprintf(
+		"UNRESOLVED merge conflict in %s%s — tree-sitter recovers past the markers, so symbols from these files can combine BOTH sides. "+
+			"`#'%s'::conflict` shows the regions; node_edit accept:\"mine\"|\"theirs\" resolves them",
+		strings.Join(named, ", "), extra, files[0])
+	if len(chimeras) > 0 {
+		msg += fmt.Sprintf(". These rows STRADDLE a marker and exist on neither side: %s", strings.Join(chimeras, ", "))
+	}
+	return msg
+}
+
+// straddlesAny reports whether a span starts or ends inside any region.
+func straddlesAny(cs []conflictRegion, from, to int) bool {
+	for _, c := range cs {
+		if (from > c.at[0] && from <= c.at[1]) || (to >= c.at[0] && to < c.at[1]) {
+			return true
+		}
+	}
+	return false
 }

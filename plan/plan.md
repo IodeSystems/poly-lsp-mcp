@@ -116,6 +116,33 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+✅ **Conflicts swept against a REAL merge — 2026-08-04.** The plan had these
+recorded as never exercised in the wild; a genuine `git merge` conflict now
+runs the whole cycle. Working: chimera withholding, `::conflict` with
+`sides`/`mineDeclares`/`theirsDeclares`, `::mine`/`::theirs`,
+`accept:"theirs"`, the RESOLVED notification, and the "git still has it staged
+as unmerged" note.
+  - **The defect: "0 matches" was not a reliable "not found".** tree-sitter
+    recovers past markers by SWALLOWING what follows — in a two-function file
+    conflicted at the first, the second was not withheld as a chimera, it was
+    never parsed. Asking for it got `totalMatches:0` and NO note. The existing
+    warning is scoped to files present in the RESULT, which is right for a
+    non-empty page and structurally cannot fire with zero rows.
+  - **Why the set could not be consulted:** only the watcher filled
+    `s.conflicted`, so the server knew about a conflict that APPEARED while it
+    ran and nothing about one already there — the ordinary case, since the
+    agent starts after the merge. Seeded now from
+    `git diff --diff-filter=U` at index time: git's own answer, exact where a
+    scan for `<<<<<<<` is not (a marker in a string literal is not an unmerged
+    path), one process instead of a pass over the workspace.
+  - **Same seeding repaired the resolve announcement.** With the set empty, a
+    conflict resolved during a session moved false → false, so
+    `noteConflictTransition` returned early and "RESOLVED" never fired.
+  - ◻ **Optional, not built:** announce a PRE-EXISTING conflict at startup the
+    way the binding report does. The zero-result note fires where it matters
+    and a startup ping for the normal "I opened this to fix the merge" case may
+    be noise. USER's call.
+
 ✅ **Daemon multi-root, resources, and the zero-result hints swept —
 2026-08-04.** Three more surfaces, two defects.
   - **The `resources` capability was claimed unconditionally.** The modern

@@ -37,10 +37,11 @@ were reproduced against HEAD before a line was written.
 **Method note, for the next run:** all three are the same trade USER settled on
 the `|` revert — cheaper to parse more than to spend an LLM turn. Two of the
 three were fixes from EARLIER THE SAME DAY that half-landed, which is the
-argument for re-scanning after a change rather than only before one. Worth
-re-scanning once sessions accumulate against this build; the corpus scanned
-here ran against binaries from before these three commits, so none of them is
-measured in the wild yet.
+argument for re-scanning after a change rather than only before one. Rollout
+needs no step — `selfupdate.go` rebuilds the stamped binary in place on the
+next spawn, verified here (16:07 build → 16:33 after one `query`). The corpus
+scanned here ran against binaries predating these three commits, so none of
+them is measured in the wild yet — the next sessions are that measurement.
 
 ## Tier-3 schema auto-bindings swept (DONE 2026-08-04)
 

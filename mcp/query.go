@@ -5297,6 +5297,14 @@ func applyBoolFlag(g *grepSpec, c byte) bool {
 		g.invert = true
 	case 'n':
 		// Accepted and ignored: hits always carry line numbers.
+	case 'r', 'R':
+		// Accepted and ignored: the selector already scopes the search, so it
+		// is recursive by construction. It used to be refused, and the refusal
+		// said as much — "the selector scopes the search, so -r is never
+		// accepted" — an error message arguing that a flag asks for what
+		// already happens. `grep -riE` is one reflex typed whole; charging a
+		// round trip for a redundant letter is the tax the `|` revert was
+		// about.
 	default:
 		return false
 	}
@@ -5304,7 +5312,7 @@ func applyBoolFlag(g *grepSpec, c byte) bool {
 }
 
 func unsupportedFlagErr(c byte) error {
-	return fmt.Errorf("unsupported flag %q — supported: -i -w -E -F -v -n, and -A<n>/-B<n>/-C<n> in ::grep. The selector scopes the search, so -r and file arguments are never accepted", "-"+string(c))
+	return fmt.Errorf("unsupported flag %q — supported: -i -w -E -F -v -n -r, and -A<n>/-B<n>/-C<n> in ::grep. The selector scopes the search, so file arguments are never accepted", "-"+string(c))
 }
 
 // finalize validates the mode combination and compiles the matcher.

@@ -626,8 +626,18 @@ func TestModernQueryGrepFieldIsGone(t *testing.T) {
 		t.Errorf("the retired grep field should point at ::grep; got %q", msg)
 	}
 	// Unsupported flags stay guided errors, now at parse time.
-	if msg := queryErr(t, s, map[string]any{"selector": `*::grep('-r derp')`}); !strings.Contains(msg, "-r") {
-		t.Errorf("expected a guided error naming -r; got %q", msg)
+	if msg := queryErr(t, s, map[string]any{"selector": `*::grep('-z derp')`}); !strings.Contains(msg, "-z") {
+		t.Errorf("expected a guided error naming -z; got %q", msg)
+	}
+	// -r is not one of them. The selector already scopes the search, so it is
+	// redundant, not wrong — and `grep -riE` is one reflex typed whole.
+	// Measured live: 2 refusals whose message argued the flag asks for what
+	// already happens.
+	plain := query(t, s, map[string]any{"selector": `*::grep('-iE PRINT')`, "limit": 50})
+	recur := query(t, s, map[string]any{"selector": `*::grep('-riE PRINT')`, "limit": 50})
+	if recur.TotalMatches == 0 || recur.TotalMatches != plain.TotalMatches {
+		t.Errorf("-r should be accepted and ignored: got %d, want %d",
+			recur.TotalMatches, plain.TotalMatches)
 	}
 }
 

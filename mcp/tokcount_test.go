@@ -73,7 +73,20 @@ import (
 // grouped-boolean example, the transitive-callers recipe that is the
 // previous recipe plus {1,}, two of three :not()s in the dead-code recipe,
 // "(a b){2} groups"); the remaining 44 are the correction itself.
-const modernTokenBudget = 1210
+// 1210 → 1280: merge conflicts. The `accept` op, and — the part that is a
+// FIX rather than a feature — what `newText` alone actually does. It was
+// documented as "CREATE a FILE", while the code has always also used it to
+// replace an addressed SPAN (the rule that makes `::body newText:…` work).
+// An undocumented write path is how the file@line bug survived: the address
+// form was in the schema, its behaviour was not, and it silently read page 1
+// for months. Nothing was cut for this one — node_edit's description was
+// audited line by line and the RENAMING block (measured 10/10 on the
+// --validate bench), params/return, and the op list are all load-bearing.
+// The standing candidate if this needs paying back is params/return, which
+// icebox.md records as MEASURED UNUSED — but dropping an op from the
+// description is how ops become undiscoverable, so that is a deliberate
+// decision, not a token trim.
+const modernTokenBudget = 1280
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

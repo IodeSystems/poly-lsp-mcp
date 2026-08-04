@@ -92,8 +92,9 @@ RENAMING a symbol? Use the rename op — ONE call renames the declaration AND ev
 Exactly ONE op:
 rename:"NewName" — workspace-wide semantic rename; lexical guesses reported under candidates, never applied.
 oldText+newText — replace a snippet inside the node. oldText must occur exactly once in the node; the address scopes it, so it need only be unique WITHIN that node — keep it short. Pass the node's whole text to rewrite it entirely, or that text + a new declaration to ADD one next to it.
-newText alone — CREATE a FILE at a path that does not exist yet; it does NOT insert a symbol into an existing file.
+newText alone — REPLACES a span address (@start-end: ::body/::signature/::grep/a conflict); CREATES a file at a new path; refused on a symbol (use oldText) and never inserts one.
 delete:true — excise the node.
+accept:"mine"|"theirs" — resolve merge conflicts (whole file, or one block by its @start-end span); markers go too. A conflicted file indexes BOTH sides as peers.
 params — [{name,type}] rebuilds the parameter list (go/typescript/python).
 return — rebuilds the return type.
 includeComments / resolution:{mode,target} — rename only.`
@@ -107,6 +108,7 @@ var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"properties":{"name":{"type":"string"},"type":{"type":"string"}},"required":["name","type"]}},` +
 	`"return":{"type":"string"},` +
 	`"delete":{"type":"boolean"},` +
+	`"accept":{"type":"string","enum":["mine","theirs"]},` +
 	`"includeComments":{"type":"boolean"},` +
 	`"resolution":{"type":"object","properties":{"mode":{"type":"string",` +
 	`"enum":["underlying","projection","mapping","hide"]},"target":{"type":"string"}}}},` +
@@ -862,6 +864,9 @@ type modernEditArgs struct {
 	Params  *[]refactorParam `json:"params,omitempty"`
 	Return  *string          `json:"return,omitempty"`
 	Delete  *bool            `json:"delete,omitempty"`
+	// Accept resolves merge conflicts inside the addressed node: "mine"
+	// (a.k.a. "ours") or "theirs". See applyConflictAccept.
+	Accept *string `json:"accept,omitempty"`
 
 	// commit / rollback drive the staged-edit transaction. HIDDEN — kept
 	// out of the schema on purpose; the rejection help reveals them when a
@@ -908,6 +913,9 @@ func (p *modernEditArgs) ops() []string {
 	}
 	if p.Return != nil {
 		out = append(out, "return")
+	}
+	if p.Accept != nil {
+		out = append(out, "accept")
 	}
 	return out
 }
@@ -1098,6 +1106,9 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		return nil, true, fmt.Errorf("no such file: %s", rn.file)
 	}
 
+	if p.Accept != nil {
+		return s.applyConflictAccept(rn, *p.Accept, p.diagnosticOptions)
+	}
 	if p.Delete != nil {
 		if rn.wholeFile() {
 			return s.applyWholeFileDelete(rn.file, p.diagnosticOptions)

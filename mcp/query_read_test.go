@@ -156,3 +156,34 @@ func TestReading_BoundsNesting(t *testing.T) {
 		t.Errorf("a bounded reading should stay short, got %d lines:\n%s", n, got)
 	}
 }
+
+// `{m,n}` means two different things and the reading has to say WHICH. On an
+// edge it counts HOPS CROSSED — a transitive walk; everywhere else it is
+// regex repetition joined by the child axis. Describing containment on an
+// edge walk is the misreading this row exists to prevent, and it was doing
+// exactly that: `::in.call{1,3}` read as "each repeat a DIRECT child of the
+// last", which is the opposite of what it does.
+func TestReading_DistinguishesEdgeHopsFromContainment(t *testing.T) {
+	hops := readingOf(t, "#'main.go#Server.Start'::in.call{1,3} > *")
+	if !strings.Contains(hops, "HOPS crossed") {
+		t.Errorf("an edge repetition should read as hops:\n%s", hops)
+	}
+	if strings.Contains(hops, "DIRECT child of the last") {
+		t.Errorf("and must not describe containment:\n%s", hops)
+	}
+
+	nest := readingOf(t, "func{2}")
+	if !strings.Contains(nest, "DIRECT child of the last") {
+		t.Errorf("a tag repetition is still child-joined:\n%s", nest)
+	}
+	if strings.Contains(nest, "HOPS") {
+		t.Errorf("and is not a walk:\n%s", nest)
+	}
+	// An exact count reads as one, not as "2 to 2".
+	if !strings.Contains(nest, "exactly 2") {
+		t.Errorf("{2} should read as an exact count:\n%s", nest)
+	}
+	if strings.Contains(nest, "2 to 2") {
+		t.Errorf("and not as a degenerate range:\n%s", nest)
+	}
+}

@@ -89,12 +89,25 @@ func describeElem(el *selElem, depth int) []readRow {
 		rows = append(rows, describeCompound(el.comp, depth)...)
 	}
 	if el.min != 1 || el.max != 1 {
-		var m string
-		if el.max < 0 {
-			m = fmt.Sprintf("repeated %d or more times, each repeat a DIRECT child of the last", el.min)
-		} else {
-			m = fmt.Sprintf("repeated %d to %d times, each repeat a DIRECT child of the last", el.min, el.max)
+		// {m,n} means two different things and the reading has to say WHICH.
+		// On an edge it counts HOPS CROSSED — a transitive walk. Everywhere
+		// else it is regex repetition joined by the child axis. Same syntax,
+		// opposite reading, and describing containment on an edge walk is the
+		// misreading this row exists to prevent.
+		unit, tail := "times, each repeat a DIRECT child of the last", ""
+		if el.comp != nil && el.comp.isRef {
+			unit, tail = "edge HOPS crossed", " — a transitive walk, not containment"
 		}
+		var count string
+		switch {
+		case el.max < 0:
+			count = fmt.Sprintf("%d or more", el.min)
+		case el.min == el.max:
+			count = fmt.Sprintf("exactly %d", el.min)
+		default:
+			count = fmt.Sprintf("%d to %d", el.min, el.max)
+		}
+		m := fmt.Sprintf("%s %s%s", count, unit, tail)
 		rows = append(rows, readRow{Clause: repClause(el), Means: m, Depth: depth})
 	}
 	return rows

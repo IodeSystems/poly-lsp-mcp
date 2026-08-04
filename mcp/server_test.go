@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -200,9 +201,9 @@ func TestInitializeReturnsProtocolVersionAndServerInfo(t *testing.T) {
 	if got.Capabilities.Tools == nil {
 		t.Error("tools capability missing")
 	}
-	if got.Capabilities.Resources == nil {
-		t.Error("resources capability missing")
-	}
+	// `resources` is surface-dependent (the modern surface serves none), so it
+	// is asserted in TestResourcesCapabilityMatchesWhatIsServed rather than
+	// here, where the subject is the protocol version and server identity.
 	if got.ServerInfo.Name != "poly-lsp-mcp" {
 		t.Errorf("serverInfo.name = %q, want poly-lsp-mcp", got.ServerInfo.Name)
 	}
@@ -2466,6 +2467,10 @@ func TestNodeRefactorRenameIncludeCommentsDedupesWithDeclaredSites(t *testing.T)
 func TestInitializeAdvertisesResourcesCapability(t *testing.T) {
 	s := startSession(t, "")
 	defer s.close()
+	// The surface that HAS resources. The modern one ships none on purpose and
+	// must not claim the capability — see
+	// TestResourcesCapabilityMatchesWhatIsServed.
+	s.srv.SetLegacyTools(true)
 	resp := s.request("initialize", map[string]any{})
 	var got struct {
 		Capabilities map[string]any `json:"capabilities"`
@@ -2863,5 +2868,62 @@ func TestUndeclaredArgsAreNotAlsoInTheSchema(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A description that names a tool this server does not have sends the model
+// after something that cannot be called. The bindings resource advertised a
+// `list_bindings` tool that exists on neither surface.
+func TestResourceDescriptionsOnlyNameRealTools(t *testing.T) {
+	tools := map[string]bool{}
+	for _, reg := range []map[string]Tool{registerLegacyTools(), registerModernTools()} {
+		for name := range reg {
+			tools[name] = true
+		}
+	}
+	// Tool-shaped words appearing in prose: snake_case identifiers.
+	toolish := regexp.MustCompile(`\b[a-z]+(?:_[a-z]+)+\b`)
+	for uri, r := range registerResources() {
+		for _, word := range toolish.FindAllString(r.Description, -1) {
+			if strings.HasPrefix(word, "poly_lsp") || strings.Contains(r.Description, word+".yaml") {
+				continue
+			}
+			if !tools[word] {
+				t.Errorf("%s describes itself with %q, which is not a tool on any surface", uri, word)
+			}
+		}
+	}
+}
+
+// Claiming `resources` while serving none sent every client to resources/list
+// for an empty array — and some of them to a permanently empty Resources
+// panel. The modern surface ships no resources on purpose.
+func TestResourcesCapabilityMatchesWhatIsServed(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		s := startSession(t, "")
+		s.srv.SetLegacyTools(legacy)
+		resp := s.request("initialize", map[string]any{})
+		var got struct {
+			Capabilities map[string]json.RawMessage `json:"capabilities"`
+		}
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatal(err)
+		}
+		_, advertised := got.Capabilities["resources"]
+		if advertised != legacy {
+			t.Errorf("legacy=%v: resources capability advertised=%v, want %v",
+				legacy, advertised, legacy)
+		}
+		// And what it claims is what resources/list returns.
+		lst := s.request("resources/list", map[string]any{})
+		var res struct {
+			Resources []json.RawMessage `json:"resources"`
+		}
+		json.Unmarshal(lst.Result, &res)
+		if advertised != (len(res.Resources) > 0) {
+			t.Errorf("legacy=%v: advertised=%v but resources/list returned %d",
+				legacy, advertised, len(res.Resources))
+		}
+		s.close()
 	}
 }

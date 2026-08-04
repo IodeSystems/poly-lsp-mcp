@@ -47,9 +47,11 @@ func registerResources() map[string]Resource {
 		"poly-lsp-mcp://bindings": {
 			URI:  "poly-lsp-mcp://bindings",
 			Name: "bindings",
-			Description: "Catalog of every cross-language binding (Tier 2 + Tier 3). " +
-				"Same payload as the `list_bindings` tool but exposed as a resource so " +
-				"MCP clients can pin it into model context without a tool call.",
+			Description: "Catalog of every cross-language binding (Tier 2 declared + " +
+				"Tier 3 schema-anchored): the names poly-lsp-mcp treats as the SAME " +
+				"symbol across languages, and the sites each one covers. Exposed as a " +
+				"resource so MCP clients can pin it into model context without spending " +
+				"a tool call.",
 			MimeType: "application/json",
 			Read:     readBindings,
 		},

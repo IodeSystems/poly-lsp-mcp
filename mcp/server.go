@@ -689,18 +689,26 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		log.Print("mcp initialize: no workspace root configured; tools will return errors")
 	}
 
+	caps := map[string]any{
+		"tools": map[string]any{},
+		// logging is what lets this server SPEAK unprompted. Everything
+		// else here is request/response, so a conflict appearing under a
+		// running agent could only be reported the next time it happened
+		// to ask. A client that ignores notifications is unaffected —
+		// they carry no state and nothing waits on them.
+		"logging": map[string]any{},
+	}
+	// Advertise `resources` only when there ARE any. The modern surface ships
+	// none on purpose — the 3-tool surface exists to cut prompt-token cost —
+	// so claiming the capability sent every client to resources/list for an
+	// empty array, and some of them to a permanently empty Resources panel.
+	if len(s.resources) > 0 {
+		caps["resources"] = map[string]any{}
+	}
+
 	res := map[string]any{
 		"protocolVersion": protocolVersion,
-		"capabilities": map[string]any{
-			"tools":     map[string]any{},
-			"resources": map[string]any{},
-			// logging is what lets this server SPEAK unprompted. Everything
-			// else here is request/response, so a conflict appearing under a
-			// running agent could only be reported the next time it happened
-			// to ask. A client that ignores notifications is unaffected —
-			// they carry no state and nothing waits on them.
-			"logging": map[string]any{},
-		},
+		"capabilities":    caps,
 		"serverInfo": map[string]any{
 			"name":    "poly-lsp-mcp",
 			"version": "0.0.0",

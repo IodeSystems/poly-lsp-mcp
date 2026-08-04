@@ -116,6 +116,33 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+✅ **Daemon multi-root, resources, and the zero-result hints swept —
+2026-08-04.** Three more surfaces, two defects.
+  - **The `resources` capability was claimed unconditionally.** The modern
+    3-tool surface ships no resources on purpose — cutting prompt tokens is
+    why it exists — so every client called `resources/list` for an empty
+    array, and the ones with a Resources panel got a permanently empty one.
+    Advertised now only when something is served. The same pass found the
+    bindings resource describing itself as "the same payload as the
+    `list_bindings` tool", which exists on neither surface; a test now keeps
+    any resource description from naming an unregistered tool.
+  - **A case slip was scored as the FURTHEST miss.** `nameNeighbours` exists
+    to catch "a typo or a case slip" and handled the case slip worst of
+    anything: comparing case-sensitively, every differing letter costs an edit
+    AND a leading difference zeroes the prefix credit, so `onlyina` for
+    `OnlyInA` scored like an unrelated word and got no hint, while a
+    one-letter typo got a good one.
+  - **Clean, no defect**: daemon multi-root isolation (two roots with
+    identical relative paths and identical symbol names, no bleed, warm index
+    reused); out-of-band create/append/delete all picked up; an unparseable
+    file still yields its symbols through error-tolerant parse; all three
+    legacy resources read correctly.
+  - **Deliberate, left alone**: a single filter that empties gets NO
+    "which clause" hint. `hintDropLastAttr` requires something narrowing to
+    survive the drop, because relaxing `func[name=Zzz]` to `func` reports that
+    some unrelated func exists — "your filter filtered", not "your filter
+    emptied it". Silence is the honest answer with one clause to blame.
+
 ✅ **An argument the tool does not have is REFUSED — 2026-08-04.** Swept the
 legacy 9-tool surface; the defect it turned up was never legacy-only.
 `encoding/json` drops unknown fields, so a misspelled or wrong-surface argument

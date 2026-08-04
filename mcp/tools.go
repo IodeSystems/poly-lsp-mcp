@@ -720,7 +720,8 @@ func handleNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Content,
 		lineLimit = *a.LineLimit
 	}
 
-	out := buildReadPayload(content, a.File, startLine, lineLimit, lineLength, targetedSearchAdvice(a.File, false))
+	out := buildReadPayload(content, a.File, startLine, lineLimit, lineLength,
+		targetedSearchAdvice(a.File, false), fileOutline(s.languageForFile(abs), content))
 	return jsonContent(out), false, nil
 }
 
@@ -736,6 +737,94 @@ func targetedSearchAdvice(file string, modern bool) string {
 			fmt.Sprintf("path=%s ::grep('-E <regex>')", file))
 	}
 	return "use the search tool (pattern=<regex>) to jump straight to the code you need"
+}
+
+// outlineSkipClasses are the classes an outline must NOT count. arguments and
+// returns are signature detail, not content — they outnumber real declarations
+// in most files (8 and 6 against 4 funcs in embedded_graphql.go) and would make
+// the counts read as noise. module is the package clause: exactly one per file,
+// so it says nothing.
+var outlineSkipClasses = map[string]bool{"argument": true, "return": true, "module": true}
+
+// minOutlineSymbols is where an outline stops being worth its tokens. A long
+// file with one or two symbols is a data blob or a table; naming its two
+// declarations tells you nothing ::grep would not, so the advice falls back to
+// search alone.
+const minOutlineSymbols = 3
+
+// fileOutline is the class histogram of a file: "12 method · 4 func · 3 var".
+// Empty when the file has no useful structure.
+//
+// This is what a truncated read is usually FOR. The observed sequence was
+// node_read(tui.go) → lines 1-56 of 2694 → node_query(path=… func) →
+// node_query(path=… type): two calls to reconstruct what the first response
+// could have carried.
+//
+// It also removes the need to GUESS a tag, which was its own recurring miss —
+// `type[name=suggestion]` (it is a struct), `method[name=withCaret]` (it is a
+// func), `type struct` (tags are a union, not a chain). A histogram does not
+// advise; it states which tags this file actually has, so there is nothing left
+// to guess.
+//
+// The counts are deliberately over ALL symbols, nested included, because that
+// is what `path=<file> <tag>` returns — the selector the hint hands back. A
+// child-only count (`#'<file>' > *`) would disagree with it: Go methods nest
+// under their receiver type, so tui.go's would vanish from the tour while still
+// being most of the file. A hint whose numbers do not match the call it
+// suggests is the failure this whole line of work is about.
+func fileOutline(lang string, content []byte) string {
+	syms, err := symbols.FileSymbols(lang, content)
+	if err != nil {
+		return "" // no node model for this language — ::grep is the only door
+	}
+	counts := map[string]int{}
+	total := 0
+	for _, s := range syms {
+		if outlineSkipClasses[s.Class] {
+			continue
+		}
+		counts[s.Class]++
+		total++
+	}
+	if total < minOutlineSymbols {
+		return ""
+	}
+	classes := make([]string, 0, len(counts))
+	for c := range counts {
+		classes = append(classes, c)
+	}
+	// Biggest first — that is the shape of the file — and alphabetical within
+	// a tie so the string is stable across reads of the same content.
+	sort.Slice(classes, func(i, j int) bool {
+		if counts[classes[i]] != counts[classes[j]] {
+			return counts[classes[i]] > counts[classes[j]]
+		}
+		return classes[i] < classes[j]
+	})
+	parts := make([]string, 0, len(classes))
+	for _, c := range classes {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[c], c))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// outlineAdvice turns an outline into the "narrow by KIND" clause, naming the
+// file's own biggest class so the example is runnable as printed rather than a
+// template to fill in.
+func outlineAdvice(file, outline string) string {
+	if outline == "" {
+		return ""
+	}
+	first := outline
+	if i := strings.Index(first, " · "); i >= 0 {
+		first = first[:i]
+	}
+	tag := first
+	if i := strings.Index(tag, " "); i >= 0 {
+		tag = tag[i+1:]
+	}
+	return fmt.Sprintf("this file is %s — narrow by kind with node_query(selector: %q)",
+		outline, fmt.Sprintf("path=%s %s", file, tag))
 }
 
 // buildReadPayload builds the response map for the line-based read
@@ -767,7 +856,12 @@ func targetedSearchAdvice(file string, modern bool) string {
 // three-tool surface is advice for a tool that isn't there — so the only
 // actionable half left was "call again with startLine=N", i.e. exactly
 // the chunk-by-chunk paging the hint exists to prevent.
-func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLength int, targeted string) map[string]any {
+//
+// outline is the file's class histogram (see fileOutline), empty when the file
+// has no useful structure. It rides along as its own payload field as well as
+// in the hint prose: the hint is advice, which gets skimmed, while `outline` is
+// an ANSWER — usually the one the read was really after.
+func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLength int, targeted, outline string) map[string]any {
 	lines := splitNodeReadLines(content)
 	totalLines := len(lines)
 	totalChars := len(content)
@@ -907,11 +1001,17 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 			"or %s. "+
 			"To keep paging anyway, call again with startLine=%d.",
 			startLine, endLine, totalLines, defaultReadCharBudget, morePages, totalLines, targeted, endLine+1)
+		if a := outlineAdvice(file, outline); a != "" {
+			fmt.Fprintf(&hint, " Or %s.", a)
+		}
 	case "lineLimit":
 		fmt.Fprintf(&hint, "Returned lines %d-%d of %d (lineLimit=%d; ~%d more read(s) to finish). "+
 			"Re-read with lineLimit=%d for the whole file in one call, or %s, "+
 			"or call again with startLine=%d to continue.",
 			startLine, endLine, totalLines, lineLimit, morePages, totalLines, targeted, endLine+1)
+		if a := outlineAdvice(file, outline); a != "" {
+			fmt.Fprintf(&hint, " Or %s.", a)
+		}
 	case "lineLength":
 		// Capitalize the standalone lineNote sentence.
 		fmt.Fprintf(&hint, "%s%s", strings.ToUpper(lineNote[:1]), lineNote[1:])
@@ -923,6 +1023,13 @@ func buildReadPayload(content []byte, file string, startLine, lineLimit, lineLen
 	out["truncated"] = true
 	out["truncatedReason"] = reason
 	out["hint"] = hint.String()
+	// Its own field as well as the prose: the hint is ADVICE, which gets
+	// skimmed, while this is an answer. Omitted rather than empty so a caller
+	// can test presence — an empty string would read as "no structure found",
+	// which is not the same as "not computed for this language".
+	if outline != "" {
+		out["outline"] = outline
+	}
 	out["totalLines"] = totalLines
 	out["totalChars"] = totalChars
 	out["maxLineLength"] = maxLineLen

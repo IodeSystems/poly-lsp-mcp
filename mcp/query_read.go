@@ -467,7 +467,28 @@ func subjectLine(list selectorList) string {
 		return ""
 	}
 	return fmt.Sprintf("returns the `%s` nodes — NOT the `%s` nodes, which only constrain them",
-		baseClause(subj), baseClause(first))
+		distinctClause(subj, first, "last"), distinctClause(first, subj, "first"))
+}
+
+// distinctClause renders c so it cannot be confused with other. baseClause
+// drops attributes, so two filtered wildcards both render `*` and the subject
+// line degenerated to "returns the `*` nodes — NOT the `*` nodes" — a sentence
+// that names nothing, printed on exactly the cross-file selectors where
+// knowing which end comes back matters most. Add the attributes back when the
+// bases collide, and if they still match, fall back to position.
+func distinctClause(c, other *selCompound, pos string) string {
+	base := baseClause(c)
+	if base != baseClause(other) {
+		return base
+	}
+	full := base
+	for _, a := range c.attrs {
+		full += renderAttr(a)
+	}
+	if full != base {
+		return full
+	}
+	return base + " (" + pos + ")"
 }
 
 // ------------------------------------------------------------ render

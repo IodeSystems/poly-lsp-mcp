@@ -100,6 +100,8 @@ type queryResult struct {
 		From   []string `json:"from"`
 		To     []string `json:"to"`
 		Conf   string   `json:"conf"`
+		Via    string   `json:"via"`
+		Hop    int      `json:"hop"`
 		Domain string   `json:"domain"`
 	} `json:"matches"`
 }

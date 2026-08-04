@@ -264,6 +264,31 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 			m["in"] = n.parent.addr()
 			m["text"] = n.genText
 		}
+		// A row the walk CROSSED an edge to reach keeps the edge's facts. An
+		// uncrossed `::out.call` row already carries site and conf; `> *`
+		// used to drop both, so a caller could not tell a resolved edge from
+		// an unsettled guess in the very results the walk was for.
+		if via, ok := e.reachedVia[n]; ok && n.class != "ref" {
+			m["via"] = via.addr()
+			m["conf"] = via.refConf
+		}
+		// How far away it is. Only meaningful for a repeated walk — a single
+		// hop is trivially 1 and saying so is noise.
+		//
+		// firstHop is keyed on the REF nodes the walk stepped through, so a
+		// crossed row (`> *`, the common shape) is not in it directly: its
+		// distance is the distance of the edge that reached it.
+		if e.maxHopReached > 1 {
+			hop, ok := e.firstHop[n]
+			if !ok {
+				if via, viaOK := e.reachedVia[n]; viaOK {
+					hop, ok = e.firstHop[via]
+				}
+			}
+			if ok {
+				m["hop"] = hop
+			}
+		}
 		matches = append(matches, m)
 	}
 
@@ -317,6 +342,18 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		// one thing to write instead. Silent unless a probe finds a
 		// concrete alternative (see zeroResultHint).
 		if h := e.zeroResultHint(list); h != "" {
+			payload["hint"] = h
+		}
+	}
+	// A clause that could never contribute, at ANY match count. This one
+	// must not be gated on total == 0 like zeroResultHint: its worst case is
+	// precisely the NON-empty one, where a vanishing {0,…} clause leaves the
+	// prefix answering alone and the result looks like a considered answer to
+	// the whole selector.
+	if h := inertContainmentNote(list); h != "" {
+		if prev, ok := payload["hint"].(string); ok && prev != "" {
+			payload["hint"] = h + ". " + prev
+		} else {
 			payload["hint"] = h
 		}
 	}
@@ -783,7 +820,8 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			lineLimit = *p.LineLimit
 		}
 		return jsonContent(buildReadPayload(content, rn.file, startLine, lineLimit, 0,
-			targetedSearchAdvice(rn.file, true))), false, nil
+			targetedSearchAdvice(rn.file, true),
+			fileOutline(s.languageForFile(abs), content))), false, nil
 	}
 
 	// An addressed-node read is ALWAYS whole.

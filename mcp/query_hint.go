@@ -568,3 +568,121 @@ func renderAttr(a selAttr) string {
 	}
 	return "[" + axis + selOpSpelling(a.op) + a.value + "]"
 }
+
+// ------------------------------------------- inert containment
+
+// inertContainmentNote names a clause that CANNOT contribute, and says what
+// the caller probably meant instead.
+//
+// The shape: two elements joined by CONTAINMENT, each pinned to a different
+// exact path. Containment is the file tree — project > dir > file > symbols —
+// so nothing at path B is ever inside something at path A unless A is a
+// directory above B. `path=a.go path=b.go` is empty for ANY depth and any
+// {m,n}; no tuning makes it work.
+//
+// It is worth its own check because the failure is not always visible as
+// emptiness. `path=a.go *{0,3} path=b.go` returns a confident 129: a bare
+// attribute after a space attaches to the element before it (deliberate — see
+// parseComplex), so that reads as `*[path=b.go]{0,3}`, and {0,…} lets the
+// whole clause VANISH. The prefix alone answers, and nothing says the rest of
+// the selector did no work. Naming it is the difference between a wrong answer
+// and a corrected one.
+//
+// Reported for any result count, unlike zeroResultHint — a non-empty wrong
+// answer is the more dangerous of the two.
+func inertContainmentNote(list selectorList) string {
+	for _, cx := range list {
+		// One compound, two different exact paths. This is what plain
+		// `path=a.go path=b.go` actually parses to — the bare attribute after
+		// a space attaches to the element before it rather than starting a
+		// new one — so it is not a containment pair at all but a single node
+		// required to live in two files at once.
+		for i := range cx.elems {
+			if a, b, ok := conflictingPaths(cx.elems[i].comp); ok {
+				return fmt.Sprintf(
+					"`path=%s` and `path=%s` are attached to the SAME element, so this asks for one "+
+						"node living in two files — always empty. A bare `path=` after a space FILTERS "+
+						"the element before it instead of descending. To link two files you want the "+
+						"reference GRAPH: path=%s ::out.call{1,3} > path=%s",
+					a, b, a, b)
+			}
+		}
+		for i := 1; i < len(cx.elems); i++ {
+			el, prev := &cx.elems[i], &cx.elems[i-1]
+			if el.comb != selDescendant && el.comb != selChild {
+				continue // only containment; edges legitimately cross files
+			}
+			outer, ok := exactPath(prev.comp)
+			if !ok {
+				continue
+			}
+			inner, ok := exactPath(el.comp)
+			if !ok || pathCanContain(outer, inner) {
+				continue
+			}
+			clause := baseClause(el.comp) + "[path=" + inner + "]"
+			why := fmt.Sprintf(
+				"`%s` can never match: it is joined to `path=%s` by CONTAINMENT, "+
+					"which is the file tree — nothing at %s is inside %s, at any depth or {m,n}",
+				clause, outer, inner, outer)
+			if el.min == 0 {
+				why += ". Every result here came from the SKIP path ({0,…} lets the clause vanish), " +
+					"so the answer is just the part before it"
+			}
+			return why + fmt.Sprintf(
+				". To link two files you want the reference GRAPH, not containment: "+
+					"path=%s ::out.call{1,3} > path=%s (::in for the reverse, drop .call for every edge kind)",
+				outer, inner)
+		}
+	}
+	return ""
+}
+
+// exactPath returns the compound's `path=` value when it is pinned to one
+// literal path. Patterns (^= *= ~=) are left alone: they can match across
+// directories, so no static claim about containment is safe.
+func exactPath(c *selCompound) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	for _, a := range c.attrs {
+		if a.axis == attrPath && a.op == selExact {
+			return a.value, true
+		}
+	}
+	return "", false
+}
+
+// pathCanContain reports whether something at path outer could contain
+// something at path inner. Equal paths qualify: a file and its symbols share
+// the file's path, so `path=a.go path=a.go` is satisfiable and must not be
+// reported. Otherwise outer has to be a directory above inner.
+func pathCanContain(outer, inner string) bool {
+	return outer == inner || strings.HasPrefix(inner, strings.TrimSuffix(outer, "/")+"/")
+}
+
+// conflictingPaths returns two exact `path=` values on the same compound when
+// they cannot both hold. A node has one path, so two different literals is a
+// contradiction — unless one is a directory above the other, which never
+// happens on a single node either (a node's path is one string, so even
+// "mcp" and "mcp/tools.go" together are unsatisfiable). Patterns are skipped:
+// only exact literals support a static claim.
+func conflictingPaths(c *selCompound) (string, string, bool) {
+	if c == nil {
+		return "", "", false
+	}
+	seen := ""
+	for _, a := range c.attrs {
+		if a.axis != attrPath || a.op != selExact {
+			continue
+		}
+		if seen == "" {
+			seen = a.value
+			continue
+		}
+		if seen != a.value {
+			return seen, a.value, true
+		}
+	}
+	return "", "", false
+}

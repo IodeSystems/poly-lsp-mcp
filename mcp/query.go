@@ -312,6 +312,20 @@ type engine struct {
 	transUnsettled   int
 	hopCounted       map[*treeNode]bool
 
+	// firstHop is the hop at which each node was FIRST reached by a
+	// transitive edge walk. The walk is a level-synchronous BFS, so
+	// first-reached is fewest-hops — no priority queue needed, the frontier
+	// already arrives in distance order. Kept so a result can say how far
+	// away it is instead of only THAT it is reachable: "reachable" without a
+	// distance cannot distinguish a direct call from a four-hop chain, which
+	// is most of what a caller wants to know from a {1,n} walk.
+	firstHop map[*treeNode]int
+
+	// reachedVia is the ref node a crossed far end came through, so a result
+	// produced by `::out.call > *` can still report the call site and the
+	// edge's confidence. See kids().
+	reachedVia map[*treeNode]*treeNode
+
 	// recursiveUnconfirmed records that a :recursive test hit a self-edge
 	// it could NOT confirm because no child LSP was reachable — so the
 	// answer is under-resolved (a real recursion may be missed, since a
@@ -453,6 +467,24 @@ const defaultBudgetMs = 10_000 // omitted-budget default: 10s wall clock
 // continues through a named gate ("::out.call > #'B'").
 func (e *engine) kids(n *treeNode) []*treeNode {
 	if n.class == "ref" {
+		// Crossing a ref is where the EDGE stops being visible: what comes
+		// back is a plain symbol, so `::out.call` (which reports the call
+		// site, the far end and a conf of lsp|lexical|unsettled) and
+		// `::out.call > *` (which reports none of it) answered the same
+		// question at very different levels of honesty. Remember the edge so
+		// the far end can still say how it was reached and how sure that is.
+		//
+		// FIRST edge wins, matching firstHop: under a repeated walk the
+		// earliest crossing is the shortest route, and a later one would
+		// relabel a near result with a distant edge.
+		if e.reachedVia == nil {
+			e.reachedVia = map[*treeNode]*treeNode{}
+		}
+		for _, f := range n.refFar {
+			if _, seen := e.reachedVia[f]; !seen {
+				e.reachedVia[f] = n
+			}
+		}
 		return n.refFar
 	}
 	if n.class == "file" && !n.loaded {
@@ -3373,12 +3405,21 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 			out[n] = true
 		}
 	}
+	// Pruning stays UNBOUNDED-ONLY on purpose. Deduping a bounded walk would
+	// redefine {m,n}: `::out.call{2,2}` means two edges CROSSED (the walk
+	// reading the tool documents), and a visited set turns it into "at
+	// DISTANCE two", dropping any node also reachable in one hop. Same
+	// syntax, quietly different answer — exactly the class of trap this pass
+	// is meant to remove, so the re-expansion cost stays.
 	var visited map[*treeNode]bool
 	if el.max < 0 {
 		visited = map[*treeNode]bool{}
 		for n := range frontier {
 			visited[n] = true
 		}
+	}
+	if trackHops {
+		e.noteFirstHop(1, frontier)
 	}
 	for count := 2; (el.max < 0 || count <= el.max) && len(frontier) > 0; count++ {
 		var next map[*treeNode]bool
@@ -3399,6 +3440,7 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 		}
 		if trackHops {
 			e.noteHop(count, next)
+			e.noteFirstHop(count, next)
 		}
 		if count >= el.min {
 			for n := range next {
@@ -3408,6 +3450,20 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 		frontier = next
 	}
 	return out
+}
+
+// noteFirstHop records the hop each node was first reached at. Because the
+// walk is a level-synchronous BFS with a visited set, the first record for a
+// node is its shortest distance, so this never needs updating downward.
+func (e *engine) noteFirstHop(hop int, nodes map[*treeNode]bool) {
+	if e.firstHop == nil {
+		e.firstHop = map[*treeNode]int{}
+	}
+	for n := range nodes {
+		if _, seen := e.firstHop[n]; !seen {
+			e.firstHop[n] = hop
+		}
+	}
 }
 
 // noteHop records one hop of a transitive edge walk: how deep it reached

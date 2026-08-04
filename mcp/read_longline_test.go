@@ -17,7 +17,7 @@ func TestReadPayloadBoundsPathologicalLongLine(t *testing.T) {
 	content := []byte("const x = \"" + huge + "\";\nconst y = 2;\n")
 
 	// Default browse: no lineLimit, no lineLength (the modern node_read path).
-	out := buildReadPayload(content, "big.js", 1, 0, 0, targetedSearchAdvice("big.js", true))
+	out := buildReadPayload(content, "big.js", 1, 0, 0, targetedSearchAdvice("big.js", true), "")
 
 	text, _ := out["text"].(string)
 	if len(text) > 64*1024 {
@@ -43,7 +43,7 @@ func TestReadPayloadBoundsPathologicalLongLine(t *testing.T) {
 func TestReadPayloadLegitLongLineNotClipped(t *testing.T) {
 	para := strings.Repeat("word ", 160) // 800 chars: a real wrapped paragraph
 	content := []byte("# Title\n\n" + para + "\n")
-	out := buildReadPayload(content, "README.md", 1, 0, 0, targetedSearchAdvice("README.md", true))
+	out := buildReadPayload(content, "README.md", 1, 0, 0, targetedSearchAdvice("README.md", true), "")
 
 	text, _ := out["text"].(string)
 	if !strings.Contains(text, para) {
@@ -58,7 +58,7 @@ func TestReadPayloadLegitLongLineNotClipped(t *testing.T) {
 // as before, no spurious truncation.
 func TestReadPayloadNormalFileUnaffected(t *testing.T) {
 	content := []byte("package p\n\nfunc F() int { return 42 }\n")
-	out := buildReadPayload(content, "p.go", 1, 0, 0, targetedSearchAdvice("p.go", true))
+	out := buildReadPayload(content, "p.go", 1, 0, 0, targetedSearchAdvice("p.go", true), "")
 	if out["truncated"] == true {
 		t.Errorf("a small normal file must not be truncated: %v", out)
 	}

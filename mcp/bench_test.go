@@ -156,7 +156,7 @@ func BenchmarkQueryShapes(b *testing.B) {
 // nearly free. It short-circuits on a single Contains.
 func BenchmarkParseConflicts(b *testing.B) {
 	clean := []byte(strings.Repeat("func A() {}\n", 500))
-	conflicted := append(append([]byte("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n"), clean...))
+	conflicted := append([]byte("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n"), clean...)
 	for _, tc := range []struct {
 		name string
 		src  []byte

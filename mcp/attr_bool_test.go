@@ -223,3 +223,30 @@ func TestReadingShowsHowThePipeWasRead(t *testing.T) {
 		t.Errorf("an AND inside an OR should read as nested:\n%s", grouped)
 	}
 }
+
+// When both ends of a chain render the same bare tag, the subject line has to
+// separate them by their ATTRIBUTES — and when even those match, say which END
+// in prose. It briefly rendered "`* (last)`", a position smuggled inside a
+// code span, which reads as a selector nobody could write.
+func TestSubjectLineNeverInventsASelector(t *testing.T) {
+	for _, tc := range []struct{ sel, want, notWant string }{
+		// Distinguished by attributes.
+		{"*[path=a.go] ::out.call > *[path=b.go]", "`*[path=b.go]`", "(last)"},
+		// The subject has NO attributes and the constraint does — still fine.
+		{"path=a.go *", "`*`", "(last)"},
+		// Different tags need no help at all.
+		{"func > argument", "`argument`", "(last)"},
+	} {
+		list, err := parseModernSelector(tc.sel)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.sel, err)
+		}
+		got := subjectLine(list)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("%s: subject should name %s; got %q", tc.sel, tc.want, got)
+		}
+		if strings.Contains(got, tc.notWant) {
+			t.Errorf("%s: a position must not appear inside a code span; got %q", tc.sel, got)
+		}
+	}
+}

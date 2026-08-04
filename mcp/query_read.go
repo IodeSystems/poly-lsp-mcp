@@ -505,29 +505,33 @@ func subjectLine(list selectorList) string {
 	if subj == nil || first == nil || subj == first {
 		return ""
 	}
-	return fmt.Sprintf("returns the `%s` nodes — NOT the `%s` nodes, which only constrain them",
-		distinctClause(subj, first, "last"), distinctClause(first, subj, "first"))
+	sc, fc := baseClause(subj), baseClause(first)
+	if sc != fc {
+		return fmt.Sprintf("returns the `%s` nodes — NOT the `%s` nodes, which only constrain them", sc, fc)
+	}
+	// Same base on both ends — two filtered wildcards, say. Attributes
+	// usually separate them; when they do not, say WHICH END in prose rather
+	// than smuggling a position into a code span ("`* (last)`" read as a
+	// selector nobody could write).
+	sf, ff := fullClause(subj), fullClause(first)
+	if sf != ff {
+		return fmt.Sprintf("returns the `%s` nodes — NOT the `%s` nodes, which only constrain them", sf, ff)
+	}
+	return fmt.Sprintf("returns the LAST `%s` — NOT the first, which only constrains it", sc)
 }
 
-// distinctClause renders c so it cannot be confused with other. baseClause
-// drops attributes, so two filtered wildcards both render `*` and the subject
-// line degenerated to "returns the `*` nodes — NOT the `*` nodes" — a sentence
-// that names nothing, printed on exactly the cross-file selectors where
-// knowing which end comes back matters most. Add the attributes back when the
-// bases collide, and if they still match, fall back to position.
-func distinctClause(c, other *selCompound, pos string) string {
-	base := baseClause(c)
-	if base != baseClause(other) {
-		return base
-	}
-	full := base
+// fullClause is baseClause plus the compound's attributes — what separates
+// two ends that render the same bare tag. baseClause drops attributes, so two
+// filtered wildcards both render `*` and the subject line degenerated to
+// "returns the `*` nodes — NOT the `*` nodes": a sentence naming nothing, on
+// exactly the cross-file selectors where knowing which end returns matters
+// most.
+func fullClause(c *selCompound) string {
+	out := baseClause(c)
 	for _, a := range c.attrs {
-		full += renderAttr(a)
+		out += renderAttr(a)
 	}
-	if full != base {
-		return full
-	}
-	return base + " (" + pos + ")"
+	return out
 }
 
 // ------------------------------------------------------------ render

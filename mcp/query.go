@@ -1694,27 +1694,28 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 			// A PATH is the overwhelmingly common case here — measured across
 			// real agent sessions, 25 of 39 distinct bad selectors were a bare
 			// file path in tag position. The parser stops at the first '/' or
-			// '.', so the plain unknown-type error names only the first segment
-			// and sends the caller to `#terminal-view`, which fails again on
-			// the rest of the path. Read the whole path and quote it for them.
+			// '.', so an unknown-type error would name only the first segment
+			// and send the caller to `#terminal-view`, which fails again on the
+			// rest of the path. Read the whole path and take it as the id.
 			if path, end := p.scanPathTail(comp.class); path != "" {
-				// "<file>#<sym>" is a node ADDRESS — the exact string
-				// node_query prints in matches[].node, and the one node_read
-				// and node_edit both take. node_query refusing its own output
-				// was the odd one out, and the refusal was worse than useless:
-				// it advised `path=<file>#<sym>`, which matches nothing at all
-				// because no path equals that string. Accept the address; it
-				// means what `#'<file>#<sym>'` means.
-				if strings.ContainsRune(path, '#') {
-					p.i = end
-					comp.class = ""
-					comp.anyType = true
-					comp.implied = true
-					comp.addAttrExpr(&attrExpr{op: attrExprLeaf,
-						leaf: selAttr{op: selExact, value: path}})
-					break
-				}
-				return comp, pathIsAnIDErr(path)
+				// A bare path — "harness.go", "cmd/dun/tui.go" — or the
+				// "<file>#<sym>" ADDRESS node_query itself prints in
+				// matches[].node. Both mean `#'<path>'`, which the refusal
+				// used to spell out for the caller to retype: the error
+				// COMPUTED the corrected selector and then made them write it.
+				// Accepting the address alone left the bare path erroring one
+				// step short — measured live after that fix, 4 more refusals
+				// in a minute, all of them a path followed by a combinator
+				// (`harness.go > type[…]`, `cmd/dun/tui.go ::grep('…')`).
+				// The parse is not in doubt and the `:explain` reading RENDERS
+				// the id it became, so nothing is normalised silently.
+				p.i = end
+				comp.class = ""
+				comp.anyType = true
+				comp.implied = true
+				comp.addAttrExpr(&attrExpr{op: attrExprLeaf,
+					leaf: selAttr{op: selExact, value: path}})
+				break
 			}
 			return comp, unknownTypeErr(comp.class)
 		}
@@ -1838,14 +1839,12 @@ func (p *modSelParser) readID() (string, error) {
 	// half of the commonest mistake: the caller was told a path is an id, wrote
 	// #path, and hit a different wall. Quote it for them.
 	if path, end := p.scanPathTail(id); path != "" {
-		// `#<file>#<sym>` unquoted — the caller wrote the address they were
-		// handed and reached for the id sigil. It IS the id; take it rather
-		// than sending them to `path=`, which cannot match an address.
-		if strings.ContainsRune(path, '#') {
-			p.i = end
-			return path, nil
-		}
-		return "", pathIsAnIDErr(path)
+		// `#cmd/dun/tui.go` or `#<file>#<sym>` unquoted — the caller wrote a
+		// path (or the address they were handed) and reached for the id sigil,
+		// which is the right sigil. It IS the id; take it rather than sending
+		// them to `path=`, which cannot match an address at all.
+		p.i = end
+		return path, nil
 	}
 	return id, nil
 }

@@ -1452,28 +1452,19 @@ func TestSelectorCorpus_ErrorsNameTheFix(t *testing.T) {
 		selector string
 		want     []string // substrings the error must contain
 	}{{
-		name:     "bare path in tag position",
-		selector: "terminal-view/src/main/java/com/termux/view/TerminalView.java",
-		want:     []string{"is a PATH", "#'terminal-view/src/main/java/com/termux/view/TerminalView.java'"},
-	}, {
-		name:     "bare path with a pseudo-element after it",
-		selector: "app/src/main/java/Foo.java::grep('bar')",
-		want:     []string{"is a PATH", "#'app/src/main/java/Foo.java'"},
-	}, {
-		name:     "unquoted id containing a path — the follow-on mistake",
-		selector: "#termux-shared/src/main/java/Foo.java",
-		want:     []string{"is a PATH", "#'termux-shared/src/main/java/Foo.java'"},
-	}, {
-		name:     "a lone filename is still a path",
-		selector: "sum.mjs",
-		want:     []string{"is a PATH", "#'sum.mjs'"},
+		name:     "an ABSOLUTE path is still refused — addresses are relative",
+		selector: "/ws/terminal-view/src/main/java/com/termux/view/TerminalView.java",
+		want:     []string{"absolute PATH", "workspace-RELATIVE"},
 	}, {
 		name:     "misremembered pseudo-class",
 		selector: "func:arg:contains(x)",
 		want:     []string{"did you mean :arity"},
 	}}
-	// A "<file>#<sym>" ADDRESS is not in that list, and must not be: it is
-	// node_query's own output and node_read/node_edit both take it. See
+	// A workspace-RELATIVE path is no longer in that list, and must not be: the
+	// refusal computed the corrected selector and then made the caller retype
+	// it. It is now taken as the id it plainly is — see
+	// TestBarePathIsTakenAsTheIDItIs. The same goes for a "<file>#<sym>"
+	// ADDRESS, which is node_query's own output —
 	// TestNodeAddressIsAcceptedAsASelector.
 
 	for _, c := range cases {
@@ -1612,13 +1603,47 @@ func TestBareAttribute(t *testing.T) {
 	}
 }
 
-// The path error should teach the form that needs no quoting.
-func TestPathErrorTeachesBareAttribute(t *testing.T) {
+// A bare path scopes; it does not error.
+//
+// The refusal it replaces already KNEW the answer — it printed `#'<path>'` and
+// `path=<path>` and made the caller write one of them back. Measured after
+// node_query started accepting its own `<file>#<sym>` address, the bare path
+// kept erroring one step short: four more refusals inside a minute of live
+// session, every one a path followed by a combinator. Both spellings, quoted
+// and bare, now mean the same node.
+func TestBarePathIsTakenAsTheIDItIs(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()
-	msg := queryErr(t, s, map[string]any{"selector": "src/main/Foo.java"})
-	if !strings.Contains(msg, "path=src/main/Foo.java") {
-		t.Errorf("the corrected selector should lead with the bare attribute; got %s", msg)
+
+	// Baseline: the spelling the refusal used to demand.
+	want := query(t, s, map[string]any{"selector": "#'web/some_file.ts' func"})
+	if want.TotalMatches == 0 {
+		t.Fatal("fixture has no funcs under web/some_file.ts")
+	}
+
+	for _, sel := range []string{
+		"web/some_file.ts func",   // path then descendant
+		"web/some_file.ts > func", // path then a combinator — the live shape
+		"#web/some_file.ts func",  // the id sigil, unquoted
+	} {
+		t.Run(sel, func(t *testing.T) {
+			got := query(t, s, map[string]any{"selector": sel})
+			if got.TotalMatches != want.TotalMatches {
+				t.Errorf("%s matched %d, want %d (same as #'…')",
+					sel, got.TotalMatches, want.TotalMatches)
+			}
+		})
+	}
+
+	// A pseudo-element hangs off it like any other subject.
+	if r := s.callTool("node_query", map[string]any{
+		"selector": "web/some_file.ts::grep('function')"}); r.IsError {
+		t.Errorf("path + pseudo-element: %s", r.Content[0].Text)
+	}
+	// A bare word with no path shape is still an unknown TYPE, not an id —
+	// that error names the closed set, which is the useful answer there.
+	if msg := queryErr(t, s, map[string]any{"selector": "notatype"}); !strings.Contains(msg, "no node type") {
+		t.Errorf("a bare word should still be read as a type; got %s", msg)
 	}
 }
 

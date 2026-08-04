@@ -553,6 +553,19 @@ func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambig
 // and marks the query under-resolved, so :recursive degrades to "cannot
 // confirm", never to a silent false negative dressed as a real answer.
 func (e *engine) confirmSelfCall(n *treeNode, line, col int) bool {
+	// NOT short-circuited by workspace name-uniqueness, though it looks like
+	// it should be. `refineIn` grants an unambiguous edge refLexical
+	// certainty ("name is UNIQUE in the workspace — certain without an LSP")
+	// and that rung does NOT transfer here: uniqueness in the workspace says
+	// nothing about EXTERNAL declarations, and an unqualified-looking call to
+	// the same name can resolve outside it.
+	//
+	// Tried and reverted 2026-08-04. `func Write(w io.Writer, …)` calling
+	// `w.Write(body)` is the counterexample already quoted in this pseudo's
+	// own note, and it is the first thing the lexical rule reported as
+	// recursive. `refSite` records name/line/col/kind/pos/encl and no
+	// QUALIFIER, so there is no cheap way to tell `Write(x)` from `w.Write(x)`
+	// — see icebox.md for what it would take.
 	e.ensureLSPCap()
 	if e.lspLeft <= 0 || !e.s.lspAvailable(n.abs) {
 		e.probeBlocked() // :recursive degrades to false — not an answer a hint may use

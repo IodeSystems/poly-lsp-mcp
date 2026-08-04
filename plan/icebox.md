@@ -317,3 +317,24 @@ drifted to the host's built-in Edit + Bash. Why, filed as work:
   `icebox` already records as MEASURED UNUSED — but that makes an op
   undiscoverable, so it is a product decision about the surface, not a trim.
   Owner: USER.
+
+- **`:recursive` without a child LSP — the one place the precision ladder has
+  no bottom rung (tried and reverted 2026-08-04).** Everywhere else this tool
+  gives a labelled best-effort answer (`conf: lsp|lexical|unsettled`);
+  `:recursive` alone returns NOTHING and explains why, so `func:recursive` from
+  the `query` CLI reports none for a repo full of plainly recursive functions.
+  USER asked the obvious question: why no best-guess-plus-caveat?
+  **Because the lexical rung is unsound here, which is not obvious until you
+  try it.** `refineIn` grants an unambiguous edge certainty on the grounds that
+  the name is UNIQUE IN THE WORKSPACE — and that says nothing about EXTERNAL
+  declarations. Implemented as `len(declsOf(leaf)) == 1 → recursive`, the very
+  first thing it reported was `func Write(w io.Writer, …)` calling
+  `w.Write(body)` — io.Writer's, not itself, and the exact counterexample this
+  pseudo's own note already quotes.
+  **What it would take**: `refSite` records name/line/col/kind/pos/encl and no
+  QUALIFIER, so nothing distinguishes `Write(x)` from `w.Write(x)`. Add a
+  qualified/receiver flag in the extractor (per language), then an UNQUALIFIED
+  call to a workspace-unique name inside that name's own body is lexically
+  certain and the rung works. Worth doing when the extractor is open for other
+  reasons; not worth opening it for this alone, since the MCP surface (with
+  gopls) answers correctly today — 18 matches on this repo, no false Write.

@@ -116,6 +116,26 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+✅ **Tier-3 schema auto-bindings swept — 2026-08-04.** Checked out end to end:
+proto, openapi and jsonschema all extract entities; sites land on the right
+lines (`openapi.yaml:8` for `UserProfile:`, `model.go:15` for `type Invoice`);
+the bindings CROSS, so a Go struct's `::in` reaches the proto message that
+declares it, from either language.
+  - **The defect: a schema that anchored NOTHING was silent** — the Tier-2
+    binding failure in its Tier-3 twin, and it needed the same fix. A wrong
+    path, a misspelled dialect, or a file the dialect cannot read produces no
+    anchors, which is exactly what declaring no schemas produces. All three
+    already had excellent stderr diagnostics; stderr does not reach the model.
+    Now on the two routes built for bindings (initialize health block +
+    `notifications/message`), quiet when the schema works.
+  - **Noted, not a defect**: the schema anchor is a hub — Go and TS each link
+    to the proto message, not to each other, so Go↔TS is two hops. The proto
+    declaration is reachable as an `::in` edge and by its `@line` address, but
+    NOT by `#Name`, because a file with no tree-sitter grammar contributes
+    binding SITES and no symbols. `#UserProfile` therefore answers with the Go
+    and TS declarations and omits the proto one that gives them their shared
+    identity. Worth revisiting if a session shows an agent tripping on it.
+
 ✅ **Conflicts swept against a REAL merge — 2026-08-04.** The plan had these
 recorded as never exercised in the wild; a genuine `git merge` conflict now
 runs the whole cycle. Working: chimera withholding, `::conflict` with

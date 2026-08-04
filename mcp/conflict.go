@@ -608,7 +608,13 @@ func lineDiff(mine, theirs []string) string {
 const maxNamedConflictFiles = 3
 
 // conflictWarning reports that returned rows come from files with unresolved
-// conflicts, and names any row that STRADDLES a marker.
+// conflicts.
+//
+// It no longer names straddling rows: dropConflictChimeras removes them
+// before this runs, and the withheld-count note explains that separately.
+// What is left to warn about is subtler and still real — a declaration that
+// merely CONTAINS a conflict is listed, is genuine, and has a different body
+// depending on the side.
 //
 // Scoped to the files actually in the result rather than the workspace: it
 // costs one read per distinct file in the page (bounded by limit), the scan
@@ -623,7 +629,6 @@ const maxNamedConflictFiles = 3
 func (s *Server) conflictWarning(rows []*treeNode) string {
 	seen := map[string][]conflictRegion{}
 	var files []string
-	var chimeras []string
 	for _, n := range rows {
 		if n.file == "" || n.abs == "" {
 			continue
@@ -641,13 +646,6 @@ func (s *Server) conflictWarning(rows []*treeNode) string {
 				files = append(files, n.file)
 			}
 		}
-		if len(cs) == 0 || n.class == "conflict" || n.class == "mine" ||
-			n.class == "theirs" || n.class == "base" {
-			continue // the conflict views are ABOUT this; they are not victims of it
-		}
-		if straddlesAny(cs, n.at[0], n.at[1]) && len(chimeras) < maxNamedConflictFiles {
-			chimeras = append(chimeras, n.addr())
-		}
 	}
 	if len(files) == 0 {
 		return ""
@@ -662,9 +660,6 @@ func (s *Server) conflictWarning(rows []*treeNode) string {
 		"UNRESOLVED merge conflict in %s%s — tree-sitter recovers past the markers, so symbols from these files can combine BOTH sides. "+
 			"`#'%s'::conflict` shows the regions; node_edit accept:\"mine\"|\"theirs\" resolves them",
 		strings.Join(named, ", "), extra, files[0])
-	if len(chimeras) > 0 {
-		msg += fmt.Sprintf(". These rows STRADDLE a marker and exist on neither side: %s", strings.Join(chimeras, ", "))
-	}
 	return msg
 }
 
@@ -726,4 +721,81 @@ func (s *Server) noteConflictTransition(path string, content []byte) {
 		"logger": "poly-lsp-mcp/conflict",
 		"data":   msg,
 	})
+}
+
+// sideSymbols lists what a side DECLARES, from its whole-file
+// reconstruction.
+//
+// Names and classes only, deliberately no addresses. A symbol found in the
+// reconstruction has a span in RECONSTRUCTED coordinates, and the file on
+// disk still has markers in it — so an address like "f.go#Greet" minted here
+// would resolve against different bytes than the ones it was computed from.
+// That is the silent-wrong-address failure this codebase has spent a lot of
+// effort removing; a name is the most that can be said honestly.
+//
+// Returns nil when the reconstruction does not parse: symbols recovered from
+// broken source are the chimeras all over again.
+func (s *Server) sideSymbols(file string, content []byte, side string) []map[string]any {
+	lang := s.languageForFile(file)
+	rebuilt := sideContent(content, side)
+	if !symbols.ParsesCleanly(lang, rebuilt) {
+		return nil
+	}
+	syms, err := symbols.FileSymbols(lang, rebuilt)
+	if err != nil {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(syms))
+	for _, sym := range syms {
+		if outlineSkipClasses[sym.Class] {
+			continue // signature detail, not content — same rule as the outline
+		}
+		out = append(out, map[string]any{"sym": sym.Sym, "class": sym.Class})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// dropConflictChimeras removes rows whose span STRADDLES a conflict marker.
+//
+// Those declarations exist on neither side — tree-sitter stitched them out of
+// both — so listing them is not a partial answer, it is a wrong one. A symbol
+// wholly INSIDE a region is left alone: it is real on one side, and which one
+// is what ::mine/::theirs answer.
+//
+// Removing them also repairs the names of the real symbols around them.
+// Ordinal disambiguation counts what the index holds, so a phantom taking
+// `B[1]` pushed the genuine function to `B[2]`; with the phantom gone the
+// ordinals are recomputed over real declarations only.
+func (s *Server) dropConflictChimeras(rows []*treeNode) ([]*treeNode, int, string) {
+	byFile := map[string][]conflictRegion{}
+	out := rows[:0:0]
+	dropped := 0
+	var where string
+	for _, n := range rows {
+		if n.abs == "" || n.class == "conflict" || n.class == "mine" ||
+			n.class == "theirs" || n.class == "base" {
+			out = append(out, n)
+			continue
+		}
+		cs, ok := byFile[n.abs]
+		if !ok {
+			content, err := os.ReadFile(n.abs)
+			if err == nil {
+				cs = parseConflicts(content)
+			}
+			byFile[n.abs] = cs
+		}
+		if len(cs) > 0 && straddlesAny(cs, n.at[0], n.at[1]) {
+			dropped++
+			if where == "" {
+				where = n.file
+			}
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, dropped, where
 }

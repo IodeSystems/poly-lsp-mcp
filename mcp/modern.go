@@ -202,6 +202,10 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		end = total
 	}
 	paged := rows[offset:end]
+	// A declaration stitched out of BOTH sides of a conflict exists nowhere;
+	// listing it is a wrong answer, not a partial one. Dropped after paging
+	// so the removal is reported against what the caller would have seen.
+	paged, chimeras, chimeraFile := s.dropConflictChimeras(paged)
 
 	matches := make([]any, 0, len(paged))
 	for _, n := range paged {
@@ -288,6 +292,14 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 						}
 						if v.Note != "" {
 							m["note"] = v.Note
+						}
+						// What each side DECLARES. Names only — a span from a
+						// reconstruction does not address the file on disk.
+						if syms := s.sideSymbols(n.file, content, "mine"); syms != nil {
+							m["mineDeclares"] = syms
+						}
+						if syms := s.sideSymbols(n.file, content, "theirs"); syms != nil {
+							m["theirsDeclares"] = syms
 						}
 					}
 				}
@@ -384,6 +396,15 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 	// the rows that carry the risk. Placed ahead of the clause notes: a
 	// selector critique is advice, this is "what you are holding may not be
 	// real".
+	if chimeras > 0 {
+		// Self-sufficient: when every row is withheld this is the ONLY note,
+		// so it has to name the file and the way out on its own.
+		payload["note"] = fmt.Sprintf(
+			"%d row(s) WITHHELD from %s: their spans straddle an UNRESOLVED merge conflict, so they are "+
+				"declarations stitched from both sides that exist on neither. `#'%s'::conflict` shows the regions, "+
+				"`::mine` / `::theirs` what each side really declares; node_edit accept:\"mine\"|\"theirs\" resolves them",
+			chimeras, chimeraFile, chimeraFile)
+	}
 	if w := s.conflictWarning(paged); w != "" {
 		if prev, ok := payload["note"].(string); ok && prev != "" {
 			payload["note"] = w + ". " + prev

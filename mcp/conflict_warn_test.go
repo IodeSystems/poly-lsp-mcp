@@ -25,9 +25,16 @@ func TestQueryWarnsWhenResultsComeFromAConflictedFile(t *testing.T) {
 			t.Errorf("the note should name the problem and the way out (%q missing): %s", want, q.Note)
 		}
 	}
-	// The dangerous rows are named, not just the file.
-	if !strings.Contains(q.Note, "STRADDLE") || !strings.Contains(q.Note, "m.go#B[1]") {
-		t.Errorf("rows that exist on neither side must be named: %s", q.Note)
+	// Rows that exist on neither side are WITHHELD rather than named — see
+	// TestChimerasAreWithheldFromQueryResults — so the note accounts for the
+	// removal instead of listing phantoms.
+	if !strings.Contains(q.Note, "WITHHELD") {
+		t.Errorf("the removal must be accounted for: %s", q.Note)
+	}
+	for _, m := range q.Matches {
+		if strings.Contains(m.Node, "B[1]") {
+			t.Errorf("a phantom must not be listed at all: %s", m.Node)
+		}
 	}
 }
 

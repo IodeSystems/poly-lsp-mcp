@@ -76,6 +76,7 @@ const (
 // json / markdown / unregistered) — callers handle those with a single
 // whole-file entry.
 func FileSymbols(language string, content []byte) ([]Symbol, error) {
+	typeTbl := typeTable(language)
 	// XML has no vendored grammar (and the html grammar mis-parses Android
 	// XML: dotted tag names split, entities in strings.xml error out), so it
 	// gets a purpose-built encoding/xml walk instead of a whole-file fallback.
@@ -109,9 +110,14 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 		var gather func(n *sitter.Node)
 		gather = func(n *sitter.Node) {
 			cnt := int(n.NamedChildCount())
+			// Hoisted: nodeType(typeTbl, Node) crosses cgo and allocates a fresh Go
+			// string EVERY call (_Cfunc_GoString was 38.7% of this walk's
+			// allocations). The parent's type is loop-invariant, so calling
+			// it per child paid that cost once per SIBLING for no reason.
+			parentType := nodeType(typeTbl, n)
 			for i := 0; i < cnt; i++ {
 				c := n.NamedChild(i)
-				switch classify(language, c.Type(), n.Type()) {
+				switch classify(language, nodeType(typeTbl, c), parentType) {
 				case roleSymbol:
 					kids = append(kids, c)
 				case roleContainer:
@@ -390,13 +396,14 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 // case, split into one node per element); TS/Python carry a single
 // return_type (unwrapped from TS's `: T` type_annotation).
 func returnTypeNodes(lang string, node *sitter.Node, content []byte) []*sitter.Node {
+	typeTbl := typeTable(lang)
 	switch lang {
 	case "go":
 		res := node.ChildByFieldName("result")
 		if res == nil {
 			return nil
 		}
-		if res.Type() != "parameter_list" {
+		if nodeType(typeTbl, res) != "parameter_list" {
 			return []*sitter.Node{res}
 		}
 		var out []*sitter.Node
@@ -417,7 +424,7 @@ func returnTypeNodes(lang string, node *sitter.Node, content []byte) []*sitter.N
 		}
 		// The field is a `type_annotation` (": T"); the type itself is
 		// its last named child.
-		if rt.Type() == "type_annotation" && rt.NamedChildCount() > 0 {
+		if nodeType(typeTbl, rt) == "type_annotation" && rt.NamedChildCount() > 0 {
 			return []*sitter.Node{rt.NamedChild(int(rt.NamedChildCount()) - 1)}
 		}
 		return []*sitter.Node{rt}
@@ -481,6 +488,26 @@ func returnTypeNodes(lang string, node *sitter.Node, content []byte) []*sitter.N
 // collapsing internal runs of whitespace so a multi-line signature still
 // yields one clean leaf.
 func collapseType(s string) string {
+	// Fast path: a type string almost never HAS runs of whitespace to
+	// collapse — `int`, `string`, `error`, `*Server` — and Fields+Join
+	// allocated a slice and a new string for every one of them regardless
+	// (5.5% of this walk's allocations, in two of the top-ten sites).
+	// Scan first; only rebuild when there is something to fix.
+	needs := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\t' || c == '\n' || c == '\r' {
+			needs = true
+			break
+		}
+		if c == ' ' && (i == 0 || i == len(s)-1 || s[i+1] == ' ') {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return s
+	}
 	return strings.Join(strings.Fields(s), " ")
 }
 
@@ -2392,7 +2419,8 @@ func classifySQL(t, parent string) symRole {
 // children worth recursing into. An empty class means DECLINE: the node
 // is not a symbol after all and is dropped along with its subtree.
 func refinedClass(lang string, node *sitter.Node, parentClass string, content []byte) (class string, branch bool) {
-	t := node.Type()
+	typeTbl := typeTable(lang)
+	t := nodeType(typeTbl, node)
 	switch lang {
 	case "go":
 		switch t {
@@ -2414,7 +2442,7 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 			return "method", false
 		case "type_spec", "type_alias":
 			if u := node.ChildByFieldName("type"); u != nil {
-				switch u.Type() {
+				switch nodeType(typeTbl, u) {
 				case "struct_type":
 					return "struct", true
 				case "interface_type":
@@ -2501,7 +2529,7 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 		case "public_field_definition", "property_signature":
 			return "field", false
 		case "variable_declarator":
-			if p := node.Parent(); p != nil && p.Type() == "lexical_declaration" {
+			if p := node.Parent(); p != nil && nodeType(typeTbl, p) == "lexical_declaration" {
 				if c := p.Child(0); c != nil && c.Content(content) == "const" {
 					return "const", false
 				}
@@ -2528,7 +2556,7 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 			// unpacking `a, b = f()`, an attribute or subscript target —
 			// is DECLINED rather than given a made-up segment.
 			left := node.ChildByFieldName("left")
-			if left == nil || left.Type() != "identifier" {
+			if left == nil || nodeType(typeTbl, left) != "identifier" {
 				return "", false
 			}
 			if parentClass == "class" {
@@ -2580,7 +2608,8 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 // identifier node whose range answers node_references / rename. Empty
 // name marks an anonymous member (rendered "[n]").
 func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *sitter.Node) {
-	t := node.Type()
+	typeTbl := typeTable(lang)
+	t := nodeType(typeTbl, node)
 
 	// Go import: alias if present, else the path's last segment.
 	if lang == "go" && t == "import_spec" {
@@ -2597,7 +2626,7 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 	// import spelling — the last meaningful path segment — so an ambient
 	// module answers to the same name an `import` of it would.
 	if lang == "typescript" && (t == "module" || t == "internal_module") {
-		if n := node.ChildByFieldName("name"); n != nil && n.Type() == "string" {
+		if n := node.ChildByFieldName("name"); n != nil && nodeType(typeTbl, n) == "string" {
 			return importBase(n.Content(content)), n
 		}
 	}
@@ -2729,23 +2758,24 @@ var goVersionSeg = regexp.MustCompile(`^v\d+$`)
 // whose owner is the qualified name's scope (Widget::area lands at
 // Widget.area even though the AST parents it to the file).
 func parentOverride(lang string, node *sitter.Node, content []byte) string {
-	if lang == "go" && node.Type() == "method_declaration" {
+	typeTbl := typeTable(lang)
+	if lang == "go" && nodeType(typeTbl, node) == "method_declaration" {
 		return goReceiverType(node, content)
 	}
 	if lang == "c" || lang == "cpp" {
-		if name := cInnermostDeclarator(node); name != nil && name.Type() == "qualified_identifier" {
+		if name := cInnermostDeclarator(node); name != nil && nodeType(typeTbl, name) == "qualified_identifier" {
 			scope, _ := cQualifiedParts(name, content)
 			return scope
 		}
 	}
-	if lang == "sql" && node.Type() == "add_constraint" {
+	if lang == "sql" && nodeType(typeTbl, node) == "add_constraint" {
 		// A constraint belongs to the table it is added to, which the
 		// enclosing ALTER TABLE names — the same reasoning that files a
 		// Go method under its receiver. The table is frequently declared
 		// in an EARLIER migration, so the prefix often has no parent
 		// node in this file; that is fine, and matches how a Go method
 		// whose type lives in another file behaves.
-		if p := node.Parent(); p != nil && p.Type() == "alter_table" {
+		if p := node.Parent(); p != nil && nodeType(typeTbl, p) == "alter_table" {
 			if ref := firstNamedChildOfType(p, "object_reference"); ref != nil {
 				if leaf := lastNamedChildOfType(ref, "identifier"); leaf != nil {
 					return leaf.Content(content)
@@ -2754,7 +2784,7 @@ func parentOverride(lang string, node *sitter.Node, content []byte) string {
 		}
 		return ""
 	}
-	if lang == "kotlin" && node.Type() == "function_declaration" {
+	if lang == "kotlin" && nodeType(typeTbl, node) == "function_declaration" {
 		// An extension function is owned by its receiver type
 		// (String.shout), the Kotlin analogue of a Go receiver.
 		if recv, _, _ := kotlinFuncParts(node); recv != nil {

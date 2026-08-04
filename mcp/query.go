@@ -277,6 +277,9 @@ type engine struct {
 	// materialization).
 	// declsByName: every declared node per name — the far ends of
 	// outgoing edges.
+	// lineCache: a file's split lines, read once per query. See fileLines.
+	lineCache map[string][]string
+
 	// symCache: parsed symbols per abs file, shared by decl-site checks
 	// and enclosing-symbol lookups.
 	siteCache   map[string][]refSite
@@ -739,6 +742,38 @@ func countFileLines(abs string) int {
 	return len(splitNodeReadLines(content))
 }
 
+// fileLines returns a file's lines, read and split ONCE per query.
+//
+// nodeSource used to os.ReadFile per CALL, and its callers are per-NODE: a
+// bare `::grep` expands over every node in the workspace, so on a 51-file
+// fixture it read 2,402 times — about 47 reads of each file. Profiling put
+// 54% of that query in os.ReadFile, which made ::grep an order of magnitude
+// more expensive than any other selector shape while being one of the most
+// used in real sessions.
+//
+// Per-ENGINE, so it lives exactly as long as one query. That also buys
+// consistency for free: a file rewritten mid-query cannot make one node's
+// view disagree with another's.
+func (e *engine) fileLines(abs string) ([]string, bool) {
+	if v, ok := e.lineCache[abs]; ok {
+		return v, v != nil
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		if e.lineCache == nil {
+			e.lineCache = map[string][]string{}
+		}
+		e.lineCache[abs] = nil
+		return nil, false
+	}
+	lines := splitNodeReadLines(content)
+	if e.lineCache == nil {
+		e.lineCache = map[string][]string{}
+	}
+	e.lineCache[abs] = lines
+	return lines, true
+}
+
 // nodeSource returns the node's OWN source text and the 1-based file
 // line its first line sits on. Project/dir nodes have no source text.
 func (e *engine) nodeSource(n *treeNode) (lines []string, startLine int, ok bool) {
@@ -746,11 +781,10 @@ func (e *engine) nodeSource(n *treeNode) (lines []string, startLine int, ok bool
 	case "project", "dir":
 		return nil, 0, false
 	}
-	content, err := os.ReadFile(n.abs)
-	if err != nil {
+	all, ok := e.fileLines(n.abs)
+	if !ok {
 		return nil, 0, false
 	}
-	all := splitNodeReadLines(content)
 	if n.class == "file" {
 		return all, 1, true
 	}

@@ -69,6 +69,12 @@ type Server struct {
 	writeMu sync.Mutex
 	enc     *json.Encoder
 
+	// conflicted tracks which files currently hold merge markers, so the
+	// watcher announces the TRANSITION rather than every save of a file
+	// that was already conflicted. Keyed workspace-relative.
+	conflictMu sync.Mutex
+	conflicted map[string]bool
+
 	stateMu     sync.Mutex
 	gotInit     bool
 	initialized bool
@@ -659,6 +665,12 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		"capabilities": map[string]any{
 			"tools":     map[string]any{},
 			"resources": map[string]any{},
+			// logging is what lets this server SPEAK unprompted. Everything
+			// else here is request/response, so a conflict appearing under a
+			// running agent could only be reported the next time it happened
+			// to ask. A client that ignores notifications is unaffected —
+			// they carry no state and nothing waits on them.
+			"logging": map[string]any{},
 		},
 		"serverInfo": map[string]any{
 			"name":    "poly-lsp-mcp",
@@ -858,6 +870,20 @@ func (s *Server) reply(req *jsonrpc.Message, result any) {
 
 func (s *Server) replyError(req *jsonrpc.Message, code int, msg string) {
 	s.send(&jsonrpc.Message{JSONRPC: "2.0", ID: req.ID, Error: &jsonrpc.Error{Code: code, Message: msg}})
+}
+
+// sendNotification pushes an unsolicited JSON-RPC notification (no id, no
+// reply expected) to the client. Safe from any goroutine — send takes
+// writeMu, so a push cannot interleave with a tool response on stdout.
+//
+// Best effort by construction: a client that never registered a handler
+// simply drops it, and nothing here waits on or retries.
+func (s *Server) sendNotification(method string, params map[string]any) {
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return
+	}
+	s.send(&jsonrpc.Message{JSONRPC: "2.0", Method: method, Params: raw})
 }
 
 func (s *Server) send(m *jsonrpc.Message) {

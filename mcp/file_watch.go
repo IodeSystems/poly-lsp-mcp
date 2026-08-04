@@ -222,6 +222,11 @@ func (s *Server) watchRefreshFile(path string) {
 	// child LSP, or its answers go stale the moment anything but this
 	// tool writes the file — see notifyChildOfExternalChange.
 	s.notifyChildOfExternalChange(path, content)
+	// And tell the CLIENT when a merge conflict appears or clears. This is
+	// the one file event an agent cannot afford to learn about late: from
+	// the moment markers land, every symbol in the file may combine both
+	// sides, and an edit can corrupt the merge.
+	s.noteConflictTransition(path, content)
 }
 
 // watchedFile reports whether a path is worth watching at all: it feeds

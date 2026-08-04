@@ -677,3 +677,53 @@ func straddlesAny(cs []conflictRegion, from, to int) bool {
 	}
 	return false
 }
+
+// ------------------------------------------------- unsolicited notice
+
+// noteConflictTransition tells the client when a watched file GAINS or LOSES
+// conflict markers.
+//
+// On the transition only. A conflicted file is saved many times while it is
+// being resolved, and re-announcing on every write would train a reader to
+// ignore the one message that mattered — the first.
+//
+// Fired from the watcher goroutine; Server.send takes writeMu, so this cannot
+// interleave with a tool response on the same stdout.
+func (s *Server) noteConflictTransition(path string, content []byte) {
+	s.rootMu.RLock()
+	root := s.root
+	s.rootMu.RUnlock()
+	rel := relPath(path, root)
+	now := len(parseConflicts(content)) > 0
+
+	s.conflictMu.Lock()
+	if s.conflicted == nil {
+		s.conflicted = map[string]bool{}
+	}
+	before := s.conflicted[rel]
+	if before == now {
+		s.conflictMu.Unlock()
+		return
+	}
+	if now {
+		s.conflicted[rel] = true
+	} else {
+		delete(s.conflicted, rel)
+	}
+	s.conflictMu.Unlock()
+
+	msg := fmt.Sprintf("merge conflict RESOLVED in %s", rel)
+	level := "info"
+	if now {
+		level = "warning"
+		msg = fmt.Sprintf(
+			"UNRESOLVED merge conflict appeared in %s — symbols there may combine BOTH sides. "+
+				"`#'%s'::conflict` to see the regions; node_edit accept:\"mine\"|\"theirs\" to resolve",
+			rel, rel)
+	}
+	s.sendNotification("notifications/message", map[string]any{
+		"level":  level,
+		"logger": "poly-lsp-mcp/conflict",
+		"data":   msg,
+	})
+}

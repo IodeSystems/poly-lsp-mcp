@@ -116,27 +116,49 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
-⏸ **`|` in an attribute value: boolean OR, or regex alternation? — BLOCKED ON
-USER, 2026-08-04.** `656114e` made `|` and `&` boolean operators over whole
-attribute TESTS, with a quoted value as the escape for a literal pipe. The
-next session says that was the wrong trade:
-- **0** true boolean ORs (`name=a|name=b`) in 65 real selectors.
-- **18** uses of `|` inside ONE value (`func[name~=pending|queued|lifted]`) —
-  the form the change turned into an error.
-- Recovery from the migration message, 3 cases: two quoted correctly
-  (`[name~='a|b|c']`), one silently narrowed to `[name~=pending]` and dropped
-  three alternatives. That third is a wrong answer, quietly.
-The original defect was real — `func name~=A|name~=B` parsed as the regex
-`A|name~=B` and returned FEWER rows than one of its own alternatives — but the
-fix taxes the common case to enable one nobody uses.
-- **next**: USER decides. The narrower rule is to treat `|` as boolean ONLY
-  when the right-hand side parses as an attribute (`name=a|name=b` boolean,
-  `name~=a|b` regex). It was dismissed at design time as ambiguous; the
-  measurement says the ambiguity resolves cleanly and the current rule costs
-  more than it saves.
-- **risks**: a second grammar change in two days, on a surface agents are
-  already adapting to. Reverting to regex-default re-opens the original bug
-  unless the "right side is an attribute" test is exact.
+✅ **`|` is an operator only before another test — 2026-08-04 (USER).** The
+boolean attribute grammar shipped on 08-03 made every `|` an operator, with a
+quoted value as the escape. The next session's transcripts said that was the
+wrong trade: **0** true boolean ORs in 97 real selectors against **19** regex
+alternations inside one value (`func[name~=pending|queued|lifted|midTurn]`),
+which the change turned into an error — and one recovery silently narrowed to
+`[name~=pending]`, dropping three alternatives without a word.
+USER's call, and the framing that settled it: *"those are not attribute
+phrases … it's cheaper to parse more than it is to llm turn."* `|`/`&` now end
+a value only when what FOLLOWS is another attribute test or a group, so
+`[name=a|name=b]` is boolean and `[name~=a|b]` is one regex. Both readings
+survive; the tax is gone.
+- **and the reading RENDERS the decision** (USER's other half: "we render an
+  explain for a query right? … That should clear it up"). It had to stop
+  reading `c.attrs`, which holds only top-level conjuncts and therefore
+  rendered NOTHING for an OR — the one shape where seeing the parse matters.
+- **measured cost of the round trip**: ~6 errors and one wrong answer over two
+  days, against a feature with no users. The lesson is in the adoption slice:
+  ship, scan, keep or revert — the scan is what caught it.
+
+✅ **Budget semantics: charge the real work, scale with the corpus, stop on
+breadth — 2026-08-04 (USER).** Asking what the budget's semantics WERE turned
+up three defects at once.
+- **It did not bind.** `spend(1)` was charged per matched SITE while the
+  expensive work (`declsOf`/`LookupExisting`) is per NODE and was free, so a
+  wide query burned seconds while barely spending and the clock — sampled
+  every 256th spend — was never consulted. Measured against a 2.3s tree build:
+  a 1ms budget took 5.06s, a 1000ms budget 23.33s. Charging before the lookup:
+  1.91s and 3.43s.
+- **A fixed default measures the wrong thing.** Work scales with the corpus
+  AND the tree build comes out of the same budget and also grows, so a flat
+  10s shrinks in the only term that matters as a workspace grows. Now 10s
+  floor + 1s per 1,000 indexed names, clamped to the SAME 30s ceiling an
+  explicit budget already had.
+- **Nothing curtailed BREADTH, and the exploding shape is the one the planner
+  skips**: `planReorder` is sound only for pure-descendant chains and excludes
+  edges/`{m,n}`/`>`/`*`; `estCard` has no figure for an edge. The guard
+  therefore MEASURES rather than estimates — expand 64 tips, project the rate,
+  stop when it cannot fit — and names the tip count, since "the clock ran out"
+  is true of every blown query. 23.0s → 6.0s on `::in.call > *`.
+- **risks**: the guard needs 64 tips to sample, so it never applies to a small
+  workspace (its test builds a 400-symbol one rather than skipping). The
+  scaled default means a big corpus can now legitimately spend 30s.
 
 ✅ **Merge conflicts are first-class — 2026-08-03/04.** A conflicted file was
 the one input where the index was CONFIDENTLY wrong: tree-sitter recovers past
@@ -446,7 +468,20 @@ corrallm.
     **Method**: pair `tool_call`/`tool_result` out of `~/.dun/sessions/*.jsonl`
     and count both the ERRORS and the corrective NOTES, which is where a
     surface tells on itself. This is now the loop for any description or
-    grammar change: ship, scan the next sessions, keep or revert.
+    grammar change: ship, scan the next sessions, keep or revert. It has paid
+    for itself once already — the `|` revert above.
+  - ✅ **Recipe sweep — run what the description advertises (2026-08-04).**
+    A second instrument, aimed at the surface rather than at sessions: run
+    every recipe and read the OUTPUT, not the exit code. Four defects have now
+    come from reading real output that tests passed over, because a test
+    asserts what the code DOES and the output is where you see what it SAYS —
+    the `file@line` page-1 read, the `|` semantics, `{m,n}` reading as
+    containment on an edge walk, and `totalMatches: 0` for a walk that never
+    finished. Two suspicions were also WRONG and worth recording as method:
+    `func:recursive` returning 0 from the CLI is correct and says why (it
+    needs an LSP to tell a self-call from a name collision), and a doubled
+    space in a `::grep` repair was an artifact of my own display filter. Twice
+    the "bug" was a grep of my own output.
   - ❗ **The bench structurally CANNOT answer the absolute adoption question.**
     In-harness, grep is just another advertised tool with a one-line desc — it
     has NO home-field advantage. The icebox's "0 calls" was grep as the model's

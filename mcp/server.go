@@ -54,6 +54,15 @@ type Server struct {
 	bindings []config.Binding
 	schemas  []config.Schema
 
+	// quiet suppresses the workspace bring-up commentary. For a server that
+	// commentary is a startup record, written once and read when something
+	// looks wrong. For the one-shot query CLI the same lines print on every
+	// invocation, ahead of the answer, and say nothing the caller can act on
+	// — and stderr is also where selector errors land, so training a reader
+	// to skip it has a cost. Set before the server is used; never mutated
+	// concurrently.
+	quiet bool
+
 	rootMu sync.RWMutex
 	root   string
 
@@ -558,6 +567,20 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 	}
 }
 
+// logf is log.Printf unless the server was put in quiet mode. Only bring-up
+// commentary goes through it — anything a caller must act on is returned as an
+// error or written to the answer stream, never demoted to a log line.
+func (s *Server) logf(format string, args ...any) {
+	if s.quiet {
+		return
+	}
+	log.Printf(format, args...)
+}
+
+// SetQuiet silences workspace bring-up logging. The query CLI sets it so a
+// successful query prints its answer and nothing else.
+func (s *Server) SetQuiet(q bool) { s.quiet = q }
+
 // BuildIndex builds the symbol index for the workspace root and runs
 // the binding passes over it: Tier-2 declared, Tier-3 schema-anchored,
 // and the Tier-3 @derived/sqlc auto-bindings that feed the
@@ -582,19 +605,19 @@ func (s *Server) BuildIndex() error {
 		return fmt.Errorf("index build failed for %s: %w", root, err)
 	}
 	s.setIndex(idx)
-	log.Printf("index: indexed %d names from %s", len(idx.Names()), root)
+	s.logf("index: indexed %d names from %s", len(idx.Names()), root)
 
 	resolver := bindings.NewResolver(root)
 	if len(s.bindings) > 0 {
 		n, err := resolver.Apply(idx, s.bindings)
 		if err != nil {
-			log.Printf("index: some bindings failed validation: %v", err)
+			s.logf("index: some bindings failed validation: %v", err)
 		}
-		log.Printf("index: applied %d declared binding site(s)", n)
+		s.logf("index: applied %d declared binding site(s)", n)
 	}
 	if len(s.schemas) > 0 {
 		n := resolver.ApplySchemas(idx, s.schemas)
-		log.Printf("index: applied %d schema-anchored site(s)", n)
+		s.logf("index: applied %d schema-anchored site(s)", n)
 	}
 	// Tier-3 auto: gat @derived(operationId) + sqlc derived:"table.column"
 	// edges → declared source bindings, and the derivation-root registry the
@@ -602,15 +625,15 @@ func (s *Server) BuildIndex() error {
 	var derivRoots []bindings.DerivRoot
 	if roots := resolver.ApplyDerived(idx); len(roots) > 0 {
 		derivRoots = append(derivRoots, roots...)
-		log.Printf("index: applied %d @derived source binding(s)", len(roots))
+		s.logf("index: applied %d @derived source binding(s)", len(roots))
 	}
 	if roots := resolver.ApplyDerivedSQL(idx); len(roots) > 0 {
 		derivRoots = append(derivRoots, roots...)
-		log.Printf("index: applied %d sqlc @derived column binding(s)", len(roots))
+		s.logf("index: applied %d sqlc @derived column binding(s)", len(roots))
 	}
 	if roots := resolver.ApplyAndroid(idx); len(roots) > 0 {
 		derivRoots = append(derivRoots, roots...)
-		log.Printf("index: applied %d Android resource binding(s)", len(roots))
+		s.logf("index: applied %d Android resource binding(s)", len(roots))
 	}
 	s.setDerivRoots(derivRoots)
 	return nil

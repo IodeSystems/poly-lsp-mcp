@@ -61,7 +61,7 @@ func runLSP() {
 	configPath := flag.String("config", "poly-lsp-mcp.yaml", "language registry config file")
 	flag.Parse()
 
-	cfg, reg := loadConfigOrDie(*configPath)
+	cfg, reg := loadConfigOrDie(*configPath, true)
 	for _, lang := range reg.Languages() {
 		backend := "treesitter-only"
 		if lang.LSP != nil {
@@ -118,7 +118,7 @@ func runMCP() {
 		return
 	}
 
-	cfg, reg := loadConfigOrDie(*configPath)
+	cfg, reg := loadConfigOrDie(*configPath, true)
 	log.Printf("mcp: workspace root %s", root)
 
 	if cfg.AutoSchemas {
@@ -165,6 +165,7 @@ func runQuery() {
 	limit := flag.Int("limit", 0, "max matches to print (0 = all)")
 	offset := flag.Int("offset", 0, "skip this many matches")
 	budget := flag.String("budget", "", "query budget: Nms wall-clock (bare = ms) or Nops deterministic work units (default 10000ms). Raise when a query reports it stopped early.")
+	verbose := flag.Bool("verbose", false, "log which config was resolved and other startup detail")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: poly-lsp-mcp query [flags] <selector>\n\n")
 		fmt.Fprintf(os.Stderr, "Evaluate a node selector and print the matches, grouped by file.\n")
@@ -186,7 +187,7 @@ func runQuery() {
 		os.Exit(2)
 	}
 
-	cfg, reg := loadConfigOrDie(*configPath)
+	cfg, reg := loadConfigOrDie(*configPath, *verbose)
 	root, err := filepath.Abs(*rootPath)
 	if err != nil {
 		log.Fatalf("root: %v", err)
@@ -195,6 +196,10 @@ func runQuery() {
 	// No SetManager / no Serve: a query is read-only and touches
 	// neither child LSPs nor the persisted index.
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+	// A successful query prints its answer and nothing else. The bring-up
+	// commentary (index size, binding passes) is a server's startup record;
+	// here it is a preamble the caller re-reads on every invocation.
+	srv.SetQuiet(!*verbose)
 	if err := srv.QueryText(selector, *limit, *offset, *budget, os.Stdout); err != nil {
 		// A selector error is the answer to what was asked, so it prints as
 		// prose. Only a genuine tool failure gets the log furniture.
@@ -239,7 +244,7 @@ func runDaemon() {
 		return
 	}
 
-	cfg, reg := loadConfigOrDie(*configPath)
+	cfg, reg := loadConfigOrDie(*configPath, true)
 
 	prefixes := []string(allow)
 	if len(prefixes) == 0 {
@@ -282,7 +287,14 @@ func stripBoolFlags(args []string, names ...string) []string {
 
 // loadConfigOrDie loads the config file (falling back to defaults) and
 // builds the registry; both subcommands need it identically.
-func loadConfigOrDie(path string) (*config.Config, *config.Registry) {
+// announce says whether to log which config was resolved. For a server it is
+// a startup fact, printed once for the life of the process and worth having in
+// the log. For the one-shot query CLI it is the most-printed line the tool has
+// — every invocation in every repo without a config file — and it says nothing
+// the caller can act on. Volume is what makes it noise: a reader trained to
+// skip the line that is always there is being trained to skip stderr, which is
+// also where the selector errors land.
+func loadConfigOrDie(path string, announce bool) (*config.Config, *config.Registry) {
 	cfg, used, err := config.LoadOrDefault(path)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -290,6 +302,9 @@ func loadConfigOrDie(path string) (*config.Config, *config.Registry) {
 	reg, err := cfg.Build()
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if !announce {
+		return cfg, reg
 	}
 	if used {
 		log.Printf("config: loaded %s", path)

@@ -16,26 +16,37 @@ symbols (USER, 2026-07-27). Both have their own entries below.
 
 **What closed it** was answering the one question left open — whether
 `R.id.x` still wanted the generated-R side — and finding it already worked.
-Measured 2026-08-04 against a synthetic Android fixture, because the corpus
-that motivated the tree is GONE (no `AndroidManifest.xml` anywhere under
-`~/local/src`; termux-app is not on this box):
+The 07-26 Kotlin entry below had in fact recorded this already ("needs no
+binding for Kotlin either — it already resolves through the LEXICAL tier,
+verified live on that app"); the plan carried as OPEN a question its own
+archive had answered.
+
+Re-measured 2026-08-04 on `llama.cpp/examples/llama.android` (11 Kotlin, 18
+XML, 9 `R.*` refs, 6 declared ids):
 
 - `R.id.x` resolves through the LEXICAL tier, no generated-R support needed —
-  the resource name is an identifier token in the source. `#send_button::in`
-  → `MainActivity.java@7`, `conf: lexical`, `from` the enclosing method.
-- The string-key contract is the half only the binding can serve, and it
-  works: `#pref_use_dark_theme::in` → `MainActivity.PREF_DARK`, a field whose
-  name shares nothing with the resource.
-- Negative control clean: a name XML never declares → 0 matches.
+  the resource name is an identifier token in the source.
+  `#msg_content::in > *` → `MessageAdapter.onBindViewHolder`.
+- A declared-but-unreferenced id is correctly empty (`#main` → 0).
+- But a COMMON-WORD id answers with every same-named identifier: `messages`
+  and `gguf` return 7 matches each, of which one is the real `R.id` site.
+- The string-key half — the part only the binding can serve — is exercised by
+  a fixture (`#pref_use_dark_theme::in` → a field whose name shares nothing
+  with the resource). No local app has a string-keyed preference screen since
+  termux-app left the disk.
 
-Two imprecisions remain and are recorded as Known limits in plan.md rather
-than fixed — a coincidental identifier reads as a reference, and the resource
-TYPE namespaces collapse (`R.id.title_bar` cannot choose between an `@+id` and
-a same-named `<string>`; both are returned, correctly typed and located). The
-generated-R pass that would fix both is in icebox with the full measurement.
-It was not built because with no Android corpus here, neither its value nor
-the tree's own recorded risks (constant folding, the distinctiveness
-heuristic) can be measured at all.
+**The demand measurement is what settled it.** The dun sessions that added
+features to termux-app (07-26 → 07-29, 2073 `node_edit` / 159 `node_query`
+calls) survive in `~/.dun/sessions` even though the repo does not. Of every
+`node_*` call whose arguments name an Android resource — 59 of them — ALL are
+`node_edit` and NONE is a `node_query`. Across four days of real feature work
+on a real Android app the agent wrote `R.id.new_session_button` and layout XML
+constantly and never once asked the graph about a resource name. The precision
+the generated-R pass buys was never demanded. One app, one agent, four days —
+absence of demand is not proof it would not help.
+
+The two imprecisions are recorded as Known limits in plan.md rather than
+fixed, and the generated-R pass is in icebox with the full measurement.
 
 **Optional, never built:** jdtls as an opt-in child LSP, which would buy
 resolved edges and safe rename for the JVM trio.

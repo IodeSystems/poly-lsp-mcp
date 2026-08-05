@@ -246,19 +246,22 @@ on extension alone.
     naming `lineLimit` / `lineLength`, params the caller never typed. It
     errors rather than silently ignoring, and the modern surface says this
     well; left alone 2026-08-04.
-  - Android `R.<type>.<name>` resolves LEXICALLY, not as a typed reference
-    (measured 2026-08-04 on a synthetic fixture — no Android corpus on this
-    box). Two consequences, both precision rather than wrong answers: a
-    coincidental identifier reads as a reference (`int status_line = 3;`
-    answers to `@+id/status_line`), and the resource TYPE namespaces collapse,
-    so `R.id.title_bar` cannot choose between `@+id/title_bar` and
-    `<string name="title_bar">` — both come back, correctly typed and located.
-    The fix is in icebox ("Android generated-R references").
+  - Android `R.<type>.<name>` resolves LEXICALLY, not as a typed reference, so
+    a COMMON-WORD resource name answers with every same-named identifier.
+    Measured 2026-08-04 on llama.cpp/examples/llama.android: of 6 declared
+    ids, `msg_content`/`fab`/`user_input` answer cleanly (1 each), `main` is
+    correctly empty, and `messages`/`gguf` return **7 matches each of which
+    one is the R.id site** — the rest a Kotlin `messages` list and the
+    `Gguf*` symbols. Thin sample (6 ids, one small app), so indicative rather
+    than measured. `androidDistinctive` already knows which names are risky
+    and gates only the BINDING, not this path. The resource TYPE namespaces
+    also collapse: `R.id.x` cannot choose between `@+id/x` and a same-named
+    `<string>`. Fix in icebox ("Android generated-R references").
   - Android resource binding reads DIRECT literals only: no constant folding,
     so `KEY = PREFIX + "x"` is invisible, and the distinctiveness heuristic is
     lexical, so a genuinely short lowercase resource name paired with a real
-    literal is dropped as noise. Both untestable here for the same missing
-    corpus.
+    literal is dropped as noise. Untested — llama.android has no string-keyed
+    preference screen, and termux-app, which had one, is no longer on disk.
   - TypeScript arrow components (`const Foo = () => …`) get no
     `.argument`/`.return` children. Measured at 9 of 331 declarators (3%) on a
     real React frontend, so left alone; revisit against a codebase that

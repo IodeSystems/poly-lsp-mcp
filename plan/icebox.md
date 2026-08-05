@@ -12,38 +12,58 @@ around it. `R.id.x` ALREADY resolves — the resource name is an identifier toke
 in the Java/Kotlin source, so the lexical tier binds it without any
 generated-R support. What this would add is precision, not reach.
 
-**Measured on a synthetic fixture** (4 files: a layout with `@+id`, a
-`values/strings.xml`, a `xml/prefs.xml` with `app:key`, and a Java class using
-both `R.id.…` and a string-literal key). No Android corpus exists on this box
-— termux-app, the repo that motivated the whole tree with 197 `.java` / 67
-`.xml`, is gone, and nothing under `~/local/src` has an `AndroidManifest.xml`.
-So the numbers below are about OUR behaviour; the frequency of `R.*` versus
-string keys in real Android code is unmeasured here, and that is exactly what
-stopped this being built.
+**Measured on a real app**, `llama.cpp/examples/llama.android` (11 Kotlin, 18
+XML, 9 `R.*` references, 6 declared ids) — the same corpus the 07-26 Kotlin
+work used. A first pass today claimed "no Android corpus on this box" and
+measured a synthetic fixture instead; that was a search error (the manifest is
+10 levels below `~`, past the depth searched), corrected the same day.
+termux-app — the repo that motivated the whole tree, 197 `.java` / 67 `.xml`,
+and the only local app with a string-keyed preference screen — is genuinely
+gone, so the BINDING half stays unmeasured. What follows is the R-reference
+half, which llama.android does exercise.
 
-- Works today: `#send_button::in` → `MainActivity.java@7`, `conf: lexical`,
-  `from` naming the enclosing method.
-- Works today, and only the binding can do it: `#pref_use_dark_theme::in` →
-  `MainActivity.PREF_DARK`, a field whose NAME shares nothing with the
-  resource — nothing lexical could connect those.
-- Clean negative control: a name XML never declares → 0 matches.
-- **Imprecision 1**: a coincidental identifier is a reference. `int
-  status_line = 3;` answers to `@+id/status_line`.
-- **Imprecision 2**: resource TYPES collapse. `@+id/title_bar` and
-  `<string name="title_bar">` are different Android resources; `#title_bar`
-  returns both (verified: 2 matches, one `field` from the layout, one `const`
-  from values). Correctly typed and located, so nothing is invented — but
-  `R.id.title_bar` cannot pick.
+- **Works, no binding needed**: `R.id.x` reaches its XML declaration through
+  the lexical tier — `#msg_content::in > *` → `MessageAdapter.onBindViewHolder`.
+  Same conclusion the 07-26 Kotlin entry in done.md already recorded on this
+  app; the question the plan carried as open had been answered in the archive.
+- **A declared-but-unreferenced id is correctly empty**: `#main` → 0.
+- **Imprecision 1, and it dominates for common-word names.** Per-id `::in`
+  match counts on this app: `msg_content` 1, `fab` 1, `user_input` 1,
+  `main` 0 — and `messages` **7**, `gguf` **7**. In `messages`' case exactly
+  one (MainActivity.kt:58) is `findViewById(R.id.messages)`; the other ~11
+  occurrences are a Kotlin `private val messages = mutableListOf<Message>()`.
+  Half the ids in this app are common words. `androidDistinctive` already
+  classifies exactly these as risky — it just gates the binding, not this
+  path.
+- **Imprecision 2**: resource TYPES collapse. `@+id/x` and `<string name="x">`
+  are different Android resources but one index name; `R.id.x` cannot pick.
+  (Shown on a synthetic fixture — llama.android happens to have no such
+  collision, its only `<string>` is `app_name`.)
 
-**The build**, if it is ever worth it: a `R.<type>.<name>` (and
-`android.R.…`) pass in `internal/bindings/android.go`, mirroring
-`codeStringLiteralSites`, gated on the XML side declaring that name in that
-type BUCKET rather than anywhere. ~60–80 lines plus tests. The bucket is the
-whole point — without it this adds nothing the lexical tier lacks.
+**The build**: a `R.<type>.<name>` (and `android.R.…`) pass in
+`internal/bindings/android.go`, mirroring `codeStringLiteralSites`, gated on
+the XML side declaring that name in that type BUCKET rather than anywhere.
+~60–80 lines plus tests. The bucket is the whole point — without it this adds
+nothing the lexical tier lacks. Requiring the `R.<bucket>.` prefix is also
+what kills Imprecision 1: `messages` would answer with its one real reference
+instead of seven.
 
-**Resume condition:** an Android checkout on the box. Until then neither the
-value nor the two risks the closed tree recorded (constant folding, the
-distinctiveness heuristic) can be measured at all.
+**Why it stays here, and it is not "no corpus".** The termux-app dun sessions
+survive in `~/.dun/sessions` even though the repo does not — 07-26 → 07-29,
+real feature work, 2073 `node_edit` / 159 `node_query` calls against a real
+Android app. Of every `node_*` call whose arguments name a resource (59), ALL
+are `node_edit` and NONE is a `node_query`. The agent wrote `R.id.…` and
+layout XML constantly and never asked the graph about a resource name, so the
+precision this buys went undemanded through the one real Android engagement we
+have. Build it when a session actually asks a resource question and gets a
+diluted answer — that transcript is the trigger, and the sweep loop will
+surface it.
+
+**Buildable whenever wanted:** `llama.android` is on the box and exercises the
+R-reference half (that is where the numbers above come from). Only the BINDING
+half is unmeasurable — constant folding and the distinctiveness threshold need
+a string-keyed preference screen, which termux-app had and no local repo does.
+Samples are thin throughout: 6 ids in one small app, one agent over four days.
 
 ---
 

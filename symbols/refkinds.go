@@ -94,14 +94,34 @@ func sitePosition(n *sitter.Node) string {
 // a few levels or not at all.
 func classifySiteNode(language string, n *sitter.Node) string {
 	// The name used AS a type is visible on the node itself in the
-	// grammars we ship (go/ts/tsx emit type_identifier).
+	// grammars we ship (go/ts/tsx emit type_identifier, and so does java).
 	if n.Type() == "type_identifier" {
+		// …except that java spells a CONSTRUCTOR with a type_identifier
+		// where ts uses a plain one, so without this the two arms would
+		// disagree about `new C()`: call in ts, type in java.
+		if p := n.Parent(); p != nil && p.Type() == "object_creation_expression" {
+			if c := p.ChildByFieldName("type"); c != nil && nodeContainsNode(c, n) {
+				return "call"
+			}
+		}
 		return "type"
 	}
 	cur := n
 	for depth := 0; cur != nil && depth < 8; depth, cur = depth+1, cur.Parent() {
 		switch cur.Type() {
-		case "call_expression", "new_expression", "call": // go/ts, ts, python
+		case "method_invocation": // java
+			// The callee is the `name` field; `object` is the receiver and
+			// `arguments` are plain references, exactly as elsewhere.
+			if f := cur.ChildByFieldName("name"); f != nil && nodeContainsNode(f, n) {
+				return "call"
+			}
+			return ""
+		case "object_creation_expression": // java
+			if c := cur.ChildByFieldName("type"); c != nil && nodeContainsNode(c, n) {
+				return "call"
+			}
+			return ""
+		case "call_expression", "new_expression", "call": // go/ts/c/cpp, ts, python
 			// Only the FUNCTION position is a call — an argument that
 			// happens to be a func name is a plain reference.
 			if f := cur.ChildByFieldName("function"); f != nil && nodeContainsNode(f, n) {
@@ -111,6 +131,13 @@ func classifySiteNode(language string, n *sitter.Node) string {
 				if c := cur.ChildByFieldName("constructor"); c != nil && nodeContainsNode(c, n) {
 					return "call"
 				}
+			}
+			// Kotlin spells every call `call_expression` but names no
+			// fields: the callee is named child 0, the arguments hang off a
+			// `call_suffix` sibling. Resolving it positionally is what keeps
+			// `foo(bar)` from crediting bar.
+			if kotlinCallee(cur, n) {
+				return "call"
 			}
 			return ""
 		case "import_declaration", "import_spec", "import_statement",
@@ -123,6 +150,30 @@ func classifySiteNode(language string, n *sitter.Node) string {
 	}
 	_ = language
 	return ""
+}
+
+// kotlinCallee reports whether n sits in the callee position of a kotlin
+// call_expression. Named child 0 is the callee expression; when it is a
+// navigation (`a.b.c()`) only the LAST suffix is the thing being called —
+// `a` and `b` are plain reads, and crediting them would invent callers.
+func kotlinCallee(call, n *sitter.Node) bool {
+	if call.NamedChildCount() == 0 {
+		return false
+	}
+	callee := call.NamedChild(0)
+	if callee == nil || !nodeContainsNode(callee, n) {
+		return false
+	}
+	if callee.Type() != "navigation_expression" {
+		return true
+	}
+	var last *sitter.Node
+	for i := 0; i < int(callee.NamedChildCount()); i++ {
+		if c := callee.NamedChild(i); c != nil && c.Type() == "navigation_suffix" {
+			last = c
+		}
+	}
+	return last != nil && nodeContainsNode(last, n)
 }
 
 func nodeContainsNode(outer, inner *sitter.Node) bool {

@@ -743,7 +743,9 @@ func (s *Server) resolveModernNode(node string) (*modernNode, error) {
 		case "external":
 			return nil, fmt.Errorf("%q resolves to an EXTERNAL stub (%s) — read-only, outside the workspace", node, m.addr())
 		}
-		return s.resolveClassicAddr(m.file, m.sym)
+		// Carry the class through: the selector may have picked this node BY
+		// class, and (file, sym) alone cannot reproduce that choice.
+		return s.resolveClassicAddrInClass(m.file, m.sym, m.class)
 	default:
 		var b strings.Builder
 		fmt.Fprintf(&b, "%q is ambiguous: %d nodes match. Pass one of these exact addresses:", node, len(matches))
@@ -764,6 +766,24 @@ func (s *Server) resolveModernNode(node string) (*modernNode, error) {
 // listing every candidate's disambiguated form. An explicit "[n]"
 // disambiguates exactly as it always has.
 func (s *Server) resolveClassicAddr(file, symPath string) (*modernNode, error) {
+	return s.resolveClassicAddrInClass(file, symPath, "")
+}
+
+// resolveClassicAddrInClass is resolveClassicAddr with an optional CLASS to
+// break ties with.
+//
+// A sym path is not always unique: a go main.go holds `package main` (a module)
+// and `func main`, and both answer to "main". The selector path could already
+// tell them apart — `func#'main.go#main'` matches exactly one node — and then
+// threw that away by re-resolving the match through (file, sym), which is
+// ambiguous again. So the one form that CAN name such a node could not address
+// it. Observed 2026-08-05, where the ambiguity error offered the same address
+// twice and neither worked.
+//
+// The filter is advisory: if nothing in the class matches, the unfiltered hits
+// stand and the caller still gets the ambiguity error rather than a confusing
+// "no symbol" one.
+func (s *Server) resolveClassicAddrInClass(file, symPath, class string) (*modernNode, error) {
 	abs, err := s.resolveFileArg(file)
 	if err != nil {
 		return nil, err
@@ -786,6 +806,17 @@ func (s *Server) resolveClassicAddr(file, symPath string) (*modernNode, error) {
 	for _, sym := range syms {
 		if classicSymMatch(symPath, sym.Sym) {
 			hits = append(hits, sym)
+		}
+	}
+	if class != "" && len(hits) > 1 {
+		var inClass []symbols.Symbol
+		for _, h := range hits {
+			if h.Class == class {
+				inClass = append(inClass, h)
+			}
+		}
+		if len(inClass) > 0 {
+			hits = inClass
 		}
 	}
 	switch len(hits) {
@@ -811,10 +842,37 @@ func (s *Server) resolveClassicAddr(file, symPath string) (*modernNode, error) {
 			name: rangeArgs{File: file, StartLine: sym.NameStartLine, StartCol: sym.NameStartCol, EndLine: sym.NameEndLine, EndCol: sym.NameEndCol},
 		}, nil
 	default:
+		// The candidates may share a sym path, in which case listing
+		// "<file>#<sym>" per hit prints the SAME address twice and answers
+		// nothing. Observed 2026-08-05 on a go main.go, where `package main`
+		// (a module) and `func main` both answer to "main":
+		//
+		//   "main" is ambiguous in cmd/dun/main.go: 2 symbols share that name.
+		//   Pass one of these exact addresses:
+		//     cmd/dun/main.go#main
+		//     cmd/dun/main.go#main
+		//
+		// The ordinal in classicSymMatch cannot break that tie either — both
+		// candidates are the bare sym, which normalizes to [1]. What does is
+		// the CLASS, so each row is spelled as a class-qualified id selector,
+		// which node_read/node_edit accept wherever an address is taken.
 		var b strings.Builder
-		fmt.Fprintf(&b, "%q is ambiguous in %s: %d symbols share that name. Pass one of these exact addresses:", symPath, file, len(hits))
+		fmt.Fprintf(&b, "%q is ambiguous in %s: %d symbols share that name. Pass one of these:", symPath, file, len(hits))
+		collide := false
+		seen := map[string]bool{}
 		for _, h := range hits {
-			fmt.Fprintf(&b, "\n  %s#%s", file, h.Sym)
+			if seen[h.Sym] {
+				collide = true
+			}
+			seen[h.Sym] = true
+		}
+		for _, h := range hits {
+			addr := fmt.Sprintf("%s#%s", file, h.Sym)
+			if collide {
+				// Quote the id: it contains '#' and '/'.
+				addr = fmt.Sprintf("%s#'%s#%s'", h.Class, file, h.Sym)
+			}
+			fmt.Fprintf(&b, "\n  %-42s %s, lines %d-%d", addr, h.Class, h.DeclStartLine, h.DeclEndLine)
 		}
 		return nil, errors.New(b.String())
 	}

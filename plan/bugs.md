@@ -331,6 +331,40 @@ deleting two redundant fragments, not by raising the budget: the
 rename)` — which repeats the sentence directly above it. Every directive is
 intact.
 
+## An ambiguous address offered the same address twice, and the one form that could disambiguate did not work
+
+**Reported:** 2026-08-05 (dun session `20260805-021013`)
+**Status:** ✅ fixed. `resolveClassicAddrInClass` in `mcp/modern.go`, pinned by
+`TestAmbiguousAddressOffersUsableAlternatives`.
+
+**Repro.** Any go `main.go` holds two symbols answering to `main` — the package
+clause (class `module`) and `func main`. So `main.go#main` is genuinely
+ambiguous, and the error read:
+
+    "main" is ambiguous in cmd/dun/main.go: 2 symbols share that name.
+    Pass one of these exact addresses:
+      cmd/dun/main.go#main
+      cmd/dun/main.go#main
+
+The list is the entire value of that error, and it offered a choice that cannot
+be made. The ordinal in `classicSymMatch` cannot break the tie either: both
+candidates are the bare sym, which normalizes to `[1]`.
+
+**The deeper half.** A class-qualified selector DOES pick one —
+`func#'cmd/dun/main.go#main'` matches exactly one node — but it could not
+ADDRESS one: the selector path resolved its single match and then called
+`resolveClassicAddr(m.file, m.sym)`, discarding the class it had just used and
+re-resolving through the ambiguous pair. So the only form that could express
+the node was rejected by the resolver that had already found it.
+
+**Fix.** The class is carried through (`resolveClassicAddrInClass`), as an
+advisory filter — if nothing in the class matches, the unfiltered hits stand
+and the caller still gets the ambiguity error rather than a confusing "no
+symbol". The error now prints class and line span per candidate, and switches
+to the class-qualified id form when the raw addresses would collide. The test
+pins that every offered address RESOLVES and that they resolve to DIFFERENT
+nodes; the spelling is free to change.
+
 ## A half-finished edit was rejected with the recovery buried behind the evidence
 
 **Reported:** 2026-08-05 (dun session `20260805-021013`, adding a

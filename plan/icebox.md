@@ -5,6 +5,48 @@ graph-selector design record this used to hold.
 
 ---
 
+## Android generated-R references — `R.<type>.<name>` as a typed reference
+
+Deferred 2026-08-04 (USER) on measurement, with the Java/Android tree closed
+around it. `R.id.x` ALREADY resolves — the resource name is an identifier token
+in the Java/Kotlin source, so the lexical tier binds it without any
+generated-R support. What this would add is precision, not reach.
+
+**Measured on a synthetic fixture** (4 files: a layout with `@+id`, a
+`values/strings.xml`, a `xml/prefs.xml` with `app:key`, and a Java class using
+both `R.id.…` and a string-literal key). No Android corpus exists on this box
+— termux-app, the repo that motivated the whole tree with 197 `.java` / 67
+`.xml`, is gone, and nothing under `~/local/src` has an `AndroidManifest.xml`.
+So the numbers below are about OUR behaviour; the frequency of `R.*` versus
+string keys in real Android code is unmeasured here, and that is exactly what
+stopped this being built.
+
+- Works today: `#send_button::in` → `MainActivity.java@7`, `conf: lexical`,
+  `from` naming the enclosing method.
+- Works today, and only the binding can do it: `#pref_use_dark_theme::in` →
+  `MainActivity.PREF_DARK`, a field whose NAME shares nothing with the
+  resource — nothing lexical could connect those.
+- Clean negative control: a name XML never declares → 0 matches.
+- **Imprecision 1**: a coincidental identifier is a reference. `int
+  status_line = 3;` answers to `@+id/status_line`.
+- **Imprecision 2**: resource TYPES collapse. `@+id/title_bar` and
+  `<string name="title_bar">` are different Android resources; `#title_bar`
+  returns both (verified: 2 matches, one `field` from the layout, one `const`
+  from values). Correctly typed and located, so nothing is invented — but
+  `R.id.title_bar` cannot pick.
+
+**The build**, if it is ever worth it: a `R.<type>.<name>` (and
+`android.R.…`) pass in `internal/bindings/android.go`, mirroring
+`codeStringLiteralSites`, gated on the XML side declaring that name in that
+type BUCKET rather than anywhere. ~60–80 lines plus tests. The bucket is the
+whole point — without it this adds nothing the lexical tier lacks.
+
+**Resume condition:** an Android checkout on the box. Until then neither the
+value nor the two risks the closed tree recorded (constant folding, the
+distinctiveness heuristic) can be measured at all.
+
+---
+
 ## Announce a PRE-EXISTING merge conflict at startup
 
 Deferred 2026-08-04, USER's call to make. The conflict sweep left this as the

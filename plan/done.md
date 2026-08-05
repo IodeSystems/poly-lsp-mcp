@@ -3,6 +3,43 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Java + Android XML — the JVM/Android blind spot (DONE 2026-08-04)
+
+Moved from plan.md on completion, USER's call to close it.
+
+**The motivating measurement, termux-app:** 17 of 291 source files visible
+(yml/md/json only) — 197 `.java` and 67 `.xml` invisible, i.e. 6% of the repo
+and none of the code. Slice 1 (Java via tree-sitter) and slice 2 (the Android
+resource binding, `internal/bindings/android.go`) shipped 2026-07-26/27; the
+binding reads Kotlin literals as well as Java ones, and XML gained real named
+symbols (USER, 2026-07-27). Both have their own entries below.
+
+**What closed it** was answering the one question left open — whether
+`R.id.x` still wanted the generated-R side — and finding it already worked.
+Measured 2026-08-04 against a synthetic Android fixture, because the corpus
+that motivated the tree is GONE (no `AndroidManifest.xml` anywhere under
+`~/local/src`; termux-app is not on this box):
+
+- `R.id.x` resolves through the LEXICAL tier, no generated-R support needed —
+  the resource name is an identifier token in the source. `#send_button::in`
+  → `MainActivity.java@7`, `conf: lexical`, `from` the enclosing method.
+- The string-key contract is the half only the binding can serve, and it
+  works: `#pref_use_dark_theme::in` → `MainActivity.PREF_DARK`, a field whose
+  name shares nothing with the resource.
+- Negative control clean: a name XML never declares → 0 matches.
+
+Two imprecisions remain and are recorded as Known limits in plan.md rather
+than fixed — a coincidental identifier reads as a reference, and the resource
+TYPE namespaces collapse (`R.id.title_bar` cannot choose between an `@+id` and
+a same-named `<string>`; both are returned, correctly typed and located). The
+generated-R pass that would fix both is in icebox with the full measurement.
+It was not built because with no Android corpus here, neither its value nor
+the tree's own recorded risks (constant folding, the distinctiveness
+heuristic) can be measured at all.
+
+**Optional, never built:** jdtls as an opt-in child LSP, which would buy
+resolved edges and safe rename for the JVM trio.
+
 ## Three refusals dropped — the scan loop run against its own fixes (DONE 2026-08-04)
 
 Moved from plan.md on completion. Commits `7bc7271`, `20fd233`, `8b82cee`.

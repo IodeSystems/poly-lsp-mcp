@@ -246,6 +246,19 @@ on extension alone.
     naming `lineLimit` / `lineLength`, params the caller never typed. It
     errors rather than silently ignoring, and the modern surface says this
     well; left alone 2026-08-04.
+  - Android `R.<type>.<name>` resolves LEXICALLY, not as a typed reference
+    (measured 2026-08-04 on a synthetic fixture — no Android corpus on this
+    box). Two consequences, both precision rather than wrong answers: a
+    coincidental identifier reads as a reference (`int status_line = 3;`
+    answers to `@+id/status_line`), and the resource TYPE namespaces collapse,
+    so `R.id.title_bar` cannot choose between `@+id/title_bar` and
+    `<string name="title_bar">` — both come back, correctly typed and located.
+    The fix is in icebox ("Android generated-R references").
+  - Android resource binding reads DIRECT literals only: no constant folding,
+    so `KEY = PREFIX + "x"` is invisible, and the distinctiveness heuristic is
+    lexical, so a genuinely short lowercase resource name paired with a real
+    literal is dropped as noise. Both untestable here for the same missing
+    corpus.
   - TypeScript arrow components (`const Foo = () => …`) get no
     `.argument`/`.return` children. Measured at 9 of 331 declarators (3%) on a
     real React frontend, so left alone; revisit against a codebase that
@@ -280,21 +293,12 @@ SHIPPED → done.md ("Rename you can check, and the UTF-16 column fix").**
 SHIPPED → done.md.**
 
 
-◐ **Java + Android XML — the JVM/Android blind spot (started 2026-07-26).**
-Motivating measurement, termux-app: 17 of 291 source files were visible
-(yml/md/json only) — 197 `.java` and 67 `.xml` invisible, i.e. 6% of the repo
-and none of the code. Slice 1 (Java via tree-sitter) and slice 2 (the Android
-resource binding, `internal/bindings/android.go`) SHIPPED → done.md; the
-binding now reads Kotlin literals as well as Java ones, and XML gained real
-named symbols (USER, 2026-07-27).
-- **next**: decide whether this tree is complete now that XML is real, or
-  whether `R.id.x` still wants the generated-R side.
-- **risks**: only direct literals are read (no constant folding, so
-  `KEY = PREFIX + "x"` is invisible); the tier-2 distinctiveness heuristic is
-  lexical, so a genuinely short lowercase resource name paired with a real
-  literal is dropped as noise.
-- **optional extensions**: jdtls as an opt-in child LSP for resolved edges and
-  safe rename.
+✅ **Java + Android XML — COMPLETE 2026-08-04 (USER)** → done.md. The blind
+spot that motivated it is closed: java and xml index, the resource binding
+crosses java/kotlin literals to XML, and `R.id.x` turned out to resolve
+already through the lexical tier. Two imprecisions are recorded as Known
+limits below; the generated-R pass that would fix them is in icebox, with the
+measurement that says why it was not built.
 
 
 ◐ **Adoption measurement — the existential question, now instrumented.**

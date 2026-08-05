@@ -2685,9 +2685,51 @@ func pathIsAnIDErr(path string) error {
 // unknownTypeErr: a bare word that isn't one of our tags. Almost always a
 // workspace NAME used where a type belongs — `cache` for the cache/ dir.
 func unknownTypeErr(name string) error {
+	// `mod` for `module` is a different mistake from `DockerExec` for a type:
+	// the first is a misspelling of a tag, the second is a workspace NAME in a
+	// tag position. Both land here, and the full tag list serves neither — the
+	// right answer was already IN the list and just not pointed at (observed
+	// 2026-08-05: `mod` twice, with `module` printed three words away).
+	if near := nearestType(name); near != "" {
+		return fmt.Errorf(
+			"no node type %q — did you mean %q? Types are a fixed set (like CSS element names): %s. "+
+				"If %q is a workspace NAME rather than a type, it is an id: try #%s.",
+			name, near, strings.Join(selectorTypeList(), " "), name, name)
+	}
 	return fmt.Errorf(
 		"no node type %q. Types are a fixed set (like CSS element names): %s. Anything NAMED in the workspace — a dir, file or symbol — is an id: try #%s (e.g. \"#%s > file\"). Pass selector \"?\" for the grammar.",
 		name, strings.Join(selectorTypeList(), " "), name, name)
+}
+
+// nearestType returns the tag a misspelling most likely meant, or "" when the
+// word is nothing like a tag — which is the common case, since a bare word in
+// a tag position is usually a workspace name. The bar is deliberately tight: a
+// wrong suggestion is worse than none, because it sends the caller to retry a
+// tag when the id form was what they needed.
+func nearestType(name string) string {
+	lower := strings.ToLower(name)
+	best, bestD := "", 1<<30
+	for _, t := range selectorTypeList() {
+		d := editDistance(lower, t)
+		// A prefix of a tag ("mod" -> "module") is the shape a truncation
+		// takes, and edit distance alone rates it poorly.
+		if strings.HasPrefix(t, lower) && len(lower) >= 3 {
+			d = 1
+		}
+		if d < bestD {
+			best, bestD = t, d
+		}
+	}
+	// Allow one edit for short words, two for longer ones, and never more
+	// than a third of the word.
+	limit := 1
+	if len(lower) >= 6 {
+		limit = 2
+	}
+	if bestD > limit || bestD*3 > len(lower)*2 {
+		return ""
+	}
+	return best
 }
 
 // dotIsNotAClassErr: `.foo`. There are no classes — the node's kind is its

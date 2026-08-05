@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -749,7 +750,46 @@ func handleNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Content,
 
 	out := buildReadPayload(content, a.File, startLine, lineLimit, lineLength,
 		targetedSearchAdvice(a.File, false), fileOutline(s.languageForFile(abs), content))
+	s.attachEnclosingSymbol(out, a.File, abs, startLine)
 	return jsonContent(out), false, nil
+}
+
+// attachEnclosingSymbol adds `enclosingSymbol`, the ADDRESS of the innermost
+// declaration containing the read's anchor line — the one thing a caller
+// holding a `file@line` needs in order to stop holding a `file@line`.
+//
+// It is a field and not a sentence on purpose. The hint already said, in
+// prose and in first position, "Avoid paging chunk-by-chunk: re-read with
+// lineLimit=N to get the whole file in ONE call". Measured on the volcycle
+// bench 2026-08-04, that was ignored 44 times out of 44 while the same model
+// acted on `matches[].node` addresses constantly and corrected itself within
+// one call of any note that said "you got zero results". Payload PROSE gets
+// skimmed exactly like description prose; a ready-to-paste address does not.
+// This is the same reason `outline` was promoted out of the hint into its own
+// field — see the comment there.
+//
+// Why it matters more than the paging it replaces: an addressed symbol is
+// never truncated and its span is byte-for-byte what node_edit's newText
+// replaces. The same run made 52 reads and 17 edits without ever addressing a
+// symbol, paged 85% of the time, and sent 489KB of newText to change 5.7KB —
+// all three are the same missing step, from `file@line` to `file#sym`.
+//
+// Omitted rather than empty when the line is in no declaration (imports, a
+// package clause, top-of-file comments), so presence is testable and an empty
+// string never reads as "this file has no symbols".
+func (s *Server) attachEnclosingSymbol(out map[string]any, file, abs string, line int) {
+	if out == nil {
+		return
+	}
+	sym := s.enclosingSymPathSkipping(abs, line, map[string][]symbols.Symbol{}, addressSkipClasses)
+	if sym == "" {
+		return
+	}
+	addr := file + "#" + sym
+	if cur, _ := out["node"].(string); cur == addr {
+		return // the caller already addressed it; repeating is not information
+	}
+	out["enclosingSymbol"] = addr
 }
 
 // targetedSearchAdvice is the "don't page, SEARCH" half of the read hint,
@@ -1380,8 +1420,76 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 		"bytesRemoved": len(orig),
 		"bytesAdded":   len(out),
 	}
+	if !created {
+		s.attachEditAmplification(payload, file, abs, orig, out)
+	}
 	oc.attach(payload)
 	return jsonContent(payload), false, nil
+}
+
+// Thresholds for attachEditAmplification. The floor keeps small files quiet —
+// rewriting a 2KB file to change 40 bytes is not worth a word. The ratio is
+// set well above any honest whole-file edit (a reformat, a codegen refresh)
+// and well below what was measured.
+const (
+	editAmplifyMinBytes = 8 << 10
+	editAmplifyRatio    = 20
+)
+
+// addressSkipClasses are classes that must never be handed back AS AN ADDRESS.
+// `module` is the package clause — one per file, named for the last path
+// segment, and in some grammars spanning the whole file — so the innermost
+// enclosing symbol of line 1 of TerminalToolbarViewPager.java is `io`, and
+// `…/TerminalToolbarViewPager.java#io` is a legal address that answers
+// nothing. Measured live on the volcycle bench 2026-08-04: 5 of the first 7
+// enclosingSymbol values were package clauses.
+var addressSkipClasses = map[string]bool{"module": true}
+
+// attachEditAmplification adds `editedNode` — the ADDRESS of the declaration a
+// whole-file rewrite actually changed — when the payload dwarfs the change.
+//
+// Measured on the volcycle bench 2026-08-04: 17 edits sent 489KB of newText to
+// change 5.7KB, an 85x amplification, the worst being 68,079 bytes to change
+// 45. Every one was the same shape — address the FILE, set newText to the
+// whole file with one declaration altered — because the run never addressed a
+// symbol (0 of 52 reads, 0 of 17 edits) and so never held a span it could
+// replace directly.
+//
+// Like enclosingSymbol on reads, this is a FIELD and not a sentence: the same
+// run ignored the read hint's prose 44 times out of 44 while acting on
+// addresses constantly. It reports rather than refuses — a whole-file rewrite
+// is legitimate (a reformat, regenerated code), and the caller has already
+// succeeded by the time this runs. What it removes is the excuse of not
+// knowing which node to address next time.
+func (s *Server) attachEditAmplification(payload map[string]any, file, abs string, orig, out []byte) {
+	if len(out) < editAmplifyMinBytes {
+		return
+	}
+	// The changed REGION, not the length delta. `return 1` -> `return 2` moves
+	// no bytes at all while rewriting the file around it, so a delta-based
+	// measure reports zero on exactly the edit worth reporting.
+	pre := 0
+	for pre < len(orig) && pre < len(out) && orig[pre] == out[pre] {
+		pre++
+	}
+	suf := 0
+	for suf < len(orig)-pre && suf < len(out)-pre &&
+		orig[len(orig)-1-suf] == out[len(out)-1-suf] {
+		suf++
+	}
+	changed := max(len(orig)-pre-suf, len(out)-pre-suf)
+	if changed == 0 || len(out) < changed*editAmplifyRatio {
+		return
+	}
+	line := 1 + bytes.Count(out[:pre], []byte("\n"))
+	sym := s.enclosingSymPathSkipping(abs, line, map[string][]symbols.Symbol{}, addressSkipClasses)
+	if sym == "" {
+		return
+	}
+	payload["editedNode"] = file + "#" + sym
+	payload["editedNodeHint"] = fmt.Sprintf(
+		"sent %d bytes to change %d. Address %s#%s directly — node_edit replaces that "+
+			"declaration's span, so newText is just the declaration.", len(out), changed, file, sym)
 }
 
 // applyDiffRewrite is the {file, diff} branch: parse the unified

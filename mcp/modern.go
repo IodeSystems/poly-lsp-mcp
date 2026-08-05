@@ -70,12 +70,12 @@ func registerModernTools() map[string]Tool {
 // information. Keep them dense.
 
 const modernNodeQueryDescription = `CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements. Files are nodes; no separate filesystem API.
-TAGS are a FIXED set: project dir file func method type struct interface class const var field enum ctor module import argument, *. Workspace NAMES are NEVER tags, always #ids: #cache, #'store.go#Save' (quote with '). Language as class: file.go. space=descendant >=child ,=union — space is ALWAYS a node boundary. FILTER by bracketing ONTO an element: func[path=a.go] ≠ func path=a.go (things inside a func). Bare attr = its own *[…]. In [] | is OR and & AND over whole TESTS — but ONLY before another test: [name=a|name=b] is boolean, [name~=a|b] is one regex.
+TAGS are a FIXED set: project dir file func method type struct interface class const var field enum ctor module import argument, *. Workspace NAMES are NEVER tags, always #ids: #cache, #'store.go#Save' (quote with '). Language as class: file.go. space=descendant >=child ,=union — space is ALWAYS a node boundary. FILTER by bracketing ONTO an element: func[path=a.go] ≠ func path=a.go (things inside a func). In [] | is OR and & AND over whole TESTS — but ONLY before another test: [name=a|name=b] is boolean, [name~=a|b] is one regex.
 GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive.
-::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E); no ctx by default (hit=the line), -A/-B/-C adds it, byte-bounded; result carries a per-file rollup.
+::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E); no ctx by default (hit=the line), -A/-B/-C adds it; result carries a per-file rollup.
 FOOTGUNS: * NEVER matches ::edges or ::grep lines — name them or they're invisible. {m,n} elsewhere is regex REPETITION child-joined, NOT depth: func{2} = func>func; within-3-levels = "> *{0,2} > x". :not/:is(sel) test the node ITSELF; :where/:any/:all/:empty(sel) test AROUND it (leading tag = a descendant, leading ::/pseudo = the node; bare :any/:all/:empty judge their position). :parents(sel) = ALL upstream (ancestors + incoming refs) — broader than callers. Edge/::grep addresses are file@line: node_read/node_edit hit that exact line.
-RECIPES: #'a.go#Save'::in.call callers | #'main'::out.call > * callees | func:not([name^=Test]):empty(::in) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints | :root > * tour.
-limit 20; offset pages; selector "?" = the full grammar.`
+RECIPES: START at a name/string: ::grep('needle'), method[name=x] — NOT :root > * (dir listing). #'a.go#Save'::in.call callers | #'main'::out.call > * callees | func:not([name^=Test]):empty(::in) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints.
+selector "?" = the full grammar.`
 
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
@@ -919,9 +919,11 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			}
 			lineLimit = *p.LineLimit
 		}
-		return jsonContent(buildReadPayload(content, rn.file, startLine, lineLimit, 0,
+		out := buildReadPayload(content, rn.file, startLine, lineLimit, 0,
 			targetedSearchAdvice(rn.file, true),
-			fileOutline(s.languageForFile(abs), content))), false, nil
+			fileOutline(s.languageForFile(abs), content))
+		s.attachEnclosingSymbol(out, rn.file, abs, startLine)
+		return jsonContent(out), false, nil
 	}
 
 	// An addressed node PLUS a window is a browse ANCHORED at that node.
@@ -966,6 +968,9 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			fileOutline(s.languageForFile(abs), content))
 		out["node"] = rn.addr
 		out["@"] = []int{rn.decl.StartLine, rn.decl.EndLine}
+		// After `node`, so a window anchored inside the addressed symbol does
+		// not repeat the address back as if it were new information.
+		s.attachEnclosingSymbol(out, rn.file, abs, startLine)
 		// A one-line site address is the shape this exists for, and "drop them
 		// to read it whole" is not advice there — whole IS the one line.
 		span := fmt.Sprintf("spans lines %d-%d; drop startLine/lineLimit to read it whole",

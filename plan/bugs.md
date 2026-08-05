@@ -331,6 +331,29 @@ deleting two redundant fragments, not by raising the budget: the
 rename)` — which repeats the sentence directly above it. Every directive is
 intact.
 
+## A pattern beginning with a dash was unsearchable
+
+**Reported:** 2026-08-05 (dun session `20260805-021013`, looking for its own
+`--docker` flag)
+**Status:** ✅ fixed. `--` ends the flags in `parseFragmentSpec` and
+`parseContainsSpec`, pinned by `TestGrepDoubleDashEndsFlags`.
+
+**Repro.** `::grep('-E --docker')` →
+
+    bad ::grep("-E --docker"): unsupported flag "--" — supported: -i -w -E …
+
+`--docker` tokenizes as flags, the parser reaches `-`, and there is no escape:
+no `--`, no `-e PATTERN`. Searching for a CLI flag name — one of the more
+ordinary things to grep a codebase for — was simply impossible, and the error
+listed supported flags at someone who had not typed a flag.
+
+**Fix.** `--` ends the flags, as in every grep, in BOTH parsers (`::grep` and
+`:contains` shared the hole and the fix). Flags before the terminator still
+apply; everything after is pattern, dashes included. The error now leads with
+the pattern reading — a leading dash is far more often a pattern than a typo —
+and names the escape. A genuinely unknown flag still reports as one, which is
+what the test pins alongside the happy path.
+
 ## An ambiguous address offered the same address twice, and the one form that could disambiguate did not work
 
 **Reported:** 2026-08-05 (dun session `20260805-021013`)

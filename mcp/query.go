@@ -1563,6 +1563,15 @@ func parseFragmentSpec(text string) (*grepSpec, error) {
 		} else {
 			rest = ""
 		}
+		// `--` ends the flags, as in every grep. Without it a pattern that
+		// BEGINS with a dash is unsearchable: `::grep('-E --docker')` reads
+		// --docker as flags and dies on "unsupported flag -", which is exactly
+		// what a caller looking for a CLI flag name hits first (observed
+		// 2026-08-05). Everything after is pattern, dashes and all.
+		if tok == "--" {
+			rest = strings.TrimLeft(rest, " \t")
+			break
+		}
 		bs := tok[1:]
 		for bi := 0; bi < len(bs); bi++ {
 			c := bs[bi]
@@ -5465,7 +5474,16 @@ func applyBoolFlag(g *grepSpec, c byte) bool {
 }
 
 func unsupportedFlagErr(c byte) error {
-	return fmt.Errorf("unsupported flag %q — supported: -i -w -E -F -v -n -r, and -A<n>/-B<n>/-C<n> in ::grep. The selector scopes the search, so file arguments are never accepted", "-"+string(c))
+	// A leading dash is far more often a PATTERN than a typo — searching for a
+	// CLI flag name is the common case that lands here — so answer that
+	// reading first rather than listing flags at someone who wanted none.
+	if c == '-' {
+		return fmt.Errorf("%s", "a pattern beginning with `-` is read as flags — end the flags with `--` first, " +
+			"as in ::grep('-E -- --docker'). Supported flags: -i -w -E -F -v -n -r, and -A<n>/-B<n>/-C<n> in ::grep")
+	}
+	return fmt.Errorf("unsupported flag %q — supported: -i -w -E -F -v -n -r, and -A<n>/-B<n>/-C<n> in ::grep. "+
+		"The selector scopes the search, so file arguments are never accepted. "+
+		"To search for a pattern that BEGINS with a dash, end the flags with `--` first", "-"+string(c))
 }
 
 // finalize validates the mode combination and compiles the matcher.
@@ -5543,6 +5561,11 @@ func parseContainsSpec(text string) (*grepSpec, error) {
 			tok, rest = trimmed[:i], trimmed[i:]
 		} else {
 			rest = ""
+		}
+		// `--` ends the flags — same reason as parseFragmentSpec.
+		if tok == "--" {
+			rest = strings.TrimLeft(rest, " \t")
+			break
 		}
 		for _, c := range []byte(tok[1:]) {
 			if applyBoolFlag(g, c) {

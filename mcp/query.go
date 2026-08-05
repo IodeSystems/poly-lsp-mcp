@@ -96,8 +96,13 @@ type treeNode struct {
 	// site's file, and the far end(s) are this node's only children.
 	// Generated: `*` never matches one and walks never enter one — only
 	// naming ::in/::out does (the CSS pseudo-element contract).
-	refDir  string      // "in" | "out"
-	refKind string      // "call" | "type" | "import" | ""  (the KIND axis)
+	refDir string // "in" | "out"
+	// refCol is the site's column. `at` holds only the line, which is not
+	// enough to tell two edges apart: `foo(foo)` is a call and a plain read
+	// on one line, and collapsing them would drop a real edge. Only the
+	// dedupe in dedupGenerated reads it.
+	refCol  int
+	refKind string // "call" | "type" | "import" | ""  (the KIND axis)
 	refPos  string      // "return" | "param" | "field" | "var" | ""  (the POSITION axis)
 	refConf string      // refLexical (name-unique) | refLSP (child LSP settled it) | refUnsettled (ambiguous guess)
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
@@ -367,6 +372,12 @@ type engine struct {
 	// from the site-based refsIn/refsOut because implements has no lexical
 	// site — it is a semantic relation only an LSP knows.
 	implRefCache map[*treeNode]map[string][]*treeNode
+	// importRefCache: `::in.import` edges per host, built on demand from
+	// the index's import DECLARATIONS. Separate from refsIn for the mirror
+	// reason: in java/kotlin an import is a decl, so it is excluded from
+	// reference sites and the class it names has no incoming edge without
+	// this. See importRefs. `in` only, so no direction key.
+	importRefCache map[*treeNode][]*treeNode
 	// implementsUnavailable records that a `.implements` query could not
 	// reach a child LSP, so the answer is "unavailable", never "none".
 	implementsUnavailable bool
@@ -2921,37 +2932,65 @@ func ordered(set map[*treeNode]bool) []*treeNode {
 // evaluate runs a parsed selector over the tree and returns the
 // matching nodes in deterministic pre-order.
 func (e *engine) evaluate(list selectorList) []*treeNode {
-	return dedupFragments(ordered(e.evalList(list, e.project, false)))
+	return dedupGenerated(ordered(e.evalList(list, e.project, false)))
 }
 
-// dedupFragments collapses ::grep hits minted for the SAME source line by
-// different hosts.
+// dedupGenerated collapses generated rows that several hosts minted for the
+// SAME place in the source. Two flavours, one cause.
 //
-// fragmentsOf runs per host node, and the hosts a bare `::grep('x')` matches
-// NEST: a line inside a method is also inside its type and its file, so one
-// source line arrives as several distinct *treeNodes that a pointer-keyed set
-// union cannot collapse. Measured on a live session against termux-app,
+// ::grep — fragmentsOf runs per host node, and the hosts a bare `::grep('x')`
+// matches NEST: a line inside a method is also inside its type and its file, so
+// one source line arrives as several distinct *treeNodes that a pointer-keyed
+// set union cannot collapse. Measured on a live session against termux-app,
 // `::grep('terminal_margin_adjustment')` reported 28 matches carrying 9
 // distinct lines — the caller pays for every copy and the count is inflated by
 // the shape of the code rather than by anything it asked for. Scoping with
 // `path=…` hid this for a year: it leaves exactly one host.
 //
+// ::in / ::out — edges are name-keyed, so a name DECLARED more than once
+// (an interface, its base class, its implementation) has one host per
+// declaration, and each host independently finds the same call sites.
+// Measured on termux-app 2026-08-04, `method[name=isTerminalViewSelected]::in`
+// reported 8 matches over 2 distinct sites, each ×4, and
+// `method[name=readControlKey]::in` reported 6 over 2. The rows are
+// byte-identical because the host is not rendered — the reader sees "8
+// callers" where there are 2.
+//
+// The ref key carries kind/pos/col and the far end, so edges that merely SHARE
+// a line stay separate: `foo(foo)` is a call plus a plain read, and dropping
+// either would lose a real edge.
+//
 // First in document order wins, which is also the copy worth keeping — hosts
 // sort by (fileOrd, symOrd), the file-level host sorts first, and its
 // -A/-B/-C context is clipped to the FILE rather than to some inner symbol.
-func dedupFragments(rows []*treeNode) []*treeNode {
-	type fragKey struct {
-		file   string
-		lo, hi int
+func dedupGenerated(rows []*treeNode) []*treeNode {
+	type genKey struct {
+		class, file    string
+		lo, hi, col    int
+		leaf, dir      string
+		kind, pos, far string
 	}
-	var seen map[fragKey]bool
+	var seen map[genKey]bool
 	dropped := 0
 	for i, n := range rows {
-		if n.class == "fragment" {
-			if seen == nil {
-				seen = make(map[fragKey]bool, len(rows))
+		var k genKey
+		switch n.class {
+		case "fragment":
+			k = genKey{class: "fragment", file: n.file, lo: n.at[0], hi: n.at[1]}
+		case "ref":
+			far := make([]string, 0, len(n.refFar))
+			for _, f := range n.refFar {
+				far = append(far, f.file+"#"+f.sym)
 			}
-			k := fragKey{n.file, n.at[0], n.at[1]}
+			sort.Strings(far)
+			k = genKey{class: "ref", file: n.file, lo: n.at[0], hi: n.at[1], col: n.refCol,
+				leaf: n.leaf, dir: n.refDir, kind: n.refKind, pos: n.refPos,
+				far: strings.Join(far, "\x00")}
+		}
+		if k.class != "" {
+			if seen == nil {
+				seen = make(map[genKey]bool, len(rows))
+			}
 			if seen[k] {
 				dropped++
 				continue
@@ -2980,7 +3019,7 @@ func (e *engine) evaluateCapped(list selectorList, need int) ([]*treeNode, bool)
 	}
 	e.cap = need
 	defer func() { e.cap = 0 }()
-	rows := dedupFragments(ordered(e.evalList(list, e.project, false)))
+	rows := dedupGenerated(ordered(e.evalList(list, e.project, false)))
 	return rows, e.capHit
 }
 
@@ -3807,6 +3846,23 @@ func (e *engine) refMatches(hosts map[*treeNode]bool, comp *selCompound, relaxed
 		// the site edges.
 		if compHasClass(comp, "implements") {
 			for _, r := range e.implementsRefs(h, comp.refDir) {
+				if !e.spend(1) {
+					break
+				}
+				if relaxed {
+					if refDirMatch(r, comp) {
+						cand[r] = true
+					}
+				} else if e.positionalMatch(r, comp) {
+					cand[r] = true
+				}
+			}
+		}
+		// `.import` is the same shape for a language whose imports are
+		// DECLARATIONS: the edge exists as a symbol elsewhere, not as a
+		// reference site, so it is built only when named. See importRefs.
+		if compHasClass(comp, "import") {
+			for _, r := range e.importRefs(h, comp.refDir) {
 				if !e.spend(1) {
 					break
 				}
@@ -4778,6 +4834,62 @@ func (e *engine) implementsRefs(h *treeNode, dir string) []*treeNode {
 	return refs
 }
 
+// importRefs builds `::in.import` edges for a symbol whose importers are
+// spelled as import DECLARATIONS rather than as reference sites.
+//
+// In java/kotlin (and any language where `import a.b.C;` declares a node),
+// the import line is the decl of an `import` symbol, so fileSites excludes
+// it — correctly, it is a declaration — and the class it names therefore had
+// NO incoming import edge. Measured on termux-app 2026-08-04:
+// `class[name=ExtraKeysView]::in.import` answered "no matches" while three
+// files import it, and the zero-result note then pointed at a javadoc
+// {@link} reference, which reads as "nothing imports this". The data was
+// always indexed — `import[name=ExtraKeysView]` lists all three — so this
+// wires the relation the caller actually asked for to the spelling they
+// actually wrote.
+//
+// Built ONLY when a query NAMES `.import`, like `.implements`: a bare ::in
+// must not start scanning import tables for every host it walks. It is a
+// name-keyed index lookup, so the edges are conf `lexical` — same caveat as
+// every other site-based edge.
+//
+// Only the `in` direction exists. `::out.import` on a class would mean "what
+// this class imports", which is a property of its FILE, not of the symbol;
+// asking an import node itself is the existing `import#huma::in` path.
+func (e *engine) importRefs(h *treeNode, dir string) []*treeNode {
+	if dir != "in" || h.sym == "" || h.class == "import" {
+		return nil
+	}
+	if e.importRefCache == nil {
+		e.importRefCache = map[*treeNode][]*treeNode{}
+	}
+	if refs, ok := e.importRefCache[h]; ok {
+		return refs
+	}
+	if e.probeBlocked() {
+		return nil
+	}
+	var refs []*treeNode
+	defer func() { e.importRefCache[h] = refs }()
+
+	if !e.spend(1) {
+		return refs
+	}
+	for _, decl := range e.declsOf(h.leaf) {
+		if decl.class != "import" || decl == h {
+			continue
+		}
+		refs = append(refs, &treeNode{
+			class: "ref", refDir: "in", refKind: "import", refConf: refLexical,
+			leaf: h.leaf, full: h.leaf,
+			file: decl.file, abs: decl.abs, at: [2]int{decl.at[0], decl.at[0]},
+			parent: h, depth: h.depth + 1, refFar: []*treeNode{decl},
+			fileOrd: h.fileOrd, symOrd: h.symOrd,
+		})
+	}
+	return refs
+}
+
 // nodeForLoc maps an implementation target location to a tree node — the
 // declared type at that line, or an external stub when it resolves outside
 // the git root (a workspace type satisfying io.Reader; a stdlib type).
@@ -4878,7 +4990,7 @@ func (e *engine) buildOutRefs(n *treeNode) {
 		// settles whatever is still ambiguous (see precision.go).
 		far, conf := e.refineFar(far, n.abs, site.line, site.col)
 		n.refsOut = append(n.refsOut, &treeNode{
-			class: "ref", refDir: "out", refKind: site.kind, refPos: site.pos, refConf: conf,
+			class: "ref", refDir: "out", refCol: site.col, refKind: site.kind, refPos: site.pos, refConf: conf,
 			leaf: site.name, full: site.name,
 			file: n.file, abs: n.abs, at: [2]int{site.line, site.line},
 			parent: n, depth: n.depth + 1, refFar: far,
@@ -4957,7 +5069,7 @@ func (e *engine) buildInRefs(n *treeNode) {
 			continue // the LSP says this site refers to a different decl
 		}
 		n.refsIn = append(n.refsIn, &treeNode{
-			class: "ref", refDir: "in", refKind: hit.kind, refPos: hit.pos, refConf: conf,
+			class: "ref", refDir: "in", refCol: hit.col, refKind: hit.kind, refPos: hit.pos, refConf: conf,
 			leaf: n.leaf, full: n.leaf,
 			file: rel, abs: fnode.abs, at: [2]int{hit.line, hit.line},
 			parent: n, depth: n.depth + 1, refFar: []*treeNode{src},

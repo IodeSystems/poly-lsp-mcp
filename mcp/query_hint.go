@@ -51,6 +51,17 @@ func (e *engine) zeroResultHint(list selectorList) string {
 	if h := e.hintDeadPath(cx); h != "" {
 		return h
 	}
+	// Before hintDeadPrefix, which is a WALK: it probes every prefix of the
+	// chain and can spend the whole wall-clock allowance getting to an
+	// answer of "". The merge hint is a fact about the shape that was
+	// WRITTEN, decided by one index-anchored probe, and it only speaks when
+	// that probe finds a concrete node — so running it first cannot preempt
+	// a truer answer, it can only stop the clock from eating a certain one.
+	// (Measured: on this repo the prefix probes exhausted the 10ms floor and
+	// the merge probe was refused before it ran.)
+	if h := e.hintMergeDescendant(cx); h != "" {
+		return h
+	}
 	if h := e.hintDeadPrefix(cx); h != "" {
 		return h
 	}
@@ -99,11 +110,70 @@ func probeSafe(cx selComplex) bool {
 // probing. A hint is best-effort by construction: on a workspace where
 // explaining the result is slow, the result stays as silent as it was
 // before, rather than becoming slow.
+// The FLOOR is what a probe needs to materialize symbols for the first time.
+// It was 10ms, tuned against this repo — where the caller's own query has
+// usually already parsed the files a probe will touch, so the probe is nearly
+// free. On a cold corpus it is not: measured 2026-08-04 on termux-app (291
+// source files), the single index-anchored probe behind hintMergeDescendant
+// took 18.9ms, blew the 10ms floor, and was reported INCONCLUSIVE — so every
+// symbol-probing hint silently disabled itself on precisely the workspace
+// whose caller most needed one. An empty result that is instant to produce
+// (the planner seeds an exact-name tip straight from the index and walks
+// nothing) gets the floor, not the elapsed time, which is why the floor and
+// not the ceiling is what binds here.
+//
+// The CEILING is unchanged and is what bounds the real hazard — the 415ms
+// hint explaining a 4µs query. 30ms of worst-case hint is still bounded and
+// still small; silence is not.
+// The wall-clock half used to SCALE with the query it explains — floored at
+// 10ms, capped at 50ms. The cap is what bounds the hazard above; the floor
+// turned out to be backwards. A probe's cost is dominated by materializing
+// symbols for the first time, so it is most expensive exactly when the
+// caller's query was CHEAP: an empty result the planner answers straight from
+// the index walks nothing, warms nothing, and then hands its probe the 10ms
+// minimum. Measured 2026-08-04 on termux-app (291 source files, cold), the
+// single index-anchored probe behind hintMergeDescendant needs 42.6ms — so
+// every symbol-probing hint reported itself INCONCLUSIVE and said nothing, on
+// precisely the workspace whose caller most needed one.
+//
+// Scaling on ELAPSED could therefore only ever shorten the allowance below
+// the cap, and it shortened it for the cases that needed it most. It is gone.
+//
+// What the clock should scale on is the CORPUS, because that is what a
+// probe's cost is made of: the probe is slow when it has to parse files for
+// the first time, and how many files there are to parse is a property of the
+// workspace, not of the query being explained. A flat number is arbitrary in
+// the direction that breaks — it is generous on a small repo, where probes
+// are nearly free anyway, and too tight on a large one, where the caller most
+// needs the hint. Both flat values tried here were wrong that way: 10ms
+// silenced every symbol-probing hint on termux-app, and 50ms made the merge
+// hint fire on 1 run in 6 — a hint that appears at random cannot be relied on
+// or tested.
+//
+// The slope is measured, not guessed: 42.6ms over termux-app's 291 source
+// files is ~0.15ms/file, and hintProbePerFile is ~3x that for headroom. The
+// floor covers a small workspace where the parse is trivial but the process
+// may still be cold; the ceiling is what bounds the hazard this budget exists
+// for — the 415ms hint explaining a 4µs query, from a probe that DROPPED its
+// index anchor and fell back to a full forward walk. Ops (below) remains the
+// deterministic bound; the clock only catches the parse storm that a single
+// spend(1) can hide.
+//
+// In the MCP server — the case that matters — the parse is cached after the
+// first hint, so later probes never approach any of this. The CLI pays it
+// cold once per invocation, bounded.
 const (
-	hintProbeOps = 50_000 // ~1% of the deterministic cap
-	hintProbeMin = 10 * time.Millisecond
-	hintProbeMax = 50 * time.Millisecond
+	hintProbeOps     = 50_000 // ~1% of the deterministic cap
+	hintProbeFloor   = 50 * time.Millisecond
+	hintProbePerFile = 450 * time.Microsecond
+	hintProbeCeil    = 400 * time.Millisecond
 )
+
+// hintProbeBudget is the wall clock one zero result's probes may share,
+// scaled to the number of indexed files. See the constants above.
+func hintProbeBudget(files int) time.Duration {
+	return min(hintProbeFloor+time.Duration(files)*hintProbePerFile, hintProbeCeil)
+}
 
 // openHintBudget opens the allowance for one zero result: a hint may take
 // about as long as the query it explains, floored so an instant query can
@@ -113,8 +183,7 @@ func (e *engine) openHintBudget() {
 	// answer, and spending 50× that to explain it would be answering a
 	// question they declined to pay for.
 	e.hintOpsLeft = min(hintProbeOps, e.workLeft)
-	e.hintDeadline = time.Now().Add(
-		min(max(time.Since(e.startedAt), hintProbeMin), hintProbeMax))
+	e.hintDeadline = time.Now().Add(hintProbeBudget(len(e.fileByRel)))
 }
 
 // probeState is every engine field a probe run can disturb.
@@ -430,6 +499,75 @@ func (e *engine) hintDeadPrefix(cx selComplex) string {
 //
 // Reporting the found node's real tag and address makes the answer
 // actionable in one step — the address feeds straight into node_read.
+// ------------------------------------------ probe: tag and filter split apart
+//
+// hintMergeDescendant reports `tag name=v` written where `tag[name=v]` was
+// meant. The space is a DESCENDANT combinator, so `method name=x` asks for a
+// node named x somewhere BELOW a method — which for a method's own name is
+// nothing — while `method[name=x]` asks for the method itself. The two read
+// almost identically and differ completely, and the wrong one is silent.
+//
+// Measured on the volcycle bench against termux-app 2026-08-04:
+// `method name=handleVirtualKeys` returned ∅ where `method[name=…]` returns
+// the declaration. The `read as` echo does spell the descendant walk out, but
+// it explains what WAS asked; nothing named the repair, and hintDropTag cannot
+// — it relaxes the SUBJECT, and the subject here is the bare filter, which has
+// no tag to drop.
+//
+// Deliberately narrow: only a bare tag followed by a bare filter, adjacent and
+// descendant-joined. Anything richer (ids, pseudos, an explicit `>`) is a
+// selector whose author meant the walk.
+func (e *engine) hintMergeDescendant(cx selComplex) string {
+	last := len(cx.elems) - 1
+	if last < 1 {
+		return ""
+	}
+	sub, prev := cx.elems[last], cx.elems[last-1]
+	if sub.comb != selDescendant || sub.comp == nil || prev.comp == nil {
+		return ""
+	}
+	if sub.min != 1 || sub.max != 1 || prev.min != 1 || prev.max != 1 {
+		return ""
+	}
+	// The subject must be a bare filter: universal, attrs only. An OR is
+	// excluded because renderAttrList spells the conjoined leaves, which is
+	// not what a boolean expression says.
+	s := sub.comp
+	if !s.implied || len(s.attrs) == 0 || hasAttrOr(s.attrExpr) ||
+		len(s.pseudos) > 0 || len(s.positionClaims) > 0 || s.ordSel != 0 ||
+		s.isGenerated() || s.langClass != "" || s.root || s.selfRef {
+		return ""
+	}
+	// The element before it must be a bare tag: a class and nothing else.
+	p := prev.comp
+	if p.class == "" || p.anyType || len(p.attrs) > 0 || p.attrExpr != nil ||
+		len(p.pseudos) > 0 || len(p.positionClaims) > 0 || p.ordSel != 0 ||
+		p.isGenerated() || p.langClass != "" || p.root || p.selfRef {
+		return ""
+	}
+	// Every attr must be a plain [name=…]-style filter, not an #id — an id
+	// already answers to the address form and is not the confusion here.
+	for _, a := range s.attrs {
+		if a.axis == attrID {
+			return ""
+		}
+	}
+
+	merged := cloneComplex(cx)
+	m := merged.elems[last].comp
+	m.class, m.anyType, m.implied = p.class, false, false
+	merged.elems = append(merged.elems[:last-1], merged.elems[last:]...)
+	merged.elems[last-1].comb = prev.comb
+	hit := e.probeFound(selectorList{merged})
+	if hit == nil {
+		return ""
+	}
+	written := renderAttrList(s.attrs)
+	return fmt.Sprintf("the SPACE makes `%s %s` a DESCENDANT walk — it looks BELOW a %s. "+
+		"Write `%s%s` (no space) to filter the %s itself: matches %s #'%s'",
+		p.class, written, p.class, p.class, written, p.class, hit.class, hit.addr())
+}
+
 func (e *engine) hintDropTag(cx selComplex) string {
 	last := len(cx.elems) - 1
 	sub := cx.elems[last].comp
@@ -600,6 +738,16 @@ func (e *engine) hintDropLastAttr(cx selComplex) string {
 
 // renderAttr spells one attribute back the way it was written — the
 // clause a hint or cost trace has to name.
+// renderAttrList spells a compound's attribute filters back the way they are
+// written — concatenated, since a compound's attrs conjoin.
+func renderAttrList(attrs []selAttr) string {
+	var b strings.Builder
+	for _, a := range attrs {
+		b.WriteString(renderAttr(a))
+	}
+	return b.String()
+}
+
 func renderAttr(a selAttr) string {
 	if a.axis == attrID && a.op == selExact {
 		return "#" + a.value

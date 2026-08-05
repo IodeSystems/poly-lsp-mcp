@@ -1808,6 +1808,19 @@ func TestSelectorCorpus_ZeroResultNamesTheClause(t *testing.T) {
 		name:     "one clause of several",
 		selector: "func[path=web/some_file.ts][name^=Call]",
 		want:     []string{"[name^=Call] filter is what emptied it", "web/some_file.ts#topLevel"},
+	}, {
+		// The space is a DESCENDANT combinator, so `tag name=v` asks for
+		// something named v BELOW a tag — which for the tag's own name is
+		// nothing — while `tag[name=v]` is the filter that was meant. The two
+		// read almost identically and the wrong one is silent. Measured on the
+		// volcycle bench against termux-app 2026-08-04: the agent wrote
+		// `method name=handleVirtualKeys`, got ∅, and moved on.
+		//
+		// hintDropTag cannot cover it — it relaxes the SUBJECT, and the
+		// subject here is the bare filter, which has no tag to drop.
+		name:     "tag and filter split by a space",
+		selector: "method name=Start",
+		want:     []string{"DESCENDANT walk", "Write `method[name=Start]`", "main.go#Server.Start"},
 	}}
 
 	for _, c := range cases {
@@ -1872,6 +1885,16 @@ func TestZeroResultHintStaysQuiet(t *testing.T) {
 	}
 	if grep.Hint != "" {
 		t.Errorf("::grep is answered by its own note, not a clause hint; got %q", grep.Hint)
+	}
+
+	// The merge hint never guesses either. If `tag[name=v]` matches nothing
+	// the space was not the problem, and an explicit `>` is a combinator the
+	// author wrote on purpose — rewriting it would invent an intent.
+	if q := query(t, s, map[string]any{"selector": "func name=NoSuchSymbolAnywhere"}); strings.Contains(q.Hint, "DESCENDANT walk") {
+		t.Errorf("no merged match exists, so the merge hint must stay quiet; got %q", q.Hint)
+	}
+	if q := query(t, s, map[string]any{"selector": "func > name=Start"}); strings.Contains(q.Hint, "DESCENDANT walk") {
+		t.Errorf("`>` is explicit; the merge hint must not fire. got %q", q.Hint)
 	}
 
 	// A lone filter has no OTHER clause to blame. Relaxing `func name^=Zzz`

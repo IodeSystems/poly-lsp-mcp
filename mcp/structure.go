@@ -387,6 +387,21 @@ func groupedMatches(items []matchItem) map[string]any {
 // via a per-call cache so a search over many hits in one file parses it
 // once.
 func (s *Server) enclosingSymPath(absFile string, line int, cache map[string][]symbols.Symbol) string {
+	return s.enclosingSymPathSkipping(absFile, line, cache, nil)
+}
+
+// enclosingSymPathSkipping is enclosingSymPath with extra classes excluded.
+//
+// Callers that hand the result back as an ADDRESS want `module` skipped: it is
+// the package clause, spans the whole file in some grammars, and is named for
+// the last path segment, so `TerminalToolbarViewPager.java#io` is what comes
+// out — a legal address that reads as noise and answers nothing. (Measured on
+// the volcycle bench 2026-08-04: 5 of the first 7 enclosingSymbol values were
+// package clauses.) `outlineSkipClasses` excludes it for the same reason.
+//
+// Attribution callers — ref sites, edges — keep it: there, "this occurrence is
+// in the package clause" is a true and useful answer.
+func (s *Server) enclosingSymPathSkipping(absFile string, line int, cache map[string][]symbols.Symbol, skip map[string]bool) string {
 	syms, ok := cache[absFile]
 	if !ok {
 		content, err := os.ReadFile(absFile)
@@ -406,7 +421,7 @@ func (s *Server) enclosingSymPath(absFile string, line int, cache map[string][]s
 		// `return B()` / the result type), stealing the site's
 		// attribution and the ref's enclosing symbol. "Which symbol
 		// encloses this line" should answer with the callable.
-		if sym.Class == "argument" || sym.Class == "return" {
+		if sym.Class == "argument" || sym.Class == "return" || skip[sym.Class] {
 			continue
 		}
 		if sym.DeclStartLine <= line && line <= sym.DeclEndLine {

@@ -2921,7 +2921,48 @@ func ordered(set map[*treeNode]bool) []*treeNode {
 // evaluate runs a parsed selector over the tree and returns the
 // matching nodes in deterministic pre-order.
 func (e *engine) evaluate(list selectorList) []*treeNode {
-	return ordered(e.evalList(list, e.project, false))
+	return dedupFragments(ordered(e.evalList(list, e.project, false)))
+}
+
+// dedupFragments collapses ::grep hits minted for the SAME source line by
+// different hosts.
+//
+// fragmentsOf runs per host node, and the hosts a bare `::grep('x')` matches
+// NEST: a line inside a method is also inside its type and its file, so one
+// source line arrives as several distinct *treeNodes that a pointer-keyed set
+// union cannot collapse. Measured on a live session against termux-app,
+// `::grep('terminal_margin_adjustment')` reported 28 matches carrying 9
+// distinct lines — the caller pays for every copy and the count is inflated by
+// the shape of the code rather than by anything it asked for. Scoping with
+// `path=…` hid this for a year: it leaves exactly one host.
+//
+// First in document order wins, which is also the copy worth keeping — hosts
+// sort by (fileOrd, symOrd), the file-level host sorts first, and its
+// -A/-B/-C context is clipped to the FILE rather than to some inner symbol.
+func dedupFragments(rows []*treeNode) []*treeNode {
+	type fragKey struct {
+		file   string
+		lo, hi int
+	}
+	var seen map[fragKey]bool
+	dropped := 0
+	for i, n := range rows {
+		if n.class == "fragment" {
+			if seen == nil {
+				seen = make(map[fragKey]bool, len(rows))
+			}
+			k := fragKey{n.file, n.at[0], n.at[1]}
+			if seen[k] {
+				dropped++
+				continue
+			}
+			seen[k] = true
+		}
+		if dropped > 0 {
+			rows[i-dropped] = n
+		}
+	}
+	return rows[:len(rows)-dropped]
 }
 
 // evaluateCapped is evaluate with an early exit once `need` matches
@@ -2939,7 +2980,7 @@ func (e *engine) evaluateCapped(list selectorList, need int) ([]*treeNode, bool)
 	}
 	e.cap = need
 	defer func() { e.cap = 0 }()
-	rows := ordered(e.evalList(list, e.project, false))
+	rows := dedupFragments(ordered(e.evalList(list, e.project, false)))
 	return rows, e.capHit
 }
 

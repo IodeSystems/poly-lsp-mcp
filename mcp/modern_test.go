@@ -617,6 +617,45 @@ func TestModernQueryGrepFiltersAndClaims(t *testing.T) {
 	}
 }
 
+// A ::grep hit is minted per HOST, and hosts nest — a line inside a method is
+// also inside its type and its file. Unscoped, one source line therefore
+// arrived as several distinct nodes that the pointer-keyed set union could not
+// collapse, so the caller paid for every copy and the count was inflated by the
+// shape of the code.
+//
+// Found in a live session against termux-app (2026-08-04): the agent's own
+// `::grep('terminal_margin_adjustment')` reported 28 matches carrying 9
+// distinct lines, and a broad `KEY_` grep reported 227 for 66. Scoping with
+// `path=` had always hidden it — that leaves exactly one host.
+//
+// The invariant: a bare grep and the same grep scoped to the file must return
+// the SAME rows. Scoping is about where to look, never about how many times a
+// line is counted.
+func TestGrepDoesNotRepeatALineOncePerHost(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	// "ctx" appears inside a method, which sits inside a file — two nesting
+	// hosts for one line.
+	bare := query(t, s, map[string]any{"selector": `::grep('ctx')`, "limit": 50})
+	scoped := query(t, s, map[string]any{"selector": `path=main.go ::grep('ctx')`, "limit": 50})
+	if bare.TotalMatches == 0 {
+		t.Fatal("fixture has no ctx lines")
+	}
+	if bare.TotalMatches != scoped.TotalMatches {
+		t.Errorf("bare grep %d != file-scoped %d — a line is counted once per host",
+			bare.TotalMatches, scoped.TotalMatches)
+	}
+	seen := map[string]bool{}
+	for _, m := range bare.Matches {
+		key := fmt.Sprintf("%s@%v", m.Node, m.At)
+		if seen[key] {
+			t.Errorf("duplicate grep row for %s", key)
+		}
+		seen[key] = true
+	}
+}
+
 func TestModernQueryGrepFieldIsGone(t *testing.T) {
 	s, _ := startModern(t)
 	defer s.close()

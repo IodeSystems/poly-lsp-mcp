@@ -2,15 +2,17 @@
 # `make smoke-editor` / `make smoke-llm` need python3, and a few tests
 # need gopls + git on PATH (skipped otherwise).
 #
-# `make build` / `make install` STAMP the source directory into the binary
-# (-X main.srcDir), which turns on dev self-update: the binary rebuilds itself
-# from this tree and re-execs whenever a .go file is newer than it. That
-# matters here because poly-lsp-mcp is always SPAWNED (by dun, by an editor),
-# never launched by hand, so nothing else in the loop notices it is stale.
-# See selfupdate.go. Disable at runtime with POLY_LSP_NO_AUTOBUILD=1.
+# Every build here is a RELEASE build — no target stamps anything into the
+# binary, and none may. Dev self-update is opt-in at RUNTIME instead:
 #
-# A plain `go install .` leaves srcDir empty and never self-updates — that is
-# the release build, and `make install-release` spells it out.
+#   export LSP_REBUILD_PATH=$(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+#
+# With that set, the binary rebuilds itself from that tree and re-execs
+# whenever a .go file there is newer than it — which matters because
+# poly-lsp-mcp is always SPAWNED (by dun, by an editor), never launched by
+# hand, so nothing else in the loop notices it is stale. Unset it to turn the
+# whole thing off. See selfupdate.go, and TestNoBuildTargetStampsTheBinary,
+# which fails if a target ever grows an -X stamp again.
 
 GO              ?= go
 BINARY          ?= poly-lsp-mcp
@@ -18,23 +20,16 @@ PREFIX          ?= $(HOME)/go/bin
 PKGS            := ./...
 RACE_TIMEOUT    ?= 300s
 TEST_TIMEOUT    ?= 180s
-SRCDIR          := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
-LDFLAGS         := -X main.srcDir=$(SRCDIR)
 
 .PHONY: default
 default: build
 
 .PHONY: build
 build:
-	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) .
+	$(GO) build -o $(BINARY) .
 
 .PHONY: install
 install:
-	$(GO) install -ldflags "$(LDFLAGS)" .
-
-# The release build: no source stamp, so no self-update.
-.PHONY: install-release
-install-release:
 	$(GO) install .
 
 # Benchmarks. Generated fixtures, so a number means the same thing next month

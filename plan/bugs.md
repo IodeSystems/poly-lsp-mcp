@@ -418,6 +418,19 @@ fix.
 tree is newer than the binary, then `syscall.Exec` the fresh one.
 `POLY_LSP_AUTOBUILD_DONE` breaks the loop, `POLY_LSP_NO_AUTOBUILD=1` disables.
 
+> **Superseded 2026-08-04 (USER), same behaviour, different trigger.** The
+> stamp travels: copy a stamped binary anywhere and it carries a path it will
+> rebuild from, and whoever controls that path controls the binary. The switch
+> is now `LSP_REBUILD_PATH`, read at RUNTIME — a distributed build contains no
+> path, so inert is the DEFAULT rather than something a release target has to
+> remember not to do. The named path is vetted before any build (absolute,
+> owned by this uid, not world-writable, `go.mod` declares this module), every
+> refusal is announced on stderr, and `TestNoBuildTargetStampsTheBinary` keeps
+> a build target from reintroducing `-X`. Everything below still describes the
+> rebuild itself, which did not change. Env names: `LSP_REBUILD_PATH`,
+> `LSP_REBUILD_DONE` (the re-exec guard); `POLY_LSP_NO_AUTOBUILD` is gone —
+> unsetting the path is the off switch.
+
 Three things the port does NOT copy from dun, because this binary's job is
 different:
 

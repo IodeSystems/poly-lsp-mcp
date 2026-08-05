@@ -33,7 +33,7 @@ func main() {
 
 	// Before ANY subcommand: this may replace the process, and it must happen
 	// before a single byte of JSON-RPC has been read or written. A no-op
-	// unless the binary was source-stamped by `make build|install`.
+	// unless LSP_REBUILD_PATH names this module's checkout (see selfupdate.go).
 	selfUpdate()
 
 	// Subcommand dispatch. Default (no subcommand) runs the LSP server.

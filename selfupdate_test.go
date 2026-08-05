@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -107,24 +108,111 @@ func TestSourceNewerThanPruneList(t *testing.T) {
 	}
 }
 
-// An unstamped binary never self-updates — that is what makes `go install .`
-// a release build. selfUpdate must return before it can stat, build or exec.
-func TestSelfUpdateIsANoOpWithoutASourceStamp(t *testing.T) {
-	saved := srcDir
-	t.Cleanup(func() { srcDir = saved })
-
-	srcDir = ""
+// With no LSP_REBUILD_PATH there is nothing to rebuild FROM — which is what
+// makes every distributed build inert. selfUpdate must return before it can
+// stat, build or exec.
+func TestSelfUpdateIsANoOpWithoutARebuildPath(t *testing.T) {
+	t.Setenv(rebuildPathEnv, "")
 	selfUpdate() // must not panic, build, or replace this test process
 
-	// The env guards are the other half: with a stamp but a guard set, still
-	// nothing. Pointing srcDir at an empty temp dir makes a stray rebuild
-	// attempt fail loudly rather than silently succeeding against the repo.
-	srcDir = t.TempDir()
-	t.Setenv("POLY_LSP_NO_AUTOBUILD", "1")
+	// The re-exec guard is the other half: a valid path, but the rebuild
+	// already happened once, so still nothing.
+	t.Setenv(rebuildPathEnv, t.TempDir())
+	t.Setenv(rebuildDoneEnv, "1")
 	selfUpdate()
-	t.Setenv("POLY_LSP_NO_AUTOBUILD", "")
-	t.Setenv("POLY_LSP_AUTOBUILD_DONE", "1")
-	selfUpdate()
+}
+
+// The path is vetted, not trusted. Each of these is a way a NAMED path can be
+// the wrong thing to rebuild from, and every one must refuse — a rebuild
+// replaces the running binary with whatever that tree compiles to.
+func TestRebuildDirRefusesAPathItCannotVouchFor(t *testing.T) {
+	good := t.TempDir()
+	writeMod := func(dir, mod string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+			[]byte("module "+mod+"\ngo 1.26\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMod(good, rebuildModule)
+
+	// A directory holding a DIFFERENT module is the mistyped-path case: it
+	// compiles, and rebuilding from it silently replaces this binary with
+	// another program.
+	other := t.TempDir()
+	writeMod(other, "github.com/someone/else")
+
+	// No go.mod at all — a path that is merely a directory.
+	empty := t.TempDir()
+
+	// World-writable: another account can swap the source before the build
+	// reads it.
+	loose := t.TempDir()
+	writeMod(loose, rebuildModule)
+	if err := os.Chmod(loose, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	// Group-writable is ACCEPTED, and this is the case that decides it: under
+	// the user-private-group convention an ordinary `git clone` lands at 0775
+	// (umask 002) with a group of one. Refusing it would refuse every normal
+	// checkout — the guard would read as strict and act as an off switch.
+	group := t.TempDir()
+	writeMod(group, rebuildModule)
+	if err := os.Chmod(group, 0o775); err != nil {
+		t.Fatal(err)
+	}
+
+	file := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"this module, owned", good, true},
+		{"group-writable, the ordinary checkout", group, true},
+		{"a different module", other, false},
+		{"no go.mod", empty, false},
+		{"world-writable", loose, false},
+		{"not a directory", file, false},
+		{"does not exist", filepath.Join(good, "nope"), false},
+		{"relative", "src/poly-lsp-mcp", false},
+		{"unexpanded tilde is expanded, then vetted", "~/almost-certainly-not-there", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(rebuildDoneEnv, "")
+			t.Setenv(rebuildPathEnv, c.path)
+			got, ok := rebuildDir()
+			if ok != c.want {
+				t.Fatalf("rebuildDir()=%q,%v want ok=%v", got, ok, c.want)
+			}
+			if ok && got != c.path {
+				t.Errorf("an accepted path is returned as given; got %q", got)
+			}
+		})
+	}
+}
+
+// The release-build gate. Self-update is reachable ONLY through the
+// environment, so no build target may reintroduce a compile-time stamp — a
+// stamped binary carries a path it will rebuild from wherever it is copied,
+// and whoever controls that path controls the binary. This asserts the
+// property at its source rather than trusting the comment above it.
+func TestNoBuildTargetStampsTheBinary(t *testing.T) {
+	b, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range strings.Split(string(b), "\n") {
+		code, _, _ := strings.Cut(line, "#") // comments may discuss -X
+		if strings.Contains(code, "-X ") || strings.Contains(code, "-ldflags") {
+			t.Errorf("Makefile:%d stamps the binary, which self-update must never depend on: %s", i+1, line)
+		}
+	}
 }
 
 // rebuildSelf must never leave a half-written binary at the destination: it

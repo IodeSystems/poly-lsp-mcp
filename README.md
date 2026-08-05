@@ -84,6 +84,24 @@ go install .
 
 Binary lands at `$GOPATH/bin/poly-lsp-mcp`.
 
+### Dev: rebuild on spawn
+
+poly-lsp-mcp is always *spawned* — dun runs it off `PATH`, editors launch the
+LSP — so nothing in the loop notices the installed binary is stale, and a
+session can run for hours against a build that predates the fix it is hunting.
+Point it at its own checkout and it rebuilds itself in place and re-execs
+whenever a `.go` file there is newer:
+
+```sh
+export LSP_REBUILD_PATH=~/src/poly-lsp-mcp   # in the profile that starts your agent/editor
+```
+
+Unset it to turn this off; there is no other switch, and nothing is stamped
+into the binary, so a build you distribute cannot do this. The path is checked
+before anything is built — absolute, owned by you, not world-writable, and its
+`go.mod` must declare this module — and a path that fails says so on stderr.
+A build failure is non-fatal: it warns and runs the binary you already have.
+
 ## LSP mode
 
 Default invocation. Speaks LSP over stdio. Point your editor's language client at the binary; configure per-workspace via `poly-lsp-mcp.yaml`.

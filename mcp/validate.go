@@ -593,8 +593,58 @@ func (oc editOutcome) rejection(label string) map[string]any {
 		p["reverted"] = true
 		p["note"] = "REJECTED — reverted; edit introduced errors (" + label + ")"
 		p["help"] = rejectHelp
+		// `action` sorts BEFORE `diagnostics`, which is the whole point.
+		//
+		// rejectHelp was already attached here and was already correct, and a
+		// dun session on 2026-08-05 still looped on the same rejection twice
+		// while adding a --docker-network flag: Go serializes map keys
+		// alphabetically, so `diagnostics` came first and buried the recovery
+		// at char ~1600 of a 2036-char payload. Payload prose gets skipped the
+		// same way description prose does (measured on the volcycle bench:
+		// a read hint ignored 44 times out of 44), so the recovery has to
+		// arrive as a short imperative in the first field read, not as an
+		// explanation after the evidence.
+		if act := incompleteEditAction(oc.NewErrors); act != "" {
+			p["action"] = act
+		}
 	}
 	return p
+}
+
+// incompleteEditErrorCodes are the diagnostics that mean "this edit is HALF
+// DONE", not "this edit is wrong": a declaration with no use yet, or a use
+// whose declaration is still coming. They are the expected state in the middle
+// of any multi-part change, so a rejection carrying only these is a signal to
+// stage rather than to rethink.
+var incompleteEditErrorCodes = []string{
+	"UnusedVar", "UnusedImport", "UndeclaredName", "MissingFieldOrMethod",
+	"declared and not used", "imported and not used", "undefined:",
+}
+
+// incompleteEditAction returns the imperative to lead the rejection with, when
+// every new error looks like a half-finished edit rather than a broken one.
+// Empty when any error is something else — claiming "just stage it" about a
+// genuine mistake would turn a correct rejection into bad advice.
+func incompleteEditAction(newErrors []string) string {
+	if len(newErrors) == 0 {
+		return ""
+	}
+	for _, k := range newErrors {
+		hit := false
+		for _, code := range incompleteEditErrorCodes {
+			if strings.Contains(k, code) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			return ""
+		}
+	}
+	return "RETRY THIS EXACT CALL WITH commit:false. These errors say the edit is INCOMPLETE, " +
+		"not wrong — a declaration with no use yet, or a use whose declaration is still coming. " +
+		"commit:false applies without validating; make the counterpart edits the same way; then one " +
+		"final node_edit WITHOUT commit:false validates and commits the batch atomically."
 }
 
 // readableNewErrors turns the internal error fingerprints into something a

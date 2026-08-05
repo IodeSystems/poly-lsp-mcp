@@ -331,6 +331,35 @@ deleting two redundant fragments, not by raising the budget: the
 rename)` — which repeats the sentence directly above it. Every directive is
 intact.
 
+## A half-finished edit was rejected with the recovery buried behind the evidence
+
+**Reported:** 2026-08-05 (dun session `20260805-021013`, adding a
+`--docker-network` flag to dun)
+**Status:** ✅ fixed. `incompleteEditAction` in `mcp/validate.go`, pinned by
+`TestIncompleteEditActionDiscriminates`.
+
+**Symptom.** `dockerNetwork := flag.Bool(...)` is a correct edit, and
+`declared and not used` is the EXPECTED state until its use is added. The
+diagnostics gate rejected and reverted it — correctly — and the agent retried
+the identical edit and was rejected identically. Two `node_edit` calls, no
+progress, on a change the transaction system exists to support.
+
+**Cause — and note the recovery was already there and already right.**
+`rejectHelp` has always explained `commit:false`, and it was attached to this
+very payload. Go serializes map keys alphabetically, so `diagnostics` came
+first: ~1500 characters of context lines, then the instruction at char ~1600 of
+2036. The same failure the volcycle bench measured on the read hint, which
+advertised `lineLimit` in first position and was ignored 44 times out of 44 —
+payload PROSE is skipped exactly like description prose.
+
+**Fix.** An `action` field, which sorts before `diagnostics` and therefore
+leads. It fires only when EVERY new error is the half-finished-edit shape
+(`UnusedVar`, `UndeclaredName`, unused import, `undefined:`) — a declaration
+with no use yet, or a use whose declaration is still coming. Any other error
+and it stays quiet: telling someone to stage a genuine mistake would turn a
+correct rejection into bad advice, so the discrimination is what the test pins,
+not the wording. `help` stays for the general counterpart-edit case.
+
 ## Symbol-probing hints silently disabled themselves on any real corpus
 
 **Reported:** 2026-08-04 (volcycle bench, termux-app — 291 source files)

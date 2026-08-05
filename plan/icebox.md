@@ -18,9 +18,11 @@ work used. A first pass today claimed "no Android corpus on this box" and
 measured a synthetic fixture instead; that was a search error (the manifest is
 10 levels below `~`, past the depth searched), corrected the same day.
 termux-app — the repo that motivated the whole tree, 197 `.java` / 67 `.xml`,
-and the only local app with a string-keyed preference screen — is genuinely
-gone, so the BINDING half stays unmeasured. What follows is the R-reference
-half, which llama.android does exercise.
+and the only local app with a string-keyed preference screen — was believed
+gone when this was written; it was in an ephemeral scratchpad and has since
+been recovered to `~/local/src/termux/termux-app` (2026-08-04), so the BINDING
+half is measurable again. What follows is the R-reference half, which
+llama.android also exercises.
 
 - **Works, no binding needed**: `R.id.x` reaches its XML declaration through
   the lexical tier — `#msg_content::in > *` → `MessageAdapter.onBindViewHolder`.
@@ -60,10 +62,11 @@ diluted answer — that transcript is the trigger, and the sweep loop will
 surface it.
 
 **Buildable whenever wanted:** `llama.android` is on the box and exercises the
-R-reference half (that is where the numbers above come from). Only the BINDING
-half is unmeasurable — constant folding and the distinctiveness threshold need
-a string-keyed preference screen, which termux-app had and no local repo does.
-Samples are thin throughout: 6 ids in one small app, one agent over four days.
+R-reference half (that is where the numbers above come from). The BINDING half
+needs a string-keyed preference screen — termux-app, now back on disk at
+`~/local/src/termux/termux-app`, so that measurement is unblocked and simply
+has not been run. Samples are thin throughout: 6 ids in one small app, one
+agent over four days.
 
 ---
 
@@ -349,6 +352,22 @@ drifted to the host's built-in Edit + Bash. Why, filed as work:
   (`TestModernToolSurfaceTokenBudget`). **Measure first**: re-run a session
   with the corrected error text and see whether the anchor idiom is actually
   reached before paying for the op.
+  - **MEASURED 2026-08-04 (volcycle bench, termux-app), and it answers both
+    halves.** The corrected error text WORKS — the anchor idiom is reached, 17
+    of 17 edits, the model never got stuck. It is reached with the worst
+    available anchor: **489,201 bytes of `newText` to change 5,763**, an 85x
+    amplification, worst single case 68,079 bytes to change 45. The idiom
+    teaches HOW to insert without teaching *pick a short neighbour*, and at
+    class scope there is no short neighbour. Caveat on that 85x: it is
+    UNDERSTATED, because it was computed from `|added - removed|` and a
+    same-length edit (`return 1` -> `return 2`) scores zero by that measure;
+    `attachEditAmplification` now measures the changed REGION via common
+    prefix/suffix instead.
+  - **Partly mitigated, not fixed.** `editedNode` (the address of the
+    declaration a whole-file rewrite actually changed) took the next run to
+    109KB — still 20x. The residue is exactly the addressing gap: `lineLimit`
+    fixed READING, but only a symbol address yields a span to REPLACE. An
+    insert op is now the cheapest remaining lever on this number.
 
 - **DECISION — should `delete:true` on a single-line `@N` close the line up?
   (2026-08-03)** It currently empties the line in place; the newline sits

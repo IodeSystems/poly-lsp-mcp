@@ -120,6 +120,61 @@ Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
 
+◐ **The volcycle bench — a real agent, a real Android app, and the first
+measurement of what this surface is like to USE — 2026-08-04/05.** Lives at
+`~/local/src/termux/` (durable, NOT a scratchpad — the corpus was lost that way
+once): `run-arms.sh` drives dun with poly-lsp (`arm-lsp`) and without
+(`arm-base`) on the same task; `score-volcycle.sh` scores KEEP (Ctrl/Fn/compile
+must stay perfect) and WORK (the feature) SEPARATELY and never sums them.
+`bench-run{1..4}/` hold the transcripts.
+
+**The headline, and it reframes a year of doc work: PROSE IS SKIPPED, FIELDS
+ARE USED.** In run 3 the read hint said, in first position, "Avoid paging
+chunk-by-chunk: re-read with lineLimit=802 to get the whole file in ONE call".
+It was ignored **44 times out of 44**, while the same model pasted
+`matches[].node` addresses constantly and corrected itself within one call of
+any note that said "you got zero results". Adding `enclosingSymbol` as a FIELD
+(no prose) moved run 4 to: paging hints **44 → 0**, `lineLimit` **0 → 23**,
+edit payload **489KB → 109KB**, WORK **4/6 → 6/6**. Four separate attempts to
+teach through description prose have now failed (the space rule, the llm-bench
+A/B, `:root > *`, this) against one mechanism that works. Design rule: hand
+back an address it can paste, not a sentence telling it what to do — the same
+reason `outline` was promoted out of the hint years ago.
+
+**The graph went unused.** 0 of 50 selectors used `::in`/`::out`/`.call`/
+`:parents` — the differentiator, on neutral ground, mid-task. It used
+`path=… ::grep(…)` plus line-window reads: a path-scoped grep and a pager,
+which is what `arm-base` got from 191 `exec` calls. 0 of 52 reads and 0 of 17
+edits addressed a symbol. **It never crossed from `file@line` to
+`file#symbol`** — and that one missing step explains the paging rate, the edit
+amplification, and the regression below, all three.
+
+**What poly-lsp bought anyway** (run 4, same task, same model): 110 calls vs
+295, 6m30s vs 10m37s, and **1 recap vs 16** — arm-base spent a fifth of its
+calls re-summarizing itself and still spawned 2 subagents. Keeping the task
+inside one context is the clearest win in the data.
+
+- ◻ **The edit-time guard — the one thing left that neither tooling nor
+  prompting touched.** All four arms (2 prompts × with/without the graph)
+  deleted the same two lines, `mVirtualControlKeyDown = down` and its Fn twin,
+  killing Ctrl on a device with no hardware keyboard. javac cannot see it (the
+  field is still READ, just never true), so the bench's compile check is
+  structurally blind, and a textual tier scored it 5/6 KEEP while it shipped.
+  `field[name=X]::in` answers "who still reads this" in one call and was never
+  asked. Shape: refuse-or-warn when an edit removes the last WRITE to a name
+  whose other sites survive — the `lexicalRenameCollision` pattern. **n=4, and
+  a one-line symptom report ("Ctrl-C doesn't work") got it fixed in 8 calls**,
+  so the capability is there and only the noticing is missing.
+- ◻ **Measure the `file@line → file#symbol` bridge.** `enclosingSymbol` moved
+  paging but symbol addressing only went 0/52 → 1/42: the win came via
+  `lineLimit`, a different route than predicted. Whether `editedNode` changes
+  edit addressing is unmeasured — rerun and count symbol addresses.
+- **risks**: every number here is n=1 per arm, one model (Qwen3-6-27B-MPT), one
+  task. The scorer's tiers 1-4 are `grep`s over a diff and have now passed
+  three things that do not work (a conflated Ctrl, a full-screen swipe
+  threshold, and unreachable `case 'p'` code). It measures what it was written
+  to measure and NOTHING else.
+
 ✅ **Three refusals dropped — the scan loop run against its OWN fixes,
 2026-08-04** → done.md. Re-scanning the same corpus after a day of surface
 fixes is what the loop is for, and it earned its keep twice: it confirmed four

@@ -331,6 +331,37 @@ deleting two redundant fragments, not by raising the budget: the
 rename)` — which repeats the sentence directly above it. Every directive is
 intact.
 
+## Symbol-probing hints silently disabled themselves on any real corpus
+
+**Reported:** 2026-08-04 (volcycle bench, termux-app — 291 source files)
+**Status:** ✅ fixed. `hintProbeBudget(files)` in `mcp/query_hint.go`.
+
+**Symptom.** `zeroResultHint`'s wall-clock allowance was
+`min(max(elapsed, 10ms), 50ms)`. On this repo that is invisible: the caller's
+own query has usually already parsed the files a probe touches, so the probe
+is nearly free. On a COLD corpus it is not — the single index-anchored probe
+behind `hintMergeDescendant` needs **42.6ms** on termux-app, blew the 10ms
+floor, and was reported INCONCLUSIVE. Every hint that has to touch symbols
+therefore said nothing, on precisely the workspaces whose callers most need
+one.
+
+**Cause, and why the floor was backwards.** A probe's cost is dominated by
+materializing symbols for the first time, so it is most expensive exactly when
+the caller's query was CHEAPEST: an empty result the planner answers straight
+from the index walks nothing, warms nothing, and then gets handed the 10ms
+minimum. Scaling on ELAPSED could only ever shorten the allowance below the
+cap, and it shortened it hardest for the cases that needed it most.
+
+**Fix.** The clock scales on the CORPUS instead, which is what a probe's cost
+is actually made of: `50ms + 0.45ms/file`, capped at 400ms. The slope is
+measured (42.6ms / 291 files ≈ 0.15ms/file, taken at 3x for headroom). The cap
+still bounds the hazard the budget exists for — the 415ms hint explaining a
+4µs query, from a probe that DROPPED its index anchor and fell back to a full
+forward walk. Two flat values were tried first and both were wrong: 10ms
+silenced everything, 50ms made the merge hint fire on **1 run in 6**, which is
+worse than never — a hint that appears at random cannot be relied on or
+tested.
+
 ## Every name in a grouped `var (…)` block was missing from the index
 
 **Reported:** 2026-08-03 (session review — dun session `20260803-172451`;

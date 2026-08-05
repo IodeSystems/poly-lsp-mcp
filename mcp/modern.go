@@ -765,6 +765,30 @@ func (s *Server) resolveModernNode(node string) (*modernNode, error) {
 // exactly ONE candidate carries that name — 2+ is an ambiguity error
 // listing every candidate's disambiguated form. An explicit "[n]"
 // disambiguates exactly as it always has.
+// misfiledDirective spots a batch control that was written into an EDIT OP
+// field - `return:"commit:false"` and friends. The op fields take source text
+// (a return list, a rename target), so a value naming a batch control is never
+// what it looks like; it is a caller reaching for an undeclared parameter and
+// guessing at a declared field.
+func misfiledDirective(p *modernEditArgs) string {
+	fields := []struct {
+		name string
+		val  *string
+	}{{"return", p.Return}, {"rename", p.Rename}}
+	for _, f := range fields {
+		if f.val == nil {
+			continue
+		}
+		v := strings.ToLower(strings.TrimSpace(*f.val))
+		for _, d := range []string{"commit", "rollback"} {
+			if strings.HasPrefix(v, d) {
+				return fmt.Sprintf("%q looks like a batch control written into the %s op", *f.val, f.name)
+			}
+		}
+	}
+	return ""
+}
+
 func (s *Server) resolveClassicAddr(file, symPath string) (*modernNode, error) {
 	return s.resolveClassicAddrInClass(file, symPath, "")
 }
@@ -1239,7 +1263,26 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	case 0:
 		return nil, true, errors.New("node_edit needs exactly one of {oldText+newText, newText, delete, rename, params, return}; none was given")
 	default:
-		return nil, true, fmt.Errorf("node_edit takes exactly one of {oldText+newText, newText, delete, rename, params, return}; got %d: %s", len(ops), strings.Join(ops, ", "))
+		// A directive smuggled into an op field is a DIFFERENT mistake from
+		// asking for two edits, and answering it as the latter leaves the
+		// caller no way forward.
+		//
+		// Observed 2026-08-05: an agent that had been told to retry with
+		// commit:false sent {oldText, newText, return:"commit:false"} - it
+		// knew the mechanism and not the parameter, because `commit` is
+		// undeclared in the schema to save tokens, so it guessed a field that
+		// exists. Being told "you passed two ops" does not help someone who
+		// meant to pass one op and one PARAMETER.
+		if misfiled := misfiledDirective(&p); misfiled != "" {
+			return nil, true, fmt.Errorf("node_edit takes exactly one of {oldText+newText, newText, delete, rename, params, return}; "+
+				"got %d: %s. But %s — the batch controls are top-level BOOLEAN parameters, not ops: "+
+				"pass commit:false (stage without validating) or rollback:true beside the edit, "+
+				"as in {node, oldText, newText, commit:false}",
+				len(ops), strings.Join(ops, ", "), misfiled)
+		}
+		return nil, true, fmt.Errorf("node_edit takes exactly one of {oldText+newText, newText, delete, rename, params, return}; got %d: %s. "+
+			"To apply several edits together, send them one per call with commit:false, then one final call without it to validate and commit the batch",
+			len(ops), strings.Join(ops, ", "))
 	}
 	if p.Delete != nil {
 		if !*p.Delete {

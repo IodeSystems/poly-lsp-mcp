@@ -331,6 +331,45 @@ deleting two redundant fragments, not by raising the budget: the
 rename)` — which repeats the sentence directly above it. Every directive is
 intact.
 
+## An agent reached for commit:false and could not spell it
+
+**Reported:** 2026-08-05 (dun session `20260805-021013`)
+**Status:** ✅ the reply now names where a batch control goes
+(`misfiledDirective` in `mcp/modern.go`), pinned by
+`TestMisfiledBatchControlIsNamed`. Whether `commit` should be DECLARED is a
+product decision — see below.
+
+**What happened.** Rejected for `declared and not used` mid-way through adding
+a flag, the agent tried to stage the edit and sent:
+
+    {"node":"cmd/dun/main.go","oldText":"…","newText":"…","return":"commit:false"}
+
+It knew the mechanism and not the parameter, so it wrote the value into
+`return` — an op that exists. The reply, *"takes exactly one of {…}; got 2:
+oldText+newText, return"*, is true and useless to someone who meant one op and
+one PARAMETER.
+
+**Why it could not know.** `commit` / `rollback` are in node_edit's
+`Undeclared` list — hidden from the schema to save tokens, revealed in prose
+by `stageHelp` / `rejectHelp` at the moment they are needed. That design
+assumed naming the mechanism is enough. It is not: a model told to "retry with
+commit:false" still has to guess where `commit:false` GOES, and it guessed a
+declared field.
+
+**Fix.** The refusal detects a batch control written into an op field and says
+where it belongs, with a spelled example (`{node, oldText, newText,
+commit:false}`). A genuine two-op request is untouched and still reads as two
+ops — pinned, so the friendlier message cannot swallow a real mistake. The
+plain two-op error also now names the batch idiom, since "I want both of these"
+is exactly what staging is for.
+
+**Open decision (USER).** Declaring `commit` would remove the guessing
+entirely, and the surface is at 1300/1300 tokens. `icebox.md` records the
+standing lever — dropping `params`/`return` from the description, MEASURED
+UNUSED, worth ~27 tokens — which would more than pay for it. Notably it is
+`return` that this agent misused, so dropping it would remove both the cost and
+the decoy.
+
 ## A pattern beginning with a dash was unsearchable
 
 **Reported:** 2026-08-05 (dun session `20260805-021013`, looking for its own

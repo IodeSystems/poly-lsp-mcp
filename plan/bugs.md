@@ -331,6 +331,47 @@ deleting two redundant fragments, not by raising the budget: the
 rename)` — which repeats the sentence directly above it. Every directive is
 intact.
 
+## Removing the last assignment to a live field broke Ctrl, silently, four times
+
+**Reported:** 2026-08-04/05 (volcycle bench, all four arms)
+**Status:** ✅ guard shipped 2026-08-05 — `lostWrites` (`mcp/validate.go`),
+`symbols.NameUses`, pinned by `TestEditWarnsWhenTheLastWriteIsRemoved` and
+`TestWrittenNamesFindsAssignmentTargetsOnly`.
+
+**Symptom.** Four independent agent runs — two prompt framings, with and
+without the reference graph — deleted
+
+    mVirtualControlKeyDown = down;
+
+leaving the field declared and still read by `readControlKey()`. Volume Down
+stopped acting as Ctrl on a phone with no hardware keyboard: no Ctrl-C in a
+terminal emulator. Every arm compiled. `:app:assembleDebug` succeeded.
+
+**Why nothing caught it.** The field is still READ, so it is not unused; it is
+simply never true again. No compiler diagnostic exists for that, so the
+revert-on-new-diagnostics gate had nothing to fire on, and the bench's tier-1
+check is textual and scored it 5/6 while it shipped. `field[name=X]::in`
+answers "who still reads this" in one call and was never asked in 50 selectors.
+
+**Guard.** `symbols.NameUses` splits identifier occurrences into writes
+(assignment targets, including declaration initializers) and reads, with a
+declaration counted as neither. An edit whose file loses every write to a name
+that still has reads comes back with `lostWrites` and an `alert`.
+
+Verified against the real trees: `mVirtualControlKeyDown` goes 1 write → 0 with
+a read surviving, so it fires. It does NOT fire on `mVirtualFnKeyDown`, because
+`= false` survives in `onCodePoint` — correct by its own definition, and the
+honest limit: it detects a lost ASSIGNMENT, not changed semantics. It would
+have caught half of what broke.
+
+**Deliberately narrow so it can be trusted.** One file, before vs after.
+Syntactic assignment only — no aliasing, no pointer writes, no cross-file
+resolution, so it can warn about an edit that is fine. It REPORTS rather than
+refuses: removing a write is legitimate (deleting dead state, replacing a field
+with a constant), and a wrong refusal costs far more than a wrong note. This is
+not the general `.write` edge kind icebox.md parks; it is the cheap, sound part
+of it.
+
 ## An agent reached for commit:false and could not spell it
 
 **Reported:** 2026-08-05 (dun session `20260805-021013`)

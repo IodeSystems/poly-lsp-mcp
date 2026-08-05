@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
 // Edit validation: revert-on-new-diagnostics. When opts.Validate is set (the
@@ -36,6 +39,11 @@ type editOutcome struct {
 	NewErrors    []string // the error diagnostics THIS edit added (code∷message)
 	Validated    bool     // proven clean: LSP answered, no new errors
 	Skipped      string   // "" | "no-lsp" | "lsp-timeout" — safety not provable
+
+	// LostWrites names variables this edit stopped ever ASSIGNING while
+	// leaving them referenced — the one breakage class no diagnostic sees.
+	// See lostWrites.
+	LostWrites []string
 
 	// Batch (commit:false transaction) signals — set only when an edit
 	// runs inside an open batch (see editBatch).
@@ -198,6 +206,56 @@ func (b *editBatch) revertAll(oc *editOutcome) {
 // collects diagnostics. Under opts.Validate it fingerprints the pre-edit error
 // set first and, if the edit introduces a NEW error, restores `orig` and
 // reports a rejection. orig==nil means a CREATE (revert = delete the new file).
+// lostWrites names the variables this edit stopped ever ASSIGNING, while
+// leaving them still referenced.
+//
+// This is the one failure class no diagnostic can see. Measured on the volcycle
+// bench: four independent agent runs deleted
+//
+//	mVirtualControlKeyDown = down;
+//
+// leaving the field declared and still read by readControlKey(), so Ctrl became
+// permanently false on a phone with no hardware keyboard. javac is happy — the
+// field IS still read — and the bench's textual checks scored it 5/6 while it
+// shipped. Two prompt framings and the presence or absence of the reference
+// graph changed nothing; only noticing at EDIT time does.
+//
+// Scope, deliberately narrow so it can be trusted:
+//   - one file, comparing before against after. A name written from another
+//     file is not consulted, so this can warn about an edit that is fine.
+//   - syntactic assignment only, no aliasing or pointer writes.
+//   - it REPORTS. Removing the last write is legitimate (deleting dead state,
+//     replacing a field with a constant), and a refusal would be wrong far
+//     more often than a note is annoying.
+//
+// Still referenced is what makes it worth saying: dropping the write AND every
+// read is just deleting something, and says nothing.
+func (s *Server) lostWrites(abs string, orig, out []byte) []string {
+	lang := s.languageForFile(abs)
+	if lang == "" {
+		return nil
+	}
+	before, _ := symbols.NameUses(lang, orig)
+	if len(before) == 0 {
+		return nil
+	}
+	afterWrites, afterReads := symbols.NameUses(lang, out)
+	var lost []string
+	for name, n := range before {
+		if n == 0 || afterWrites[name] > 0 {
+			continue
+		}
+		// Only interesting while something still READS it. A surviving
+		// declaration is not a read: dropping the write and every reader is
+		// just deleting dead state, and says nothing.
+		if afterReads[name] > 0 {
+			lost = append(lost, name)
+		}
+	}
+	sort.Strings(lost)
+	return lost
+}
+
 func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts diagnosticOptions) (editOutcome, error) {
 	uri := pathToURI(abs)
 
@@ -238,7 +296,7 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 	s.refreshFileInIndex(abs, out)
 
 	diags := s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
-	oc := editOutcome{Diags: diags}
+	oc := editOutcome{Diags: diags, LostWrites: s.lostWrites(abs, orig, out)}
 	if !validate {
 		return oc, nil
 	}
@@ -562,6 +620,25 @@ func (oc editOutcome) attach(p map[string]any) {
 		p["validated"] = false
 		p["validationSkipped"] = oc.Skipped
 	}
+	if len(oc.LostWrites) > 0 {
+		// `alert` sorts before `diagnostics`, for the reason the rejection's
+		// `action` field does: a note behind the evidence is a note unread.
+		p["lostWrites"] = oc.LostWrites
+		p["alert"] = fmt.Sprintf(
+			"this edit removed the last ASSIGNMENT to %s, which is still referenced — "+
+				"so it now keeps its zero value forever and no compiler will say so. "+
+				"If that was not deliberate, restore the assignment; check who depends on it with "+
+				"node_query(selector: \"field[name=%s]::in\").",
+			strings.Join(quoteAll(oc.LostWrites), ", "), oc.LostWrites[0])
+	}
+}
+
+func quoteAll(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = strconv.Quote(s)
+	}
+	return out
 }
 
 // annotate adds ONLY the validation-status fields (validated /

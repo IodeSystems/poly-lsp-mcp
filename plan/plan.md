@@ -154,7 +154,18 @@ amplification, and the regression below, all three.
 calls re-summarizing itself and still spawned 2 subagents. Keeping the task
 inside one context is the clearest win in the data.
 
-- ◻ **The edit-time guard — the one thing left that neither tooling nor
+- ✅ **The edit-time guard — SHIPPED 2026-08-05.** `lostWrites` in
+  `mcp/validate.go` + `symbols.NameUses`: an edit that removes the last
+  ASSIGNMENT to a name still READ comes back with `alert` + `lostWrites`.
+  Verified against the real before/after trees — `mVirtualControlKeyDown`
+  writes 1→0 with a read surviving, so it would have fired on the Ctrl kill.
+  It stays quiet on `mVirtualFnKeyDown`, correctly: a `= false` write survives
+  in onCodePoint, so that is not "the last write removed". **It would have
+  caught half of what broke**, which is the honest claim — it detects a lost
+  assignment, not changed semantics. Reports, never refuses (removing a write
+  is legitimate); one file, syntactic assignment only; a declaration is not a
+  read, so dropping the write AND the readers stays silent. Original entry:
+- ◻ **~~The edit-time guard~~ — the one thing left that neither tooling nor
   prompting touched.** All four arms (2 prompts × with/without the graph)
   deleted the same two lines, `mVirtualControlKeyDown = down` and its Fn twin,
   killing Ctrl on a device with no hardware keyboard. javac cannot see it (the

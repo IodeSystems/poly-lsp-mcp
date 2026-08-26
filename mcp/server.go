@@ -214,6 +214,11 @@ type Server struct {
 	// new error (revert-on-new-diagnostics). Set by --validate. See validate.go.
 	validateEdits bool
 
+	// fileAccessHook: when set, consulted before node_read / node_edit touch
+	// a file. The host's executable may cancel the operation and inject a
+	// note into the result. See hook.go. nil = no hook (default behavior).
+	fileAccessHook *FileHook
+
 	// queryWorkBudget caps one node_query evaluation's WORK (nodes
 	// visited + edges crossed + sites/lines scanned). 0 = the default.
 	// See engine.spend — tripping it is loud, never silent.
@@ -327,6 +332,10 @@ func (s *Server) SetLegacyTools(enabled bool) {
 // so read-only is a ~37% smaller surface for a job that never needed them.
 // SetValidateEdits toggles revert-on-new-diagnostics for every mutating edit.
 func (s *Server) SetValidateEdits(enabled bool) { s.validateEdits = enabled }
+
+// SetFileAccessHook installs the host's file-access hook (nil disables it).
+// Set before the server handles any request.
+func (s *Server) SetFileAccessHook(h *FileHook) { s.fileAccessHook = h }
 
 func (s *Server) SetReadOnly(enabled bool) {
 	s.readOnly = enabled

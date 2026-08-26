@@ -977,6 +977,9 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	if err != nil {
 		return nil, true, err
 	}
+	if cancel, note := s.fileAccessGuard("read", rn.file); cancel {
+		return hookBlockedResult(note), false, nil
+	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, true, fmt.Errorf("read %s: %w", rn.file, err)
@@ -1333,6 +1336,9 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	// newText ALONE replaces it. This is what makes `#'F'::body newText:…`
 	// rewrite just the body without repeating the old text.
 	if rn.class == "ref" && p.NewText != nil && p.OldText == nil && p.Delete == nil {
+		if cancel, note := s.fileAccessGuard("edit", rn.file); cancel {
+			return hookBlockedResult(note), false, nil
+		}
 		return s.applyRangeRewrite(rn.addr, rn.decl, *p.NewText, p.diagnosticOptions)
 	}
 
@@ -1358,12 +1364,21 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		if *p.NewText == "" {
 			return nil, true, fmt.Errorf("creating %s needs non-empty newText", rn.file)
 		}
+		if cancel, note := s.fileAccessGuard("create", rn.file); cancel {
+			return hookBlockedResult(note), false, nil
+		}
 		return s.applyWholeFileWrite(rn.file, *p.NewText, p.diagnosticOptions)
 	}
 
 	// Every remaining op acts on an EXISTING node.
 	if !rn.exists {
 		return nil, true, fmt.Errorf("no such file: %s", rn.file)
+	}
+
+	// One guard covers every branch below (accept / delete / modify /
+	// rename): all of them rewrite the same file.
+	if cancel, note := s.fileAccessGuard("edit", rn.file); cancel {
+		return hookBlockedResult(note), false, nil
 	}
 
 	if p.Accept != nil {

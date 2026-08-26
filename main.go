@@ -100,6 +100,7 @@ func runMCP() {
 	noValidate := flag.Bool("no-validate", false, "turn OFF revert-on-new-diagnostics (see --validate); for when validation itself misfires, e.g. a never-analyzed file with pre-existing errors")
 	daemonMode := flag.Bool("daemon", false, "proxy tool calls to the shared per-user poly-lsp daemon (auto-starting it) instead of building the index in-process; one warm index + child-LSP fleet is shared across every client")
 	readCharBudget := flag.Int("read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
+	hookPath := flag.String("hook", os.Getenv("POLY_LSP_HOOK"), "path to a host hook executable consulted before every file read/edit (exit 2 = cancel, stdout = injected note); $POLY_LSP_HOOK fallback. See mcp/hook.go")
 	flag.Parse()
 
 	if *readCharBudget > 0 {
@@ -158,6 +159,10 @@ func runMCP() {
 		log.Printf("mcp: READ-ONLY — mutating tools are not registered")
 	}
 	srv.SetValidateEdits(*validate)
+	if *hookPath != "" {
+		srv.SetFileAccessHook(&mcp.FileHook{Path: *hookPath})
+		log.Printf("mcp: file-access hook armed: %s", *hookPath)
+	}
 	// Log the SURPRISING state. Validation is the default now, so announcing
 	// it every run is noise; running WITHOUT it is the fact worth recording,
 	// because an edit that breaks the build will then simply land.

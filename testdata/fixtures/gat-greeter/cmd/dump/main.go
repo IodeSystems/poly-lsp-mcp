@@ -30,8 +30,8 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/iodesystems/gwag/gw/gat"
-	"github.com/iodesystems/gwag/gw/ir"
+	"github.com/iodesystems/gwag/v2/gw/gat"
+	"github.com/iodesystems/gwag/v2/gw/ir"
 )
 
 func main() {

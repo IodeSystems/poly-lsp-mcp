@@ -126,6 +126,140 @@ var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 // model to narrow its selector rather than page through noise.
 const defaultQueryLimit = 20
 
+// queryRow builds one match row of node_query's answer. It is the ONE row
+// builder: QueryJSON (the CLI's --json) builds its rows with it too, so the
+// rows a model reads and the rows a program parses cannot drift apart.
+func (s *Server) queryRow(e *engine, n *treeNode) map[string]any {
+	// "type", not "class": the OUTPUT is the strongest teacher we have —
+	// it lands every turn, in front of the model, right where it decides
+	// what to write next. Labeling a tag "class" here while the grammar
+	// calls it a tag is precisely the mixed signal that had the model
+	// writing `.cache`. The result must model the language it wants back.
+	m := map[string]any{"node": n.addr(), "type": n.class}
+	// project/dir nodes have no source span, so no "@".
+	if n.class != "project" && n.class != "dir" {
+		m["@"] = []int{n.at[0], n.at[1]}
+	}
+	switch n.class {
+	case "ref":
+		// A ref row teaches the edge: its type IS the selector
+		// spelling, and the far end is keyed by direction so the row
+		// reads as the fact it states.
+		m["type"] = refTypeLabel(n)
+		// What settled this edge. A caller acting on "who calls Save"
+		// needs to know whether a language server said so (lsp), the
+		// name is unique so the match is certain anyway (lexical), or
+		// it is an "unsettled" guess whose several far ends are a
+		// CANDIDATE LIST, not a fact.
+		m["conf"] = n.refConf
+		far := make([]string, 0, len(n.refFar))
+		external := false
+		for _, f := range n.refFar {
+			far = append(far, f.addr())
+			if f.domain == "external" {
+				external = true
+			}
+		}
+		if n.refDir == "out" {
+			m["to"] = far
+		} else {
+			m["from"] = far
+		}
+		// An external far end (module@version#sym) is a read-only STUB
+		// outside the git root — resolved (conf: lsp) but NOT indexed.
+		// Flag it so the identity never reads as a workspace symbol.
+		if external {
+			m["domain"] = "external"
+		}
+	case "fragment":
+		// A fragment row IS its matched line: text (plus -A/-B/-C
+		// context) and the node it was found in.
+		m["type"] = "::grep"
+		m["in"] = n.parent.addr()
+		m["text"] = n.frag.Text
+		if len(n.frag.Before) > 0 {
+			m["before"] = n.frag.Before
+		}
+		if len(n.frag.After) > 0 {
+			m["after"] = n.frag.After
+		}
+	case "conflict", "mine", "theirs", "base":
+		// A conflict node carries its source INLINE and, for a side, the
+		// REF it came from. The ref is the side's real identity: under a
+		// rebase "ours" is the upstream and "theirs" is your own commit,
+		// so a caller told only "mine/theirs" is being told the thing
+		// that misleads them.
+		m["type"] = "::" + n.class
+		m["in"] = n.parent.addr()
+		m["text"] = n.genText
+		if n.conflictLabel != "" {
+			m["ref"] = n.conflictLabel
+		}
+		if n.conflict != nil {
+			sides := map[string]any{"mine": n.conflict.ours.label, "theirs": n.conflict.theirs.label}
+			if n.conflict.base != nil {
+				sides["base"] = n.conflict.base.label
+			}
+			m["sides"] = sides
+			// Whether each side RECONSTRUCTS into parseable source, and
+			// the text diff when neither does. Without this a caller
+			// cannot tell a structural answer from a recovered guess.
+			if abs, err := s.resolveFileArg(n.file); err == nil {
+				if content, err := os.ReadFile(abs); err == nil {
+					v := s.viewOf(n.file, content, *n.conflict)
+					m["mineParses"], m["theirsParses"] = v.MineParses, v.TheirsParses
+					if v.Diff != "" {
+						m["diff"] = v.Diff
+					}
+					if v.Note != "" {
+						m["note"] = v.Note
+					}
+					// What each side DECLARES. Names only — a span from a
+					// reconstruction does not address the file on disk.
+					if syms := s.sideSymbols(n.file, content, "mine"); syms != nil {
+						m["mineDeclares"] = syms
+					}
+					if syms := s.sideSymbols(n.file, content, "theirs"); syms != nil {
+						m["theirsDeclares"] = syms
+					}
+				}
+			}
+		}
+	case "signature", "body":
+		// A generated decl-head / body node carries its source INLINE,
+		// so a broad `func::signature` is a one-query overview.
+		m["type"] = "::" + n.class
+		m["in"] = n.parent.addr()
+		m["text"] = n.genText
+	}
+	// A row the walk CROSSED an edge to reach keeps the edge's facts. An
+	// uncrossed `::out.call` row already carries site and conf; `> *`
+	// used to drop both, so a caller could not tell a resolved edge from
+	// an unsettled guess in the very results the walk was for.
+	if via, ok := e.reachedVia[n]; ok && n.class != "ref" {
+		m["via"] = via.addr()
+		m["conf"] = via.refConf
+	}
+	// How far away it is. Only meaningful for a repeated walk — a single
+	// hop is trivially 1 and saying so is noise.
+	//
+	// firstHop is keyed on the REF nodes the walk stepped through, so a
+	// crossed row (`> *`, the common shape) is not in it directly: its
+	// distance is the distance of the edge that reached it.
+	if e.maxHopReached > 1 {
+		hop, ok := e.firstHop[n]
+		if !ok {
+			if via, viaOK := e.reachedVia[n]; viaOK {
+				hop, ok = e.firstHop[via]
+			}
+		}
+		if ok {
+			m["hop"] = hop
+		}
+	}
+	return m
+}
+
 func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
 	var p struct {
 		Selector string          `json:"selector"`
@@ -216,134 +350,7 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 
 	matches := make([]any, 0, len(paged))
 	for _, n := range paged {
-		// "type", not "class": the OUTPUT is the strongest teacher we have —
-		// it lands every turn, in front of the model, right where it decides
-		// what to write next. Labeling a tag "class" here while the grammar
-		// calls it a tag is precisely the mixed signal that had the model
-		// writing `.cache`. The result must model the language it wants back.
-		m := map[string]any{"node": n.addr(), "type": n.class}
-		// project/dir nodes have no source span, so no "@".
-		if n.class != "project" && n.class != "dir" {
-			m["@"] = []int{n.at[0], n.at[1]}
-		}
-		switch n.class {
-		case "ref":
-			// A ref row teaches the edge: its type IS the selector
-			// spelling, and the far end is keyed by direction so the row
-			// reads as the fact it states.
-			m["type"] = refTypeLabel(n)
-			// What settled this edge. A caller acting on "who calls Save"
-			// needs to know whether a language server said so (lsp), the
-			// name is unique so the match is certain anyway (lexical), or
-			// it is an "unsettled" guess whose several far ends are a
-			// CANDIDATE LIST, not a fact.
-			m["conf"] = n.refConf
-			far := make([]string, 0, len(n.refFar))
-			external := false
-			for _, f := range n.refFar {
-				far = append(far, f.addr())
-				if f.domain == "external" {
-					external = true
-				}
-			}
-			if n.refDir == "out" {
-				m["to"] = far
-			} else {
-				m["from"] = far
-			}
-			// An external far end (module@version#sym) is a read-only STUB
-			// outside the git root — resolved (conf: lsp) but NOT indexed.
-			// Flag it so the identity never reads as a workspace symbol.
-			if external {
-				m["domain"] = "external"
-			}
-		case "fragment":
-			// A fragment row IS its matched line: text (plus -A/-B/-C
-			// context) and the node it was found in.
-			m["type"] = "::grep"
-			m["in"] = n.parent.addr()
-			m["text"] = n.frag.Text
-			if len(n.frag.Before) > 0 {
-				m["before"] = n.frag.Before
-			}
-			if len(n.frag.After) > 0 {
-				m["after"] = n.frag.After
-			}
-		case "conflict", "mine", "theirs", "base":
-			// A conflict node carries its source INLINE and, for a side, the
-			// REF it came from. The ref is the side's real identity: under a
-			// rebase "ours" is the upstream and "theirs" is your own commit,
-			// so a caller told only "mine/theirs" is being told the thing
-			// that misleads them.
-			m["type"] = "::" + n.class
-			m["in"] = n.parent.addr()
-			m["text"] = n.genText
-			if n.conflictLabel != "" {
-				m["ref"] = n.conflictLabel
-			}
-			if n.conflict != nil {
-				sides := map[string]any{"mine": n.conflict.ours.label, "theirs": n.conflict.theirs.label}
-				if n.conflict.base != nil {
-					sides["base"] = n.conflict.base.label
-				}
-				m["sides"] = sides
-				// Whether each side RECONSTRUCTS into parseable source, and
-				// the text diff when neither does. Without this a caller
-				// cannot tell a structural answer from a recovered guess.
-				if abs, err := s.resolveFileArg(n.file); err == nil {
-					if content, err := os.ReadFile(abs); err == nil {
-						v := s.viewOf(n.file, content, *n.conflict)
-						m["mineParses"], m["theirsParses"] = v.MineParses, v.TheirsParses
-						if v.Diff != "" {
-							m["diff"] = v.Diff
-						}
-						if v.Note != "" {
-							m["note"] = v.Note
-						}
-						// What each side DECLARES. Names only — a span from a
-						// reconstruction does not address the file on disk.
-						if syms := s.sideSymbols(n.file, content, "mine"); syms != nil {
-							m["mineDeclares"] = syms
-						}
-						if syms := s.sideSymbols(n.file, content, "theirs"); syms != nil {
-							m["theirsDeclares"] = syms
-						}
-					}
-				}
-			}
-		case "signature", "body":
-			// A generated decl-head / body node carries its source INLINE,
-			// so a broad `func::signature` is a one-query overview.
-			m["type"] = "::" + n.class
-			m["in"] = n.parent.addr()
-			m["text"] = n.genText
-		}
-		// A row the walk CROSSED an edge to reach keeps the edge's facts. An
-		// uncrossed `::out.call` row already carries site and conf; `> *`
-		// used to drop both, so a caller could not tell a resolved edge from
-		// an unsettled guess in the very results the walk was for.
-		if via, ok := e.reachedVia[n]; ok && n.class != "ref" {
-			m["via"] = via.addr()
-			m["conf"] = via.refConf
-		}
-		// How far away it is. Only meaningful for a repeated walk — a single
-		// hop is trivially 1 and saying so is noise.
-		//
-		// firstHop is keyed on the REF nodes the walk stepped through, so a
-		// crossed row (`> *`, the common shape) is not in it directly: its
-		// distance is the distance of the edge that reached it.
-		if e.maxHopReached > 1 {
-			hop, ok := e.firstHop[n]
-			if !ok {
-				if via, viaOK := e.reachedVia[n]; viaOK {
-					hop, ok = e.firstHop[via]
-				}
-			}
-			if ok {
-				m["hop"] = hop
-			}
-		}
-		matches = append(matches, m)
+		matches = append(matches, s.queryRow(e, n))
 	}
 
 	payload := map[string]any{

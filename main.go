@@ -193,6 +193,7 @@ func runQuery() {
 	offset := flag.Int("offset", 0, "skip this many matches")
 	budget := flag.String("budget", "", "query budget: Nms wall-clock (bare = ms) or Nops deterministic work units (default 10000ms). Raise when a query reports it stopped early.")
 	verbose := flag.Bool("verbose", false, "log which config was resolved and other startup detail")
+	asJSON := flag.Bool("json", false, "print ONE JSON document (matches with node, file, type, @, and for an edge from/to and conf; total, offset, stop-early flags) instead of the grouped text tree")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: poly-lsp-mcp query [flags] <selector>\n\n")
 		fmt.Fprintf(os.Stderr, "Evaluate a node selector and print the matches, grouped by file.\n")
@@ -235,7 +236,11 @@ func runQuery() {
 	// A successful query prints its answer and nothing else. The bring-up
 	// commentary (index size, binding passes) is a server's startup record;
 	// here it is a preamble the caller re-reads on every invocation.
-	if err := srv.QueryText(selector, *limit, *offset, *budget, os.Stdout); err != nil {
+	query := srv.QueryText
+	if *asJSON {
+		query = srv.QueryJSON
+	}
+	if err := query(selector, *limit, *offset, *budget, os.Stdout); err != nil {
 		// A selector error is the answer to what was asked, so it prints as
 		// prose. Only a genuine tool failure gets the log furniture.
 		var se *mcp.SelectorError

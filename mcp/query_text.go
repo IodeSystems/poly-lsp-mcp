@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -147,6 +148,89 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 		return err
 	}
 	return nil
+}
+
+// QueryJSON is QueryText for a program: the same compile / evaluate /
+// paginate path, written as ONE JSON document instead of the grouped tree.
+// Each match is the row node_query emits (queryRow, the shared builder:
+// node, type, @, and for an edge its far end under from/to and its conf)
+// plus the file it lives in. The document carries total, offset and the
+// stop-early flags as fields; no reading, hint or caveat text is written
+// outside it, so stdout always parses.
+func (s *Server) QueryJSON(selector string, limit, offset int, budget string, w io.Writer) error {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return &SelectorError{errors.New("selector is required (e.g. \":root > *\" for the top-level tour)")}
+	}
+	if selector == "?" {
+		return writeJSONDoc(w, map[string]any{"grammar": selectorGrammarHelp})
+	}
+	if offset < 0 {
+		return &SelectorError{errors.New("offset must be >= 0")}
+	}
+
+	selector, explain := splitExplain(selector)
+	list, err := parseModernSelector(selector)
+	if err != nil {
+		return &SelectorError{err}
+	}
+	// Edges resolve through the symbol index; see QueryText.
+	if s.getIndex() == nil {
+		if err := s.BuildIndex(); err != nil {
+			return err
+		}
+	}
+	e, err := s.buildTree()
+	if err != nil {
+		return err
+	}
+	if v, unit, ok := parseBudget(budget); ok {
+		e.setBudget(v, unit)
+	}
+	rows := e.evaluate(list)
+	if explain {
+		return writeJSONDoc(w, map[string]any{"explain": e.explainRows(list), "truncated": e.workExceeded})
+	}
+
+	total := len(rows)
+	if limit <= 0 {
+		limit = total
+	}
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	matches := make([]map[string]any, 0, end-offset)
+	for _, n := range rows[offset:end] {
+		m := s.queryRow(e, n)
+		if n.file != "" {
+			m["file"] = n.file
+		}
+		matches = append(matches, m)
+	}
+	// total is a floor, not a count, when the budget stopped the walk:
+	// budgetExceeded says which one a caller is holding.
+	return writeJSONDoc(w, map[string]any{
+		"matches":        matches,
+		"returned":       len(matches),
+		"total":          total,
+		"offset":         offset,
+		"truncated":      end < total || e.workExceeded,
+		"budgetExceeded": e.workExceeded,
+		"timedOut":       e.timedOut,
+	})
+}
+
+// writeJSONDoc writes v as one JSON document. HTML escaping is off: a
+// selector's > and an address's & are data, not markup.
+func writeJSONDoc(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 const recursiveNote = "\nnote: :recursive needs a child LSP to tell a real self-call from a name\n" +

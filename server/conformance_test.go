@@ -429,4 +429,3 @@ func TestConformanceFramingRoundTrip(t *testing.T) {
 		t.Errorf("round trip mismatch: got %+v want %+v", got, msg)
 	}
 }
-

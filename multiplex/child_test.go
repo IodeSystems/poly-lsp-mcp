@@ -26,15 +26,18 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dir)
 
 	polyLspMcpBinary = filepath.Join(dir, "poly-lsp-mcp")
 	out, err := exec.Command("go", "build", "-o", polyLspMcpBinary, "github.com/iodesystems/poly-lsp-mcp").CombinedOutput()
 	if err != nil {
+		_ = os.RemoveAll(dir)
 		panic(fmt.Sprintf("build poly-lsp-mcp for tests: %v\n%s", err, out))
 	}
 
-	os.Exit(m.Run())
+	// os.Exit skips deferred calls, so the directory is removed before it.
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 func polyglotDir(t *testing.T) string {

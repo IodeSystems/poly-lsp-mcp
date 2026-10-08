@@ -454,7 +454,16 @@ func externalStub(defAbs string, defLine int, name string) *treeNode {
 func externalIdentity(defAbs string) (module, version string) {
 	p := filepath.ToSlash(defAbs)
 	if i := strings.LastIndex(p, "/pkg/mod/"); i >= 0 {
-		return splitModuleVersion(path.Dir(p[i+len("/pkg/mod/"):]))
+		sub := p[i+len("/pkg/mod/"):]
+		// An auto-downloaded Go toolchain is a GOROOT tree kept in the
+		// module cache (golang.org/toolchain@v0.0.1-go1.N.linux-amd64/src/strings/...):
+		// its files are the stdlib, named like the /src/ branch below.
+		if strings.HasPrefix(sub, "golang.org/toolchain@") {
+			if j := strings.Index(sub, "/src/"); j >= 0 {
+				return path.Dir(sub[j+len("/src/"):]), ""
+			}
+		}
+		return splitModuleVersion(path.Dir(sub))
 	}
 	if i := strings.LastIndex(p, "/node_modules/"); i >= 0 {
 		return firstNodePackage(p[i+len("/node_modules/"):]), ""

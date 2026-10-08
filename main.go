@@ -183,9 +183,10 @@ func runMCP() {
 
 // runQuery compiles and evaluates one selector against the workspace
 // and prints the matches. It is the human-facing door to the same
-// engine node_query serves: no JSON-RPC, no child LSPs, no warm index
-// — buildTree walks the workspace and parses only the files the
-// selector actually descends into.
+// engine node_query serves: no JSON-RPC, no warm index — buildTree walks
+// the workspace and parses only the files the selector actually descends
+// into. Child LSPs only with --resolve: then ambiguous ::in/::out edges
+// are resolved through them and each edge carries its conf.
 func runQuery() {
 	configPath := flag.String("config", "poly-lsp-mcp.yaml", "language registry config file")
 	rootPath := flag.String("root", ".", "workspace root directory to query")
@@ -194,6 +195,7 @@ func runQuery() {
 	budget := flag.String("budget", "", "query budget: Nms wall-clock (bare = ms) or Nops deterministic work units (default 10000ms). Raise when a query reports it stopped early.")
 	verbose := flag.Bool("verbose", false, "log which config was resolved and other startup detail")
 	asJSON := flag.Bool("json", false, "print ONE JSON document (matches with node, file, type, @, and for an edge from/to and conf; total, offset, stop-early flags) instead of the grouped text tree")
+	resolve := flag.Bool("resolve", false, "resolve ::in/::out edges through child LSPs (spawns them for this run, e.g. gopls) and label each edge conf: lsp|lexical|unsettled, as node_query does; slower to start")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: poly-lsp-mcp query [flags] <selector>\n\n")
 		fmt.Fprintf(os.Stderr, "Evaluate a node selector and print the matches, grouped by file.\n")
@@ -221,8 +223,8 @@ func runQuery() {
 		log.Fatalf("root: %v", err)
 	}
 
-	// No SetManager / no Serve: a query is read-only and touches
-	// neither child LSPs nor the persisted index.
+	// No Serve: a query is read-only and never writes the persisted index.
+	// Child LSPs only under --resolve (below).
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
 	// It DOES want the parse cache, though. Without it every invocation
 	// re-parses the workspace from scratch — the dominant cost of a one-shot
@@ -233,6 +235,17 @@ func runQuery() {
 	srv.SetQuiet(!*verbose)
 	srv.SetCachePath(cachePathFor(root))
 	srv.LoadCache()
+	// --resolve: start the child LSPs so evaluate settles ambiguous edges
+	// the way node_query does. Shutdown on every exit path below, so no
+	// child process outlives the run (log.Fatalf and os.Exit skip defers).
+	shutdown := func() {}
+	if *resolve {
+		if err := srv.InitResolve(multiplex.NewManager(reg)); err != nil {
+			srv.Shutdown()
+			log.Fatalf("query: %v", err)
+		}
+		shutdown = srv.Shutdown
+	}
 	// A successful query prints its answer and nothing else. The bring-up
 	// commentary (index size, binding passes) is a server's startup record;
 	// here it is a preamble the caller re-reads on every invocation.
@@ -240,7 +253,9 @@ func runQuery() {
 	if *asJSON {
 		query = srv.QueryJSON
 	}
-	if err := query(selector, *limit, *offset, *budget, os.Stdout); err != nil {
+	err = query(selector, *limit, *offset, *budget, os.Stdout)
+	shutdown()
+	if err != nil {
 		// A selector error is the answer to what was asked, so it prints as
 		// prose. Only a genuine tool failure gets the log furniture.
 		var se *mcp.SelectorError

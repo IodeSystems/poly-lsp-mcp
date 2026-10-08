@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 )
 
 // QueryText compiles a selector, evaluates it against the workspace
@@ -113,7 +115,11 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 	if e.workExceeded {
 		trace = e.costTrace(list)
 	}
-	if err := renderQueryTree(w, paged, total, offset, end, e.workExceeded, e.timedOut, trace); err != nil {
+	// With a manager attached (query --resolve) each edge row carries its
+	// conf, the label node_query gives the same edge. Without one every
+	// edge is name-keyed and the caveat below says so instead.
+	showConf := s.manager != nil
+	if err := renderQueryTree(w, paged, total, offset, end, e.workExceeded, e.timedOut, trace, showConf); err != nil {
 		return err
 	}
 	// The same hint the MCP path attaches as `hint`, rendered for a human.
@@ -130,11 +136,22 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 			}
 		}
 	}
-	// The CLI spawns no child LSP, so every edge it crossed is name-keyed
-	// (lexical) — a far end may be a same-named symbol, not the resolved
-	// one. The tree renders far ends without a conf column, so without
-	// this line a lexical guess reads as a settled fact. Only the MCP
-	// server resolves (conf: lsp); say so whenever an edge was involved.
+	// A child LSP served this query (query --resolve): edges were resolved
+	// where they were ambiguous and each row states its conf, so the three
+	// no-LSP caveats below would be false. Say what the edges are made of
+	// instead, the line node_query returns under edges.
+	if s.childLSPServes() {
+		if note := e.precisionNote(); note != "" {
+			_, err := fmt.Fprintf(w, "\nedges: %s\n", note)
+			return err
+		}
+		return nil
+	}
+	// No child LSP served (no --resolve, or none could start), so every
+	// edge it crossed is name-keyed (lexical) — a far end may be a
+	// same-named symbol, not the resolved one. Without this line a
+	// lexical guess reads as a settled fact. Say so whenever an edge was
+	// involved.
 	if strings.Contains(selector, ".implements") {
 		_, err := fmt.Fprint(w, implementsNote)
 		return err
@@ -253,6 +270,30 @@ const lexicalEdgeNote = "\nnote: ::in/::out edges are name-keyed (lexical) here 
 	"same-named symbol, not the resolved one. The MCP server resolves via child\n" +
 	"LSPs and labels each edge (conf: lsp|lexical|unsettled); `query` does not.\n"
 
+// InitResolve brings up a one-shot query WITH child LSPs (query --resolve):
+// it attaches mgr, builds the index and starts the children Init starts, so
+// evaluate resolves ambiguous edges through them as node_query does. The
+// long-running extras a one-shot run does not use are turned off: the
+// proactive didOpen walk (resolution opens the files it asks about), the
+// git prewarm and the file watcher. The cache path is cleared AFTER the
+// caller's LoadCache, so Shutdown does not save: the CLI's cache use stays
+// load-only (see LoadCache). Pair with Shutdown.
+func (s *Server) InitResolve(mgr *multiplex.Manager) error {
+	s.SetManager(mgr)
+	s.SetProactiveOpen(false)
+	s.SetGitPrewarm(false)
+	s.SetFileWatch(false)
+	s.SetCachePath("")
+	return s.Init()
+}
+
+// childLSPServes reports whether a child LSP is running for this server,
+// so a query's edges could be resolved and labelled rather than only
+// name-keyed.
+func (s *Server) childLSPServes() bool {
+	return s.manager != nil && len(s.manager.Languages()) > 0
+}
+
 // maxFarEnds caps how many far ends one ref row spells out before it
 // starts counting them instead.
 const maxFarEnds = 3
@@ -277,7 +318,7 @@ func groupKey(n *treeNode) string {
 	return n.file
 }
 
-func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, workExceeded, timedOut bool, trace []string) error {
+func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, workExceeded, timedOut bool, trace []string, showConf bool) error {
 	if total == 0 {
 		// A bare "no matches" would claim the selector's answer IS none.
 		// When the budget killed the walk, that is not what happened and
@@ -325,7 +366,7 @@ func renderQueryTree(w io.Writer, paged []*treeNode, total, offset, end int, wor
 			if j == len(g.rows)-1 {
 				glyph = "└─"
 			}
-			fmt.Fprintf(tw, "%s %s\t%s\n", glyph, describeNode(n), nodeSpan(n))
+			fmt.Fprintf(tw, "%s %s\t%s\n", glyph, describeNode(n, showConf), nodeSpan(n))
 		}
 	}
 	fmt.Fprintln(tw)
@@ -414,7 +455,7 @@ func groupHeader(g *queryGroup) string {
 	return g.key
 }
 
-func describeNode(n *treeNode) string {
+func describeNode(n *treeNode, showConf bool) string {
 	switch n.class {
 	case "ref":
 		t := "::" + n.refDir
@@ -440,7 +481,13 @@ func describeNode(n *treeNode) string {
 			held := len(far) - maxFarEnds
 			far = append(far[:maxFarEnds:maxFarEnds], fmt.Sprintf("(+%d more)", held))
 		}
-		return fmt.Sprintf("%s %s %s", t, arrow, strings.Join(far, ", "))
+		line := fmt.Sprintf("%s %s %s", t, arrow, strings.Join(far, ", "))
+		// What settled the edge: lsp | lexical | unsettled, the conf
+		// node_query reports for the same row.
+		if showConf && n.refConf != "" {
+			line += "  [conf: " + n.refConf + "]"
+		}
+		return line
 	case "fragment":
 		return fmt.Sprintf("::grep %q", n.frag.Text)
 	case "project", "dir", "file":

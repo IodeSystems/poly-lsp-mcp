@@ -1,0 +1,242 @@
+[
+  {
+    "id": "q1",
+    "question": "Which non-test functions call `parseModernSelector`?",
+    "expected": ["mcp/modern.go#handleModernNodeQuery", "mcp/modern.go#resolveModernNode", "mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#parseModernSelector'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'parseModernSelector'}) WHERE NOT c.address ENDS WITH '_test.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='parseModernSelector' AND c.address NOT LIKE '%_test.go'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q2",
+    "question": "Which non-test functions call `buildTree`?",
+    "expected": ["mcp/modern.go#handleModernNodeQuery", "mcp/modern.go#resolveModernNode", "mcp/query.go#classCounts", "mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#buildTree'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'buildTree'}) WHERE NOT c.address ENDS WITH '_test.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='buildTree' AND c.address NOT LIKE '%_test.go'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q3",
+    "question": "What functions are defined in `mcp/query_text.go`?",
+    "expected": ["mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON", "mcp/query_text.go#writeJSONDoc", "mcp/query_text.go#usesEdge", "mcp/query_text.go#InitResolve", "mcp/query_text.go#childLSPServes", "mcp/query_text.go#groupKey", "mcp/query_text.go#renderQueryTree", "mcp/query_text.go#budgetLabel", "mcp/query_text.go#renderExplain", "mcp/query_text.go#writeBudgetBlow", "mcp/query_text.go#isContainerOf", "mcp/query_text.go#groupHeader", "mcp/query_text.go#describeNode", "mcp/query_text.go#nodeSpan", "mcp/query_text.go#summarize", "mcp/query_text.go#Error", "mcp/query_text.go#Unwrap"],
+    "canonical": {
+      "gsl": "#'mcp/query_text.go' > func",
+      "cypher": "MATCH (f:File {address:'mcp/query_text.go'})<-[:CONTAINS]-(fn:Function) RETURN fn.address",
+      "sql": "SELECT n.address FROM node n WHERE n.class='function' AND n.file='mcp/query_text.go'"
+    },
+    "category": "functions_in_file",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q4",
+    "question": "Which non-test functions in `mcp/` have names starting with `handle`?",
+    "expected": ["mcp/file_watch.go#handleWatchEvent", "mcp/modern.go#handleModernNodeEdit", "mcp/modern.go#handleModernNodeQuery", "mcp/modern.go#handleModernNodeRead", "mcp/node_query.go#handleLegacyNodeQuery", "mcp/rename_file.go#handleNodeRenameFile", "mcp/server.go#handleInitialize", "mcp/server.go#handleToolsList", "mcp/server.go#handleResourcesList", "mcp/server.go#handleResourcesRead", "mcp/server.go#handleToolsCall", "mcp/structure.go#handleStructure", "mcp/tools.go#handleNodeEdit", "mcp/tools.go#handleNodeDelete", "mcp/tools.go#handleNodeRefactor", "mcp/tools.go#handleSearch", "mcp/tools.go#handleNodeReferences", "mcp/tools.go#handleNodeRead"],
+    "canonical": {
+      "gsl": "func[name^=handle]:not([path$=_test.go])",
+      "cypher": "MATCH (f:Function) WHERE f.name STARTS WITH 'handle' AND f.address STARTS WITH 'mcp/' AND NOT f.address ENDS WITH '_test.go' RETURN f.address",
+      "sql": "SELECT n.address FROM node n WHERE n.class='function' AND n.name LIKE 'handle%' AND n.address LIKE 'mcp/%' AND n.address NOT LIKE '%_test.go'"
+    },
+    "category": "name_pattern",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q5",
+    "question": "What are the top-level directories in the workspace?",
+    "expected": ["bench", "config", "internal", "mcp", "multiplex", "server", "symbols"],
+    "canonical": {
+      "gsl": ":root > dir",
+      "cypher": "MATCH (d:Directory) WHERE d.parent IS NULL RETURN d.address",
+      "sql": "SELECT n.address FROM node n WHERE n.class='directory' AND n.parent IS NULL"
+    },
+    "category": "top_level_structure",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q6",
+    "question": "Which functions call `nodeLess`?",
+    "expected": ["mcp/query.go#ordered"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#nodeLess'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'nodeLess'}) RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='nodeLess'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q7",
+    "question": "In which file is `parseModernSelector` defined?",
+    "expected": ["mcp/query.go"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#parseModernSelector':parents(file)",
+      "cypher": "MATCH (f:File)<-[:CONTAINS]-(fn:Function {name:'parseModernSelector'}) RETURN f.address",
+      "sql": "SELECT n.file FROM node n WHERE n.name='parseModernSelector' AND n.class='function'"
+    },
+    "category": "symbol_to_file",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q8",
+    "question": "What functions are defined in `mcp/modern.go`?",
+    "expected": ["mcp/modern.go#registerModernTools", "mcp/modern.go#queryRow", "mcp/modern.go#refTypeLabel", "mcp/modern.go#fragmentRollup", "mcp/modern.go#resolveRefSiteAddr", "mcp/modern.go#isClassicSymPath", "mcp/modern.go#looksLikeSelector", "mcp/modern.go#resolveModernNode", "mcp/modern.go#misfiledDirective", "mcp/modern.go#resolveClassicAddr", "mcp/modern.go#resolveClassicAddrInClass", "mcp/modern.go#classicSymMatch", "mcp/modern.go#nodeCurrentText", "mcp/modern.go#handleModernNodeRead", "mcp/modern.go#handleModernNodeQuery", "mcp/modern.go#handleModernNodeEdit", "mcp/modern.go#oldTextOutsizesNodeErr", "mcp/modern.go#occurrencesOf", "mcp/modern.go#oldTextNotFoundErr", "mcp/modern.go#oldTextAmbiguousErr", "mcp/modern.go#ops", "mcp/modern.go#wholeFile"],
+    "canonical": {
+      "gsl": "#'mcp/modern.go' > func",
+      "cypher": "MATCH (f:File {address:'mcp/modern.go'})<-[:CONTAINS]-(fn:Function) RETURN fn.address",
+      "sql": "SELECT n.address FROM node n WHERE n.class='function' AND n.file='mcp/modern.go'"
+    },
+    "category": "functions_in_file",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q9",
+    "question": "Which non-test functions in `mcp/` call `splitExplain`?",
+    "expected": ["mcp/modern.go#handleModernNodeQuery", "mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#splitExplain'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'splitExplain'}) WHERE NOT c.address ENDS WITH '_test.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='splitExplain' AND c.address NOT LIKE '%_test.go'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q10",
+    "question": "Which functions in `mcp/query.go` call `dedupGenerated`?",
+    "expected": ["mcp/query.go#evaluate", "mcp/query.go#evaluateCapped"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#dedupGenerated'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'dedupGenerated'}) WHERE c.file='mcp/query.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='dedupGenerated' AND c.file='mcp/query.go'"
+    },
+    "category": "direct_callers_file_scoped",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q11",
+    "question": "In which file is `buildTree` defined?",
+    "expected": ["mcp/query.go"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#buildTree':parents(file)",
+      "cypher": "MATCH (f:File)<-[:CONTAINS]-(fn:Function {name:'buildTree'}) RETURN f.address",
+      "sql": "SELECT n.file FROM node n WHERE n.name='buildTree' AND n.class='function'"
+    },
+    "category": "symbol_to_file",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q12",
+    "question": "Which non-test functions call `evaluate` (the `*engine` method, not `evaluateCapped`)?",
+    "expected": ["mcp/modern.go#resolveModernNode", "mcp/query.go#evaluateCapped", "mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#evaluate'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'evaluate'}) WHERE NOT c.address ENDS WITH '_test.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='evaluate' AND c.address NOT LIKE '%_test.go'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q13",
+    "question": "What functions are defined in `mcp/conflict.go`?",
+    "expected": ["mcp/conflict.go#parseConflicts", "mcp/conflict.go#closeSide", "mcp/conflict.go#isConflictMarker", "mcp/conflict.go#markerLabel", "mcp/conflict.go#resolvedNote", "mcp/conflict.go#withNote", "mcp/conflict.go#normalizeConflictSide", "mcp/conflict.go#conflictSpans", "mcp/conflict.go#sideOf", "mcp/conflict.go#conflictText", "mcp/conflict.go#conflictOverlap", "mcp/conflict.go#conflictChimeraErr", "mcp/conflict.go#conflictAddr", "mcp/conflict.go#sideContent", "mcp/conflict.go#straddlesAny", "mcp/conflict.go#text", "mcp/conflict.go#applyConflictAccept", "mcp/conflict.go#parseConflictElement", "mcp/conflict.go#conflictMatches", "mcp/conflict.go#conflictNodesOf", "mcp/conflict.go#conflictSideNode", "mcp/conflict.go#reconstructSides", "mcp/conflict.go#viewOf", "mcp/conflict.go#lineDiff", "mcp/conflict.go#conflictWarning", "mcp/conflict.go#noteConflictTransition", "mcp/conflict.go#sideSymbols", "mcp/conflict.go#dropConflictChimeras", "mcp/conflict.go#seedConflicted", "mcp/conflict.go#conflictedFiles", "mcp/conflict.go#zeroResultConflictNote"],
+    "canonical": {
+      "gsl": "#'mcp/conflict.go' > func",
+      "cypher": "MATCH (f:File {address:'mcp/conflict.go'})<-[:CONTAINS]-(fn:Function) RETURN fn.address",
+      "sql": "SELECT n.address FROM node n WHERE n.class='function' AND n.file='mcp/conflict.go'"
+    },
+    "category": "functions_in_file",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q14",
+    "question": "Which non-test functions in `mcp/` call `parseBudget`?",
+    "expected": ["mcp/modern.go#handleModernNodeQuery", "mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#parseBudget'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'parseBudget'}) WHERE NOT c.address ENDS WITH '_test.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='parseBudget' AND c.address NOT LIKE '%_test.go'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q15",
+    "question": "Which functions in `mcp/query.go` have names starting with `match`?",
+    "expected": ["mcp/query.go#matchSelAttr", "mcp/query.go#matchAttrOp", "mcp/query.go#matchAttrExpr", "mcp/query.go#matchLine"],
+    "canonical": {
+      "gsl": "#'mcp/query.go' > func[name^=match]",
+      "cypher": "MATCH (f:Function) WHERE f.file='mcp/query.go' AND f.name STARTS WITH 'match' RETURN f.address",
+      "sql": "SELECT n.address FROM node n WHERE n.class='function' AND n.file='mcp/query.go' AND n.name LIKE 'match%'"
+    },
+    "category": "name_pattern",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q16",
+    "question": "Which non-test functions call `walkDir`?",
+    "expected": ["mcp/query.go#buildTree"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#walkDir'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'walkDir'}) WHERE NOT c.address ENDS WITH '_test.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='walkDir' AND c.address NOT LIKE '%_test.go'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q17",
+    "question": "What function symbols in the workspace are named exactly `evaluate`?",
+    "expected": ["mcp/query.go#evaluate"],
+    "canonical": {
+      "gsl": "func#evaluate",
+      "cypher": "MATCH (f:Function {name:'evaluate'}) RETURN f.address",
+      "sql": "SELECT n.address FROM node n WHERE n.name='evaluate' AND n.class='function'"
+    },
+    "category": "exact_name_lookup",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q18",
+    "question": "Which non-test functions in `mcp/` call `setBudget`?",
+    "expected": ["mcp/modern.go#handleModernNodeQuery", "mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#setBudget'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'setBudget'}) WHERE NOT c.address ENDS WITH '_test.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='setBudget' AND c.address NOT LIKE '%_test.go'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q19",
+    "question": "Which functions in `mcp/query.go` call `nodeLess`?",
+    "expected": ["mcp/query.go#ordered"],
+    "canonical": {
+      "gsl": "#'mcp/query.go#nodeLess'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'nodeLess'}) WHERE c.file='mcp/query.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='nodeLess' AND c.file='mcp/query.go'"
+    },
+    "category": "direct_callers_file_scoped",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q20",
+    "question": "Which non-test functions call `renderQueryTree`?",
+    "expected": ["mcp/query_text.go#QueryText"],
+    "canonical": {
+      "gsl": "#'mcp/query_text.go#renderQueryTree'::in.call > *",
+      "cypher": "MATCH (c:Function)-[:CALL]->(f:Function {name:'renderQueryTree'}) WHERE NOT c.address ENDS WITH '_test.go' RETURN c.address",
+      "sql": "SELECT c.address FROM edge e JOIN node c ON e.from=c.id JOIN node f ON e.to=f.id WHERE e.kind='call' AND f.name='renderQueryTree' AND c.address NOT LIKE '%_test.go'"
+    },
+    "category": "direct_callers_non_test",
+    "difficulty": "medium"
+  }
+]

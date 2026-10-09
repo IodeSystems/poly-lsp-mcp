@@ -168,6 +168,10 @@ type Index struct {
 	sites         map[string][]Site
 	declaredSites map[string][]Site
 	commentSites  map[string][]Site
+	// pluginEdges holds sites produced by convention plugins (F2), keyed
+	// by the plugin's kind name. Separate from the three stores above so
+	// that zero plugins → zero plugin edges → the index is unchanged.
+	pluginEdges map[string][]Site
 
 	// gen bumps on every mutation. Derived state (the query-cost
 	// estimator's tallies, the inversion cache) memoizes against
@@ -217,7 +221,8 @@ func (i *Index) Cardinality() int {
 func (i *Index) NameFreq(name string) int {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return len(i.sites[name]) + len(i.declaredSites[name]) + len(i.commentSites[name])
+	return len(i.sites[name]) + len(i.declaredSites[name]) +
+		len(i.commentSites[name]) + len(i.pluginEdges[name])
 }
 
 func NewIndex() *Index {
@@ -225,11 +230,12 @@ func NewIndex() *Index {
 		sites:         map[string][]Site{},
 		declaredSites: map[string][]Site{},
 		commentSites:  map[string][]Site{},
+		pluginEdges:   map[string][]Site{},
 	}
 }
 
-// Lookup returns every site for name from all three stores (declared,
-// lexical, comment) with same-(file, line, col) dedup — higher
+// Lookup returns every site for name from all stores (declared, lexical,
+// comment, plugin) with same-(file, line, col) dedup — higher
 // confidence wins. The returned slice is a copy; callers may mutate
 // it freely.
 func (i *Index) Lookup(name string) []Site {
@@ -255,6 +261,12 @@ func (i *Index) Lookup(name string) []Site {
 		out = append(out, s)
 	}
 	for _, s := range i.commentSites[name] {
+		if seen[key{s.File, s.Line, s.Col}] {
+			continue
+		}
+		out = append(out, s)
+	}
+	for _, s := range i.pluginEdges[name] {
 		if seen[key{s.File, s.Line, s.Col}] {
 			continue
 		}
@@ -385,6 +397,11 @@ func (i *Index) buildInversionLocked() map[string][]InvSite {
 			add(name, s)
 		}
 	}
+	for name, sites := range i.pluginEdges {
+		for _, s := range sites {
+			add(name, s)
+		}
+	}
 	if len(dead) > 0 {
 		i.removeFilesLocked(dead)
 	}
@@ -416,7 +433,7 @@ func (i *Index) removeFilesLocked(files []string) {
 		gone[f] = true
 	}
 	i.gen++
-	for _, store := range []map[string][]Site{i.sites, i.declaredSites, i.commentSites} {
+	for _, store := range []map[string][]Site{i.sites, i.declaredSites, i.commentSites, i.pluginEdges} {
 		for name, list := range store {
 			kept := make([]Site, 0, len(list))
 			for _, s := range list {
@@ -568,6 +585,9 @@ func (i *Index) Names() []string {
 		set[k] = struct{}{}
 	}
 	for k := range i.commentSites {
+		set[k] = struct{}{}
+	}
+	for k := range i.pluginEdges {
 		set[k] = struct{}{}
 	}
 	out := make([]string, 0, len(set))
@@ -822,6 +842,9 @@ type buildConfig struct {
 	// it; this is the escape hatch for a workspace that deliberately
 	// ignores files it still wants indexed.
 	noGitignore bool
+	// plugins are convention extractors (F2) that run after the lexical
+	// walk and add typed, confidence-labelled edges to the index.
+	plugins []Plugin
 }
 
 // WithCache plumbs a ParseCache through Build. Files whose
@@ -857,6 +880,7 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	if !cfg.noGitignore {
 		ign = git.LoadIgnores(root)
 	}
+	var pluginFiles []PluginFile
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -896,6 +920,11 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		if err != nil {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
+		pluginFiles = append(pluginFiles, PluginFile{
+			Path:     path,
+			Content:  content,
+			Language: lang.Name,
+		})
 		var hits []Hit
 		if h, ok := cfg.cache.Get(lang.Name, content); ok {
 			hits = h
@@ -920,6 +949,17 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	})
 	if err != nil {
 		return nil, err
+	}
+	// Convention plugins (F2) run after the lexical walk, over the files
+	// it indexed. Zero plugins → this loop is a no-op → the index is
+	// byte-for-byte what it is without plugins.
+	for _, p := range cfg.plugins {
+		if p.Extract == nil {
+			continue
+		}
+		for _, e := range p.Extract(pluginFiles) {
+			idx.InsertPlugin(e)
+		}
 	}
 	return idx, nil
 }

@@ -117,6 +117,7 @@ func runQuestion(h *harness, rows *Rows, q Question, lang, card string, model Mo
 	if se != nil {
 		// Single retry: feed the parse/execute error back to the model ONCE.
 		res.Retries = 1
+		var se2 *selectorErr
 		retry := "Your query failed with: " + se.Err +
 			"\nReturn a corrected query (the query and nothing else)."
 		rq, rpt, rct, rwall, rerr := model(card, retry)
@@ -129,10 +130,17 @@ func runQuestion(h *harness, rows *Rows, q Question, lang, card string, model Mo
 		}
 		rq = extractQuery(rq)
 		res.Query = rq
-		answer, execErr, _ = execute(h, rows, lang, rq)
+		answer, execErr, se2 = execute(h, rows, lang, rq)
 		res.Answer = answer
 		if execErr != nil {
 			res.ExecErr = execErr.Error()
+			return res
+		}
+		if se2 != nil {
+			// The retry also failed to parse/execute: a hard miss, but record
+			// the message so the operator can see what the model produced the
+			// second time. (Not a third attempt — the retry is exactly once.)
+			res.ExecErr = se2.Err
 			return res
 		}
 	}
@@ -144,7 +152,10 @@ func runQuestion(h *harness, rows *Rows, q Question, lang, card string, model Mo
 // (canonical node addresses). It returns (answer, opErr, selectorErr):
 //   - opErr: an operational failure (the question is a hard miss).
 //   - selectorErr: a parse/execute error the model can fix (triggers the
-//     single retry); non-nil only for GSL.
+//     single retry). The retry rule is language-agnostic: a parse/execute
+//     failure in GSL, Cypher, or SQL all route through it — each candidate
+//     gets the same one free retry, so the round measures the languages,
+//     not the executor's retry policy.
 func execute(h *harness, rows *Rows, lang, query string) (answer []string, opErr error, selErr *selectorErr) {
 	switch lang {
 	case "gsl":
@@ -165,13 +176,17 @@ func execute(h *harness, rows *Rows, lang, query string) (answer []string, opErr
 	case "cypher":
 		ans, err := execCypher(rows, query)
 		if err != nil {
-			return nil, err, nil
+			// A Cypher parse/execute failure is model-fixable: feed it back
+			// for the single retry, exactly as a GSL selector error does. The
+			// retry rule is language-agnostic (the spec), so a parse failure
+			// in ANY candidate's executor gets one retry, not just GSL's.
+			return nil, nil, &selectorErr{Err: err.Error()}
 		}
 		return ans, nil, nil
 	case "sql":
 		ans, err := execSQL(rows, query)
 		if err != nil {
-			return nil, err, nil
+			return nil, nil, &selectorErr{Err: err.Error()}
 		}
 		return ans, nil, nil
 	default:

@@ -31,15 +31,15 @@ echo "=== is anything listening on 11434? ==="
 echo "LISTEN_DONE"
 ```
 
-The harness compiles cleanly and all 22 unit tests (canned fixtures, no model, no network) pass. These tests cover bank parsing (both array and object shapes), the GSL/Cypher/SQL executors, and the scorer — the full preconditions for the operator run.
+The harness compiles cleanly and all unit tests (canned fixtures, no model, no network) pass. These tests cover bank parsing (both object and array shapes, including the object-without-questions fallthrough), the GSL/Cypher/SQL executors, and the scorer — the full preconditions for the operator run.
 
-```sh inputs=tools/graphq/bank.go,tools/graphq/main.go,tools/graphq/model.go,tools/graphq/exec_gsl.go,tools/graphq/exec_cypher.go,tools/graphq/exec_sql.go,tools/graphq/score.go
-echo "=== build ==="
-go build ./tools/graphq 2>&1
-echo "BUILD_EXIT: $?"
+```sh inputs=tools/graphq/bank.go,tools/graphq/bank_test.go,tools/graphq/main.go,tools/graphq/model.go,tools/graphq/exec_gsl.go,tools/graphq/exec_cypher.go,tools/graphq/exec_sql.go,tools/graphq/score.go
+echo "=== vet (compiles without producing a binary) ==="
+go vet ./tools/graphq 2>&1
+echo "VET_EXIT: $?"
 echo ""
 echo "=== unit tests (canned fixtures, no model, no network) ==="
-go test -v -count=1 ./tools/graphq 2>&1 | tail -30
+go test -v -count=1 ./tools/graphq 2>&1 | grep -E '^(=== RUN|--- (PASS|FAIL)|PASS|FAIL|ok)' 
 echo "TEST_EXIT: ${PIPESTATUS[0]}"
 ```
 

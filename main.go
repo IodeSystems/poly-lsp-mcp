@@ -223,6 +223,20 @@ func runQuery() {
 		log.Fatalf("root: %v", err)
 	}
 
+	// A shared per-user daemon, if it is already running for this workspace,
+	// answers the query so this process never rebuilds the workspace index —
+	// the ~15s-per-query cost the one-shot path pays. PROBE ONLY, never
+	// auto-start: a one-shot query must not leave a daemon behind. The state
+	// file names the socket; a healthy probe is the authority, and a live
+	// daemon is LSP-resolved by construction (each hosted root carries its
+	// own child-LSP manager), so this path needs no --resolve. On no daemon,
+	// a dead one, or any transport error, fall back to the standalone path
+	// below — the answer is the same matches, built in-process.
+	if out, ok := queryViaDaemon(*verbose, root, *asJSON, selector, *limit, *offset, *budget); ok {
+		fmt.Print(out)
+		return
+	}
+
 	// No Serve: a query is read-only and never writes the persisted index.
 	// Child LSPs only under --resolve (below).
 	srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
@@ -265,6 +279,39 @@ func runQuery() {
 		}
 		log.Fatalf("query: %v", err)
 	}
+}
+
+// queryViaDaemon answers the query through an ALREADY-RUNNING shared daemon,
+// if there is one. It probes the state file (never auto-starts) and a health
+// check over the socket; ok is false on no state file, a dead daemon, or any
+// transport/refusal error, in which case the caller runs standalone.
+func queryViaDaemon(verbose bool, root string, asJSON bool, selector string, limit, offset int, budget string) (string, bool) {
+	st, ok := daemon.ReadState()
+	if !ok || !daemon.PidAlive(st.PID) {
+		return "", false
+	}
+	c := daemon.NewClient(st.Socket)
+	if !c.Healthy() {
+		return "", false
+	}
+	out, err := c.Query(daemon.QueryParams{
+		Root:     root,
+		Selector: selector,
+		Limit:    limit,
+		Offset:   offset,
+		Budget:   budget,
+		JSON:     asJSON,
+	})
+	if err != nil {
+		if verbose {
+			log.Printf("query: daemon %s did not answer (%v); running standalone", st.Socket, err)
+		}
+		return "", false
+	}
+	if verbose {
+		log.Printf("query: answered through daemon %s (pid %d)", st.Socket, st.PID)
+	}
+	return out, true
 }
 
 // runDaemon runs (or controls) the shared per-user daemon: one process

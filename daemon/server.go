@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -266,6 +268,23 @@ func fileSymbolFrom(s symbols.Symbol) FileSymbol {
 	}
 }
 
+type queryIn struct {
+	Body struct {
+		Root     string `json:"root"`
+		Selector string `json:"selector"`
+		Limit    int    `json:"limit"`
+		Offset   int    `json:"offset"`
+		Budget   string `json:"budget,omitempty"`
+		JSON     bool   `json:"json"`
+	}
+}
+type queryOut struct {
+	Body struct {
+		Output string `json:"output"`
+		Root   string `json:"root"`
+	}
+}
+
 type fileSymbolsIn struct {
 	Body struct {
 		Content  string `json:"content"`            // the file text to fragment
@@ -407,6 +426,45 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 			for i, s := range syms {
 				out.Body.Symbols[i] = fileSymbolFrom(s)
 			}
+			return out, nil
+		})
+
+	// Query is the non-MCP door to the same engine node_query serves, and
+	// the daemon answer is LSP-resolved: every hosted root gets its own
+	// multiplex.Manager at build time (Registry.build), so edges settle
+	// through the child LSPs without the caller asking. The warm server is
+	// resolved through the same trust gate as /open; the answer is exactly
+	// what QueryText/QueryJSON writes, so a daemon answer and a standalone
+	// answer for the same workspace are the same text.
+	gat.Register(api, g, op("query", http.MethodPost, "/query", "Evaluate a selector against a root and return the text (or one JSON document) answer."),
+		func(_ context.Context, in *queryIn) (*queryOut, error) {
+			srv, canonical, err := resolveServer(allow, reg, in.Body.Root, "")
+			if err != nil {
+				return nil, err
+			}
+			var buf bytes.Buffer
+			var qerr error
+			if in.Body.JSON {
+				qerr = srv.QueryJSON(in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf)
+			} else {
+				qerr = srv.QueryText(in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf)
+			}
+			if qerr != nil {
+				// A selector error is the answer to what was asked: a
+				// 200 carrying the prose, like the CLI prints it to stdout.
+				// Only a genuine tool failure gets an HTTP error.
+				var se *mcp.SelectorError
+				if errors.As(qerr, &se) {
+					out := &queryOut{}
+					out.Body.Output = se.Error() + "\n"
+					out.Body.Root = canonical
+					return out, nil
+				}
+				return nil, huma.Error500InternalServerError("query", qerr)
+			}
+			out := &queryOut{}
+			out.Body.Output = buf.String()
+			out.Body.Root = canonical
 			return out, nil
 		})
 

@@ -94,8 +94,9 @@ type Server struct {
 	initialized bool
 	shutdown    bool
 
-	indexMu sync.RWMutex
-	index   *symbols.Index
+	indexMu    sync.RWMutex
+	index      *symbols.Index
+	indexBuilds int // count of BuildIndex calls; a test seam for "did this process build the index itself"
 	// ignores is the workspace's gitignore set, guarded by indexMu
 	// alongside the index it was resolved with.
 	ignores *git.IgnoreSet
@@ -597,6 +598,11 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 	}
 }
 
+// IndexBuilds reports how many times BuildIndex has run on this server.
+// A query that answers through the daemon never builds in its OWN process,
+// so the CLI's process count staying at 0 is the proof the daemon served.
+func (s *Server) IndexBuilds() int { return s.indexBuilds }
+
 // logf is log.Printf unless the server was put in quiet mode. Only bring-up
 // commentary goes through it — anything a caller must act on is returned as an
 // error or written to the answer stream, never demoted to a log line.
@@ -630,6 +636,7 @@ func (s *Server) BuildIndex() error {
 	// same set the build used, and re-resolved on every rebuild so a
 	// branch switch that changes .gitignore is picked up.
 	s.setIgnores(git.LoadIgnores(root))
+	s.indexBuilds++
 	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache))
 	if err != nil {
 		return fmt.Errorf("index build failed for %s: %w", root, err)

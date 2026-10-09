@@ -167,6 +167,41 @@ func (c *Client) FileSymbols(content, language, path string) (string, []FileSymb
 	return out.Language, out.Symbols, nil
 }
 
+// QueryParams is one /query request against a hosted root.
+type QueryParams struct {
+	Root     string
+	Selector string
+	Limit    int
+	Offset   int
+	Budget   string
+	JSON     bool
+}
+
+// Query evaluates a selector against a root on the daemon and returns the
+// answer text — exactly what QueryText (or QueryJSON with JSON: true)
+// writes. The daemon answer is LSP-resolved: the hosted root carries its
+// own child-LSP manager, so edges settle with conf the way node_query does.
+// A selector error comes back as the answer (the prose), not as an error;
+// a genuine tool failure is an error.
+func (c *Client) Query(p QueryParams) (string, error) {
+	var out struct {
+		Output string `json:"output"`
+		Root   string `json:"root"`
+	}
+	body := map[string]any{
+		"root":     p.Root,
+		"selector": p.Selector,
+		"limit":    p.Limit,
+		"offset":   p.Offset,
+		"budget":   p.Budget,
+		"json":     p.JSON,
+	}
+	if err := c.postJSON("/query", body, &out); err != nil {
+		return "", err
+	}
+	return out.Output, nil
+}
+
 func (c *Client) get(path string, q url.Values, out any) error {
 	u := "http://poly-lsp" + path
 	if len(q) > 0 {

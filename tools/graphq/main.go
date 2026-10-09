@@ -23,6 +23,7 @@ func main() {
 		budget    = flag.String("budget", "", "GSL work budget, e.g. 200000ops (empty = default)")
 		edgeCap   = flag.Int("edgecap", 2000, "max edge queries when building the shared rows")
 		seeds     = flag.String("seeds", "", "comma-separated extra symbol seeds for the edge BFS")
+		timeout   = flag.Duration("timeout", 120*time.Second, "per-request model timeout")
 	)
 	flag.Parse()
 
@@ -76,7 +77,7 @@ func main() {
 		fail("rows: %v", err)
 	}
 
-	model := newChatModel(*base, *modelName)
+	model := newChatModel(*base, *modelName, *timeout)
 	var results []Result
 	for _, q := range bank.Questions {
 		res := runQuestion(h, rows, q, *lang, string(card), model)

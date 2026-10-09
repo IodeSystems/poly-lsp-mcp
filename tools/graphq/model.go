@@ -29,17 +29,20 @@ type chatModel struct {
 	client    *http.Client
 }
 
-// newChatModel builds the client. base is the API root (…/v1).
-func newChatModel(base, modelName string) Model {
+// newChatModel builds the client. base is the API root (…/v1). timeout is
+// the per-request deadline: an unreachable endpoint then fails fast (a few
+// seconds) instead of hanging the round.
+func newChatModel(base, modelName string, timeout time.Duration) Model {
+	client := &http.Client{Timeout: timeout}
 	return func(system, user string) (string, int, int, time.Duration, error) {
-		return chat(base, modelName, system, user)
+		return chat(base, modelName, system, user, client)
 	}
 }
 
 // chat does one /chat/completions call and extracts the first choice's content
 // and the usage token counts. temperature is 0 (deterministic) and max_tokens
 // 512 (one query, not an essay).
-func chat(base, modelName, system, user string) (string, int, int, time.Duration, error) {
+func chat(base, modelName, system, user string, client *http.Client) (string, int, int, time.Duration, error) {
 	reqBody := map[string]any{
 		"model":       modelName,
 		"messages":    []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": user}},
@@ -56,7 +59,7 @@ func chat(base, modelName, system, user string) (string, int, int, time.Duration
 		return "", 0, 0, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
+	resp, err := client.Do(req.WithContext(context.Background()))
 	wall := time.Since(start)
 	if err != nil {
 		return "", 0, 0, wall, err

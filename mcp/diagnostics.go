@@ -230,16 +230,25 @@ func (s *Server) runProactiveOpen() {
 	if root == "" {
 		return
 	}
+	ig := s.getIgnores()
 	var opened int
 	start := time.Now()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
+		// Gitignored paths are skipped: a vendored toolchain or build tree
+		// can hold thousands of files, and every didOpen'd file is one
+		// gopls keeps fully type-checked in memory. (dun's ignored go/
+		// tree — 9,355 files — drove one gopls to 20 GB.) Edits and
+		// lookups still open an ignored file on demand.
 		if d.IsDir() {
-			if skipProactiveOpenDir(d.Name()) {
+			if skipProactiveOpenDir(d.Name()) || ig.DirIgnored(root, path) {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if ig.KnownIgnored(root, path) {
 			return nil
 		}
 		info, err := d.Info()

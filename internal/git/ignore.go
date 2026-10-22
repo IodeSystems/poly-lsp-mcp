@@ -121,6 +121,20 @@ func (s *IgnoreSet) FileIgnored(root, path string) bool {
 	return s.checkIgnore(r)
 }
 
+// KnownIgnored is FileIgnored without the git fallback: it consults only
+// the snapshot LoadIgnores took. Right for a walk over paths that existed
+// when the set was loaded; no subprocess per file.
+func (s *IgnoreSet) KnownIgnored(root, path string) bool {
+	if s == nil {
+		return false
+	}
+	r := s.rel(root, path)
+	if r == "" {
+		return false
+	}
+	return s.files[r] || s.matchDir(r)
+}
+
 // checkIgnore asks git whether one relative path is ignored, memoizing
 // the answer. Returns false when git cannot answer.
 func (s *IgnoreSet) checkIgnore(rel string) bool {

@@ -68,6 +68,11 @@ func TestMisfiledBatchControlIsNamed(t *testing.T) {
 		if strings.Contains(msg, "batch control") {
 			t.Errorf("a real two-op request must not be explained as a misfiled directive; got %q", msg)
 		}
+		// The shapes are named by what they do, oldText and newText as ONE
+		// edit — a flat field list read to models as six separate options.
+		if !strings.Contains(msg, "an edit {oldText, newText}") || !strings.Contains(msg, "a refactor {delete} | {rename}") {
+			t.Errorf("the reply should group the op shapes; got %q", msg)
+		}
 		// It should still point at the way to do several edits together.
 		if !strings.Contains(msg, "commit:false") {
 			t.Errorf("the reply should name how to apply several edits together; got %q", msg)

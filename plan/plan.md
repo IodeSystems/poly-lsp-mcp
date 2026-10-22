@@ -172,7 +172,8 @@ via LOCAL_PEERCRED untested live; Windows does not build (not in scope).
 ❓ **mcp test suite hangs** (found 2026-10-22, pre-existing — reproduces at
 `4a207b4`). `go test ./mcp` hits the 10-min timeout; seen in
 `TestEdgeAddressesAreSites`, `TestPathToolsRefuseEscapingPaths`,
-`TestModernQueryAncestorChain`, each alone too (120 s timeout). Stack: server
+`TestModernQueryAncestorChain`, `TestModernNodeEditRenameRejectsNonSymbol`,
+each alone too (60–120 s timeout). Stack: server
 `send` and test `mcpSession.sendMessage` both blocked on the io.Pipe pair — a
 write/write deadlock, likely an unsolicited server notification the test does
 not read. **next**: read the stacks, find which notification. **risks**: until

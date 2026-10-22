@@ -1136,6 +1136,13 @@ type modernEditArgs struct {
 	diagnosticOptions
 }
 
+// editOpShapes names node_edit's op shapes by what each one DOES. A flat
+// field list ("{oldText+newText, newText, delete, rename, …}") reads to a
+// model as six independent options and hides that oldText and newText are
+// one edit.
+const editOpShapes = "exactly one of: an edit {oldText, newText}, a create or span rewrite {newText}, " +
+	"a refactor {delete} | {rename} | {params} | {return}, or a conflict resolution {accept}"
+
 // ops names every op BUCKET actually supplied — node_edit requires
 // exactly one and never silently picks. The text bucket
 // (oldText/newText/delete) is one bucket: the modify / create / delete
@@ -1271,7 +1278,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	switch ops := p.ops(); len(ops) {
 	case 1:
 	case 0:
-		return nil, true, errors.New("node_edit needs exactly one of {oldText+newText, newText, delete, rename, params, return}; none was given")
+		return nil, true, errors.New("node_edit takes " + editOpShapes + "; none was given")
 	default:
 		// A directive smuggled into an op field is a DIFFERENT mistake from
 		// asking for two edits, and answering it as the latter leaves the
@@ -1284,13 +1291,13 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		// exists. Being told "you passed two ops" does not help someone who
 		// meant to pass one op and one PARAMETER.
 		if misfiled := misfiledDirective(&p); misfiled != "" {
-			return nil, true, fmt.Errorf("node_edit takes exactly one of {oldText+newText, newText, delete, rename, params, return}; "+
+			return nil, true, fmt.Errorf("node_edit takes "+editOpShapes+"; "+
 				"got %d: %s. But %s — the batch controls are top-level BOOLEAN parameters, not ops: "+
 				"pass commit:false (stage without validating) or rollback:true beside the edit, "+
 				"as in {node, oldText, newText, commit:false}",
 				len(ops), strings.Join(ops, ", "), misfiled)
 		}
-		return nil, true, fmt.Errorf("node_edit takes exactly one of {oldText+newText, newText, delete, rename, params, return}; got %d: %s. "+
+		return nil, true, fmt.Errorf("node_edit takes "+editOpShapes+"; got %d: %s. "+
 			"To apply several edits together, send them one per call with commit:false, then one final call without it to validate and commit the batch",
 			len(ops), strings.Join(ops, ", "))
 	}

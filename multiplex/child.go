@@ -46,6 +46,11 @@ type Child struct {
 
 	done chan struct{}
 	err  atomic.Value // error
+
+	// exec.Cmd.Wait must run exactly once; both the manager's watchdog
+	// and Shutdown reap, so the result is memoized.
+	waitOnce sync.Once
+	waitErr  error
 }
 
 // Spawn starts the child process and begins draining its stdout/stderr.
@@ -281,10 +286,20 @@ func (c *Child) Shutdown(ctx context.Context) error {
 }
 
 // Wait blocks until the read loop has terminated and the process has
-// exited. Returns the process's exit error if any.
+// exited, reaping it. Returns the process's exit error if any. Safe to
+// call more than once and from several goroutines.
 func (c *Child) Wait() error {
 	<-c.done
-	return c.cmd.Wait()
+	c.waitOnce.Do(func() { c.waitErr = c.cmd.Wait() })
+	return c.waitErr
+}
+
+// Pid returns the OS process id, or 0 if the process never started.
+func (c *Child) Pid() int {
+	if c.cmd.Process == nil {
+		return 0
+	}
+	return c.cmd.Process.Pid
 }
 
 // Done returns a channel that is closed when the read loop terminates.

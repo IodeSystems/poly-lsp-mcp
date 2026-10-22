@@ -137,6 +137,13 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 // exit when their child is replaced — the new child gets its own.
 func (m *Manager) watch(name string, child *Child) {
 	<-child.Done()
+	// Reap. Without this every crashed child stays a zombie for the
+	// life of the server. Kill first: a child that closed stdout but is
+	// still running would otherwise block Wait forever.
+	_ = child.Kill()
+	if err := child.Wait(); err != nil {
+		log.Printf("multiplex: %s (pid %d) reaped: %v", name, child.Pid(), err)
+	}
 
 	m.shutdownMu.Lock()
 	stopping := m.shutdownCalled

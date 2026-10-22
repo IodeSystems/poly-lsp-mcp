@@ -2,6 +2,8 @@ package multiplex
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -396,4 +398,46 @@ func TestPolyglotFixtureDrivesRouting(t *testing.T) {
 	if c := m.RouteByURI("file://" + filepath.Join(cwd, "config.yaml")); c != nil {
 		t.Errorf("config.yaml should NOT route to a child (yaml is treesitter-only)")
 	}
+}
+
+// A child that exits must be reaped (waited on) by the manager, not left
+// as a zombie. Regression: the watchdog restarted on EOF but never called
+// cmd.Wait, so each crash left a <defunct> process behind. The test does
+// NOT call Wait itself — the manager has to.
+func TestExitedChildIsReaped(t *testing.T) {
+	reg := makeTestRegistry(t)
+	m := NewManager(reg)
+	m.RestartInitialBackoff = 50 * time.Millisecond
+	m.RestartMaxBackoff = 100 * time.Millisecond
+	m.RestartMaxAttempts = 3
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cwd := t.TempDir()
+	if err := m.Start(ctx, cwd, "file://"+cwd, []string{"stub"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Shutdown(ctx) })
+
+	child := m.RouteByURI("file:///x.stub")
+	if child == nil {
+		t.Fatal("no child")
+	}
+	pid := child.Pid()
+	if err := child.Kill(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reaped = /proc/<pid> is gone. A zombie keeps /proc/<pid> with state Z.
+	stat := fmt.Sprintf("/proc/%d/stat", pid)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(stat); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(stat)
+	t.Fatalf("pid %d not reaped within 5s: %s", pid, b)
 }

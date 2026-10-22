@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -433,5 +434,29 @@ func TestListenUnixRefusesLiveSocket(t *testing.T) {
 	}()
 	if _, err := listenUnix(socket); err == nil {
 		t.Error("listenUnix stole a live socket")
+	}
+}
+
+// A zombie (exited, not yet reaped) is not alive: kill(pid, 0) succeeds
+// on it, and Restart used to wait 15s for a daemon that had already exited.
+func TestPidAliveFalseForZombie(t *testing.T) {
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	defer cmd.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for !pidZombie(pid) {
+		if time.Now().After(deadline) {
+			t.Fatal("child never became a zombie")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if PidAlive(pid) {
+		t.Fatal("PidAlive true for a zombie")
+	}
+	if !PidAlive(os.Getpid()) {
+		t.Fatal("PidAlive false for self")
 	}
 }

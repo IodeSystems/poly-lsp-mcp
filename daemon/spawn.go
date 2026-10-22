@@ -33,7 +33,13 @@ func StartDetached(args []string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	return cmd.Process.Release()
+	// Reap it. Setsid does not reparent: until this process exits, it is
+	// the daemon's parent, and a long-lived caller (`mcp --daemon`) that
+	// never waits leaves the stopped daemon a zombie — which also kept
+	// `daemon --restart` waiting on it. A short-lived caller exits first
+	// and init reaps instead.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // EnsureRunning returns a client to a healthy daemon, auto-starting one

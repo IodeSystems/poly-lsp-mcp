@@ -57,7 +57,7 @@ type entry struct {
 	// len). A root is built on first acquire and evicted idleTimeout after the
 	// last holder leaves — child LSPs (gopls et al., hundreds of MB) are the
 	// expensive thing this frees. Guarded by Registry.mu.
-	holders   map[string]struct{}
+	holders    map[string]struct{}
 	evictTimer *time.Timer
 }
 

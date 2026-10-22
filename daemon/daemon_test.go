@@ -380,7 +380,7 @@ func TestRegistryReacquireCancelsEviction(t *testing.T) {
 	if _, err := r.Acquire("s1", resolved); err != nil {
 		t.Fatalf("acquire s1: %v", err)
 	}
-	r.Release("s1")               // schedules eviction
+	r.Release("s1") // schedules eviction
 	if _, err := r.Acquire("s2", resolved); err != nil {
 		t.Fatalf("re-acquire s2: %v", err)
 	}

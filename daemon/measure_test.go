@@ -18,7 +18,8 @@ import (
 // worktree open actually costs, split into the index build (what a true COW
 // overlay would optimize) vs gopls warmup (which a COW cannot touch — gopls
 // binds per module root). Run with:
-//   go test ./daemon/ -tags measure -run TestMeasureWorktreeOpen -v -count=1
+//
+//	go test ./daemon/ -tags measure -run TestMeasureWorktreeOpen -v -count=1
 func TestMeasureWorktreeOpen(t *testing.T) {
 	repoRoot, err := filepath.Abs("..")
 	if err != nil {

@@ -15,14 +15,14 @@ func TestPathUnder(t *testing.T) {
 		path, prefix string
 		want         bool
 	}{
-		{"/home/u/local", "/home/u/local", true},          // identical
-		{"/home/u/local/x", "/home/u/local", true},        // descendant
-		{"/home/u/local/x/y/z", "/home/u/local", true},    // deep descendant
-		{"/home/u/localsecrets", "/home/u/local", false},  // string-prefix bypass
-		{"/home/u/local-evil", "/home/u/local", false},    // string-prefix bypass
-		{"/home/u", "/home/u/local", false},               // ancestor, not under
-		{"/home/other/local", "/home/u/local", false},     // sibling tree
-		{"/etc/passwd", "/home/u/local", false},           // unrelated
+		{"/home/u/local", "/home/u/local", true},         // identical
+		{"/home/u/local/x", "/home/u/local", true},       // descendant
+		{"/home/u/local/x/y/z", "/home/u/local", true},   // deep descendant
+		{"/home/u/localsecrets", "/home/u/local", false}, // string-prefix bypass
+		{"/home/u/local-evil", "/home/u/local", false},   // string-prefix bypass
+		{"/home/u", "/home/u/local", false},              // ancestor, not under
+		{"/home/other/local", "/home/u/local", false},    // sibling tree
+		{"/etc/passwd", "/home/u/local", false},          // unrelated
 	}
 	for _, c := range cases {
 		// pathUnder assumes cleaned inputs; clean here to mirror the

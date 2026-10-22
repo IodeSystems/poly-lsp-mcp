@@ -16,7 +16,7 @@
 
 GO              ?= go
 BINARY          ?= poly-lsp-mcp
-PREFIX          ?= $(HOME)/go/bin
+BINDIR          ?= $(HOME)/.local/bin
 PKGS            := ./...
 RACE_TIMEOUT    ?= 300s
 TEST_TIMEOUT    ?= 180s
@@ -28,9 +28,14 @@ default: build
 build:
 	$(GO) build -o $(BINARY) .
 
+# Per-user bin dir on Linux and macOS. Built to a temp name and renamed
+# over the old binary, so a running copy is never half-written.
 .PHONY: install
 install:
-	$(GO) install .
+	@mkdir -p $(BINDIR)
+	$(GO) build -o $(BINDIR)/.$(BINARY).tmp .
+	mv -f $(BINDIR)/.$(BINARY).tmp $(BINDIR)/$(BINARY)
+	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "warning: $(BINDIR) is not on PATH" >&2 ;; esac
 
 # Benchmarks. Generated fixtures, so a number means the same thing next month
 # — never benchmark the live repo, it drifts with every commit.
@@ -120,7 +125,7 @@ help:
 	@echo "poly-lsp-mcp Makefile targets:"
 	@echo ""
 	@echo "  build           - go build into ./$(BINARY)"
-	@echo "  install         - go install to \$$GOPATH/bin"
+	@echo "  install         - build into \$$BINDIR (default ~/.local/bin)"
 	@echo "  test            - short test suite (skips live-LSP / live-gat e2e)"
 	@echo "  test-all        - full test suite, no -short"
 	@echo "  test-race       - short suite + race detector (standing gate)"

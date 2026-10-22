@@ -102,6 +102,15 @@ agents actually want the cross-lib answer unprompted.
 - **Child-LSP lifecycle** (2026-10-22 → done.md): idle / RSS / memory-pressure
   stops with lazy restart + didOpen replay, zombie reaping, proactive open
   honors .gitignore, `poly-lsp-mcp status`.
+- **Canon (~/doc) CLI-12 / CLI-14** (2026-10-22). `make install` builds to
+  `~/.local/bin` (temp + rename, PATH warning). **Divergence from CLI-12:** no
+  `-X` stamp — self-update is the runtime `LSP_REBUILD_PATH` (plan/bugs.md),
+  guarded by `TestNoBuildTargetStampsTheBinary`. CLI-14: OS calls in per-OS
+  files (`multiplex/proc_*`, `daemon/zombie_*`, `daemon/peercred_*`); macOS
+  RSS and zombie checks use `ps`; PSI is Linux only; other OSes refuse peer
+  creds (connection rejected). `GOOS=darwin go vet` cannot run here (cgo
+  tree-sitter, no macOS SDK); darwin is type-checked with
+  `GOOS=darwin gopls check` instead.
 - **A space is always a node boundary** (2026-08-03, BREAKING, `656114e`). The
   bare-attribute-attaches rule is gone: `func[path=a.go]` filters,
   `func path=a.go` descends, a bare attr is its own `*[…]`. The old exception
@@ -122,6 +131,12 @@ Conventions for this file are at the top: current state + active work ONLY.
 Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
+
+◻ **First run on macOS** (2026-10-22). Not yet built or run on a Mac.
+**next**: on the Mac, `make install`, then `go test ./multiplex ./daemon .`
+and `poly-lsp-mcp status`. **risks**: `ps -o rss=` output format; peer-cred
+via LOCAL_PEERCRED untested live; Windows does not build (not in scope).
+**blocking decisions**: none.
 
 ❓ **mcp test suite hangs** (found 2026-10-22, pre-existing — reproduces at
 `4a207b4`). `go test ./mcp` hits the 10-min timeout; seen in

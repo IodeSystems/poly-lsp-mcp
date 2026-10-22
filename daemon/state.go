@@ -5,8 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -72,20 +70,6 @@ func PidAlive(pid int) bool {
 	// waits for its parent to reap it. Count that as gone, or Restart
 	// waits its full timeout for a daemon that already exited.
 	return !pidZombie(pid)
-}
-
-// pidZombie reports whether /proc says pid is a zombie (state Z). False
-// when /proc is unavailable.
-func pidZombie(pid int) bool {
-	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if err != nil {
-		return false
-	}
-	// "pid (comm) S ..." — comm may contain spaces and parens; the state
-	// follows the LAST ')'.
-	s := string(b)
-	i := strings.LastIndexByte(s, ')')
-	return i >= 0 && i+2 < len(s) && s[i+2] == 'Z'
 }
 
 // RemoveStaleState deletes the discovery file when its pid is gone.

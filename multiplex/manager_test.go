@@ -2,8 +2,6 @@ package multiplex
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -429,15 +427,13 @@ func TestExitedChildIsReaped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Reaped = /proc/<pid> is gone. A zombie keeps /proc/<pid> with state Z.
-	stat := fmt.Sprintf("/proc/%d/stat", pid)
+	// Reaped = kill(pid, 0) gives ESRCH. A zombie still answers it.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(stat); os.IsNotExist(err) {
+		if processGone(pid) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	b, _ := os.ReadFile(stat)
-	t.Fatalf("pid %d not reaped within 5s: %s", pid, b)
+	t.Fatalf("pid %d not reaped within 5s", pid)
 }

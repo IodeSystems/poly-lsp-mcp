@@ -1,12 +1,14 @@
 package multiplex
 
 import (
+	"errors"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -85,11 +87,17 @@ func ReadStatusFiles(dir string) ([]StatusFile, error) {
 		if json.Unmarshal(b, &sf) != nil {
 			continue
 		}
-		if _, err := os.Stat(fmt.Sprintf("/proc/%d", sf.PID)); os.IsNotExist(err) {
+		if processGone(sf.PID) {
 			_ = os.Remove(p)
 			continue
 		}
 		out = append(out, sf)
 	}
 	return out, nil
+}
+
+// processGone reports whether pid no longer exists. kill(pid, 0): ESRCH =
+// gone; EPERM = exists, not ours. Works without /proc (macOS).
+func processGone(pid int) bool {
+	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }

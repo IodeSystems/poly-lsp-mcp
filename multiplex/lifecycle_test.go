@@ -3,7 +3,6 @@ package multiplex
 import (
 	"context"
 	"os"
-	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,10 +38,8 @@ func status(t *testing.T, m *Manager) ChildStatus {
 	return st[0]
 }
 
-func gone(pid int) bool {
-	_, err := os.Stat("/proc/" + strconv.Itoa(pid))
-	return os.IsNotExist(err)
-}
+// gone reports whether pid is reaped. A zombie still answers kill(pid, 0).
+func gone(pid int) bool { return processGone(pid) }
 
 const stubURI = "file:///x.stub"
 

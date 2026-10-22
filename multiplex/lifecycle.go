@@ -1,12 +1,9 @@
 package multiplex
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +26,7 @@ type Lifecycle struct {
 	// PSIThreshold: when /proc/pressure/memory "some avg10" is at or
 	// above this, stop one child per Interval — the one idle longest,
 	// then the largest. systemd-oomd acts at 50 by default; act first.
+	// Linux only: elsewhere there is no PSI and this rule does nothing.
 	PSIThreshold float64
 	// Interval between checks. Zero = 10s.
 	Interval time.Duration
@@ -328,40 +326,6 @@ func (m *Manager) Status() []ChildStatus {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Language < out[j].Language })
 	return out
-}
-
-// readVmRSS returns VmRSS from /proc/<pid>/status, in bytes.
-func readVmRSS(pid int) (int64, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
-	if err != nil {
-		return 0, err
-	}
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "VmRSS:") {
-			continue
-		}
-		f := strings.Fields(line) // VmRSS: 12345 kB
-		if len(f) < 2 {
-			break
-		}
-		kb, err := strconv.ParseInt(f[1], 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return kb * 1024, nil
-	}
-	return 0, fmt.Errorf("no VmRSS for pid %d", pid)
-}
-
-// readMemoryPSI returns "some avg10" from /proc/pressure/memory.
-func readMemoryPSI() (float64, error) {
-	b, err := os.ReadFile("/proc/pressure/memory")
-	if err != nil {
-		return 0, err
-	}
-	return parsePSISomeAvg10(string(b))
 }
 
 func parsePSISomeAvg10(s string) (float64, error) {

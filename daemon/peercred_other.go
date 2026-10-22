@@ -1,19 +1,14 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package daemon
 
 import (
+	"errors"
 	"net"
-	"os"
 )
 
-// peerCred has no portable non-Linux implementation (macOS uses
-// getpeereid, which the standard syscall package does not expose). On
-// these platforms the peer-credential gate degenerates to the socket's
-// 0600 mode bits — only the owning user can connect anyway — so we
-// report the daemon's own uid, which the accept filter treats as
-// allowed. pid is unavailable (0), so the optional /proc-based binding
-// strengthening (Linux-only) is simply absent here.
+// peerCred has no implementation here. It refuses rather than reporting
+// the daemon's own uid: the accept filter rejects the connection.
 func peerCred(_ net.Conn) (uid, pid int, err error) {
-	return os.Getuid(), 0, nil
+	return 0, 0, errors.New("peer cred: unsupported on this platform")
 }

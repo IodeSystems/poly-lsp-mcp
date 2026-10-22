@@ -134,8 +134,8 @@ func listenUnix(socket string) (net.Listener, error) {
 	return &credListener{Listener: ln, selfUID: os.Getuid()}, nil
 }
 
-// credListener drops connections whose peer uid is not the daemon's own
-// before net/http ever sees them.
+// credListener drops connections whose peer uid is not the daemon's own,
+// or cannot be read, before net/http ever sees them.
 type credListener struct {
 	net.Listener
 	selfUID int
@@ -148,7 +148,13 @@ func (l *credListener) Accept() (net.Conn, error) {
 			return nil, err
 		}
 		uid, _, cerr := peerCred(c)
-		if cerr == nil && uid != l.selfUID {
+		if cerr != nil {
+			// Unknown peer: refuse, do not trust the socket mode alone.
+			log.Printf("daemon: rejected connection: %v", cerr)
+			_ = c.Close()
+			continue
+		}
+		if uid != l.selfUID {
 			log.Printf("daemon: rejected connection from uid %d", uid)
 			_ = c.Close()
 			continue

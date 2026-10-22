@@ -158,7 +158,7 @@ func (s *Server) lspAvailable(abs string) bool {
 	if s.manager == nil {
 		return false
 	}
-	return s.manager.RouteByURI(pathToURI(abs)) != nil
+	return s.manager.Serves(pathToURI(abs))
 }
 
 // resolveDefinition asks the child LSP owning `abs` where the symbol at

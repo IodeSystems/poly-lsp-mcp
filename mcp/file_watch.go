@@ -241,7 +241,7 @@ func (s *Server) watchedFile(path string) bool {
 	if s.manager == nil || s.pathIgnored(path) {
 		return false
 	}
-	return s.manager.RouteByURI(pathToURI(path)) != nil
+	return s.manager.Serves(pathToURI(path))
 }
 
 // removeFileFromIndex evicts every site for path from the index. Used

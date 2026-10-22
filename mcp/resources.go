@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -69,7 +70,30 @@ func registerResources() map[string]Resource {
 			MimeType: "application/json",
 			Read:     readDiagnostics,
 		},
+		"poly-lsp-mcp://children": {
+			URI:  "poly-lsp-mcp://children",
+			Name: "children",
+			Description: "Child LSP processes (gopls etc.) for this workspace: state " +
+				"(running / stopped / down), pid, RSS in bytes, seconds since last use, " +
+				"and lifecycle counters — crash restarts, and idle / memory / pressure " +
+				"stops with the last reason. A stopped child starts again on the next " +
+				"request that needs it.",
+			MimeType: "application/json",
+			Read:     readChildren,
+		},
 	}
+}
+
+func readChildren(s *Server) (string, error) {
+	rows := []multiplex.ChildStatus{}
+	if s.manager != nil {
+		rows = s.manager.Status()
+	}
+	raw, err := json.MarshalIndent(map[string]any{"children": rows}, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal children: %w", err)
+	}
+	return string(raw), nil
 }
 
 func readWorkspace(s *Server) (string, error) {

@@ -181,3 +181,106 @@ func TestProactiveOpenDisabled(t *testing.T) {
 		t.Errorf("openDocs should be empty with proactive open disabled; got %d entries", n)
 	}
 }
+
+// TestWokenChildGetsOpenDocsReplayed: after a lifecycle stop, the next
+// RouteByURI starts a fresh gopls, which knows no documents. Without the
+// OnStart replay, openDocs still says main.go is open, so the next edit
+// goes out as didChange for a file the new gopls never saw — gopls drops
+// it and the stale error stays. With replay, the fix clears the error.
+func TestWokenChildGetsOpenDocsReplayed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipped under -short")
+	}
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not on PATH")
+	}
+
+	dir := t.TempDir()
+	mainGo := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainGo,
+		[]byte("package main\n\nfunc main() {\n\tdoesNotExist()\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module x\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := multiplex.NewManager(reg)
+	mgr.Lifecycle = multiplex.Lifecycle{IdleStop: 500 * time.Millisecond, Interval: 100 * time.Millisecond}
+	srv := New(reg, dir, nil, nil)
+	srv.SetManager(mgr)
+
+	sIn, cOut := io.Pipe()
+	cIn, sOut := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(sIn, sOut) }()
+	sess := &mcpSession{
+		t: t, srv: srv,
+		srvIn: cOut, clientR: json.NewDecoder(cIn),
+		clientW: cOut, done: done,
+	}
+	defer sess.close()
+	sess.request("initialize", map[string]any{})
+	sess.notify("notifications/initialized", map[string]any{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.WaitForProactiveOpen(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := func() bool {
+		for _, st := range mgr.Status() {
+			if st.Language == "go" {
+				return st.State == "stopped"
+			}
+		}
+		return false
+	}
+	for !stopped() {
+		if ctx.Err() != nil {
+			t.Fatalf("go child never idle-stopped: %+v", mgr.Status())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	uri := pathToURI(mainGo)
+	child := mgr.RouteByURI(uri) // wake; OnStart replays didOpen
+	if child == nil {
+		t.Fatal("wake failed")
+	}
+	store := mgr.Diagnostics()
+	// The woken gopls reports the error again (from the replayed open).
+	for hasError(store.Get(uri)) == false {
+		gen := store.Gen(uri)
+		if store.WaitAfter(ctx, uri, gen); ctx.Err() != nil {
+			t.Fatal("woken gopls never reported the error")
+		}
+	}
+
+	fixed := []byte("package main\n\nfunc main() {}\n")
+	if err := os.WriteFile(mainGo, fixed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.notifyChildOfEdit(child, uri, fixed)
+	for hasError(store.Get(uri)) {
+		gen := store.Gen(uri)
+		if store.WaitAfter(ctx, uri, gen); ctx.Err() != nil {
+			t.Fatalf("edit after wake did not clear the error (didChange to an unopened doc?): %+v", store.Get(uri))
+		}
+	}
+}
+
+func hasError(diags []multiplex.Diagnostic) bool {
+	for _, d := range diags {
+		if d.Severity == 1 {
+			return true
+		}
+	}
+	return false
+}

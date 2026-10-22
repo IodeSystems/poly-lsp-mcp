@@ -306,6 +306,52 @@ func (s *Server) notifyChildOfOpen(child *multiplex.Child, uri string, content [
 	}
 }
 
+// replayOpenDocs is the manager's OnStart hook. A restarted child (crash
+// restart, or lazy start after a lifecycle stop) knows no documents, but
+// openDocs says they are open — the next edit would send didChange for a
+// URI the child never saw. Re-send didOpen for every open document of
+// lang, from disk (edits land on disk before they are pushed). Documents
+// gone from disk are forgotten.
+func (s *Server) replayOpenDocs(lang string, child *multiplex.Child) {
+	start := time.Now()
+	s.openDocsMu.Lock()
+	uris := make([]string, 0, len(s.openDocs))
+	for uri := range s.openDocs {
+		if s.languageIDForURI(uri) == lang {
+			uris = append(uris, uri)
+		}
+	}
+	s.openDocsMu.Unlock()
+
+	replayed := 0
+	for _, uri := range uris {
+		content, err := os.ReadFile(uriToPath(uri))
+		s.openDocsMu.Lock()
+		if err != nil {
+			delete(s.openDocs, uri)
+			delete(s.sentDocs, uri)
+			s.openDocsMu.Unlock()
+			continue
+		}
+		s.openDocs[uri] = 1
+		s.openDocsMu.Unlock()
+		s.recordSent(uri, content)
+		if err := child.Notify("textDocument/didOpen", map[string]any{
+			"textDocument": map[string]any{
+				"uri":        uri,
+				"languageId": lang,
+				"version":    1,
+				"text":       string(content),
+			},
+		}); err != nil {
+			log.Printf("mcp replay didOpen %s: %v", uri, err)
+			return
+		}
+		replayed++
+	}
+	log.Printf("mcp: %s started; replayed didOpen for %d file(s) in %s", lang, replayed, time.Since(start).Round(time.Millisecond))
+}
+
 // stopManagerIfPresent drains the manager during shutdown. Best
 // effort: errors are logged, never surfaced.
 func (s *Server) stopManagerIfPresent() {
@@ -802,7 +848,9 @@ func (s *Server) notifyChildOfExternalChange(path string, content []byte) {
 		return
 	}
 	uri := pathToURI(path)
-	child := s.manager.RouteByURI(uri)
+	// Running, not RouteByURI: a stopped child needs no push — it
+	// re-reads open documents from disk when it starts (replayOpenDocs).
+	child := s.manager.Running(uri)
 	if child == nil {
 		return
 	}
@@ -840,9 +888,9 @@ func (s *Server) notifyChildOfExternalDelete(path string) {
 		return
 	}
 	uri := pathToURI(path)
-	child := s.manager.RouteByURI(uri)
+	child := s.manager.Running(uri)
 	if child == nil {
-		return
+		return // replayOpenDocs drops it when the child starts
 	}
 	s.openDocsMu.Lock()
 	_, opened := s.openDocs[uri]

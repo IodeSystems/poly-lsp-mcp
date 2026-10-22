@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
@@ -292,6 +293,21 @@ func (c *Child) Wait() error {
 	<-c.done
 	c.waitOnce.Do(func() { c.waitErr = c.cmd.Wait() })
 	return c.waitErr
+}
+
+// Reap waits up to grace for the process to exit on its own, then kills
+// it, and always reaps it. Done (stdout EOF) can fire before the process
+// has exited, so killing right after Done would cut a clean exit short.
+func (c *Child) Reap(grace time.Duration) error {
+	exited := make(chan error, 1)
+	go func() { exited <- c.Wait() }()
+	select {
+	case err := <-exited:
+		return err
+	case <-time.After(grace):
+		_ = c.Kill()
+		return <-exited
+	}
 }
 
 // Pid returns the OS process id, or 0 if the process never started.

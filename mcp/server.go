@@ -465,6 +465,9 @@ func (s *Server) WaitForGitPrewarm(ctx context.Context) error {
 // until we know which languages the workspace actually has.
 func (s *Server) SetManager(mgr *multiplex.Manager) {
 	s.manager = mgr
+	if mgr != nil {
+		mgr.OnStart = s.replayOpenDocs
+	}
 }
 
 // SetDiagnosticWait overrides the per-edit deadline for waiting on

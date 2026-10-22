@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/daemon"
@@ -101,6 +102,7 @@ func runMCP() {
 	daemonMode := flag.Bool("daemon", false, "proxy tool calls to the shared per-user poly-lsp daemon (auto-starting it) instead of building the index in-process; one warm index + child-LSP fleet is shared across every client")
 	readCharBudget := flag.Int("read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
 	hookPath := flag.String("hook", os.Getenv("POLY_LSP_HOOK"), "path to a host hook executable consulted before every file read/edit (exit 2 = cancel, stdout = injected note); $POLY_LSP_HOOK fallback. See mcp/hook.go")
+	lifecycle := lifecycleFlags()
 	flag.Parse()
 
 	if *readCharBudget > 0 {
@@ -175,9 +177,22 @@ func runMCP() {
 	// inside handleInitialize once we know which languages the
 	// workspace actually contains, so we just hand the pre-built
 	// Manager over here.
-	srv.SetManager(multiplex.NewManager(reg))
+	mgr := multiplex.NewManager(reg)
+	mgr.Lifecycle = lifecycle()
+	srv.SetManager(mgr)
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// lifecycleFlags registers the child-LSP lifecycle flags shared by `mcp`
+// and `daemon`; call the result after flag.Parse. See multiplex.Lifecycle.
+func lifecycleFlags() func() multiplex.Lifecycle {
+	idle := flag.Duration("lsp-idle-stop", 15*time.Minute, "stop a child LSP (gopls etc.) that got no request for this long; it starts again on the next request. 0 = never")
+	rssMB := flag.Int64("lsp-max-rss-mb", 6144, "stop a child LSP whose RSS is above this many MiB; it starts again on the next request. 0 = no limit")
+	psi := flag.Float64("lsp-psi-threshold", 20, "when /proc/pressure/memory 'some avg10' is at or above this, stop one child LSP per 10s (idle longest, then largest). 0 = off")
+	return func() multiplex.Lifecycle {
+		return multiplex.Lifecycle{IdleStop: *idle, MaxRSS: *rssMB << 20, PSIThreshold: *psi}
 	}
 }
 
@@ -334,6 +349,7 @@ func runDaemon() {
 	restart := flag.Bool("restart", false, "restart the running daemon (replaying its flags) and exit")
 	var allow multiFlag
 	flag.Var(&allow, "allow", "directory prefix a client may address roots under (repeatable; default $HOME)")
+	lifecycle := lifecycleFlags()
 	flag.Parse()
 
 	if *stop {
@@ -366,6 +382,7 @@ func runDaemon() {
 	}
 
 	dreg := daemon.NewRegistry(cfg, reg, *readOnly, *validate)
+	dreg.SetLifecycle(lifecycle())
 	if err := daemon.Serve(daemon.Config{Socket: *socket, Allow: al, Reg: dreg}); err != nil {
 		log.Fatal(err)
 	}

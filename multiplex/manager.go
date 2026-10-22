@@ -27,6 +27,12 @@ import (
 // If the child exits without an orderly Shutdown call from the manager,
 // the watchdog respawns via exponential backoff up to RestartMaxAttempts
 // before giving up and removing the language from the table.
+//
+// Lifecycle (opt-in, see Lifecycle): a monitor goroutine stops children
+// that are idle, over an RSS limit, or chosen under machine memory
+// pressure. A stopped child is not a crash: it does not use up
+// RestartMaxAttempts, and the next RouteByURI for its language starts it
+// again and calls OnStart so the caller can replay its open documents.
 type Manager struct {
 	registry *config.Registry
 
@@ -36,6 +42,20 @@ type Manager struct {
 	RestartMaxBackoff     time.Duration
 	RestartMaxAttempts    int
 
+	// Lifecycle policy. Zero value = all off (the pre-lifecycle
+	// behavior). Set before Start.
+	Lifecycle Lifecycle
+
+	// OnStart, if set, is called after a child for lang is (re)started
+	// by a crash restart or a lazy wake — not by the initial Start. The
+	// new child knows no documents; the callback replays didOpen.
+	// RouteByURI does not return a woken child until OnStart returns.
+	OnStart func(lang string, child *Child)
+
+	// Test seams; nil = read /proc.
+	readRSS func(pid int) (int64, error)
+	readPSI func() (float64, error)
+
 	// Captured at Start so the watchdog can respawn with the same
 	// shape it was originally given.
 	startCwd     string
@@ -44,6 +64,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	children map[string]*Child // language name → Child
 	caps     map[string]json.RawMessage
+	slots    map[string]*slot // language name → lifecycle state; present once started
 
 	// diagnostics is a single store across every spawned child. Wired
 	// into each child via Attach during Start / restart so callers can
@@ -53,6 +74,7 @@ type Manager struct {
 
 	shutdownMu     sync.Mutex
 	shutdownCalled bool
+	monitorStop    chan struct{}
 }
 
 func NewManager(reg *config.Registry) *Manager {
@@ -60,8 +82,16 @@ func NewManager(reg *config.Registry) *Manager {
 		registry:    reg,
 		children:    map[string]*Child{},
 		caps:        map[string]json.RawMessage{},
+		slots:       map[string]*slot{},
 		diagnostics: NewDiagnosticStore(),
+		monitorStop: make(chan struct{}),
 	}
+}
+
+func (m *Manager) stopping() bool {
+	m.shutdownMu.Lock()
+	defer m.shutdownMu.Unlock()
+	return m.shutdownCalled
 }
 
 // Diagnostics returns the manager's shared diagnostic store. Callers
@@ -124,9 +154,13 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 		m.mu.Lock()
 		m.children[name] = child
 		m.caps[name] = caps
+		m.slots[name] = newSlot()
 		m.mu.Unlock()
-		log.Printf("multiplex: %s ready", name)
+		log.Printf("multiplex: %s ready (pid %d)", name, child.Pid())
 		go m.watch(name, child)
+	}
+	if m.Lifecycle.enabled() {
+		go m.monitor()
 	}
 	return nil
 }
@@ -138,26 +172,22 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 func (m *Manager) watch(name string, child *Child) {
 	<-child.Done()
 	// Reap. Without this every crashed child stays a zombie for the
-	// life of the server. Kill first: a child that closed stdout but is
-	// still running would otherwise block Wait forever.
-	_ = child.Kill()
-	if err := child.Wait(); err != nil {
+	// life of the server. Reap kills after the grace period: a child that
+	// closed stdout but is still running would otherwise block forever.
+	if err := child.Reap(2 * time.Second); err != nil {
 		log.Printf("multiplex: %s (pid %d) reaped: %v", name, child.Pid(), err)
 	}
 
-	m.shutdownMu.Lock()
-	stopping := m.shutdownCalled
-	m.shutdownMu.Unlock()
-	if stopping {
+	if m.stopping() {
 		return
 	}
 
-	// Already replaced by a previous restart pass? Drop out so the
-	// most recent watchdog is the one in charge.
+	// Replaced by a previous restart pass, or removed by a lifecycle
+	// stop? Then this exit was not a crash: drop out.
 	m.mu.RLock()
 	current := m.children[name]
 	m.mu.RUnlock()
-	if current != nil && current != child {
+	if current != child {
 		return
 	}
 
@@ -187,10 +217,7 @@ func (m *Manager) restart(name string) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		time.Sleep(backoff)
 
-		m.shutdownMu.Lock()
-		stopping := m.shutdownCalled
-		m.shutdownMu.Unlock()
-		if stopping {
+		if m.stopping() {
 			return
 		}
 
@@ -217,9 +244,16 @@ func (m *Manager) restart(name string) {
 		m.mu.Lock()
 		m.children[name] = child
 		m.caps[name] = caps
+		if sl := m.slots[name]; sl != nil {
+			sl.stats.CrashRestarts++
+			sl.touch()
+		}
 		m.mu.Unlock()
-		log.Printf("multiplex: %s restarted", name)
+		log.Printf("multiplex: %s restarted (pid %d)", name, child.Pid())
 		go m.watch(name, child)
+		if m.OnStart != nil {
+			m.OnStart(name, child)
+		}
 		return
 	}
 
@@ -227,6 +261,7 @@ func (m *Manager) restart(name string) {
 	m.mu.Lock()
 	delete(m.children, name)
 	delete(m.caps, name)
+	delete(m.slots, name)
 	m.mu.Unlock()
 }
 
@@ -241,22 +276,72 @@ func nextBackoff(cur, max time.Duration) time.Duration {
 // RouteByURI returns the Child for the given file URI, or nil if no
 // language matches or its child is no longer running. Callers that get
 // nil should fall back to the symbol-index path.
+//
+// RouteByURI counts as use of the child (resets its idle clock). A child
+// stopped by lifecycle policy is started again here, synchronously; use
+// Running for a lookup that must not wake it.
 func (m *Manager) RouteByURI(uri string) *Child {
 	lang := m.languageForURI(uri)
 	if lang == nil {
 		return nil
 	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	child := m.children[lang.Name]
-	if child == nil {
+	sl := m.slots[lang.Name]
+	stopped := sl != nil && sl.stopped
+	m.mu.RUnlock()
+	if child != nil && alive(child) {
+		if sl != nil {
+			sl.touch()
+		}
+		return child
+	}
+	if !stopped {
 		return nil
 	}
-	select {
-	case <-child.Done():
+	return m.wake(lang.Name, sl)
+}
+
+// Running returns the live Child for uri without waking a stopped child
+// and without resetting its idle clock. For notifications that a stopped
+// child does not need (it re-reads documents from disk when it wakes).
+func (m *Manager) Running(uri string) *Child {
+	lang := m.languageForURI(uri)
+	if lang == nil {
 		return nil
-	default:
+	}
+	m.mu.RLock()
+	child := m.children[lang.Name]
+	m.mu.RUnlock()
+	if child != nil && alive(child) {
 		return child
+	}
+	return nil
+}
+
+// Serves reports whether RouteByURI could return a child for uri: one is
+// running, or stopped by lifecycle policy and will start on demand. Does
+// not wake it.
+func (m *Manager) Serves(uri string) bool {
+	lang := m.languageForURI(uri)
+	if lang == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if c := m.children[lang.Name]; c != nil && alive(c) {
+		return true
+	}
+	sl := m.slots[lang.Name]
+	return sl != nil && sl.stopped
+}
+
+func alive(c *Child) bool {
+	select {
+	case <-c.Done():
+		return false
+	default:
+		return true
 	}
 }
 
@@ -301,7 +386,8 @@ func (m *Manager) Broadcast(method string, params any) {
 	}
 }
 
-// Languages returns the names of running children, sorted. Useful for
+// Languages returns the names of running children plus children stopped
+// by lifecycle policy (they start on demand), sorted. Useful for
 // diagnostics and as a sanity check after Start.
 func (m *Manager) Languages() []string {
 	m.mu.RLock()
@@ -309,6 +395,11 @@ func (m *Manager) Languages() []string {
 	out := make([]string, 0, len(m.children))
 	for k := range m.children {
 		out = append(out, k)
+	}
+	for k, sl := range m.slots {
+		if sl.stopped && m.children[k] == nil {
+			out = append(out, k)
+		}
 	}
 	sort.Strings(out)
 	return out
@@ -321,6 +412,9 @@ func (m *Manager) Languages() []string {
 // intentionally killing.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.shutdownMu.Lock()
+	if !m.shutdownCalled {
+		close(m.monitorStop)
+	}
 	m.shutdownCalled = true
 	m.shutdownMu.Unlock()
 

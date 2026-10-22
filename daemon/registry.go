@@ -40,6 +40,9 @@ type Registry struct {
 	// (a root, once opened, stays warm forever — the pre-step-5 behavior).
 	idleTimeout time.Duration
 
+	// lifecycle is applied to every root's child-LSP manager.
+	lifecycle multiplex.Lifecycle
+
 	mu      sync.Mutex
 	servers map[string]*entry
 }
@@ -271,9 +274,15 @@ func (r *Registry) build(root string) *mcp.Server {
 	srv.SetParseCache(r.cache)
 	// One Manager per root: child LSPs bind to the module root and can't
 	// be shared across roots.
-	srv.SetManager(multiplex.NewManager(r.reg))
+	mgr := multiplex.NewManager(r.reg)
+	mgr.Lifecycle = r.lifecycle
+	srv.SetManager(mgr)
 	return srv
 }
+
+// SetLifecycle sets the child-LSP lifecycle policy for roots built after
+// the call. Call before Serve.
+func (r *Registry) SetLifecycle(lc multiplex.Lifecycle) { r.lifecycle = lc }
 
 // LanguageForPath derives the tree-sitter grammar name from a path's
 // extension (via the config registry), or "" if none is registered. Used

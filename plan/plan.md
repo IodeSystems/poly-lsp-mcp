@@ -99,6 +99,9 @@ agents actually want the cross-lib answer unprompted.
 - **Daemon mode is COMPLETE** (→ done.md): `mcp --daemon` proxies to one
   shared per-user daemon over a unix socket — one warm index, one child-LSP
   fleet, one parse cache for every client.
+- **Child-LSP lifecycle** (2026-10-22 → done.md): idle / RSS / memory-pressure
+  stops with lazy restart + didOpen replay, zombie reaping, proactive open
+  honors .gitignore, `poly-lsp-mcp status`.
 - **A space is always a node boundary** (2026-08-03, BREAKING, `656114e`). The
   bare-attribute-attaches rule is gone: `func[path=a.go]` filters,
   `func path=a.go` descends, a bare attr is its own `*[…]`. The old exception
@@ -119,6 +122,15 @@ Conventions for this file are at the top: current state + active work ONLY.
 Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
+
+❓ **mcp test suite hangs** (found 2026-10-22, pre-existing — reproduces at
+`4a207b4`). `go test ./mcp` hits the 10-min timeout; seen in
+`TestEdgeAddressesAreSites`, `TestPathToolsRefuseEscapingPaths`,
+`TestModernQueryAncestorChain`, each alone too (120 s timeout). Stack: server
+`send` and test `mcpSession.sendMessage` both blocked on the io.Pipe pair — a
+write/write deadlock, likely an unsolicited server notification the test does
+not read. **next**: read the stacks, find which notification. **risks**: until
+fixed, the mcp package has no full-suite signal. **blocking decisions**: none.
 
 ◐ **The volcycle bench — a real agent, a real Android app, and the first
 measurement of what this surface is like to USE — 2026-08-04/05.** Lives at

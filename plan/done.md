@@ -3,6 +3,34 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## Child-LSP memory lifecycle (DONE 2026-10-22)
+
+Asked for by dun-51 after the 2026-10-22 OOM kills (kernel OOM killed
+llama-server 3×; the dump showed 24 gopls = 30.5 GB, one of them 20.8 GB under
+`poly-lsp-mcp mcp --root dun`, later a zombie). Defaults decided by USER.
+
+- `d6144d4` reap: the watchdog restarted on EOF but never `cmd.Wait`ed, so
+  every crashed child stayed `<defunct>`. `Child.Wait` idempotent;
+  `Child.Reap(grace)` kills only after 2 s (EOF arrives before exit).
+- `e9569a6` lifecycle: `--lsp-idle-stop` 15m, `--lsp-max-rss-mb` 6144,
+  `--lsp-psi-threshold` 20 (some avg10; one stop per 10 s tick, idle longest
+  then largest), 0 = off, on `mcp` and `daemon` only. Stop = shutdown/exit,
+  kill, reap; next `RouteByURI` starts it and `OnStart` replays didOpen from
+  disk (crash restarts too — before, they got didChange for unseen docs).
+  Policy stops counted apart from crashes; do not use `RestartMaxAttempts`.
+  Measured on dun (183 files): wake 96 ms, first definition after wake 3.2 s
+  vs 4.1 s cold.
+- `15ca518` ROOT CAUSE: the proactive didOpen walk ignored .gitignore; dun's
+  ignored `go/` (Go 1.23.6 source) sent 9,355 files to gopls — a test gopls hit
+  7.9 GB with no answer in 10 min. Now 209 files, ~500 MB.
+- `93dc8d1` visibility: status files in `$XDG_RUNTIME_DIR/poly-lsp/children`,
+  `poly-lsp-mcp status [--json]`. The modern MCP surface has no resources, so
+  `poly-lsp-mcp://children` exists on `--legacy-tools` only.
+
+Assumptions: memory/pressure stops restart LAZILY (next request), not at once.
+Lifecycle stays off in LSP-server mode (the editor owns documents; no replay
+there) and in `query --resolve`.
+
 ## Java + Android XML — the JVM/Android blind spot (DONE 2026-08-04)
 
 Moved from plan.md on completion, USER's call to close it.

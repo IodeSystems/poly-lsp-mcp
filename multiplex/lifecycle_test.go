@@ -156,3 +156,35 @@ func TestReadVmRSSSelf(t *testing.T) {
 		t.Fatalf("got %d, %v", rss, err)
 	}
 }
+
+func TestStatusFileWrittenAndRemoved(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(makeTestRegistry(t))
+	m.StatusDir = dir
+	m.Lifecycle = Lifecycle{IdleStop: time.Millisecond, Interval: time.Hour}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cwd := t.TempDir()
+	if err := m.Start(ctx, cwd, "file://"+cwd, []string{"stub"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	m.checkLifecycle() // idle stop writes the file
+
+	files, err := ReadStatusFiles(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("ReadStatusFiles: %v, %+v", err, files)
+	}
+	f := files[0]
+	if f.PID != os.Getpid() || f.Root != cwd || len(f.Children) != 1 {
+		t.Fatalf("status file: %+v", f)
+	}
+	if c := f.Children[0]; c.State != "stopped" || c.IdleStops != 1 {
+		t.Fatalf("child row: %+v", c)
+	}
+
+	m.Shutdown(ctx)
+	if files, _ := ReadStatusFiles(dir); len(files) != 0 {
+		t.Fatalf("status file left after Shutdown: %+v", files)
+	}
+}

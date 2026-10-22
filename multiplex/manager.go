@@ -52,6 +52,12 @@ type Manager struct {
 	// RouteByURI does not return a woken child until OnStart returns.
 	OnStart func(lang string, child *Child)
 
+	// StatusDir, if set, gets a StatusFile from this manager every
+	// Lifecycle interval and after each stop or start, removed at
+	// Shutdown. See ReadStatusFiles.
+	StatusDir string
+	statusMu  sync.Mutex
+
 	// Test seams; nil = read /proc.
 	readRSS func(pid int) (int64, error)
 	readPSI func() (float64, error)
@@ -159,7 +165,8 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 		log.Printf("multiplex: %s ready (pid %d)", name, child.Pid())
 		go m.watch(name, child)
 	}
-	if m.Lifecycle.enabled() {
+	if m.Lifecycle.enabled() || m.StatusDir != "" {
+		m.writeStatus()
 		go m.monitor()
 	}
 	return nil
@@ -417,6 +424,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 	m.shutdownCalled = true
 	m.shutdownMu.Unlock()
+	m.removeStatus()
 
 	m.mu.Lock()
 	children := m.children

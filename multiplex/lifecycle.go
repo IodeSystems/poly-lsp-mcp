@@ -159,6 +159,7 @@ func (m *Manager) wake(name string, sl *slot) *Child {
 	m.mu.Unlock()
 	sl.touch()
 	log.Printf("multiplex: %s started on demand (pid %d) in %s", name, child.Pid(), took.Round(time.Millisecond))
+	m.writeStatus()
 	return child
 }
 
@@ -206,6 +207,7 @@ func (m *Manager) stopChild(name, reason string, rss int64) bool {
 	}
 	cancel()
 	_ = child.Reap(2 * time.Second) // the watchdog reaps too; Wait is idempotent
+	m.writeStatus()
 	return true
 }
 
@@ -219,6 +221,7 @@ func (m *Manager) monitor() {
 			return
 		case <-t.C:
 			m.checkLifecycle()
+			m.writeStatus()
 		}
 	}
 }

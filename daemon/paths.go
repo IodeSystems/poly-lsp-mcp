@@ -41,6 +41,16 @@ func SocketPath() string {
 	return filepath.Join(ConfigHome(), "daemon.sock")
 }
 
+// StatusDir holds one child-LSP status file per manager (per stdio mcp
+// process, per daemon root); `poly-lsp-mcp status` reads them. Runtime
+// dir, like the socket: the files describe live processes only.
+func StatusDir() string {
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
+		return filepath.Join(rt, "poly-lsp", "children")
+	}
+	return filepath.Join(ConfigHome(), "children")
+}
+
 // StatePath is the discovery file (~/.poly-lsp/daemon.json): pid, socket
 // path, start time, version. A client reads it to find a running daemon;
 // its socket field is authoritative over SocketPath() so a daemon

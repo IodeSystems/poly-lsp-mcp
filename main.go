@@ -2,13 +2,17 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
@@ -40,6 +44,7 @@ func main() {
 	// Subcommand dispatch. Default (no subcommand) runs the LSP server.
 	// `poly-lsp-mcp mcp [flags]` runs the MCP server.
 	// `poly-lsp-mcp query [flags] <selector>` runs one selector and prints it.
+	// `poly-lsp-mcp status [--json]` lists every process's child LSPs.
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 		runMCP()
@@ -48,6 +53,11 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "query" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 		runQuery()
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "status" {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+		runStatus()
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "daemon" {
@@ -179,10 +189,46 @@ func runMCP() {
 	// Manager over here.
 	mgr := multiplex.NewManager(reg)
 	mgr.Lifecycle = lifecycle()
+	mgr.StatusDir = daemon.StatusDir()
 	srv.SetManager(mgr)
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// runStatus prints the child LSPs of every running poly-lsp-mcp process
+// (stdio mcp servers and daemon roots), from their status files.
+func runStatus() {
+	asJSON := flag.Bool("json", false, "print the status files as one JSON array")
+	flag.Parse()
+	files, err := multiplex.ReadStatusFiles(daemon.StatusDir())
+	if err != nil {
+		log.Fatal(err)
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].PID < files[j].PID })
+	if *asJSON {
+		b, _ := json.MarshalIndent(files, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "PID\tROOT\tLANG\tSTATE\tCHILD\tRSS\tIDLE\tSTARTS\tCRASH\tIDLE-STOP\tMEM-STOP\tPSI-STOP\tLAST STOP")
+	for _, f := range files {
+		for _, c := range f.Children {
+			last := "-"
+			if c.LastStop != "" {
+				last = fmt.Sprintf("%s %s (%dM)", c.LastStop, c.LastStopAt, c.LastStopRSS>>20)
+			}
+			child, rss := "-", "-"
+			if c.PID != 0 {
+				child, rss = strconv.Itoa(c.PID), fmt.Sprintf("%dM", c.RSS>>20)
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n",
+				f.PID, f.Root, c.Language, c.State, child, rss, time.Duration(c.IdleSec)*time.Second,
+				c.Starts, c.CrashRestarts, c.IdleStops, c.MemoryStops, c.PressureStops, last)
+		}
+	}
+	w.Flush()
 }
 
 // lifecycleFlags registers the child-LSP lifecycle flags shared by `mcp`
@@ -383,6 +429,7 @@ func runDaemon() {
 
 	dreg := daemon.NewRegistry(cfg, reg, *readOnly, *validate)
 	dreg.SetLifecycle(lifecycle())
+	dreg.SetStatusDir(daemon.StatusDir())
 	if err := daemon.Serve(daemon.Config{Socket: *socket, Allow: al, Reg: dreg}); err != nil {
 		log.Fatal(err)
 	}

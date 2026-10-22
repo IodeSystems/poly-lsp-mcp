@@ -102,6 +102,14 @@ agents actually want the cross-lib answer unprompted.
 - **Child-LSP lifecycle** (2026-10-22 → done.md): idle / RSS / memory-pressure
   stops with lazy restart + didOpen replay, zombie reaping, proactive open
   honors .gitignore, `poly-lsp-mcp status`.
+- **Canon (~/doc) CLI-1..7** (2026-10-22): cobra. `newRoot()` + `loader`
+  (`main.go`), one file per command (`cmd_mcp.go`, `cmd_query.go`,
+  `cmd_daemon.go`). Bare binary = LSP server (editors start it with no args),
+  also `lsp`. An unknown first word is an error, not the LSP server waiting on
+  stdin. Flags are pflag: `--root`, not `-root` (callers checked: dun, Claude
+  config, smoke scripts all use `--`). `daemon --restart` replays the parsed
+  flags (`replayFlags`), not raw argv. Not migrated: `tools/graphq` (dev
+  bench tool, stdlib flag).
 - **Canon (~/doc) CLI-12 / CLI-14** (2026-10-22). `make install` builds to
   `~/.local/bin` (temp + rename, PATH warning). **Divergence from CLI-12:** no
   `-X` stamp — self-update is the runtime `LSP_REBUILD_PATH` (plan/bugs.md),
@@ -131,6 +139,29 @@ Conventions for this file are at the top: current state + active work ONLY.
 Completed trees live in `plan/done.md`; deferred opt-ins in `plan/icebox.md`.
 
 Open frontier:
+
+◻ **Dogfood review: Python repo with a .venv** (2026-10-22, macOS) —
+full text in `plan/reviews/2026-10-22-python-repo-dogfood.md` — local only,
+reviews are not committed. Not yet triaged; claims are the reviewer's, not re-measured. Ranked asks:
+1. ◻ gitignore not applied on the query/MCP path (`.venv` indexed; 15:1
+   venv:first-party lines). Reported as wiring, not `symbols.Build` logic.
+2. ◻ `#Name` scans; 6,000 files → 97s, 33s sys (suspect per-dir git
+   subprocess in `checkIgnore`). Name index, or fail fast.
+3. ◻ budget exhaustion renders as `returned: 0` — must read as partial.
+4. ◻ `func[path=…]` costs a full scan; `file[path=…] > func` is instant.
+   Per-file buckets for root-level attr filters; the failure hint advises
+   the wrong fix.
+5. ◻ `#'file#sym'` exhausts where `node_read` of the same id works; `::in` /
+   `::out` returned 0 after a full burn.
+6. ◻ no persisted index observed on macOS (`~/Library/Caches/poly-lsp-mcp/`
+   never created); 12.5s floor per call.
+7. ◻ say when a backend LSP is missing (`python: pylsp MISSING — lexical
+   only`).
+8. ✅ `status` with no rows now says so; `explain` was not a subcommand (see
+   CLI-1 above).
+**next**: reproduce #1 in a scratch repo with a committed `.gitignore` and a
+`.venv/`; it amplifies #2, #4, #6. **risks**: none taken yet. **blocking
+decisions**: order after #1 is Carl's call.
 
 ◻ **First run on macOS** (2026-10-22). Not yet built or run on a Mac.
 **next**: on the Mac, `make install`, then `go test ./multiplex ./daemon .`

@@ -1,0 +1,57 @@
+package main
+
+import (
+	"bytes"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// An unknown subcommand used to fall through to the stdio LSP server, which
+// waits on stdin: `poly-lsp-mcp explain …` looked like a hang. It must be an
+// error that names the command.
+func TestUnknownSubcommandIsAnError(t *testing.T) {
+	root := newRoot()
+	root.SetArgs([]string{"explain", "--root", ".", "#x"})
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), `unknown command "explain"`) {
+		t.Fatalf("err = %v, want unknown command \"explain\"", err)
+	}
+}
+
+// Root help must list the subcommands; it used to show only --config.
+func TestRootHelpListsSubcommands(t *testing.T) {
+	root := newRoot()
+	var out bytes.Buffer
+	root.SetArgs([]string{"--help"})
+	root.SetOut(&out)
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"lsp", "mcp", "query", "status", "daemon"} {
+		if !strings.Contains(out.String(), "  "+sub+" ") {
+			t.Errorf("root --help does not list %q:\n%s", sub, out.String())
+		}
+	}
+}
+
+// --restart relaunches the daemon with the flags it was given, minus the
+// control flags, each repeat of --allow kept.
+func TestDaemonReplayFlags(t *testing.T) {
+	root := newRoot()
+	cmd, _, err := root.Find([]string{"daemon"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--restart", "--allow", "/a", "--allow", "/b", "--read-only", "--lsp-idle-stop", "5m"}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatal(err)
+	}
+	got := replayFlags(cmd.Flags(), "stop", "restart", "help")
+	want := []string{"--allow=/a", "--allow=/b", "--lsp-idle-stop=5m0s", "--read-only=true"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("replayFlags = %q, want %q", got, want)
+	}
+}

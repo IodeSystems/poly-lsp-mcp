@@ -243,6 +243,15 @@ the client (dun) retries with its own decisions and reports them.
   counted in the report. `shadows:` in config. visionbridge: 20 hidden.
   Not handled: creating foo.ts does not evict an already-indexed foo.js
   until the next build.
+- ✅ git decides the file set (Carl via dun-a8, "fused": use what git has
+  tracked, walk nothing it already listed). Nested repos classified:
+  worktree of this repo / another repo left out with the reason, submodules
+  included; `leftOut` in the report; query tree skips nested repos unless
+  named; unreadable paths skipped and named. Demo repo (3 worktrees + a
+  clone): 311 files, 0.25 s, no retry. ◻ next slices: node_query
+  `include` opt-in for broad traversal inside node_modules; not-a-project
+  root detection (home dir, dir of clones); symlink/LFS/binary/monorepo
+  edge cases.
 - ◻ dun side: read the `poly-lsp-mcp/index` notification, choose excludes,
   respawn, report what it decided and how to reverse it. Protocol sent to
   dun-a8.

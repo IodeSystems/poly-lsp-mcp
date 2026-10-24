@@ -32,6 +32,7 @@ type BuildCost struct {
 	dirs     map[string]*dirCost // repo-relative, slash-separated; "" = root
 	nested   map[string]bool     // directories with their own .git
 	langs    map[string]int      // indexable files per language
+	leftOut  []LeftOut           // see CostReport.LeftOut
 	shadowed map[string]int      // files hidden by a stronger sibling, by rule
 }
 
@@ -82,6 +83,27 @@ func (c *BuildCost) shadow(rule string) { c.shadowed[rule]++ }
 
 func (c *BuildCost) lang(name string) { c.langs[name]++ }
 
+func (c *BuildCost) unreadable(p string) {
+	c.leftOut = append(c.leftOut, LeftOut{Dir: c.rel(p), Reason: LeftUnreadable})
+}
+
+// LeaveOut records a directory the build did not look into, and why.
+func (c *BuildCost) LeaveOut(dir, reason string) {
+	c.leftOut = append(c.leftOut, LeftOut{Dir: dir, Reason: reason})
+}
+
+// LeftOut is a directory (or file) the index does not cover, and why.
+type LeftOut struct {
+	Dir    string `json:"dir"`
+	Reason string `json:"reason"` // git-ignored | worktree of this repo | another repo | excluded | unreadable
+}
+
+const (
+	LeftIgnored    = "git-ignored"
+	LeftExcluded   = "excluded"
+	LeftUnreadable = "unreadable"
+)
+
 func (c *BuildCost) file(p string, size int64, cost time.Duration, cached bool) {
 	d := path.Dir(c.rel(p))
 	if d == "." {
@@ -109,6 +131,9 @@ type CostReport struct {
 	WallMs   int64     `json:"wallMs"`   // the whole walk
 	Heaviest []DirCost `json:"heaviest"` // by cost, at most 10
 	Hint     string    `json:"hint,omitempty"`
+	// LeftOut: what the build did not look into, and why — git-ignored
+	// directories, nested repositories, --exclude, unreadable paths.
+	LeftOut []LeftOut `json:"leftOut,omitempty"`
 	// Languages: indexable files per language (read or counted).
 	Languages map[string]int `json:"languages,omitempty"`
 	// Shadowed: files left out because a stronger-typed sibling exists
@@ -185,6 +210,7 @@ func (c *BuildCost) Report() CostReport {
 		Cached: total.cached,
 		WallMs: c.wall.Milliseconds(),
 	}
+	rep.LeftOut = append([]LeftOut(nil), c.leftOut...)
 	if len(c.langs) > 0 {
 		rep.Languages = map[string]int{}
 		for k, v := range c.langs {
@@ -290,6 +316,30 @@ func (r CostReport) Text() string {
 		}
 		sort.Strings(parts)
 		fmt.Fprintf(&b, "shadowed (a stronger-typed file of the same name exists; reachable by naming the path): %s\n", strings.Join(parts, ", "))
+	}
+	if len(r.LeftOut) > 0 {
+		byReason := map[string][]string{}
+		for _, l := range r.LeftOut {
+			byReason[l.Reason] = append(byReason[l.Reason], l.Dir)
+		}
+		var reasons []string
+		for k := range byReason {
+			reasons = append(reasons, k)
+		}
+		sort.Strings(reasons)
+		b.WriteString("left out:\n")
+		for _, k := range reasons {
+			dirs := byReason[k]
+			shown := dirs
+			if len(shown) > 5 {
+				shown = shown[:5]
+			}
+			more := ""
+			if len(dirs) > 5 {
+				more = fmt.Sprintf(" … and %d more", len(dirs)-5)
+			}
+			fmt.Fprintf(&b, "  %-22s %3d  %s%s\n", k, len(dirs), strings.Join(shown, ", "), more)
+		}
 	}
 	if len(r.Heaviest) == 0 {
 		return b.String()

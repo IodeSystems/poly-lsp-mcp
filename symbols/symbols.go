@@ -853,6 +853,14 @@ type buildConfig struct {
 	ignores *git.IgnoreSet
 	// budget bounds the walk. See WithBudget.
 	budget Budget
+	// manifest, if set, is the file set to index instead of a walk.
+	manifest *git.Manifest
+}
+
+// WithManifest indexes the files git lists instead of walking root. nil
+// keeps the walk (not a repo).
+func WithManifest(m *git.Manifest) BuildOption {
+	return func(cfg *buildConfig) { cfg.manifest = m }
 }
 
 // WithCache plumbs a ParseCache through Build. Files whose
@@ -958,23 +966,12 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	}
 	read, counted, over, stopped := 0, 0, false, false
 	shadow := reg.NewShadowChecker()
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return fs.SkipDir
-			}
-			if ign.DirIgnored(root, path) {
-				return fs.SkipDir
-			}
-			if cfg.cost != nil {
-				cfg.cost.dir(path)
-			}
-			return nil
-		}
-		// KnownIgnored, not FileIgnored: every path this walk visits existed
+
+	// visit indexes one file. info is asked for only once the cheap checks
+	// pass. fs.SkipAll ends the build's file loop (budget spent and the
+	// trace's count run out).
+	visit := func(path string, info func() (fs.FileInfo, error)) error {
+		// KnownIgnored, not FileIgnored: every path a build visits existed
 		// when LoadIgnores ran, so the snapshot already has the answer.
 		// FileIgnored's git fallback spawned one `git check-ignore` per
 		// non-ignored file — on dun, 20k files under untracked worktrees, it
@@ -1002,11 +999,11 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			}
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil {
-			return err
+		fi, err := info()
+		if err != nil || !fi.Mode().IsRegular() {
+			return nil // gone since git listed it, or a symlink: not followed
 		}
-		if info.Size() > maxFileSize {
+		if fi.Size() > maxFileSize {
 			return nil
 		}
 		if cfg.cost != nil {
@@ -1026,15 +1023,20 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 				stopped = true
 				return fs.SkipAll
 			}
-			cfg.cost.file(path, info.Size(), 0, false)
+			cfg.cost.file(path, fi.Size(), 0, false)
 			return nil
 		}
-		read++
 		fileStart := time.Now()
 		content, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", path, err)
+			// Skipped and named, not fatal: one unreadable file must not
+			// cost the whole index.
+			if cfg.cost != nil {
+				cfg.cost.unreadable(path)
+			}
+			return nil
 		}
+		read++
 		pluginFiles = append(pluginFiles, PluginFile{
 			Path:     path,
 			Content:  content,
@@ -1062,12 +1064,48 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			}
 		}
 		if cfg.cost != nil {
-			cfg.cost.file(path, info.Size(), time.Since(fileStart), cached)
+			cfg.cost.file(path, fi.Size(), time.Since(fileStart), cached)
 		}
 		return nil
-	})
-	if err != nil {
-		return nil, err
+	}
+
+	if cfg.manifest != nil {
+		// git already knows the file set: iterate it, walk nothing.
+		for _, rel := range cfg.manifest.Files {
+			if inSkipDir(rel) {
+				continue
+			}
+			path := filepath.Join(root, filepath.FromSlash(rel))
+			if visit(path, func() (fs.FileInfo, error) { return os.Lstat(path) }) == fs.SkipAll {
+				break
+			}
+		}
+	} else {
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				// An unreadable directory is skipped and named, not fatal.
+				if d != nil && d.IsDir() && path != root {
+					if cfg.cost != nil {
+						cfg.cost.unreadable(path)
+					}
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				if skipDirs[d.Name()] {
+					return fs.SkipDir
+				}
+				if ign.DirIgnored(root, path) {
+					return fs.SkipDir
+				}
+				if cfg.cost != nil {
+					cfg.cost.dir(path)
+				}
+				return nil
+			}
+			return visit(path, d.Info)
+		})
 	}
 	if over {
 		cfg.cost.end()
@@ -1085,4 +1123,20 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		}
 	}
 	return idx, nil
+}
+
+// inSkipDir reports whether a root-relative, slash-separated path runs
+// through a skipped directory. git may track a vendor/ or dist/ tree; the
+// index leaves it out the same as a walk would.
+func inSkipDir(rel string) bool {
+	for {
+		i := strings.IndexByte(rel, '/')
+		if i < 0 {
+			return false
+		}
+		if skipDirs[rel[:i]] {
+			return true
+		}
+		rel = rel[i+1:]
+	}
 }

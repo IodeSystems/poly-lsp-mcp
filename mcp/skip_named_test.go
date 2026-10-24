@@ -42,16 +42,16 @@ func TestSkippedDirReachableWhenNamed(t *testing.T) {
 	}
 }
 
-func TestNamedSkipPaths(t *testing.T) {
+func TestSelectorPaths(t *testing.T) {
 	for sel, want := range map[string]string{
 		"func": "",
 		"file[path=node_modules/react/index.d.ts]": "node_modules/react/index.d.ts",
 		"#'vendor/x/y.go#F'::in":                   "vendor/x/y.go",
 		"#'./dist/'":                               "dist",
-		"#'src/build.go'":                          "", // a file named build.go is not the build/ dir
+		"#build":                                   "", // a bare word is not a path: no slash
 	} {
-		if got := strings.Join(namedSkipPaths(sel), ","); got != want {
-			t.Errorf("namedSkipPaths(%q) = %q, want %q", sel, got, want)
+		if got := strings.Join(selectorPaths(sel), ","); got != want {
+			t.Errorf("selectorPaths(%q) = %q, want %q", sel, got, want)
 		}
 	}
 }

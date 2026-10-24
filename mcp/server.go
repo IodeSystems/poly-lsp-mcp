@@ -107,6 +107,7 @@ type Server struct {
 	index       *symbols.Index
 	indexCost   symbols.CostReport // guarded by indexMu
 	excludes    []string           // client-chosen dirs to drop; see SetExcludes
+	nested      []string           // nested repos left out by the last build; guarded by indexMu
 	indexBuilds int                // count of BuildIndex calls; a test seam for "did this process build the index itself"
 	// ignores is the workspace's gitignore set, guarded by indexMu
 	// alongside the index it was resolved with.
@@ -655,12 +656,33 @@ func (s *Server) BuildIndex() error {
 	// Resolved alongside the walk so the watcher filters by exactly the
 	// same set the build used, and re-resolved on every rebuild so a
 	// branch switch that changes .gitignore is picked up.
-	ign := s.loadIgnores(root)
+	//
+	// In a git repository the file set is git's own (tracked + untracked
+	// not ignored): the build iterates it and walks nothing. Nested
+	// repositories git reports are left out with the reason, and join the
+	// ignore set so every other walk (proactive open, watcher, bindings)
+	// skips them too.
+	manifest := git.LoadManifest(root)
+	s.setNested(manifest.NestedDirs())
+	snapshot := git.LoadIgnores(root)
+	ignoredDirs := snapshot.IgnoredDirs() // before excludes join the set
+	ign := s.withClientDirs(root, snapshot)
 	s.setIgnores(ign)
 	s.indexBuilds++
 	cost := symbols.NewBuildCost()
+	if manifest != nil {
+		for _, n := range manifest.Nested {
+			cost.LeaveOut(n.Dir, n.Reason)
+		}
+	}
+	for _, d := range ignoredDirs {
+		cost.LeaveOut(d, symbols.LeftIgnored)
+	}
+	for _, d := range s.excludes {
+		cost.LeaveOut(git.CleanExclude(d), symbols.LeftExcluded)
+	}
 	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache), symbols.WithCost(cost),
-		symbols.WithIgnores(ign), symbols.WithBudget(s.indexBudget))
+		symbols.WithIgnores(ign), symbols.WithBudget(s.indexBudget), symbols.WithManifest(manifest))
 	if err != nil {
 		var be *symbols.BudgetError
 		if errors.As(err, &be) {
@@ -951,7 +973,29 @@ func (s *Server) excludeSet() *git.IgnoreSet {
 
 // loadIgnores is git's ignore set for root plus the client's excludes.
 func (s *Server) loadIgnores(root string) *git.IgnoreSet {
-	return git.LoadIgnores(root).WithExcludes(root, s.excludes)
+	return s.withClientDirs(root, git.LoadIgnores(root))
+}
+
+// withClientDirs adds the client's excludes and the nested repositories
+// the last build left out to an ignore set.
+func (s *Server) withClientDirs(root string, ign *git.IgnoreSet) *git.IgnoreSet {
+	s.indexMu.RLock()
+	nested := s.nested
+	s.indexMu.RUnlock()
+	return ign.WithExcludes(root, append(append([]string(nil), s.excludes...), nested...))
+}
+
+func (s *Server) setNested(dirs []string) {
+	s.indexMu.Lock()
+	s.nested = dirs
+	s.indexMu.Unlock()
+}
+
+// nestedDirs are the nested repositories the last build left out.
+func (s *Server) nestedDirs() []string {
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
+	return s.nested
 }
 
 func (s *Server) setIgnores(ig *git.IgnoreSet) {

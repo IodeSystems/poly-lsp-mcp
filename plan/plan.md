@@ -280,13 +280,11 @@ the client (dun) retries with its own decisions and reports them.
   worktree of this repo / another repo left out with the reason, submodules
   included; `leftOut` in the report; query tree skips nested repos unless
   named; unreadable paths skipped and named. Demo repo (3 worktrees + a
-  clone): 311 files, 0.25 s, no retry. ◻ next slices: not-a-project
-  root detection (home dir, dir of clones); symlink/LFS/binary/monorepo
-  edge cases.
+  clone): 311 files, 0.25 s, no retry.
 - ✅ node_query `include` (Carl: "it's all dead ends"): gitignore-style
   patterns open any dead end (skipped dir, nested repo, excluded dir,
   shadowed file) for broad traversal; `query --include` (repeatable), usage
-  log `include` field, leftOut hint names the way in. Matcher: mcp/include.go.
+  log `include` field, leftOut hint names the way in. Matcher: internal/pathpat.
   Assumption: a pattern never reaches through a dead end to something
   beside it (`*.js` does not open node_modules); the repo-state dir is never entered.
 - ✅ dead ends rolled up: node_query result `leftOut` {pruned, deadEnds,
@@ -319,6 +317,31 @@ the client (dun) retries with its own decisions and reports them.
   `poly-lsp-mcp://diagnostics` is empty for unused roots. The memory-stop
   hint path (OnStop → setup re-send) has no test with a real stop. Not
   detected: JVM (Gradle/Maven) roots.
+- ✅ index edge cases decided and reported (Carl: heuristics decide, each
+  reported with how to refine or revert). Not a project (home, `/`, a dir
+  of 3+ clones outside a repo): refused before any build, reason + up to 20
+  repos + remedy (`--root <one>` | `--index-anyway`) in the notification,
+  tool refusals, `index`, `query`, `doctor`; 73 ms process wall on ~ and on
+  a dir of 78 clones. Over size (1 MiB), `*.min.*`, LFS pointers, skipped
+  dirs: left out per file/dir. `--include` / `include:` overrides those,
+  nested repos and links leaving the root (not .gitignore, not --exclude);
+  matcher moved to internal/pathpat. Symlinks inside the root followed
+  after plain files (dedupe by real path), loops / leaving root / beyond
+  `--symlink-depth` (4) reported; manifest lists links apart (`ls-files
+  --stage`). `leftOut` capped at 20 per reason, `leftOutBy` {count, hint}.
+  CI: CGO_ENABLED=0 vet+test job (release.yml; runs on tags and dispatch
+  only). Commits: `ad808e7` `70ca7ad` `60272e4` `a07beb7`.
+  **risks**: the watcher does not apply over-size/minified/LFS, so an edit
+  to such a file indexes it until the next build. An include that leads
+  INTO a nested repo (`clone/sub`) drops the whole repo from the ignore set
+  and the query tree's skips, so node_query and the watcher see all of it;
+  only the build is limited to the path. Files a followed link reaches are
+  indexed under the link's path (a link into node_modules indexes it).
+  A gitignored link target is left out as `git-ignored`. `daemon` and
+  `mcp --daemon` take no `--include`/`--index-anyway`/`--symlink-depth`
+  (daemon reads `include:` from its config); a home or clones root is
+  refused there with no override. The home check uses $HOME; a dotfiles
+  repo at ~ is refused too.
 - ◻ dun side: read the `poly-lsp-mcp/index` notification, choose excludes,
   respawn, report what it decided and how to reverse it. Protocol sent to
   dun-a8.

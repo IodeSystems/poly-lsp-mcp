@@ -196,6 +196,22 @@ In a git repository the file set is git's: `git ls-files --cached --recurse-subm
 
 The index walk has a startup budget, `--index-budget`, in `node_query`'s grammar: `Nms` wall-clock (bare = ms) or `Nops`, one op per file read (default `30000ms`; `0` = unbounded). Over budget the build fails, but the walk goes on counting without reading, so the failure is a trace of where the files are. The notification (level `error`, `budget`, `read`) and every tool call carry that trace and both ways out: get under budget with `--exclude <dir>` (repeatable, relative to `--root`; the directory is dropped from the index, the query tree and every walk, and the repository is not changed) or `.gitignore`; or raise it, with a suggested `--index-budget` scaled from what was read.
 
+Some roots and files are decided for you. Each decision is reported, with the way to revert it:
+
+| Decision | Reason in `leftOut` | Override |
+|----------|---------------------|----------|
+| Root is the home directory, `/`, or a directory outside any repository with 3+ clones in it: not indexed. The bring-up fails at once (`state` `failed`, `reason` `not a project`, `repos`: up to 20 found, relative) and every tool call says the same | — | `--root <one of them>`, or `--index-anyway` |
+| A directory such as `node_modules`, `vendor`, `dist`, `build` | `skipped dir` | `--include <dir>` |
+| A file over 1 MiB | `over size` | `--include <path>` (indexed whatever its size; the budget still bounds the build) |
+| A `*.min.*` file | `minified` | `--include <path>` |
+| A Git LFS pointer (content not fetched) | `LFS pointer (not downloaded)` | `git lfs pull` |
+| A symlink whose target leaves the root | `symlink leaves root` | `--include <link path>` |
+| A symlink more than `--symlink-depth` (4) links deep; `0` follows none | `symlink depth` | `--symlink-depth N` |
+| A dir symlink to a directory already open on its own path | `symlink loop` | — |
+| A symlink to a path indexed under its own name (indexed once) | `symlink to indexed path` | — |
+
+Symlinks whose target is inside the root are followed, files and directories, with ignores applied to both the link's path and the target's. `--include <pattern>` (repeatable, gitignore-style, on `mcp`, `index` and `query`; also `include:` in `poly-lsp-mcp.yaml`) overrides the guesses in the table and opens a nested repository; it does not override `.gitignore` or `--exclude`. `leftOut` lists at most 20 entries per reason; `leftOutBy` gives each reason's true count and its hint.
+
 `poly-lsp-mcp index --root .` prints the same report from the shell (`--json` for the notification's `index` shape); `poly-lsp-mcp status` prints it for every running server.
 
 `node_query` skips `node_modules`, `vendor`, `dist`, `build` and the like in broad traversal, but a selector that names a path inside one (`file[path=node_modules/react/index.d.ts]`, `#'vendor/x' func`) reaches that path and nothing beside it. It does not apply `.gitignore`; every `node_query` appends one line to `~/.poly-lsp/usage.jsonl` (matches, how many were gitignored or in a skipped directory, and whether the selector named them), and `poly-lsp-mcp usage` totals it — the evidence for whether it should.

@@ -168,6 +168,31 @@ reviews are not committed. Not yet triaged; claims are the reviewer's, not re-me
 `.venv/`; it amplifies #2, #4, #6. **risks**: none taken yet. **blocking
 decisions**: order after #1 is Carl's call.
 
+◻ **Daemon: dun-style start, version check, blue/green upgrade** (Carl,
+2026-10-24: likes dund's start-on-first-use, multi-session upgrade notice and
+self-upgrade). dun-a8's account of dund (cmd/dun/attach.go,
+internal/dundcli/{cli,handover}.go, internal/dund/upgrade.go) is the model.
+Today: `mcp --daemon` auto-starts (spawn.go EnsureRunning, 8 s poll), no
+lock, no build identity (`Version` const "0.1.0"), no upgrade, no notice;
+and none of today's startup work (async init, budget, --exclude, report)
+reaches it. Proposed slices:
+1. flock `~/.poly-lsp/daemon.lock` around start; stamp a build id (VCS
+   revision via debug.ReadBuildInfo, or content hash) into daemon.json.
+2. Daemon parity: async init per root, budget, excludes, index report, the
+   `poly-lsp-mcp/index` notification relayed through the proxy.
+3. Version handshake on connect: proxy build vs daemon build; daemon also
+   watches its own exe.
+4. Blue/green upgrade: new daemon warms on a side socket (cache.gob, index,
+   child LSPs) while the old serves; takes the socket; old drains (bounded)
+   and exits. Proxy retries an idempotent call once on reconnect.
+5. In-band notice: `notifications/message` logger `poly-lsp-mcp/daemon`
+   (upgrading/upgraded/failed); tool calls wait, bounded, during the swap.
+6. Keep exe.prev, roll back after N failed starts (dund's open gap).
+**next**: Carl approves the slices and order. **risks**: two daemons warm at
+once doubles child-LSP memory during the swap (gopls was 6 GB on dun);
+cache.gob format needs a version. **blocking decisions**: approve; swap
+memory policy (warm all roots, or only recently used ones).
+
 ◻ **First run on macOS** (2026-10-22). Not yet built or run on a Mac.
 **next**: on the Mac, `make install`, then `go test ./multiplex ./daemon .`
 and `poly-lsp-mcp status`. **risks**: `ps -o rss=` output format; peer-cred

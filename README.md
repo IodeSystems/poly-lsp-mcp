@@ -421,7 +421,7 @@ Supports Go, TypeScript (.ts/.tsx/.js), and Python.
 }
 ```
 
-- **rename**: workspace-wide, with declared-binding + aliasing safety. Touches comments and prose only when `includeComments: true`. Cross-namespace lexical guesses are returned as `candidates` (apply with `applyCandidates: true`); renaming a `@derived` source fails closed pending `resolution: {mode, target}` — see [Derivation-aware refactoring](#derivation-aware-refactoring-derived).
+- **rename**: workspace-wide, with declared-binding + aliasing safety. Also rewrites whole-word mentions in comments and prose by default (the reply lists the files and how to get a code-only rename); a plain lowercase-word old name (`save`, `data`) leaves prose alone and reports the skipped count. `includeComments: true|false` is a hidden override. Cross-namespace lexical guesses are returned as `candidates` (apply with `applyCandidates: true`); renaming a `@derived` source fails closed pending `resolution: {mode, target}` — see [Derivation-aware refactoring](#derivation-aware-refactoring-derived).
 - **params**: rebuilds the function declaration. When arity changes, callers across the workspace are rewritten best-effort — args truncated on shrink, padded with language-appropriate zero values on growth (`""`, `0`, `false`, `nil` / `null` / `None`, `[]` / `{}`, …). Spread / splat callers are reported as `skipped` so you decide.
 - **return**: replaces the existing return type or inserts one into a previously-void declaration.
 

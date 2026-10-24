@@ -68,6 +68,9 @@ agents actually want the cross-lib answer unprompted.
   over one unified node tree (project > dir > file > symbols > argument),
   addressed as `<file>#<sym>`, queried by CSS selector. Legacy 9-tool surface
   behind `--legacy-tools`. Sandbox jail + read-only mode: commit `0fbeb02`.
+- ✅ Rename rewrites comment/prose mentions by default (plain lowercase-word old
+  names exempt; reply lists files + the code-only escape). `includeComments` is
+  a hidden node_edit param; node_edit ops are logged to the usage log.
 - Selector language: CSS containment + the graph as NODES. References are
   reified edge pseudo-elements — `::in`/`::out` on TWO orthogonal class axes,
   KIND (.call/.type/.import) × POSITION (.return/.param/.field/.var), composed

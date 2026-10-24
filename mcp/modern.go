@@ -59,8 +59,10 @@ func registerModernTools() map[string]Tool {
 			Handler:     handleModernNodeEdit,
 			// commit/rollback are HIDDEN, not missing: the rejection help
 			// reveals them exactly when a multi-stage edit is needed, so they
-			// cost no schema budget on every other turn.
-			Undeclared: []string{"commit", "rollback", "diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
+			// cost no schema budget on every other turn. includeComments is hidden
+			// too: a rename rewrites comment mentions by default, and the reply
+			// names the override.
+			Undeclared: []string{"commit", "rollback", "includeComments", "diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
 		},
 	}
 }
@@ -104,7 +106,7 @@ newText alone — REPLACES a span address (@start-end: ::body/::signature/::grep
 delete:true — excise the node.
 accept:"mine"|"theirs" — resolve merge conflicts (whole file, or one block by its @start-end span); markers go too. A conflicted file indexes both sides as PEERS; ::conflict/::mine/::theirs/::base read them apart (sides carry their ref).
 params [{name,type}] / return — rebuild the parameter list / return type (go/typescript/python).
-includeComments / resolution:{mode,target} — rename only.`
+resolution:{mode,target} — rename only.`
 
 var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"node":{"type":"string","description":"Address or selector."},` +
@@ -116,7 +118,6 @@ var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"return":{"type":"string"},` +
 	`"delete":{"type":"boolean"},` +
 	`"accept":{"type":"string","enum":["mine","theirs"]},` +
-	`"includeComments":{"type":"boolean"},` +
 	`"resolution":{"type":"object","properties":{"mode":{"type":"string",` +
 	`"enum":["underlying","projection","mapping","hide"]},"target":{"type":"string"}}}},` +
 	`"required":["node"]}`)
@@ -1136,7 +1137,10 @@ type modernEditArgs struct {
 	Commit   *bool `json:"commit,omitempty"`
 	Rollback bool  `json:"rollback,omitempty"`
 
-	IncludeComments bool `json:"includeComments,omitempty"`
+	// IncludeComments is HIDDEN (not in the schema). nil = default: comment and
+	// prose mentions are renamed, except for a plain-word old name. An explicit
+	// value overrides both.
+	IncludeComments *bool `json:"includeComments,omitempty"`
 	Resolution      *struct {
 		Mode   string `json:"mode"`
 		Target string `json:"target"`
@@ -1323,7 +1327,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	}
 	// rename-only modifiers, rejected before anything touches disk.
 	if p.Rename == nil {
-		if p.IncludeComments {
+		if p.IncludeComments != nil {
 			return nil, true, errors.New("includeComments only applies to rename")
 		}
 		if p.Resolution != nil {

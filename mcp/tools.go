@@ -204,7 +204,7 @@ func registerLegacyTools() map[string]Tool {
 				"`params` (rebuild the function's parameter list — go / typescript / python; callers across the workspace get their arg lists rewritten best-effort, padded with language-appropriate zero values on growth, truncated on shrink, spread/splat callers reported as skipped); " +
 				"`return` (replace the return type, or insert one into a previously-void / unannotated signature). " +
 				"Combine all three to change name + signature + return type in one tool call. " +
-				"`includeComments` extends rename to documentation/prose via a word-boundary scan; partial-word matches like `thisUserID` stay untouched. " +
+				"rename also rewrites comment/prose mentions by word-boundary scan (partial-word matches like `thisUserID` stay untouched) unless the old name is a plain lowercase word; `includeComments` true/false overrides. " +
 				"Legacy shape `kind=\"rename\", newName=X` still accepted; internally normalized into `refactor:{rename: X}`.",
 			InputSchema: json.RawMessage(`{
   "type": "object",
@@ -237,7 +237,7 @@ func registerLegacyTools() map[string]Tool {
     },
     "kind":            {"type": "string", "enum": ["rename"], "description": "Legacy shape. Prefer refactor:{rename: X}."},
     "newName":         {"type": "string", "description": "Required when kind='rename'."},
-    "includeComments": {"type": "boolean", "description": "Rename word-boundary mentions in comments / prose / non-indexed file types too. Default false."},
+    "includeComments": {"type": "boolean", "description": "Rename word-boundary mentions in comments / prose / non-indexed file types. Default true, except when the old name is a plain lowercase word (save, data): then prose is left alone and the reply says how many were skipped."},
     "applyCandidates": {"type": "boolean", "description": "Also rename the lexical name-match sites that are cross-namespace GUESSES. Default false: those sites are returned under 'candidates' (recommendations) and NOT touched — review them, then re-run with applyCandidates:true. Authoritative sites (declared @derived/binding, child-LSP) are always renamed."},
     "resolution": {"type": "object", "description": "Resolves the variance when the target is a @derived source (a derivation-graph node — gat operation / sqlc column). Without it, such a rename is NOT applied and returns variance:true with the modes to choose from. mode='underlying' cascades the rename to the source + all references (the only automated mode); projection/mapping/hide are recognized but manual. target='file:line' picks one source when fan-in is ambiguous.", "properties": {"mode": {"type": "string", "enum": ["underlying", "projection", "mapping", "hide"]}, "target": {"type": "string"}}}
   },
@@ -1605,7 +1605,7 @@ func handleNodeRefactor(s *Server, sess sessionID, args json.RawMessage) ([]Cont
 		// refactor: {rename: <newName>}.
 		Kind            string `json:"kind"`
 		NewName         string `json:"newName"`
-		IncludeComments bool   `json:"includeComments"`
+		IncludeComments *bool  `json:"includeComments"`
 		// ApplyCandidates also renames the lexical name-match sites that are
 		// guesses across namespaces (otherwise they're returned as candidates,
 		// not touched). Explicit intent to act on a guess.
@@ -1676,7 +1676,7 @@ func handleNodeRefactor(s *Server, sess sessionID, args json.RawMessage) ([]Cont
 // callers get the new name. Best-effort call-site rewriting (drop
 // removed args, insert zero values for added ones) lands in a follow-
 // up; for now the diagnostic round-trip surfaces broken callers.
-func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments bool, dopts diagnosticOptions) ([]Content, bool, error) {
+func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments *bool, dopts diagnosticOptions) ([]Content, bool, error) {
 	abs, err := s.resolveFileArg(a.File)
 	if err != nil {
 		return nil, true, err
@@ -1990,7 +1990,11 @@ func byteOffsetToLineColPos(content []byte, offset int) (int, int) {
 // txn threads a shared validation transaction from a caller (refactorSignature
 // runs a nested rename inside its own txn). nil = standalone: this call owns a
 // fresh txn and verifies/reverts at the end.
-func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, applyCandidates bool, mode, target string, opts diagnosticOptions, txn *validationTxn) ([]Content, bool, error) {
+//
+// includeComments is tri-state. nil = the default: comment and prose mentions
+// are rewritten too, unless the old name is a plain word (see plainWordName).
+// An explicit true or false overrides both the default and that guard.
+func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bool, applyCandidates bool, mode, target string, opts diagnosticOptions, txn *validationTxn) ([]Content, bool, error) {
 	ownTxn := txn == nil
 	if ownTxn {
 		txn = s.beginValidationTxn(opts)
@@ -2081,14 +2085,25 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 		}
 	}
 
-	if includeComments {
-		// Workspace-wide word-boundary scan picks up positions the
-		// index intentionally doesn't see — most commonly comments,
-		// docstrings, markdown prose, and config formats we don't
-		// have a grammar for. \b anchors mean partial-word matches
-		// (thisUserID) are NOT renamed.
-		more := s.findCommentMentions(name, newName, resolved)
-		resolved = append(resolved, more...)
+	// Comment and prose mentions: the symbol index never sees them, so a
+	// rename that stopped at identifiers left stale names in docs. Default ON.
+	// A workspace-wide word-boundary scan finds them; \b anchors keep
+	// partial-word matches (thisUserID) out.
+	var commentMentions map[string]int // file → mentions rewritten
+	skippedMentions := 0
+	if includeComments == nil || *includeComments {
+		more := s.findCommentMentions(name, newName, resolved, idx.LookupExisting(name))
+		if includeComments == nil && plainWordName(name) {
+			// "save", "data", "get" are English: rewriting every one in
+			// prose would corrupt docs. Counted so the reply can say so.
+			skippedMentions = len(more)
+		} else {
+			resolved = append(resolved, more...)
+			commentMentions = map[string]int{}
+			for _, e := range more {
+				commentMentions[e.RelFile]++
+			}
+		}
 	}
 	byFile := map[string][]resolvedEdit{}
 	order := []string{}
@@ -2173,10 +2188,37 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 				"Every touched site is listed in results[].lines — check those if you want to verify, "+
 				"but do NOT re-run the rename per-file or search/replace to \"finish\".",
 			name, newName, scope, len(results))
-		if !includeComments {
+		if includeComments != nil && !*includeComments {
 			note += " Any occurrences left are in comments/strings/prose (not identifiers) and were intentionally skipped — pass includeComments:true to rename those too."
 		}
 		payload["note"] = note
+	}
+	if len(commentMentions) > 0 {
+		files := make([]string, 0, len(commentMentions))
+		for f := range commentMentions {
+			files = append(files, f)
+		}
+		sort.Strings(files)
+		changed := make([]map[string]any, 0, len(files))
+		total := 0
+		for _, f := range files {
+			changed = append(changed, map[string]any{"file": f, "mentions": commentMentions[f]})
+			total += commentMentions[f]
+		}
+		payload["commentsChanged"] = changed
+		if includeComments == nil {
+			payload["commentsNote"] = fmt.Sprintf(
+				"Also rewrote %d comment/prose mention(s) of %q in %d file(s) (commentsChanged). "+
+					"For a code-only rename, revert this rename and repeat it with includeComments:false.",
+				total, name, len(files))
+		}
+	}
+	if skippedMentions > 0 {
+		payload["commentMentionsSkipped"] = skippedMentions
+		payload["commentsNote"] = fmt.Sprintf(
+			"%q is a plain word, so %d comment/prose mention(s) were NOT rewritten (they may be ordinary English). "+
+				"To rewrite them too, revert this rename and repeat it with includeComments:true.",
+			name, skippedMentions)
 	}
 	if diags.DroppedDiagnostics > 0 {
 		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
@@ -2200,17 +2242,36 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments, ap
 	return jsonContent(payload), false, nil
 }
 
+// plainWordName reports whether name is all lowercase ASCII letters: no
+// digits, underscores or internal capitals. Such a name (save, data, get) is
+// also an ordinary English word, so its prose mentions are not renamed by
+// default; a name like fetchUser or user_id is unambiguous.
+func plainWordName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
 // findCommentMentions runs a workspace-wide word-boundary scan for
 // name and returns a resolvedEdit per match whose position isn't
 // already covered by `existing`. Used by node_refactor with
 // kind=rename + includeComments=true to pick up comments / prose /
 // non-indexed file types the symbol index intentionally skips.
 //
+// codeSites are the index's identifier sites for name; they are skipped so
+// this scan only adds comments, prose and non-indexed files.
+//
 // Word-boundary anchoring keeps partial-word matches out (`thisUserID`
 // won't match `\bUserID\b`). Aliasing safety is implicit: the
 // rewriter still replaces the matched bytes verbatim, and we only
 // match the exact name.
-func (s *Server) findCommentMentions(name, newName string, existing []resolvedEdit) []resolvedEdit {
+func (s *Server) findCommentMentions(name, newName string, existing []resolvedEdit, codeSites []symbols.Site) []resolvedEdit {
 	root := s.getRoot()
 	if root == "" {
 		return nil
@@ -2223,6 +2284,14 @@ func (s *Server) findCommentMentions(name, newName string, existing []resolvedEd
 	seen := map[loc]bool{}
 	for _, e := range existing {
 		seen[loc{e.AbsFile, e.Line, e.Col}] = true
+	}
+	// An indexed identifier site is CODE. A same-named symbol the rename did
+	// not target (another package's Ping, when gopls scoped the rename to one
+	// type) must stay untouched; only what the index never sees is fair game.
+	for _, c := range codeSites {
+		if c.Confidence != symbols.ConfidenceComment {
+			seen[loc{c.File, c.Line, c.Col}] = true
+		}
 	}
 	re, err := regexp.Compile(`\b` + regexp.QuoteMeta(name) + `\b`)
 	if err != nil {

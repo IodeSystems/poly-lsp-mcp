@@ -2386,7 +2386,7 @@ func TestNodeRefactorUnknownKindIsError(t *testing.T) {
 	}
 }
 
-func TestNodeRefactorRenameDefaultSkipsComments(t *testing.T) {
+func TestNodeRefactorRenameIncludeCommentsFalseSkipsComments(t *testing.T) {
 	dir := t.TempDir()
 	mainPath := filepath.Join(dir, "main.go")
 	if err := os.WriteFile(mainPath,
@@ -2408,14 +2408,16 @@ func TestNodeRefactorRenameDefaultSkipsComments(t *testing.T) {
 		"node":    "main.go#UserID",
 		"kind":    "rename",
 		"newName": "PersonID",
+		// Rewriting comments is the default now; false is the code-only rename.
+		"includeComments": false,
 	})
 	if r.IsError {
 		t.Fatalf("rename errored: %+v", r.Content)
 	}
 	got, _ := os.ReadFile(mainPath)
-	// Default: the comment is preserved (still says UserID).
+	// Explicit false: the comment is preserved (still says UserID).
 	if !strings.Contains(string(got), "// UserID is the canonical id") {
-		t.Errorf("comment was rewritten without includeComments:\n%s", got)
+		t.Errorf("comment was rewritten with includeComments:false:\n%s", got)
 	}
 	if !strings.Contains(string(got), "type PersonID int") {
 		t.Errorf("type declaration not renamed:\n%s", got)

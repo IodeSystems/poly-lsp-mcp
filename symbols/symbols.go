@@ -851,8 +851,8 @@ type buildConfig struct {
 	// ignores, if set, replaces the set Build would load from git — so a
 	// caller's excludes apply, and the set is loaded once per caller.
 	ignores *git.IgnoreSet
-	// maxFiles, if > 0, is the hard limit on indexed files. See WithLimit.
-	maxFiles int
+	// budget bounds the walk. See WithBudget.
+	budget Budget
 }
 
 // WithCache plumbs a ParseCache through Build. Files whose
@@ -878,34 +878,52 @@ func WithIgnores(ign *git.IgnoreSet) BuildOption {
 	return func(cfg *buildConfig) { cfg.ignores = ign }
 }
 
-// WithLimit makes Build fail with a *LimitError when the workspace has more
-// than maxFiles indexable files. 0 = no limit.
-func WithLimit(maxFiles int) BuildOption {
-	return func(cfg *buildConfig) { cfg.maxFiles = maxFiles }
+// Budget bounds a Build, in node_query's terms: Time is wall-clock, Ops is
+// files read and parsed (deterministic). Zero fields are unbounded.
+type Budget struct {
+	Time time.Duration
+	Ops  int
 }
 
-// limitCountFactor bounds the count-only walk after the limit: it stops at
-// this many times the limit, so a root pointed at a home directory still
-// returns quickly.
-const limitCountFactor = 20
+func (b Budget) String() string {
+	if b.Ops > 0 {
+		return fmt.Sprintf("%dops", b.Ops)
+	}
+	return fmt.Sprintf("%dms", b.Time.Milliseconds())
+}
 
-// LimitError is a build stopped by WithLimit. Report is the post-mortem:
-// after the limit, the walk went on counting files and bytes without
-// reading them, so it shows where the files are.
-type LimitError struct {
-	Limit  int
+func (b Budget) set() bool { return b.Time > 0 || b.Ops > 0 }
+
+// WithBudget makes Build fail with a *BudgetError when it cannot index the
+// workspace within b.
+func WithBudget(b Budget) BuildOption {
+	return func(cfg *buildConfig) { cfg.budget = b }
+}
+
+// After the budget is spent the walk goes on counting files and bytes,
+// without reading them, so the trace shows where the rest of the workspace
+// is. That counting is bounded too — budgetCountFactor times the files read,
+// and no more time than the budget itself — so a root at $HOME still
+// returns.
+const budgetCountFactor = 20
+
+// BudgetError is a build that blew its budget. Report is the trace: every
+// file read within the budget, and every file counted after it.
+type BudgetError struct {
+	Budget Budget
+	Read   int // files read and parsed within the budget
 	Report CostReport
-	// Stopped: the count-only walk itself stopped at limitCountFactor×Limit,
-	// so Report.Files is a lower bound.
+	// Stopped: the counting walk itself ran out, so Report.Files is a lower
+	// bound.
 	Stopped bool
 }
 
-func (e *LimitError) Error() string {
+func (e *BudgetError) Error() string {
 	n := fmt.Sprintf("%d", e.Report.Files)
 	if e.Stopped {
 		n = "at least " + n
 	}
-	return fmt.Sprintf("index limit: %s indexable files, limit %d", n, e.Limit)
+	return fmt.Sprintf("index budget %s spent after %d of %s indexable files", e.Budget, e.Read, n)
 }
 
 // Build walks root recursively and indexes every file whose extension is
@@ -929,14 +947,16 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		ign = git.LoadIgnores(root)
 	}
 	var pluginFiles []PluginFile
-	if cfg.maxFiles > 0 && cfg.cost == nil {
-		cfg.cost = NewBuildCost() // the post-mortem needs one
+	if cfg.budget.set() && cfg.cost == nil {
+		cfg.cost = NewBuildCost() // the trace needs one
 	}
+	walkStart := time.Now()
+	var spentAt time.Time
 	if cfg.cost != nil {
 		cfg.cost.begin(root)
 		defer cfg.cost.end()
 	}
-	indexed, over, stopped := 0, false, false
+	read, counted, over, stopped := 0, 0, false, false
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -980,18 +1000,24 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		if info.Size() > maxFileSize {
 			return nil
 		}
-		indexed++
-		if cfg.maxFiles > 0 && indexed > cfg.maxFiles {
-			// Past the limit: count, do not read, so the post-mortem shows
-			// where the files are.
-			over = true
-			if indexed > limitCountFactor*cfg.maxFiles {
+		if !over && cfg.budget.set() &&
+			((cfg.budget.Ops > 0 && read >= cfg.budget.Ops) ||
+				(cfg.budget.Time > 0 && time.Since(walkStart) > cfg.budget.Time)) {
+			over, spentAt = true, time.Now()
+		}
+		if over {
+			// Spent: count, do not read, so the trace shows where the rest
+			// of the files are.
+			counted++
+			if counted > budgetCountFactor*max(read, 1) ||
+				(cfg.budget.Time > 0 && time.Since(spentAt) > cfg.budget.Time) {
 				stopped = true
 				return fs.SkipAll
 			}
 			cfg.cost.file(path, info.Size(), 0, false)
 			return nil
 		}
+		read++
 		fileStart := time.Now()
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -1033,7 +1059,7 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	}
 	if over {
 		cfg.cost.end()
-		return nil, &LimitError{Limit: cfg.maxFiles, Report: cfg.cost.Report(), Stopped: stopped}
+		return nil, &BudgetError{Budget: cfg.budget, Read: read, Report: cfg.cost.Report(), Stopped: stopped}
 	}
 	// Convention plugins (F2) run after the lexical walk, over the files
 	// it indexed. Zero plugins → this loop is a no-op → the index is

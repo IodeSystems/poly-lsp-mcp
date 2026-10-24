@@ -96,12 +96,11 @@ type Server struct {
 	// ready is closed when an asynchronous bring-up ends; nil when the
 	// bring-up was synchronous. initErr is its outcome, either way. Both
 	// guarded by stateMu. See async_init.go.
-	ready      chan struct{}
-	initErr    error
-	asyncInit  bool
-	indexLimit int
-	usageLog   string // see usage.go
-	indexWarn  int
+	ready       chan struct{}
+	initErr     error
+	asyncInit   bool
+	indexBudget symbols.Budget
+	usageLog    string // see usage.go
 
 	indexMu     sync.RWMutex
 	index       *symbols.Index
@@ -660,11 +659,11 @@ func (s *Server) BuildIndex() error {
 	s.indexBuilds++
 	cost := symbols.NewBuildCost()
 	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache), symbols.WithCost(cost),
-		symbols.WithIgnores(ign), symbols.WithLimit(s.indexLimit))
+		symbols.WithIgnores(ign), symbols.WithBudget(s.indexBudget))
 	if err != nil {
-		var le *symbols.LimitError
-		if errors.As(err, &le) {
-			s.setIndexCost(le.Report) // the post-mortem
+		var be *symbols.BudgetError
+		if errors.As(err, &be) {
+			s.setIndexCost(be.Report) // the trace
 		}
 		return fmt.Errorf("index build failed for %s: %w", root, err)
 	}
@@ -792,8 +791,6 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		res["index"] = c
 		if err := s.waitReady(); err != nil {
 			res["indexError"] = s.indexFailure(err)
-		} else if l := s.largeIndex(); l != nil {
-			res["indexLarge"] = l
 		}
 	}
 	s.reply(req, res)

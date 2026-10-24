@@ -185,8 +185,10 @@ the client (dun) retries with its own decisions and reports them.
   `--exclude` (`a019fc7`). dun: initialize 0.07 s; ready notification at
   2.3 s; first tool call 3.9 s. Demo (3 worktrees, limit 500): fails with
   `.claude/worktrees/` 75%, retry with `--exclude` answers at 0.46 s.
-- ✅ `--index-warn-files` 10000 warns (`large` in the ready notification,
-  level warning) and serves; `--index-max-files` is the hard cap, 100000.
+- ✅ ~~file-count thresholds~~ → `--index-budget` (Carl: like node_query's
+  budget), `30000ms` default, `Nms`|`Nops`. Over budget: fail with the
+  trace, get-under (`--exclude`/.gitignore) and raise (scaled suggestion)
+  remedies; tools refuse with the same text.
   node_query reaches a skipped dir (node_modules…) only along a path the
   selector names. Usage log `~/.poly-lsp/usage.jsonl` + `poly-lsp-mcp
   usage` (`4dc0cf5`).
@@ -194,9 +196,9 @@ the client (dun) retries with its own decisions and reports them.
   respawn, report what it decided and how to reverse it. Protocol sent to
   dun-a8.
 **next**: dun's adoption; read `poly-lsp-mcp usage` after a week of use.
-**risks**: thresholds are guesses (dun 455 files; worktree case 22,012); a
-failed bring-up refuses node_read too; `daemon` has no `--exclude` or
-limits yet; the usage log records selectors (local only).
+**risks**: 30 s default is a guess (dun 0.2 s warm; worktree case 15.8 s
+cold); a wall-clock budget varies by machine and cache state; a failed
+bring-up refuses node_read too; `daemon` has no `--exclude` or budget yet; the usage log records selectors (local only).
 **decided (Carl, 2026-10-24)**: node_query does NOT apply `.gitignore` —
 usage decides; skip dirs are reachable when named.
 **optional extensions**: `cache.gob` load (0.97 s) and `goOperationIDSites`

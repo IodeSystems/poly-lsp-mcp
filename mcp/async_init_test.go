@@ -70,9 +70,9 @@ func TestAsyncInitializeRepliesBeforeTheIndex(t *testing.T) {
 	}
 }
 
-// Over the limit: the notification and every tool call carry the
-// post-mortem and the remedy, so the client can retry with excludes.
-func TestIndexLimitFailsWithPostMortem(t *testing.T) {
+// Over budget: the notification and every tool call carry the trace and
+// both remedies — get under budget, or raise it — so the client can retry.
+func TestIndexBudgetFailsWithTrace(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"a.go":            "package p\n",
 		"vendored/x/b.go": "package x\n",
@@ -80,7 +80,9 @@ func TestIndexLimitFailsWithPostMortem(t *testing.T) {
 	})
 	s := startSessionWith(t, dir, nil, nil, func(srv *Server) {
 		srv.SetAsyncInit(true)
-		srv.SetIndexLimit(1)
+		if err := srv.SetIndexBudget("1ops"); err != nil {
+			t.Fatal(err)
+		}
 	})
 	defer s.close()
 	s.request("initialize", map[string]any{})
@@ -90,13 +92,13 @@ func TestIndexLimitFailsWithPostMortem(t *testing.T) {
 		t.Fatalf("a tool call over the limit should be refused: %+v", r)
 	}
 	text := r.Content[0].Text
-	for _, want := range []string{"index limit", "vendored/x/", "--exclude"} {
+	for _, want := range []string{"index budget 1ops spent", "vendored/x/", "--exclude", "--index-budget 4ops"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("refusal should contain %q:\n%s", want, text)
 		}
 	}
 	note := indexNote(t, s)
-	if note["state"] != "failed" || note["limit"] != float64(1) || note["remedy"] == nil {
+	if note["state"] != "failed" || note["budget"] != "1ops" || note["read"] != float64(1) || note["remedy"] == nil {
 		t.Errorf("failure notification: %v", note)
 	}
 }
@@ -116,30 +118,5 @@ func TestExcludesDropDirectories(t *testing.T) {
 	r := s.callTool("node_query", map[string]any{"selector": "#Drop"})
 	if len(r.Content) > 0 && strings.Contains(r.Content[0].Text, "vendored") {
 		t.Errorf("an excluded directory answered a query: %s", r.Content[0].Text)
-	}
-}
-
-// Above the warning threshold the build goes on; the ready notification
-// says the workspace is large, for the client to show the user.
-func TestLargeWorkspaceWarnsAndServes(t *testing.T) {
-	dir := writeTree(t, map[string]string{
-		"a.go":            "package p\n\nfunc A() {}\n",
-		"vendored/x/b.go": "package x\n",
-	})
-	s := startSessionWith(t, dir, nil, nil, func(srv *Server) {
-		srv.SetAsyncInit(true)
-		srv.SetIndexWarn(1)
-	})
-	defer s.close()
-	s.request("initialize", map[string]any{})
-
-	r := s.callTool("node_query", map[string]any{"selector": "#A"})
-	if r.IsError {
-		t.Fatalf("a large workspace is still served: %+v", r)
-	}
-	note := indexNote(t, s)
-	large, _ := note["large"].(map[string]any)
-	if note["state"] != "ready" || large == nil || large["files"] != float64(2) {
-		t.Errorf("ready notification should carry `large`: %v", note)
 	}
 }

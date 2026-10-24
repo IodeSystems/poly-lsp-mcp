@@ -110,11 +110,11 @@ func TestBuildRecordsCost(t *testing.T) {
 	}
 }
 
-// Over the limit the build fails, and the error carries the post-mortem: the
-// walk went on counting, so the report covers every file, not the first
-// maxFiles. A walk that would run away (a root at $HOME) stops counting at
-// limitCountFactor×limit and says the count is a lower bound.
-func TestBuildLimitReportsWhereTheFilesAre(t *testing.T) {
+// Over budget the build fails, and the error carries the trace: the walk
+// went on counting, so the report covers every file, not only those read in
+// budget. A walk that would run away (a root at $HOME) stops counting at
+// budgetCountFactor×read and says the count is a lower bound.
+func TestBuildBudgetReportsWhereTheFilesAre(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < 25; i++ {
 		sub := "main"
@@ -134,24 +134,27 @@ func TestBuildLimitReportsWhereTheFilesAre(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = Build(dir, reg, WithLimit(5))
-	le, ok := err.(*LimitError)
+	_, err = Build(dir, reg, WithBudget(Budget{Ops: 5}))
+	be, ok := err.(*BudgetError)
 	if !ok {
-		t.Fatalf("want *LimitError, got %v", err)
+		t.Fatalf("want *BudgetError, got %v", err)
 	}
-	if le.Stopped || le.Report.Files != 25 {
-		t.Errorf("post-mortem should count all 25 files: stopped=%v files=%d", le.Stopped, le.Report.Files)
+	if be.Stopped || be.Read != 5 || be.Report.Files != 25 {
+		t.Errorf("trace should count all 25 files, 5 read: stopped=%v read=%d files=%d", be.Stopped, be.Read, be.Report.Files)
 	}
-	if len(le.Report.Heaviest) == 0 || le.Report.Heaviest[0].Dir != "vendored/pkg/" {
-		t.Errorf("heaviest should name vendored/pkg/: %+v", le.Report.Heaviest)
+	if len(be.Report.Heaviest) == 0 || be.Report.Heaviest[0].Dir != "vendored/pkg/" {
+		t.Errorf("heaviest should name vendored/pkg/: %+v", be.Report.Heaviest)
 	}
-
-	_, err = Build(dir, reg, WithLimit(1))
-	if le, ok = err.(*LimitError); !ok || !le.Stopped || !strings.Contains(le.Error(), "at least") {
-		t.Errorf("a runaway count stops at %dx the limit and says so: %v", limitCountFactor, err)
+	if !strings.Contains(be.Error(), "5ops") {
+		t.Errorf("the error names the budget: %v", be)
 	}
 
-	if _, err := Build(dir, reg, WithLimit(25)); err != nil {
-		t.Errorf("at the limit is not over it: %v", err)
+	_, err = Build(dir, reg, WithBudget(Budget{Ops: 1}))
+	if be, ok = err.(*BudgetError); !ok || !be.Stopped || !strings.Contains(be.Error(), "at least") {
+		t.Errorf("a runaway count stops at %dx the files read and says so: %v", budgetCountFactor, err)
+	}
+
+	if _, err := Build(dir, reg, WithBudget(Budget{Ops: 25})); err != nil {
+		t.Errorf("exactly the budget is within it: %v", err)
 	}
 }

@@ -3,6 +3,7 @@ package mcp
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
@@ -29,28 +30,25 @@ import (
 // bring-up, where the initialize result carries the index report.
 func (s *Server) SetAsyncInit(on bool) { s.asyncInit = on }
 
-// SetIndexLimit fails the index build when the workspace has more than n
-// indexable files (0 = no limit). The failure carries the post-mortem: the
-// directories that hold the files. See symbols.WithLimit.
-func (s *Server) SetIndexLimit(n int) { s.indexLimit = n }
-
-// SetIndexWarn reports a workspace above n indexable files as large: the
-// build goes on, and the ready notification carries a `large` entry for the
-// client to show the user. 0 = never.
-func (s *Server) SetIndexWarn(n int) { s.indexWarn = n }
-
-// largeIndex is the `large` entry, or nil when the workspace is not large.
-func (s *Server) largeIndex() map[string]any {
-	c := s.IndexCost()
-	if s.indexWarn <= 0 || c.Files <= s.indexWarn {
+// SetIndexBudget bounds the index walk, in node_query's budget grammar:
+// "Nms" (bare = ms) wall-clock, or "Nops", one op per file read. Over
+// budget the bring-up fails, and the failure is the trace: where the files
+// are, how to get under budget, how to raise it. "" or "0" = unbounded.
+func (s *Server) SetIndexBudget(spec string) error {
+	if t := strings.TrimSpace(spec); t == "" || t == "0" {
+		s.indexBudget = symbols.Budget{}
 		return nil
 	}
-	return map[string]any{
-		"files":     c.Files,
-		"threshold": s.indexWarn,
-		"message": fmt.Sprintf("large workspace: %d indexable files (warning above %d); see index.heaviest for where they are. %s",
-			c.Files, s.indexWarn, "To drop a directory: --exclude <dir> or .gitignore. To silence: raise --index-warn-files."),
+	v, unit, ok := parseBudget(spec)
+	if !ok {
+		return fmt.Errorf("index budget %q: want Nms (bare = ms) or Nops", spec)
 	}
+	if unit == "ops" {
+		s.indexBudget = symbols.Budget{Ops: v}
+	} else {
+		s.indexBudget = symbols.Budget{Time: time.Duration(v) * time.Millisecond}
+	}
+	return nil
 }
 
 // indexLogger is the notifications/message logger for bring-up state.
@@ -108,18 +106,15 @@ func (s *Server) notifyIndexState(err error, took time.Duration) {
 		data["schemas"] = sc
 	}
 	level := "info"
-	if l := s.largeIndex(); l != nil && err == nil {
-		level = "warning"
-		data["large"] = l
-	}
 	if err != nil {
 		level = "error"
 		data["state"] = "failed"
 		data["error"] = err.Error()
 		data["remedy"] = s.indexRemedy(err)
-		var le *symbols.LimitError
-		if errors.As(err, &le) {
-			data["limit"] = le.Limit
+		var be *symbols.BudgetError
+		if errors.As(err, &be) {
+			data["budget"] = be.Budget.String()
+			data["read"] = be.Read
 		}
 	}
 	s.sendNotification("notifications/message", map[string]any{
@@ -131,21 +126,34 @@ func (s *Server) notifyIndexState(err error, took time.Duration) {
 
 // indexRemedy says how to get past a failed bring-up.
 func (s *Server) indexRemedy(err error) string {
-	var le *symbols.LimitError
-	if errors.As(err, &le) {
-		return "exclude the heavy directories (--exclude <dir>, repeatable, relative to the root; the repository is not changed), " +
-			"or add them to .gitignore, or raise --index-max-files"
+	var be *symbols.BudgetError
+	if errors.As(err, &be) {
+		return fmt.Sprintf("get under budget: exclude the heavy directories above (--exclude <dir>, repeatable, relative to the root; "+
+			"the repository is not changed) or add them to .gitignore. Or raise it: --index-budget %s (now %s).",
+			raisedBudget(be), be.Budget)
 	}
 	return "fix the cause above and restart the server"
+}
+
+// raisedBudget suggests a budget that would have fitted: the spent budget
+// scaled by files counted over files read, plus a fifth for margin. When the
+// count stopped early it is a lower bound, and so is this.
+func raisedBudget(be *symbols.BudgetError) symbols.Budget {
+	read := max(be.Read, 1)
+	scale := float64(be.Report.Files) / float64(read) * 1.2
+	if be.Budget.Ops > 0 {
+		return symbols.Budget{Ops: int(float64(be.Budget.Ops)*scale) + 1}
+	}
+	return symbols.Budget{Time: time.Duration(float64(be.Budget.Time) * scale).Round(time.Second)}
 }
 
 // indexFailure is what a tool call answers when the bring-up failed: the
 // error, the post-mortem when there is one, and the remedy.
 func (s *Server) indexFailure(err error) string {
 	msg := fmt.Sprintf("poly-lsp: the workspace index was not built: %v\n", err)
-	var le *symbols.LimitError
-	if errors.As(err, &le) {
-		msg += le.Report.Text()
+	var be *symbols.BudgetError
+	if errors.As(err, &be) {
+		msg += be.Report.Text()
 	}
 	return msg + "remedy: " + s.indexRemedy(err)
 }

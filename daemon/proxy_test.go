@@ -205,8 +205,9 @@ func TestProxyParityWithTheStdioServer(t *testing.T) {
 		t.Errorf("an excluded dir was indexed: %q", text)
 	}
 
-	// A second client of the warm root gets the same report, replayed.
-	h2 := startProxy(t, c, root, OpenOptions{})
+	// A second client of the warm root, with the same options, gets the
+	// same report, replayed.
+	h2 := startProxy(t, c, root, OpenOptions{Excludes: []string{"vendor"}})
 	h2.reply(h2.request("initialize", map[string]any{}), 5*time.Second)
 	if data := h2.logged(indexLogger, 10*time.Second, nil); data["state"] != "ready" {
 		t.Fatalf("second client's index notification = %v", data)

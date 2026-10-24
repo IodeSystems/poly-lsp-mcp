@@ -250,9 +250,19 @@ dies mid-warm (green exits today); `make test` covers the e2e only without
    modern.go; `TestFileAccessMatchesTheGuard` keeps them in step). `--hook`
    help ends "--daemon: the proxy runs it" (dun greps `mcp --help`).
    A daemon without /access: call goes through, logged (fail-open).
-2. ◻ index options of a later /open apply to a warm root.
+2. ✅ `feat(daemon): index options of a later open apply to a warm root`.
+   One index per root, last open wins. `sameBuild` compares the effective
+   options (daemon defaults filled in; excludes cleaned and sorted;
+   includes, budget, index-anyway, symlink depth, lsp-roots). Differ →
+   new entry (holders carried), old server's batches of those sessions
+   rolled back, then shut down; notice `poly-lsp-mcp/daemon`
+   `rebuilding` {root, from, to} to every holder. The proxy now opens only
+   once its event stream is subscribed (≤5 s), so the opener gets it too.
+   A takeover's `--warm` carries the options (JSON when non-default).
+   Assumption: `--lsp-roots` counts as an option (it is fixed at build).
 3. ◻ root lifetime follows its clients.
-**risks**: a call the in-process server would refuse before its guard
+**risks**: two clients on one root with different flags rebuild it on
+each other's (re)opens; a call the in-process server would refuse before its guard
 (e.g. `delete:false`) can still reach the hook from the proxy; /access is
 one more round-trip per read/edit, only when a hook is set.
 

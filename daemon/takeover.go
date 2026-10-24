@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -139,7 +141,7 @@ func (h *host) blueGreen(req UpgradeRequest) (err error) {
 	args := append([]string{"daemon"}, h.args...)
 	args = append(args, "--takeover-from="+strconv.Itoa(os.Getpid()), "--socket="+side)
 	for _, r := range roots {
-		args = append(args, "--warm="+r)
+		args = append(args, "--warm="+warmArg(r, h.reg.optionsOf(r)))
 	}
 	logf, err := os.OpenFile(LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -263,7 +265,8 @@ func (h *host) handOver(to string) {
 func (h *host) warmRoots(roots []string) {
 	start := time.Now()
 	var wg sync.WaitGroup
-	for _, r := range roots {
+	for _, arg := range roots {
+		r, opts := parseWarm(arg)
 		canonical, err := h.allow.Resolve(r)
 		if err != nil {
 			log.Printf("daemon: warm %s: %v", r, err)
@@ -272,12 +275,45 @@ func (h *host) warmRoots(roots []string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = h.reg.get(canonical, "", nil, false)
+			_, _ = h.reg.get(canonical, "", &opts, false)
 		}()
 	}
 	wg.Wait()
 	h.warm.Store(true)
 	log.Printf("daemon: warm: %d root(s) in %s", len(roots), time.Since(start).Round(time.Millisecond))
+}
+
+// warmArg is one --warm value: the root, or, when the root was built with
+// a client's index options, {"root":…, <OpenOptions>} as JSON, so the new
+// daemon builds what the old one had and the clients' re-opens find it
+// the same (no rebuild). A path never starts with "{".
+func warmArg(root string, opts OpenOptions) string {
+	if reflect.DeepEqual(opts, OpenOptions{}) {
+		return root
+	}
+	b, err := json.Marshal(struct {
+		Root string `json:"root"`
+		OpenOptions
+	}{root, opts})
+	if err != nil {
+		return root
+	}
+	return string(b)
+}
+
+// parseWarm reads a --warm value written by warmArg.
+func parseWarm(arg string) (string, OpenOptions) {
+	if !strings.HasPrefix(arg, "{") {
+		return arg, OpenOptions{}
+	}
+	var w struct {
+		Root string `json:"root"`
+		OpenOptions
+	}
+	if err := json.Unmarshal([]byte(arg), &w); err != nil {
+		return arg, OpenOptions{}
+	}
+	return w.Root, w.OpenOptions
 }
 
 // awaitTakeover ends a takeover daemon that is never asked to take over —

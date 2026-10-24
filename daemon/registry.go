@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -69,8 +70,9 @@ type Registry struct {
 // OpenOptions are what a client chooses about the index of a root it
 // opens: the stdio server's --exclude, --include, --index-budget,
 // --index-anyway, --symlink-depth and --lsp-roots, carried by the proxy.
-// They apply when the open builds the root; a root already built for
-// another client keeps the options it was built with.
+// One index per root, and the last open wins: an open whose options
+// differ from those the root was built with rebuilds it with its own, and
+// every session on the root is told (see get).
 type OpenOptions struct {
 	Excludes     []string `json:"excludes,omitempty"`
 	Includes     []string `json:"includes,omitempty"`
@@ -218,22 +220,26 @@ func (r *Registry) Open(holder, root string, opts OpenOptions) (*mcp.Server, err
 // get fetches-or-builds the server for root. When holder != "" it also
 // registers the hold and cancels eviction (under the same lock as the
 // fetch, so it can't race an in-flight evict of the same entry). opts !=
-// nil is an /open: it rebuilds a failed entry. lsps false builds without
-// starting child LSPs (a takeover's warm); a later get with lsps starts
-// them.
+// nil is an /open: it rebuilds a failed entry, and an entry built with
+// other index options (see sameBuild) — the sessions on the root are
+// told, and the old server's open batches rolled back. lsps false builds
+// without starting child LSPs (a takeover's warm); a later get with lsps
+// starts them.
 func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.Server, error) {
 	r.mu.Lock()
 	var carried map[string]struct{}
+	var replaced *entry
 	if e, ok := r.servers[root]; ok {
-		failed := false
+		failed, changed := false, false
 		if opts != nil {
 			select {
 			case <-e.ready:
 				failed = e.err != nil
 			default:
 			}
+			changed = !failed && !r.sameBuild(e.opts, *opts)
 		}
-		if !failed {
+		if !failed && !changed {
 			if holder != "" {
 				r.holdLocked(e, holder)
 			}
@@ -248,14 +254,18 @@ func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.
 			}
 			return e.srv, e.err
 		}
-		// A failed root, opened again: build it afresh for this client,
-		// keeping the holders the failed one had.
+		// A failed root opened again, or a root opened with other index
+		// options: build it afresh for this client, keeping the holders
+		// the old one had.
 		if e.evictTimer != nil {
 			e.evictTimer.Stop()
 		}
 		carried = e.holders
 		delete(r.servers, root)
 		r.hub.forget(root)
+		if changed {
+			replaced = e
+		}
 	}
 	e := &entry{ready: make(chan struct{}), holders: map[string]struct{}{}, lastUsed: time.Now()}
 	for h := range carried {
@@ -268,9 +278,16 @@ func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.
 		e.holders[holder] = struct{}{}
 	}
 	r.servers[root] = e
+	var to []string
+	for h := range e.holders {
+		to = append(to, h)
+	}
 	r.mu.Unlock()
+	if replaced != nil {
+		r.retire(root, replaced, e.opts, to)
+	}
 
-	srv := r.build(root, e.opts)
+	srv := r.build(root, e, e.opts)
 	err := srv.BringUp(lsps)
 	e.srv, e.err = srv, err
 	close(e.ready)
@@ -368,11 +385,103 @@ func (r *Registry) evict(root string, want *entry) {
 	log.Printf("daemon: evicted idle root %s", root)
 }
 
-// build constructs (but does not bring up) a server for root with the
-// shared cache, daemon-wide policy and the client's index options. Schemas
-// are detected per root when auto-schemas is on, since detection is
-// workspace-specific.
-func (r *Registry) build(root string, opts OpenOptions) *mcp.Server {
+// retire tells the sessions on root (to) that its index options changed
+// and it is rebuilding, then rolls back their open batches on the old
+// server and shuts it down once its own bring-up has ended.
+func (r *Registry) retire(root string, old *entry, now OpenOptions, to []string) {
+	from, next := old.opts.String(), now.String()
+	params, err := json.Marshal(map[string]any{"level": "info", "logger": daemonLogger, "data": map[string]any{
+		"state": "rebuilding", "root": root, "from": from, "to": next,
+		"message": fmt.Sprintf("poly-lsp: the index options of %s changed (%s → %s), by a client's open; rebuilding the index", root, from, next),
+	}})
+	if err == nil {
+		log.Printf("daemon: root %s: index options %s → %s; rebuilding", root, from, next)
+		r.hub.publish(root, daemonLogger, "notifications/message", params, to)
+	}
+	go func() {
+		<-old.ready
+		if old.srv == nil {
+			return
+		}
+		for _, sess := range to {
+			if n, ok := old.srv.RollbackSession(sess); ok {
+				log.Printf("daemon: root %s rebuilt: rolled back session %s's open batch (%d edit(s))", root, sess, n)
+			}
+		}
+		old.srv.Shutdown()
+	}()
+}
+
+// sameBuild reports whether two opens' options build the same root: the
+// same effective excludes (in any order), includes, budget, index-anyway,
+// symlink depth and child-LSP roots, with the daemon's defaults filled in.
+func (r *Registry) sameBuild(a, b OpenOptions) bool {
+	return reflect.DeepEqual(r.effective(a), r.effective(b))
+}
+
+// effective is o with the daemon's defaults filled in, its excludes
+// cleaned and sorted: what a build from o uses.
+func (r *Registry) effective(o OpenOptions) OpenOptions {
+	var ex []string
+	for _, d := range o.Excludes {
+		ex = append(ex, git.CleanExclude(d))
+	}
+	slices.Sort(ex)
+	ex = slices.Compact(ex)
+	out := OpenOptions{Excludes: ex, Includes: o.Includes, Budget: o.Budget, IndexAnyway: r.idx.Anyway || o.IndexAnyway, LSPRoots: o.LSPRoots}
+	if len(out.Includes) == 0 {
+		out.Includes = nil
+	}
+	if out.Budget == "" {
+		out.Budget = r.idx.Budget
+	}
+	depth := r.idx.SymlinkDepth
+	if o.SymlinkDepth != nil {
+		depth = *o.SymlinkDepth
+	}
+	out.SymlinkDepth = &depth
+	if out.LSPRoots == "" {
+		out.LSPRoots = "single"
+		if r.lspRootsAuto {
+			out.LSPRoots = "auto"
+		}
+	}
+	return out
+}
+
+// String names the options an open set, for a person: "exclude vendor,
+// budget 10s", or "the daemon's defaults".
+func (o OpenOptions) String() string {
+	var parts []string
+	if len(o.Excludes) > 0 {
+		parts = append(parts, "exclude "+strings.Join(o.Excludes, ","))
+	}
+	if len(o.Includes) > 0 {
+		parts = append(parts, "include "+strings.Join(o.Includes, ","))
+	}
+	if o.Budget != "" {
+		parts = append(parts, "budget "+o.Budget)
+	}
+	if o.IndexAnyway {
+		parts = append(parts, "index-anyway")
+	}
+	if o.SymlinkDepth != nil {
+		parts = append(parts, fmt.Sprintf("symlink-depth %d", *o.SymlinkDepth))
+	}
+	if o.LSPRoots != "" {
+		parts = append(parts, "lsp-roots "+o.LSPRoots)
+	}
+	if len(parts) == 0 {
+		return "the daemon's defaults"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// build constructs (but does not bring up) a server for root, as entry e,
+// with the shared cache, daemon-wide policy and the client's index
+// options. Schemas are detected per root when auto-schemas is on, since
+// detection is workspace-specific.
+func (r *Registry) build(root string, e *entry, opts OpenOptions) *mcp.Server {
 	schemas := r.cfg.Schemas
 	if r.cfg.AutoSchemas {
 		if detected := config.DetectSchemas(root, r.cfg.Schemas); len(detected) > 0 {
@@ -385,7 +494,7 @@ func (r *Registry) build(root string, opts OpenOptions) *mcp.Server {
 	srv.SetValidateEdits(r.validate)
 	srv.SetParseCache(r.cache)
 	srv.SetUsageLog(r.usageLog)
-	srv.SetNotifier(func(method string, params map[string]any) { r.notify(root, method, params) })
+	srv.SetNotifier(func(method string, params map[string]any) { r.notify(root, e, method, params) })
 	srv.SetExcludes(append(append([]string{}, r.idx.Excludes...), opts.Excludes...))
 	srv.SetIncludes(append(append(append([]string{}, r.cfg.Include...), r.idx.Includes...), opts.Includes...))
 	srv.SetIndexAnyway(r.idx.Anyway || opts.IndexAnyway)
@@ -444,19 +553,22 @@ func checkOpenOptions(o OpenOptions) error {
 
 // notify is every hosted server's notification sink: it goes to the
 // sessions that hold the root, and the latest index and setup state is
-// kept for a session that attaches later.
-func (r *Registry) notify(root, method string, params map[string]any) {
+// kept for a session that attaches later. A server that is no longer the
+// root's (e, rebuilt with other options, or evicted) says nothing.
+func (r *Registry) notify(root string, e *entry, method string, params map[string]any) {
 	raw, err := json.Marshal(params)
 	if err != nil {
 		return
 	}
 	logger, _ := params["logger"].(string)
 	r.mu.Lock()
+	if r.servers[root] != e {
+		r.mu.Unlock()
+		return
+	}
 	var to []string
-	if e, ok := r.servers[root]; ok {
-		for h := range e.holders {
-			to = append(to, h)
-		}
+	for h := range e.holders {
+		to = append(to, h)
 	}
 	r.mu.Unlock()
 	r.hub.publish(root, logger, method, raw, to)
@@ -545,6 +657,17 @@ func (r *Registry) RecentRoots(window time.Duration) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// optionsOf is the index options root was built with (zero when it is
+// not hosted, or was built with the daemon's own).
+func (r *Registry) optionsOf(root string) OpenOptions {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.servers[root]; ok {
+		return e.opts
+	}
+	return OpenOptions{}
 }
 
 // OpenBatches counts the open (commit:false) edit batches on every root.

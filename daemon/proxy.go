@@ -28,6 +28,8 @@ var (
 	// reconnectWait bounds how long a lost connection is retried before
 	// the proxy gives up on the daemon.
 	reconnectWait = 60 * time.Second
+	// streamWait bounds how long the open waits for the event stream.
+	streamWait = 5 * time.Second
 )
 
 // proxy is one `mcp --daemon` process: the stdio MCP surface of a single
@@ -287,10 +289,16 @@ func (p *proxy) handshake(c *Client) {
 // session's lifetime to the daemon: when the proxy exits, the connection
 // drops and the daemon rolls back any batch this session left open. When
 // the daemon ends it (a hand-over) or the connection drops, the link is
-// lost and the proxy reconnects.
+// lost and the proxy reconnects. It returns once the daemon has the
+// stream (bounded by streamWait), so what the open says — a rebuild
+// notice — reaches this client too.
 func (p *proxy) followEvents(l *link) {
+	subscribed := make(chan struct{})
+	var once sync.Once
+	ready := func() { once.Do(func() { close(subscribed) }) }
 	go func() {
-		err := l.client.Events(p.ctx, func(ev Event) { p.notify(ev.Method, ev.Params) })
+		defer ready()
+		err := l.client.Events(p.ctx, ready, func(ev Event) { p.notify(ev.Method, ev.Params) })
 		if p.ctx.Err() != nil {
 			return
 		}
@@ -302,6 +310,10 @@ func (p *proxy) followEvents(l *link) {
 		}
 		p.lose(l)
 	}()
+	select {
+	case <-subscribed:
+	case <-time.After(streamWait):
+	}
 }
 
 // ready waits, bounded, for l to have opened the root.

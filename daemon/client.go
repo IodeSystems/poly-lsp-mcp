@@ -197,8 +197,10 @@ func (c *Client) OpenWith(root string, opts OpenOptions) (OpenResult, error) {
 // Events holds /session/events open and calls fn with each notification
 // until ctx ends or the daemon closes the stream. Like WatchSession, it
 // binds the session's lifetime: when it drops, the daemon rolls back the
-// session's batches and releases its holds.
-func (c *Client) Events(ctx context.Context, fn func(Event)) error {
+// session's batches and releases its holds. subscribed, if set, is called
+// once the daemon has the stream: what the session's roots say from then
+// on reaches fn.
+func (c *Client) Events(ctx context.Context, subscribed func(), fn func(Event)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://poly-lsp/session/events", nil)
 	if err != nil {
 		return err
@@ -212,6 +214,9 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("daemon: %s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	if subscribed != nil {
+		subscribed()
 	}
 	dec := json.NewDecoder(resp.Body)
 	for {

@@ -238,3 +238,82 @@ func TestDoctorFlagsMissingLSP(t *testing.T) {
 		t.Errorf("fast-path advisory present = %v on runtime %s: %v", advised, ts.Runtime(), rep.Advisories)
 	}
 }
+
+// `mcp --help` carries the phrases clients detect: dun's two for the
+// proxy (--hook's and --daemon's), and the one that says daemon mode is
+// the default.
+func TestMCPHelpMarkers(t *testing.T) {
+	root := newRoot()
+	var out bytes.Buffer
+	root.SetArgs([]string{"mcp", "--help"})
+	root.SetOut(&out)
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []string{"--daemon: the proxy runs it", "a root outside --allow is admitted", "daemon mode is the default"} {
+		if !strings.Contains(out.String(), m) {
+			t.Errorf("mcp --help does not contain %q:\n%s", m, out.String())
+		}
+	}
+}
+
+// Daemon mode is the default; --no-daemon, $POLY_LSP_NO_DAEMON=1 and an
+// in-process-only setting given without --daemon choose in-process.
+func TestMCPChooseDaemon(t *testing.T) {
+	t.Chdir(t.TempDir()) // no poly-lsp-mcp.yaml here
+	for _, tc := range []struct {
+		args    []string
+		env     map[string]string
+		want    bool
+		wantErr bool
+	}{
+		{args: nil, want: true},
+		{args: []string{"--daemon"}, want: true},
+		{args: []string{"--no-daemon"}, want: false},
+		{args: []string{"--daemon=false"}, want: false},
+		{args: []string{"--daemon", "--no-daemon"}, wantErr: true},
+		{args: []string{"--read-only", "--exclude", "x", "--lsp-roots", "auto", "--hook", "/h"}, want: true},
+		{args: []string{"--legacy-tools"}, want: false},
+		{args: []string{"--read-char-budget", "9000"}, want: false},
+		{args: []string{"--config", "c.yaml"}, want: false},
+		{args: []string{"--lsp-idle-stop", "1m"}, want: false},
+		{args: []string{"--lsp-max-rss-mb", "1"}, want: false},
+		{args: []string{"--lsp-psi-threshold", "0"}, want: false},
+		{args: []string{"--lsp-roots-max", "2"}, want: false},
+		{args: []string{"--daemon", "--legacy-tools"}, want: true},
+		{env: map[string]string{"POLY_LSP_NO_DAEMON": "1"}, want: false},
+		{args: []string{"--daemon"}, env: map[string]string{"POLY_LSP_NO_DAEMON": "1"}, want: true},
+		{args: []string{"--no-daemon=false"}, env: map[string]string{"POLY_LSP_NO_DAEMON": "1"}, want: true},
+		{env: map[string]string{"POLY_LSP_READ_CHAR_BUDGET": "9000"}, want: false},
+	} {
+		t.Setenv("POLY_LSP_NO_DAEMON", "")
+		t.Setenv("POLY_LSP_READ_CHAR_BUDGET", "")
+		for k, v := range tc.env {
+			t.Setenv(k, v)
+		}
+		root := newRoot()
+		cmd, rest, err := root.Find(append([]string{"mcp"}, tc.args...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.ParseFlags(rest); err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		d, _ := cmd.Flags().GetBool("daemon")
+		nd, _ := cmd.Flags().GetBool("no-daemon")
+		got, err := chooseDaemon(cmd, d, nd)
+		if (err != nil) != tc.wantErr || (err == nil && got != tc.want) {
+			t.Errorf("args %v env %v: daemon=%v err=%v, want daemon=%v err=%v", tc.args, tc.env, got, err, tc.want, tc.wantErr)
+		}
+	}
+	// A config file at the default --config path is the client's own
+	// config, which the daemon would not read: in-process.
+	if err := os.WriteFile("poly-lsp-mcp.yaml", []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _, _ := newRoot().Find([]string{"mcp"})
+	_ = cmd.ParseFlags(nil)
+	if got, err := chooseDaemon(cmd, false, false); err != nil || got {
+		t.Errorf("with ./poly-lsp-mcp.yaml: daemon=%v err=%v, want in-process", got, err)
+	}
+}

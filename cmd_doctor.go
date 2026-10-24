@@ -228,7 +228,7 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 					rep.Daemon += ", this build"
 				} else {
 					rep.Daemon += ", build " + build + ", NOT this binary's (" + daemon.BuildID() + ")"
-					rep.Advisories = append(rep.Advisories, "the running daemon is another build; the next `mcp --daemon` client of this build asks it to upgrade (blue/green), or restart it now: poly-lsp-mcp daemon --restart")
+					rep.Advisories = append(rep.Advisories, "the running daemon is another build; the next `mcp` client of this build asks it to upgrade (blue/green), or restart it now: poly-lsp-mcp daemon --restart")
 				}
 				// A daemon from before root stats answers without them.
 				if h, err := daemon.NewClient(st.Socket).Health(2 * time.Second); err == nil {

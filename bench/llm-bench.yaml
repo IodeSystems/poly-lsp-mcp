@@ -35,7 +35,8 @@ probeDirs:
 
 # Toolsets are the experiment axis: each is a list of EXTRA MCP servers spawned
 # alongside llm-bench-mcp. "{{workspace}}" in an arg becomes the run's scratch
-# workspace. `poly-lsp-mcp mcp --root <workspace>`; build it onto $PATH first.
+# workspace. `poly-lsp-mcp mcp --no-daemon --root <workspace>`; build it onto
+# $PATH first. In-process: each run gets its own index, no shared daemon state.
 toolsets:
   # The control. Every poly-lsp number is a delta against this.
   baseline: []
@@ -48,7 +49,7 @@ toolsets:
     cedeFileTools: true
     servers:
       - cmd: poly-lsp-mcp
-        args: ["mcp", "--root", "{{workspace}}"]
+        args: ["mcp", "--no-daemon", "--root", "{{workspace}}"]
 
   # Read-only: navigation + reading, no mutating tools registered. 2 tools
   # (~620 tok) vs 3 (~990). For exploration/review, a tool the model cannot see
@@ -63,7 +64,7 @@ toolsets:
     cedeFileTools: false
     servers:
       - cmd: poly-lsp-mcp
-        args: ["mcp", "--root", "{{workspace}}", "--read-only"]
+        args: ["mcp", "--no-daemon", "--root", "{{workspace}}", "--read-only"]
 
   # polylsp + edit validation. node_edit runs the child LSP after each write and
   # REVERTS any edit that introduces a NEW error (revert-on-new-diagnostics).
@@ -73,7 +74,7 @@ toolsets:
     cedeFileTools: true
     servers:
       - cmd: poly-lsp-mcp
-        args: ["mcp", "--root", "{{workspace}}", "--validate"]
+        args: ["mcp", "--no-daemon", "--root", "{{workspace}}", "--validate"]
 
   # No-run variants: withdraw llm-bench-mcp's `run` tool via baseArgs, so the
   # model CANNOT build/test itself. This isolates edit validation's value — with
@@ -87,13 +88,13 @@ toolsets:
     baseArgs: ["--run-tool=false"]
     servers:
       - cmd: poly-lsp-mcp
-        args: ["mcp", "--root", "{{workspace}}"]
+        args: ["mcp", "--no-daemon", "--root", "{{workspace}}"]
   polylsp-norun-validate:
     cedeFileTools: true
     baseArgs: ["--run-tool=false"]
     servers:
       - cmd: poly-lsp-mcp
-        args: ["mcp", "--root", "{{workspace}}", "--validate"]
+        args: ["mcp", "--no-daemon", "--root", "{{workspace}}", "--validate"]
 
   # The 9-tool surface the 3-tool one replaced. Identical to `polylsp` in every
   # other respect, so a polylsp-vs-polylsp-legacy diff isolates the SURFACE —
@@ -103,7 +104,7 @@ toolsets:
     cedeFileTools: true
     servers:
       - cmd: poly-lsp-mcp
-        args: ["mcp", "--root", "{{workspace}}", "--legacy-tools"]
+        args: ["mcp", "--no-daemon", "--root", "{{workspace}}", "--legacy-tools"]
 
   # mcpshell (eval, a distinct interface that keeps its file tools) + poly-lsp.
   # Cede anyway: node_edit is the near-match that confuses the model.
@@ -113,4 +114,4 @@ toolsets:
       - cmd: mcpshell
         args: ["mcp"]
       - cmd: poly-lsp-mcp
-        args: ["mcp", "--root", "{{workspace}}"]
+        args: ["mcp", "--no-daemon", "--root", "{{workspace}}"]

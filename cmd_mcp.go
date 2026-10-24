@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -30,6 +32,7 @@ func mcpCmd(l *loader) *cobra.Command {
 		validate       bool
 		noValidate     bool
 		daemonMode     bool
+		noDaemon       bool
 		readCharBudget int
 		hookPath       string
 	)
@@ -58,7 +61,11 @@ func mcpCmd(l *loader) *cobra.Command {
 	// errors, which has no baseline and can false-revert its first edit.
 	f.BoolVar(&validate, "validate", true, "revert-on-new-diagnostics: an edit that introduces a new error is rolled back instead of landing (needs a child LSP; degrades to apply-and-flag without one)")
 	f.BoolVar(&noValidate, "no-validate", false, "turn OFF revert-on-new-diagnostics (see --validate); for when validation itself misfires, e.g. a never-analyzed file with pre-existing errors")
-	f.BoolVar(&daemonMode, "daemon", false, "proxy tool calls to the shared per-user poly-lsp daemon (auto-starting it) instead of building the index in-process; one warm index + child-LSP fleet is shared across every client; a root outside --allow is admitted")
+	// Daemon mode is the default. --daemon stays accepted: client configs
+	// written when it was opt-in pass it, and dun detects the proxy by the
+	// two phrases in its help (and --hook's), so they stay as they are.
+	f.BoolVar(&daemonMode, "daemon", false, "the default (see --no-daemon); accepted for existing configs. Proxy tool calls to the shared per-user poly-lsp daemon (auto-starting it) instead of building the index in-process; one warm index + child-LSP fleet is shared across every client; a root outside --allow is admitted")
+	f.BoolVar(&noDaemon, "no-daemon", false, "build the index and run child LSPs in this process instead of proxying to the shared per-user daemon; daemon mode is the default. $"+noDaemonEnv+"=1 does the same. Implied (logged) by an in-process-only flag given without --daemon: "+inProcessOnlyList()+"; also used when the daemon cannot start")
 	f.IntVar(&readCharBudget, "read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
 	f.StringVar(&hookPath, "hook", os.Getenv("POLY_LSP_HOOK"), "path to a host hook executable consulted before every file read/edit (exit 2 = cancel, stdout = injected note); $POLY_LSP_HOOK fallback; see mcp/hook.go. --daemon: the proxy runs it")
 	lifecycle := lifecycleFlags(f)
@@ -81,10 +88,15 @@ func mcpCmd(l *loader) *cobra.Command {
 			return fmt.Errorf("root: %w", err)
 		}
 
+		useDaemon, err := chooseDaemon(cmd, daemonMode, noDaemon)
+		if err != nil {
+			return err
+		}
+
 		// Daemon proxy mode: keep the stdio MCP surface, forward tool calls
 		// to the shared daemon over its unix socket. The workspace index,
 		// child LSPs, and parse cache live once in the daemon.
-		if daemonMode {
+		if useDaemon {
 			// The client's index choices travel with its /open: they shape
 			// the root when this open builds it. Only flags given on this
 			// command line; the rest are the daemon's own.
@@ -109,30 +121,49 @@ func mcpCmd(l *loader) *cobra.Command {
 					opts.LSPRoots = "auto"
 				}
 			}
-			if legacyTools {
-				log.Print("mcp: --legacy-tools is ignored in --daemon mode (the daemon serves the modern surface)")
+			// Only reached with an explicit --daemon: without it, these
+			// flags chose in-process (chooseDaemon).
+			for _, name := range inProcessOnly(cmd) {
+				log.Printf("mcp: %s is ignored in --daemon mode (the daemon's own setting applies)", name)
 			}
-			log.Printf("mcp: proxying root %s to shared daemon (readOnly=%v validate=%v)", root, readOnly, validate)
-			// Reached behind the initialize reply: starting a daemon can
-			// take seconds, and initialize answers at once.
-			connect := func() (*daemon.Client, error) {
-				client, err := daemon.EnsureRunning(nil)
-				if err != nil {
-					return nil, err
+			// Reach the daemon (starting it if none answers) before serving:
+			// a daemon that cannot start — no writable ~/.poly-lsp, a socket
+			// that will not bind — falls back to in-process here, while that
+			// is still possible. The cost is the start itself on the first
+			// client: a daemon binds its socket before it loads anything.
+			// Reconnects after a lost daemon still run behind the reply.
+			first, err := daemon.EnsureRunning(nil)
+			if err != nil {
+				log.Printf("mcp: the shared daemon is unavailable (%v); serving in-process instead (--no-daemon skips the attempt)", err)
+			} else {
+				log.Printf("mcp: proxying root %s to shared daemon (readOnly=%v validate=%v)", root, readOnly, validate)
+				var connectMu sync.Mutex
+				connect := func() (*daemon.Client, error) {
+					connectMu.Lock()
+					client := first
+					first = nil
+					connectMu.Unlock()
+					if client == nil {
+						c, err := daemon.EnsureRunning(nil)
+						if err != nil {
+							return nil, err
+						}
+						client = c
+					}
+					// Carry this client's policy to the daemon (enforced
+					// per-connection at its boundary).
+					client.SetPolicy(readOnly, validate)
+					return client, nil
 				}
-				// Carry this client's policy to the daemon (enforced
-				// per-connection at its boundary).
-				client.SetPolicy(readOnly, validate)
-				return client, nil
+				// The file-access hook runs here, client-side, with this
+				// process's env: the daemon runs no client's hook.
+				var hook *mcp.FileHook
+				if hookPath != "" {
+					hook = &mcp.FileHook{Path: hookPath}
+					log.Printf("mcp: file-access hook armed (proxy): %s", hookPath)
+				}
+				return daemon.RunProxy(connect, root, opts, hook, os.Stdin, os.Stdout)
 			}
-			// The file-access hook runs here, client-side, with this
-			// process's env: the daemon runs no client's hook.
-			var hook *mcp.FileHook
-			if hookPath != "" {
-				hook = &mcp.FileHook{Path: hookPath}
-				log.Printf("mcp: file-access hook armed (proxy): %s", hookPath)
-			}
-			return daemon.RunProxy(connect, root, opts, hook, os.Stdin, os.Stdout)
 		}
 
 		cfg, reg, err := l.load(true)
@@ -193,6 +224,75 @@ func mcpCmd(l *loader) *cobra.Command {
 		return srv.Serve(os.Stdin, os.Stdout)
 	}
 	return cmd
+}
+
+// noDaemonEnv is --no-daemon's environment fallback, for a client that can
+// only set env (as $POLY_LSP_HOOK, $POLY_LSP_READ_CHAR_BUDGET).
+const noDaemonEnv = "POLY_LSP_NO_DAEMON"
+
+// inProcessOnlyFlags are the mcp flags the daemon does not take from a
+// client: they configure this process's own server (--legacy-tools,
+// --read-char-budget, --config) or its child-LSP fleet, which in daemon
+// mode is the daemon's, set by its own flags. Given without --daemon, any
+// of them means in-process.
+var inProcessOnlyFlags = []string{"legacy-tools", "read-char-budget", "config", "lsp-idle-stop", "lsp-max-rss-mb", "lsp-psi-threshold", "lsp-roots-max"}
+
+func inProcessOnlyList() string {
+	names := make([]string, len(inProcessOnlyFlags))
+	for i, name := range inProcessOnlyFlags {
+		names[i] = "--" + name
+	}
+	return strings.Join(names, ", ")
+}
+
+// inProcessOnly names the in-process-only settings this invocation gives:
+// the flags set on its command line, $POLY_LSP_READ_CHAR_BUDGET, and a
+// config file at the default --config path (the daemon reads the config
+// of the directory it was started in, not this client's).
+func inProcessOnly(cmd *cobra.Command) []string {
+	var given []string
+	for _, name := range inProcessOnlyFlags {
+		if f := cmd.Flag(name); f != nil && f.Changed {
+			given = append(given, "--"+name)
+		}
+	}
+	if !cmd.Flag("read-char-budget").Changed && os.Getenv("POLY_LSP_READ_CHAR_BUDGET") != "" {
+		given = append(given, "$POLY_LSP_READ_CHAR_BUDGET")
+	}
+	if f := cmd.Flag("config"); f != nil && !f.Changed {
+		if _, err := os.Stat(f.Value.String()); err == nil {
+			given = append(given, "config file "+f.Value.String())
+		}
+	}
+	return given
+}
+
+// chooseDaemon decides daemon mode (the default) or in-process. In order:
+// --no-daemon / $POLY_LSP_NO_DAEMON=1 or --daemon=false: in-process; an
+// explicit --daemon: daemon, whatever else is given (the in-process-only
+// settings are then ignored, logged); an in-process-only setting: in-process,
+// logged; else daemon.
+func chooseDaemon(cmd *cobra.Command, daemonMode, noDaemon bool) (bool, error) {
+	explicitDaemon := cmd.Flags().Changed("daemon")
+	if cmd.Flags().Changed("no-daemon") {
+		if explicitDaemon && daemonMode && noDaemon {
+			return false, fmt.Errorf("--daemon and --no-daemon: give one")
+		}
+		if noDaemon {
+			return false, nil
+		}
+	} else if os.Getenv(noDaemonEnv) == "1" && !(explicitDaemon && daemonMode) {
+		log.Printf("mcp: $%s=1: serving in-process", noDaemonEnv)
+		return false, nil
+	}
+	if explicitDaemon {
+		return daemonMode, nil
+	}
+	if given := inProcessOnly(cmd); len(given) > 0 {
+		log.Printf("mcp: %s given: serving in-process (implies --no-daemon; the daemon would not apply it)", strings.Join(given, ", "))
+		return false, nil
+	}
+	return true, nil
 }
 
 // lifecycleFlags registers the child-LSP lifecycle flags shared by `mcp`

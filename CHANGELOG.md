@@ -13,6 +13,7 @@ The project ships from `main` without semver tags today. This section captures t
 
 ### Breaking changes since the early scaffold
 
+- **`mcp` runs in daemon mode by default**: it proxies to the shared per-user daemon (auto-started). `--no-daemon` or `$POLY_LSP_NO_DAEMON=1` restores the in-process server. `--daemon` is still accepted. An in-process-only setting (`--legacy-tools`, `--read-char-budget`, `--config` or a `./poly-lsp-mcp.yaml`, the `--lsp-*` lifecycle flags, `--lsp-roots-max`) without `--daemon` means in-process; a daemon that cannot start falls back to in-process, logged.
 - **Library mode shipped**: `config`, `mcp`, `server`, `multiplex`, `symbols` promoted out of `internal/` to top-level packages. External code can now import them as `github.com/iodesystems/poly-lsp-mcp/{config,mcp,server,multiplex,symbols}`. `bindings`, `git`, and `jsonrpc` stay internal (implementation detail). See `examples/embed/main.go` for the embedding pattern.
 - Module + binary renamed `tslsmcp` → `poly-lsp-mcp` (commit `84c2cb5`). Adopters update:
   - Go import path: `github.com/iodesystems/tslsmcp` → `github.com/iodesystems/poly-lsp-mcp`.

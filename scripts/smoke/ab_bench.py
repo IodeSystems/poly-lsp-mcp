@@ -239,9 +239,9 @@ def run_poly(task, endpoint, model, keep_tmp):
     tmp, ws_dir = make_fixture(task)
     binary = os.path.join(tmp, "poly-lsp-mcp")
     build_binary(REPO_ROOT, binary)
-    print(f"[poly] mcp --root {ws_dir}", file=sys.stderr)
+    print(f"[poly] mcp --no-daemon --root {ws_dir}", file=sys.stderr)
     proc = subprocess.Popen(
-        [binary, "mcp", "--root", ws_dir],
+        [binary, "mcp", "--no-daemon", "--root", ws_dir],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     mcp = MCP(proc)

@@ -298,7 +298,7 @@ def main() -> int:
 
     print(f"[mcp] starting against {ws}", file=sys.stderr)
     proc = subprocess.Popen(
-        [binary, "mcp", "--root", ws, "--config", cfg_path],
+        [binary, "mcp", "--no-daemon", "--root", ws, "--config", cfg_path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,

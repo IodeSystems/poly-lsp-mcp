@@ -94,7 +94,14 @@ import (
 // meant to bind rather than track, the lever is dropping params/return
 // (icebox.md: MEASURED UNUSED) for ~27, which is a product decision about
 // the surface, not a wording exercise.
-const modernTokenBudget = 1300
+// 1300 → 1340: node_query `include`, the one-line schema property (38
+// tokens measured). It is the only on-wire way to search inside a dead end
+// (node_modules, nested worktree, excluded dir, shadowed file) other than
+// naming a path, and the leftOut hint points at it by name, so it cannot be
+// hidden like node_edit's commit/rollback. Fourth raise in a row; the same
+// standing candidate applies (params/return, MEASURED UNUSED). If usage.jsonl
+// shows `include` unused, delete the property and take the 38 back.
+const modernTokenBudget = 1340
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

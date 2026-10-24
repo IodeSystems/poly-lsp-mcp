@@ -174,6 +174,7 @@ type QueryParams struct {
 	Limit    int
 	Offset   int
 	Budget   string
+	Include  []string // gitignore-style patterns opening left-out dirs
 	JSON     bool
 }
 
@@ -194,6 +195,7 @@ func (c *Client) Query(p QueryParams) (string, error) {
 		"limit":    p.Limit,
 		"offset":   p.Offset,
 		"budget":   p.Budget,
+		"include":  p.Include,
 		"json":     p.JSON,
 	}
 	if err := c.postJSON("/query", body, &out); err != nil {

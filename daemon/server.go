@@ -276,12 +276,13 @@ func fileSymbolFrom(s symbols.Symbol) FileSymbol {
 
 type queryIn struct {
 	Body struct {
-		Root     string `json:"root"`
-		Selector string `json:"selector"`
-		Limit    int    `json:"limit"`
-		Offset   int    `json:"offset"`
-		Budget   string `json:"budget,omitempty"`
-		JSON     bool   `json:"json"`
+		Root     string   `json:"root"`
+		Selector string   `json:"selector"`
+		Limit    int      `json:"limit"`
+		Offset   int      `json:"offset"`
+		Budget   string   `json:"budget,omitempty"`
+		Include  []string `json:"include,omitempty"`
+		JSON     bool     `json:"json"`
 	}
 }
 type queryOut struct {
@@ -451,9 +452,9 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 			var buf bytes.Buffer
 			var qerr error
 			if in.Body.JSON {
-				qerr = srv.QueryJSON(in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf)
+				qerr = srv.QueryJSON(in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf, in.Body.Include...)
 			} else {
-				qerr = srv.QueryText(in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf)
+				qerr = srv.QueryText(in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf, in.Body.Include...)
 			}
 			if qerr != nil {
 				// A selector error is the answer to what was asked: a

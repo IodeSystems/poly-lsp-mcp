@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -269,6 +270,9 @@ type engine struct {
 	// dependency. But a selector that names a path inside one is asking for
 	// exactly that, so the walk follows the named path and nothing beside it.
 	named []string
+	// inc is the caller's include patterns: any dead end one matches is
+	// entered and walked fully, not just along a named path. See includeSet.
+	inc *includeSet
 	// nested are the nested repositories the index left out (worktrees,
 	// other clones), by dir → reason: skipped like node_modules.
 	nested map[string]string
@@ -684,8 +688,9 @@ func (e *engine) nodeByAddr(rel, sym string, line int) *treeNode {
 func (s *Server) buildTree() (*engine, error) { return s.buildTreeFor("") }
 
 // buildTreeFor is buildTree for one selector: a path the selector names
-// inside a skipped directory is walked, so it can match.
-func (s *Server) buildTreeFor(selector string) (*engine, error) {
+// inside a skipped directory is walked, so it can match. include opens dead
+// ends wholesale: see includeSet.
+func (s *Server) buildTreeFor(selector string, include ...string) (*engine, error) {
 	root := s.getRoot()
 	if root == "" {
 		return nil, fmt.Errorf("no workspace root configured")
@@ -714,6 +719,7 @@ func (s *Server) buildTreeFor(selector string) (*engine, error) {
 	// non-edge query never pays to compute the workspace-tuned cap.
 	e.excl = s.excludeSet()
 	e.named = selectorPaths(selector)
+	e.inc = newIncludeSet(include)
 	e.nested = map[string]string{}
 	for _, n := range s.nestedRepos() {
 		e.nested[n.Dir] = n.Reason
@@ -724,7 +730,7 @@ func (s *Server) buildTreeFor(selector string) (*engine, error) {
 	for _, p := range selectorPaths(selector) {
 		e.namedFiles[p] = true
 	}
-	e.walkDir(root, project, false)
+	e.walkDir(root, project, false, false)
 	return e, nil
 }
 
@@ -742,43 +748,64 @@ func (e *engine) reachesNamed(rel string) bool {
 }
 
 // walkDir adds abs's children under parent. inSkip: abs is inside a skipped
-// directory the walk entered for a named path, so only children on the way
-// to, or inside, a named path are added.
-func (e *engine) walkDir(abs string, parent *treeNode, inSkip bool) {
+// directory the walk entered for a named or included path, so only children
+// on the way to, or inside, one are added. inFull: abs was opened by an
+// include pattern, so nothing inside is left out.
+func (e *engine) walkDir(abs string, parent *treeNode, inSkip, inFull bool) {
 	des, err := os.ReadDir(abs)
 	if err != nil {
 		return
 	}
 	sort.Slice(des, func(i, j int) bool { return des[i].Name() < des[j].Name() })
 	for _, de := range des {
-		childAbs := filepath.Join(abs, de.Name())
-		childInSkip := inSkip
-		childRel := relPath(childAbs, e.s.getRoot())
-		nestedReason := ""
-		if de.IsDir() {
-			nestedReason = e.nested[childRel]
-		}
-		if skipScanDir(de.Name()) || nestedReason != "" {
-			if de.Name() == ".git" {
-				continue
-			}
-			if !e.reachesNamed(childRel) {
-				if nestedReason != "" {
-					e.pruned[nestedReason]++
-				} else {
-					e.pruned[de.Name()+"/"]++
-				}
-				continue
-			}
-			childInSkip = true
-		} else if inSkip && !e.reachesNamed(childRel) {
+		// Never entered, included or not: it is repository state.
+		if de.Name() == ".git" {
 			continue
+		}
+		childAbs := filepath.Join(abs, de.Name())
+		childInSkip, childFull := inSkip, inFull
+		childRel := relPath(childAbs, e.s.getRoot())
+		isDir := de.IsDir()
+		if !inFull {
+			nestedReason := ""
+			if isDir {
+				nestedReason = e.nested[childRel]
+			}
+			switch {
+			case skipScanDir(de.Name()) || nestedReason != "":
+				switch {
+				case e.inc.matches(childRel, isDir):
+					childFull = true
+				case e.reachesNamed(childRel) || e.inc.onWay(childRel):
+					childInSkip = true
+				default:
+					if nestedReason != "" {
+						e.pruned[nestedReason]++
+					} else {
+						e.pruned[de.Name()+"/"]++
+					}
+					continue
+				}
+			case inSkip:
+				if e.inc.matches(childRel, isDir) {
+					childFull = true
+				} else if !e.reachesNamed(childRel) && !e.inc.onWay(childRel) {
+					continue
+				}
+			}
 		}
 		// The client's excludes hold here too: a directory it dropped from
 		// the index is not a node either.
-		if de.IsDir() && e.excl.DirIgnored(e.s.getRoot(), childAbs) {
-			e.pruned[leftExcluded]++
-			continue
+		if isDir && !childFull && e.excl.DirIgnored(e.s.getRoot(), childAbs) {
+			switch {
+			case e.inc.matches(childRel, true):
+				childFull = true
+			case e.inc.onWay(childRel):
+				childInSkip = true
+			default:
+				e.pruned[leftExcluded]++
+				continue
+			}
 		}
 		// A binary file (ELF, image, compiled test binary) is never a
 		// useful node — no symbols, no readable source, and node_read of
@@ -786,25 +813,25 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip bool) {
 		// ordinal, becomes a file node, or gets its 13 MB read by
 		// countFileLines. Same null-byte probe symbols.Search uses
 		// (search.go). Directories are never probed.
-		if !de.IsDir() && looksBinaryFile(childAbs) {
+		if !isDir && looksBinaryFile(childAbs) {
 			continue
 		}
-		if !de.IsDir() {
-			if _, ok := e.shadow.Shadowed(childAbs); ok && !e.namedFiles[relPath(childAbs, e.s.getRoot())] {
+		if !isDir && !childFull {
+			if _, ok := e.shadow.Shadowed(childAbs); ok && !e.namedFiles[childRel] && !e.inc.matches(childRel, false) {
 				e.pruned[leftShadowed]++
 				continue
 			}
 		}
-		rel := relPath(childAbs, e.s.getRoot())
+		rel := childRel
 		e.ordSeq++
-		if de.IsDir() {
+		if isDir {
 			d := &treeNode{
 				class: "dir", leaf: de.Name(), full: rel, file: rel,
 				parent: parent, depth: parent.depth + 1, abs: childAbs,
 				fileOrd: e.ordSeq,
 			}
 			parent.children = append(parent.children, d)
-			e.walkDir(childAbs, d, childInSkip)
+			e.walkDir(childAbs, d, childInSkip, childFull)
 			continue
 		}
 		f := &treeNode{
@@ -5061,6 +5088,9 @@ func (e *engine) noteDeadEnd(rel string) {
 
 // leftOutReason names why a root-relative path is not in the tree, or "".
 func (e *engine) leftOutReason(rel string) string {
+	if e.inc.covers(rel) {
+		return "" // opened by include: the tree holds it
+	}
 	for d, reason := range e.nested {
 		if rel == d || strings.HasPrefix(rel, d+"/") {
 			return reason
@@ -5081,6 +5111,28 @@ func (e *engine) leftOutReason(rel string) string {
 	return ""
 }
 
+// includeExample is a JSON array of include patterns for the hint: the
+// skipped dirs this walk pruned, which are named by their keys. A nested
+// repo or excluded dir has no such key, so the example then stands for the
+// commonest case.
+func (e *engine) includeExample() string {
+	var keys []string
+	for k := range e.pruned {
+		if strings.HasSuffix(k, "/") {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		keys = []string{"node_modules/"}
+	}
+	if len(keys) > 3 {
+		keys = keys[:3]
+	}
+	b, _ := json.Marshal(keys)
+	return string(b)
+}
+
 // leftOutRollup is the query's dead ends for the result: what the walk did
 // not enter and edges that ended in left-out code, by reason. nil when none.
 func (e *engine) leftOutRollup() map[string]any {
@@ -5088,7 +5140,8 @@ func (e *engine) leftOutRollup() map[string]any {
 		return nil
 	}
 	out := map[string]any{
-		"hint": "not searched; a path named in the selector is searched even inside these",
+		"hint": "not searched; name a path in the selector, or pass include:" + e.includeExample() +
+			" (gitignore-style) to search inside",
 	}
 	if len(e.pruned) > 0 {
 		out["pruned"] = e.pruned // dirs; files for shadowed

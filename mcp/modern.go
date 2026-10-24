@@ -82,7 +82,8 @@ var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."},` +
-	`"budget":{"type":["integer","string"],"description":"limit Nms (bare=ms) or Nops; def 10000ms"}},` +
+	`"budget":{"type":["integer","string"],"description":"limit Nms (bare=ms) or Nops; def 10000ms"},` +
+	`"include":{"type":"array","items":{"type":"string"},"description":"gitignore-style patterns to search inside left-out dirs, e.g. [\"node_modules\"]"}},` +
 	`"required":["selector"]}`)
 
 const modernNodeReadDescription = `Read a node whole. node = an address from node_query's matches[].node ("<file>#<sym>" or "<file>"), or a selector matching exactly one node (2+ errors and lists candidates).
@@ -268,6 +269,7 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		Limit    *int            `json:"limit"`
 		Offset   *int            `json:"offset"`
 		Budget   json.RawMessage `json:"budget"` // number (=ms) or "Nms"/"Nops"
+		Include  []string        `json:"include"`
 	}
 	if len(args) > 0 && string(args) != "null" {
 		if err := json.Unmarshal(args, &p); err != nil {
@@ -307,7 +309,7 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 	}
 
 	queryStart := time.Now()
-	e, err := s.buildTreeFor(sel)
+	e, err := s.buildTreeFor(sel, p.Include...)
 	if err != nil {
 		return nil, true, err
 	}
@@ -325,7 +327,7 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		need = offset + limit
 	}
 	rows, capped := e.evaluateCapped(list, need)
-	s.recordUsage(sel, rows, time.Since(queryStart))
+	s.recordUsage(sel, p.Include, rows, time.Since(queryStart))
 
 	// :explain returns a cost TRACE, not matches — a deliberate
 	// result-shape fork. The query still RAN (that is the measured

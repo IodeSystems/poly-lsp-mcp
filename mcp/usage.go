@@ -34,9 +34,12 @@ type UsageRecord struct {
 	Ignored      int `json:"ignored"`
 	IgnoredNamed int `json:"ignoredNamed"`
 	// Skipped: matches inside a skipped directory (node_modules, vendor…),
-	// reachable only because the selector named them.
+	// reachable only because the selector named them or include opened them.
 	Skipped int   `json:"skipped"`
 	Ms      int64 `json:"ms"`
+	// Include: the patterns the caller opened dead ends with, so the log shows
+	// how often they are wanted.
+	Include []string `json:"include,omitempty"`
 }
 
 // SetUsageLog appends a UsageRecord to path for every node_query. "" = off.
@@ -46,7 +49,7 @@ var usageMu sync.Mutex
 
 // recordUsage classifies the matches and appends one line. Errors are
 // dropped: the log is for measurement, never for correctness.
-func (s *Server) recordUsage(selector string, rows []*treeNode, took time.Duration) {
+func (s *Server) recordUsage(selector string, include []string, rows []*treeNode, took time.Duration) {
 	if s.usageLog == "" {
 		return
 	}
@@ -57,6 +60,7 @@ func (s *Server) recordUsage(selector string, rows []*treeNode, took time.Durati
 		At:       time.Now().Format(time.RFC3339),
 		Root:     root,
 		Selector: selector,
+		Include:  include,
 		Matches:  len(rows),
 		Ms:       took.Milliseconds(),
 	}

@@ -248,10 +248,15 @@ the client (dun) retries with its own decisions and reports them.
   worktree of this repo / another repo left out with the reason, submodules
   included; `leftOut` in the report; query tree skips nested repos unless
   named; unreadable paths skipped and named. Demo repo (3 worktrees + a
-  clone): 311 files, 0.25 s, no retry. ◻ next slices: node_query
-  `include` opt-in for broad traversal inside node_modules; not-a-project
+  clone): 311 files, 0.25 s, no retry. ◻ next slices: not-a-project
   root detection (home dir, dir of clones); symlink/LFS/binary/monorepo
   edge cases.
+- ✅ node_query `include` (Carl: "it's all dead ends"): gitignore-style
+  patterns open any dead end (skipped dir, nested repo, excluded dir,
+  shadowed file) for broad traversal; `query --include` (repeatable), usage
+  log `include` field, leftOut hint names the way in. Matcher: mcp/include.go.
+  Assumption: a pattern never reaches through a dead end to something
+  beside it (`*.js` does not open node_modules); the repo-state dir is never entered.
 - ✅ dead ends rolled up: node_query result `leftOut` {pruned, deadEnds,
   hint} by reason, not per item (pruned: dirs the walk skipped, files for
   shadowed; deadEnds: LSP edges resolved into left-out code, from refineFar

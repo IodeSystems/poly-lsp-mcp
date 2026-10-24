@@ -48,7 +48,7 @@ type SelectorError struct{ Err error }
 func (e *SelectorError) Error() string { return e.Err.Error() }
 func (e *SelectorError) Unwrap() error { return e.Err }
 
-func (s *Server) QueryText(selector string, limit, offset int, budget string, w io.Writer) error {
+func (s *Server) QueryText(selector string, limit, offset int, budget string, w io.Writer, include ...string) error {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		return &SelectorError{errors.New("selector is required (e.g. \":root > *\" for the top-level tour)")}
@@ -76,7 +76,7 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 			return err
 		}
 	}
-	e, err := s.buildTreeFor(selector)
+	e, err := s.buildTreeFor(selector, include...)
 	if err != nil {
 		return err
 	}
@@ -174,7 +174,7 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 // plus the file it lives in. The document carries total, offset and the
 // stop-early flags as fields; no reading, hint or caveat text is written
 // outside it, so stdout always parses.
-func (s *Server) QueryJSON(selector string, limit, offset int, budget string, w io.Writer) error {
+func (s *Server) QueryJSON(selector string, limit, offset int, budget string, w io.Writer, include ...string) error {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		return &SelectorError{errors.New("selector is required (e.g. \":root > *\" for the top-level tour)")}
@@ -197,7 +197,7 @@ func (s *Server) QueryJSON(selector string, limit, offset int, budget string, w 
 			return err
 		}
 	}
-	e, err := s.buildTreeFor(selector)
+	e, err := s.buildTreeFor(selector, include...)
 	if err != nil {
 		return err
 	}

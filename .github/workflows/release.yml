@@ -18,6 +18,25 @@ permissions:
   contents: read
 
 jobs:
+  # The pure-Go tree-sitter runtime is what `go install` builds on a machine
+  # with no C compiler; the release builds are cgo. This keeps it green.
+  pure-go:
+    name: vet and test, CGO_ENABLED=0
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go vet ./...
+          go test -count=1 -timeout 900s ./...
+
   build:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}

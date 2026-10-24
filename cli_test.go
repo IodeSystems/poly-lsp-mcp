@@ -231,7 +231,9 @@ func TestDoctorFlagsMissingLSP(t *testing.T) {
 		t.Errorf("runtime = %q, want %q", rep.Runtime, ts.Runtime())
 	}
 	// The slow parser is said out loud, with the way to the fast one.
-	advised := slices.Contains(rep.Advisories, ts.FastPathHint)
+	advised := slices.ContainsFunc(rep.Advisories, func(a string) bool {
+		return strings.HasPrefix(a, ts.FastPathHint+": ") && !strings.Contains(a, "@latest")
+	})
 	if advised != (ts.Runtime() == "pure-go") {
 		t.Errorf("fast-path advisory present = %v on runtime %s: %v", advised, ts.Runtime(), rep.Advisories)
 	}

@@ -21,7 +21,8 @@ import (
 //
 //	release     built with -tags release → latest GitHub release tag; update by download
 //	go install  no tag, no vcs.* settings (a proxy module zip has no VCS) → the
-//	            module proxy's @latest; update by `go install …@latest`
+//	            module proxy's @latest; update by `go install …@<that version>`,
+//	            pinned: the proxy's cached @latest can lag what it just answered
 //	source      vcs.revision present → compared against the checkout's upstream,
 //	            but only when LSP_REBUILD_PATH names the checkout, because the
 //	            binary deliberately carries no path (see selfupdate.go)
@@ -40,8 +41,30 @@ const (
 	releaseLatestURL = "https://api.github.com/repos/IodeSystems/poly-lsp-mcp/releases/latest"
 	proxyLatestURL   = "https://proxy.golang.org/github.com/iodesystems/poly-lsp-mcp/@latest"
 	releaseAssetURL  = "https://github.com/IodeSystems/poly-lsp-mcp/releases/latest/download/poly-lsp-mcp_%s_%s.tar.gz"
-	goInstallCmd     = "go install github.com/iodesystems/poly-lsp-mcp@latest"
+	modulePath       = "github.com/iodesystems/poly-lsp-mcp"
 )
+
+// goInstallCmd installs one version of the module, never a bare @latest:
+// the proxy's cached @latest is whatever it last resolved, which with no
+// tag is an old commit.
+func goInstallCmd(version string) string { return "go install " + modulePath + "@" + version }
+
+// rebuildCmd is the command that builds this binary's own version again,
+// for advice that needs a rebuild (a C compiler installed since). By origin,
+// as the update check's How: the checkout's make install, else go install
+// of the version this binary is, else a checkout.
+func rebuildCmd(bo buildOrigin, rebuildPath string) string {
+	switch {
+	case bo.Origin == updateOriginSource && rebuildPath != "":
+		return fmt.Sprintf("make -C %s install", rebuildPath)
+	case bo.Origin == updateOriginSource:
+		return "make install in the checkout it was built from (" + bo.Current + ")"
+	}
+	if _, ok := parseSemver(bo.Current); ok {
+		return goInstallCmd(bo.Current)
+	}
+	return "make install in a checkout of " + modulePath
+}
 
 // updateInfo is the `update` object of `doctor --json`. The field names are a
 // contract with clients (dun); renaming one breaks them.
@@ -277,7 +300,7 @@ func (c *updateChecker) lookupProxy(ctx context.Context, u *updateInfo) error {
 	if r.Version == "" {
 		return fmt.Errorf("proxy answer has no Version")
 	}
-	u.compare(r.Version, goInstallCmd)
+	u.compare(r.Version, goInstallCmd(r.Version))
 	return nil
 }
 

@@ -23,6 +23,7 @@ package ts
 
 // FastPathHint is the advice shown wherever the pure-Go runtime's cost is
 // visible to a user. One string so doctor and the index budget error agree.
+// It ends at "rebuild": the command depends on how this binary was built,
+// which doctor works out and appends.
 const FastPathHint = "this binary parses with pure-Go tree-sitter (built without cgo), ~10x slower to parse and ~6x slower to index than a cgo build; " +
-	"for the fast path install a C compiler (Linux: gcc / build-essential; macOS: xcode-select --install) and rebuild: " +
-	"go install github.com/iodesystems/poly-lsp-mcp@latest (or make install)"
+	"for the fast path install a C compiler (Linux: gcc / build-essential; macOS: xcode-select --install) and rebuild"

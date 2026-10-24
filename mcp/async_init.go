@@ -195,7 +195,7 @@ func (s *Server) indexRemedy(err error) string {
 		// A blown budget is where the pure-Go parser's cost shows, so the
 		// fast build is part of the way out.
 		if ts.Runtime() == "pure-go" {
-			msg += " Or parse faster: " + ts.FastPathHint + "."
+			msg += " Or parse faster: " + ts.FastPathHint + " (`poly-lsp-mcp doctor` names the command)."
 		}
 		if !s.lspRootsAuto {
 			if hints, _ := s.rootsHints(true); len(hints) > 0 {

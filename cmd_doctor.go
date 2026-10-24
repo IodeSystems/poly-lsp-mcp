@@ -131,7 +131,8 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 			// `go install` with no C compiler on the machine builds the pure-Go
 			// parser without a word; this is the one place that says so.
 			if rep.Runtime == "pure-go" {
-				rep.Advisories = append(rep.Advisories, ts.FastPathHint)
+				rebuild, _ := rebuildDir()
+				rep.Advisories = append(rep.Advisories, ts.FastPathHint+": "+rebuildCmd(classifyBuild(readBuildInfo()), rebuild))
 			}
 			copies := pathCopies("poly-lsp-mcp")
 			if len(copies) == 0 {

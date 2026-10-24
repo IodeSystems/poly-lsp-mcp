@@ -374,6 +374,10 @@ release; no vcs.* → proxy `@latest`; vcs.revision → checkout vs upstream),
 24 h cache, 2 s timeouts, silent offline. Source origin limitation, by design:
 no srcDir stamp, so it compares only when `LSP_REBUILD_PATH` names the
 checkout; otherwise it says it can't. A modified checkout is never nagged.
+`how` and the pure-Go note's rebuild command pin a version (`go install
+…@<version>`, `rebuildCmd`), never a bare `@latest`: the proxy's cached
+@latest is 9f31d7e (old, needs a C compiler) while no tag exists. README's
+"Without a checkout" line still says `@latest` (open).
 **risks**: the release path is untested against a real tag/API until Carl
 tags; `-tags release` in release.yml was not actionlint-checked here.
 

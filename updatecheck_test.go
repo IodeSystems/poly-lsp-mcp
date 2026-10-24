@@ -134,10 +134,10 @@ func TestUpdateProxyLookup(t *testing.T) {
 	c.proxyURL = srv.URL
 
 	u := c.check(buildOrigin{Origin: "go install", Current: "v0.9.2"})
-	if u == nil || !u.Available || u.Latest != "v0.9.4" || u.How != "go install github.com/iodesystems/poly-lsp-mcp@latest" {
+	if u == nil || !u.Available || u.Latest != "v0.9.4" || u.How != "go install github.com/iodesystems/poly-lsp-mcp@v0.9.4" {
 		t.Fatalf("got %+v", u)
 	}
-	if want := "go install v0.9.2 → v0.9.4 available: go install github.com/iodesystems/poly-lsp-mcp@latest"; u.text() != want {
+	if want := "go install v0.9.2 → v0.9.4 available: go install github.com/iodesystems/poly-lsp-mcp@v0.9.4"; u.text() != want {
 		t.Errorf("text = %q, want %q", u.text(), want)
 	}
 
@@ -307,5 +307,34 @@ func TestUpdateJSONFieldNames(t *testing.T) {
 	b, _ = json.Marshal(updateInfo{Origin: "source", Current: "abc", CheckedAt: "t"})
 	if want := `{"origin":"source","current":"abc","available":false,"checkedAt":"t"}`; string(b) != want {
 		t.Errorf("got %s, want %s", b, want)
+	}
+}
+
+// The rebuild command in doctor's pure-Go note builds this binary's own
+// version again, by origin, and is never a bare @latest: the proxy's cached
+// @latest is an old commit while no tag exists.
+func TestRebuildCmd(t *testing.T) {
+	cases := []struct {
+		bo          buildOrigin
+		rebuildPath string
+		want        string
+	}{
+		{buildOrigin{Origin: updateOriginGoInstall, Current: "v0.0.0-20261024120000-ad7dd8012345"}, "",
+			"go install github.com/iodesystems/poly-lsp-mcp@v0.0.0-20261024120000-ad7dd8012345"},
+		{buildOrigin{Origin: updateOriginRelease, Current: "v0.9.2"}, "", "go install github.com/iodesystems/poly-lsp-mcp@v0.9.2"},
+		{buildOrigin{Origin: updateOriginSource, Current: "ad7dd8012345"}, "/src/poly", "make -C /src/poly install"},
+		{buildOrigin{Origin: updateOriginSource, Current: "ad7dd8012345"}, "", "make install in the checkout it was built from (ad7dd8012345)"},
+		{buildOrigin{}, "", "make install in a checkout of github.com/iodesystems/poly-lsp-mcp"},
+		{buildOrigin{Origin: updateOriginRelease, Current: "unknown", Note: "version is not a release tag: can't compare"}, "",
+			"make install in a checkout of github.com/iodesystems/poly-lsp-mcp"},
+	}
+	for _, c := range cases {
+		got := rebuildCmd(c.bo, c.rebuildPath)
+		if got != c.want {
+			t.Errorf("rebuildCmd(%+v, %q) = %q, want %q", c.bo, c.rebuildPath, got, c.want)
+		}
+		if strings.Contains(got, "@latest") {
+			t.Errorf("rebuildCmd(%+v) = %q: a bare @latest", c.bo, got)
+		}
 	}
 }

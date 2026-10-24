@@ -43,7 +43,7 @@ jobs:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - { goos: linux, goarch: amd64, runner: ubuntu-24.04 }

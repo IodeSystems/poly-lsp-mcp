@@ -323,14 +323,13 @@ func waitRootGone(r *Registry, root string, d time.Duration) bool {
 	return false
 }
 
-// A root stays warm while ANY session holds it and is evicted (its server —
-// index + child LSPs + watcher — shut down) idleTimeout after the LAST holder
-// leaves. This is step 5's resource win: an abandoned root stops pinning a
-// gopls fleet.
-func TestRegistryRefCountEviction(t *testing.T) {
+// A root stays while ANY session holds it; a client-less root is in the
+// LRU, and with --idle-roots-mb 0 it is evicted (its server — index +
+// child LSPs + watcher — shut down) as soon as its LAST holder leaves.
+func TestRegistryEvictsOnlyClientlessRoots(t *testing.T) {
 	cfg, reg := testRegistryDeps(t)
 	r := NewRegistry(cfg, reg, false, false)
-	r.idleTimeout = 80 * time.Millisecond
+	r.SetRootLifetime(time.Hour, 0)
 	defer r.Close()
 
 	root := t.TempDir()
@@ -349,44 +348,128 @@ func TestRegistryRefCountEviction(t *testing.T) {
 		t.Fatal("root not open after acquire")
 	}
 
-	// One holder leaves — s2 still holds it, so no eviction even past idle.
+	// One holder leaves — s2 still holds it: never evicted, whatever the cap.
 	r.Release("s1")
-	time.Sleep(3 * r.idleTimeout)
+	time.Sleep(50 * time.Millisecond)
 	if !hasRoot(r, resolved) {
 		t.Fatal("evicted while still held by s2")
 	}
 
-	// Last holder leaves — evicted after idle.
+	// Last holder leaves — over a cap of 0, so evicted.
 	r.Release("s2")
 	if !waitRootGone(r, resolved, 3*time.Second) {
 		t.Fatal("root not evicted after last holder left")
 	}
 }
 
-// Re-acquiring an unheld root before its idle timer fires cancels the pending
-// eviction — a client reconnecting keeps its warm index.
-func TestRegistryReacquireCancelsEviction(t *testing.T) {
+// A client-less root's child LSPs stop --root-lsp-grace after its last
+// client left; the index stays. A client coming back before the grace
+// ends cancels the stop.
+func TestRegistryStopsLSPsAfterTheGrace(t *testing.T) {
 	cfg, reg := testRegistryDeps(t)
 	r := NewRegistry(cfg, reg, false, false)
-	r.idleTimeout = 100 * time.Millisecond
+	const grace = 100 * time.Millisecond
+	r.SetRootLifetime(grace, -1)
 	defer r.Close()
-
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hi\n"), 0o644); err != nil {
-		t.Fatal(err)
+	_, resolved := goWorkspace(t)
+	stopped := func() bool {
+		st, _ := r.RootStats()
+		return len(st) == 1 && st[0].LSPsStopped
 	}
-	resolved, _ := resolvePath(root)
 
 	if _, err := r.Acquire("s1", resolved); err != nil {
 		t.Fatalf("acquire s1: %v", err)
 	}
-	r.Release("s1") // schedules eviction
+	r.Release("s1")
 	if _, err := r.Acquire("s2", resolved); err != nil {
 		t.Fatalf("re-acquire s2: %v", err)
 	}
-	time.Sleep(3 * r.idleTimeout) // past the original deadline
+	time.Sleep(3 * grace) // past the first release's grace
+	if stopped() {
+		t.Fatal("a client coming back did not cancel the child-LSP stop")
+	}
+
+	r.Release("s2")
+	deadline := time.Now().Add(5 * time.Second)
+	for !stopped() {
+		if time.Now().After(deadline) {
+			t.Fatal("child LSPs not stopped after the grace")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if !hasRoot(r, resolved) {
-		t.Fatal("re-acquire did not cancel the pending eviction")
+		t.Fatal("the index went with the child LSPs")
+	}
+	// A client coming back clears it; its children start on demand.
+	if _, err := r.Acquire("s3", resolved); err != nil {
+		t.Fatal(err)
+	}
+	if stopped() {
+		t.Error("still reported stopped with a client")
+	}
+}
+
+// The client-less roots are an LRU bounded by their resident estimates:
+// past --idle-roots-mb the least recently used goes; a root with a client
+// stays whatever its size.
+func TestRegistryIdleRootsLRU(t *testing.T) {
+	cfg, reg := testRegistryDeps(t)
+	r := NewRegistry(cfg, reg, false, false)
+	defer r.Close()
+	mk := func(n int) string {
+		root := t.TempDir()
+		src := "package main\n\nfunc F() {}\n" + strings.Repeat("// pad\n", n)
+		if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		resolved, _ := resolvePath(root)
+		return resolved
+	}
+	a, b, big := mk(100), mk(100), mk(1000)
+	size := func(root string) int64 {
+		st, _ := r.RootStats()
+		for _, s := range st {
+			if s.Root == root {
+				return s.Resident
+			}
+		}
+		t.Fatalf("%s not hosted", root)
+		return 0
+	}
+	for _, root := range []string{a, b, big} {
+		if _, err := r.Acquire("s-"+root, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if size(a) == 0 || size(big) <= size(a) {
+		t.Fatalf("estimates: a %d, big %d", size(a), size(big))
+	}
+	// Room for one small client-less root, not two, and not the big one.
+	r.SetRootLifetime(time.Hour, size(a)+size(b)/2)
+
+	r.Release("s-" + big) // over the cap alone: evicted
+	if !waitRootGone(r, big, 3*time.Second) {
+		t.Fatal("a client-less root over the cap stayed")
+	}
+	r.Release("s-" + a)
+	time.Sleep(10 * time.Millisecond)
+	if _, err := r.Get(b); err != nil { // b used last
+		t.Fatal(err)
+	}
+	r.Release("s-" + b) // a and b over the cap: a, used least recently, goes
+	if !waitRootGone(r, a, 3*time.Second) || !hasRoot(r, b) {
+		t.Fatalf("LRU kept the wrong root: %v", r.Roots())
+	}
+
+	// A held root is never evicted, even over the cap.
+	r.SetRootLifetime(time.Hour, 1)
+	if _, err := r.Acquire("s4", big); err != nil {
+		t.Fatal(err)
+	}
+	r.Release("s-none")
+	time.Sleep(50 * time.Millisecond)
+	if !hasRoot(r, big) {
+		t.Fatal("a root with a client was evicted")
 	}
 }
 

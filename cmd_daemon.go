@@ -56,6 +56,10 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 	// For every hosted root; a client's /open adds its own excludes and
 	// includes and may set the rest (mcp --daemon passes those it is given).
 	idx := indexFlags(f)
+	// A root's lifetime follows its clients; see daemon/registry.go.
+	lspGrace := f.Duration("root-lsp-grace", daemon.DefaultRootLSPGrace, "stop a root's child LSPs this long after its last client disconnected (its index stays; the children start again on demand)")
+	idleRootsMB := f.Int64("idle-roots-mb", daemon.DefaultIdleRootsMB, "keep the indexes of roots with no client up to this many MiB (estimated), least recently used evicted first; a root with a client is never evicted. 0 = keep none, -1 = no limit")
+	idleExit := f.Duration("idle-exit", time.Hour, "exit after this long with no client; with no client and no root kept, exit within seconds. The next `mcp --daemon` starts it again. 0 = never")
 	warmRecent := f.Duration("warm-recent", 30*time.Minute, "an upgrade's new daemon warms the roots requested within this long before it takes over; older roots come up on their next request")
 	// Set by a daemon starting its replacement (blue/green; daemon/takeover.go).
 	takeoverFrom := f.Int("takeover-from", 0, "pid of the daemon this one replaces")
@@ -131,8 +135,13 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		dreg.SetUsageLog(daemon.UsagePath())
 		dreg.SetIndexDefaults(daemon.IndexDefaults{Excludes: idx.excludes, Includes: idx.includes,
 			Budget: idx.budget, Anyway: idx.anyway, SymlinkDepth: idx.symlinkDepth})
+		idleCap := *idleRootsMB << 20
+		if *idleRootsMB < 0 {
+			idleCap = -1
+		}
+		dreg.SetRootLifetime(*lspGrace, idleCap)
 		return daemon.Serve(daemon.Config{Socket: socket, Allow: al, Reg: dreg, Args: args,
-			TakeoverFrom: *takeoverFrom, Warm: warm, WarmRecent: *warmRecent})
+			TakeoverFrom: *takeoverFrom, Warm: warm, WarmRecent: *warmRecent, IdleExit: *idleExit})
 	}
 	return cmd
 }

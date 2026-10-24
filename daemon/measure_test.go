@@ -150,7 +150,7 @@ func TestMeasureWorktreeSharing(t *testing.T) {
 
 	r := NewRegistry(cfg, reg, false, false)
 	r.cachePath = "" // cold: no ~/.poly-lsp/cache.gob
-	r.idleTimeout = 0
+	r.SetRootLifetime(time.Hour, -1)
 	defer r.Close()
 
 	heap := func() uint64 {

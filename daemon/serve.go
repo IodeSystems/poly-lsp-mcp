@@ -32,6 +32,11 @@ type Config struct {
 	// WarmRecent: the roots requested within this long are the ones a
 	// takeover warms. 0 = the default.
 	WarmRecent time.Duration
+	// IdleExit: with no client (no session stream, no request in flight)
+	// for this long, the daemon exits; with no client and no hosted root
+	// it exits after emptyExitWait. The next `mcp --daemon` starts one
+	// again. 0 = never exit when idle.
+	IdleExit time.Duration
 
 	// stop ends the daemon as SIGTERM does (tests, which serve in-process).
 	stop chan struct{}
@@ -75,7 +80,27 @@ type host struct {
 	draining  chan struct{}
 	inflight  atomic.Int64
 	stopWatch context.CancelFunc
+
+	// clients counts the open session streams (/session/events,
+	// /session/watch): one per connected proxy. lastActive is when a
+	// request or stream last ended (unix nanos). For idleExit.
+	clients    atomic.Int64
+	lastActive atomic.Int64
+	idleExit   time.Duration
 }
+
+// Idle exit timings, variables so tests can shorten them.
+var (
+	// emptyExitWait: a daemon with no client and no hosted root exits
+	// after this long, not at once — a proxy that just started it dials
+	// /health, then opens its session stream.
+	emptyExitWait = 10 * time.Second
+	// idleCheck is how often the daemon looks for idleness.
+	idleCheck = time.Second
+	// lockWait bounds how long a starting daemon waits for the lock: the
+	// daemon holding it may be exiting (idle), still saving its cache.
+	lockWait = 5 * time.Second
+)
 
 // Serve runs the daemon: it listens on the unix socket (peer-cred gated),
 // serves the gat/huma handler, records the state file, and blocks until
@@ -86,6 +111,7 @@ func Serve(cfg Config) error {
 		allow: cfg.Allow, reg: cfg.Reg, args: cfg.Args,
 		takeoverFrom: cfg.TakeoverFrom,
 		warmRecent:   cfg.WarmRecent,
+		idleExit:     cfg.IdleExit,
 		draining:     make(chan struct{}),
 		tookOver:     make(chan struct{}),
 	}
@@ -108,8 +134,9 @@ func Serve(cfg Config) error {
 	} else {
 		// The lock first: of two daemons started at once, the loser stops
 		// here, before it touches the socket or daemon.json, and its
-		// starter's poll finds the winner.
-		lock, err := TryLock()
+		// starter's poll finds the winner. It waits a little for a holder
+		// that is exiting (idle), so a client arriving then gets a daemon.
+		lock, err := WaitLock(lockWait)
 		if err != nil {
 			if errors.Is(err, ErrLocked) {
 				if st, ok := ReadState(); ok {
@@ -153,6 +180,10 @@ func Serve(cfg Config) error {
 	h.stopWatch = stopWatch
 	defer stopWatch()
 
+	h.touch()
+	if h.idleExit > 0 {
+		go h.exitWhenIdle(ctx)
+	}
 	if h.takeoverFrom != 0 {
 		log.Printf("daemon: takeover of pid %d: warming %d root(s) on %s (pid %d, build %s)", h.takeoverFrom, len(cfg.Warm), socket, os.Getpid(), BuildID())
 		go h.warmRoots(cfg.Warm)
@@ -256,12 +287,16 @@ func (h *host) releaseLock() {
 	h.lock = nil
 }
 
-// track counts in-flight requests, for the drain after a hand-over. The
-// long-lived session streams are not requests in flight: they end when
-// draining closes.
+// track counts in-flight requests, for the drain after a hand-over, and
+// the open session streams (clients), for the idle exit. The long-lived
+// session streams are not requests in flight: they end when draining
+// closes.
 func (h *host) track(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer h.touch()
 		if strings.HasPrefix(r.URL.Path, "/session/") {
+			h.clients.Add(1)
+			defer h.clients.Add(-1)
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -269,6 +304,54 @@ func (h *host) track(next http.Handler) http.Handler {
 		defer h.inflight.Add(-1)
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (h *host) touch() { h.lastActive.Store(time.Now().UnixNano()) }
+
+// exitWhenIdle ends the daemon when nobody uses it: no client (session
+// stream) and no request in flight for idleExit, or for emptyExitWait
+// when it hosts no root either — the client-less roots it keeps (see
+// Registry.trimLocked) are what is worth waiting idleExit for. Only the
+// daemon serving the main socket exits so; a takeover daemon waits for
+// its takeover (awaitTakeover). The next proxy starts a daemon again.
+func (h *host) exitWhenIdle(ctx context.Context) {
+	t := time.NewTicker(idleCheck)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		h.mu.Lock()
+		main := h.main && !h.handedOver
+		h.mu.Unlock()
+		if !main || h.clients.Load() > 0 || h.inflight.Load() > 0 {
+			continue
+		}
+		idle := time.Since(time.Unix(0, h.lastActive.Load()))
+		roots := h.reg.Len()
+		if idle < h.idleExit && (roots > 0 || idle < emptyExitWait) {
+			continue
+		}
+		log.Printf("daemon: no client for %s, %d root(s) kept; exiting (--idle-exit %s)", idle.Truncate(time.Millisecond), roots, h.idleExit)
+		h.exitIdle()
+		return
+	}
+}
+
+// exitIdle stops the daemon as shutdown does, in another order: the
+// listener first, so a client arriving meanwhile starts a new daemon (it
+// waits for this one's lock, lockWait) instead of reaching one that is
+// tearing its roots down.
+func (h *host) exitIdle() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = h.srv.Shutdown(sctx)
+	h.reg.Close()
+	h.reg.SaveCache()
 }
 
 // listenUnix creates the socket with tight permissions: dir 0700, socket

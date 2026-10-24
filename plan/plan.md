@@ -241,7 +241,7 @@ from before this work gets no handshake (log says `daemon --restart`).
 dies mid-warm (green exits today); `make test` covers the e2e only without
 -short.
 
-◐ **Daemon usable for dun** (dun #52 asked, Carl decided root lifetime,
+✅ **Daemon usable for dun** (dun #52 asked, Carl decided root lifetime,
 2026-10-24). One commit per slice:
 1. ✅ `feat(daemon): file-access hook in the proxy`. `mcp --daemon` runs
    `--hook`/`$POLY_LSP_HOOK` itself, client-side with the client's env,
@@ -260,11 +260,32 @@ dies mid-warm (green exits today); `make test` covers the e2e only without
    once its event stream is subscribed (≤5 s), so the opener gets it too.
    A takeover's `--warm` carries the options (JSON when non-default).
    Assumption: `--lsp-roots` counts as an option (it is fixed at build).
-3. ◻ root lifetime follows its clients.
-**risks**: two clients on one root with different flags rebuild it on
+3. ✅ `feat(daemon): root lifetime follows its clients` (Carl's call).
+   Last client of a root gone → its child LSPs stop after
+   `daemon --root-lsp-grace` (1m; `Manager.StopAll`, reason `no-client`,
+   wake on demand); index stays in an LRU of client-less roots capped by
+   `--idle-roots-mb` (1024 MiB; 0 none, -1 unbounded), evicted least
+   recently used first; a held root never. Failed client-less roots go at
+   once. Estimate = CostReport.Bytes × 8 (`residentFactor`; measured live
+   heap 5.8× cold / 3.6× index-only, `TestMeasureRootResident -tags
+   measure`; ~9× after a resolved query). Replaces the old 5-min whole-root
+   eviction. Daemon exits after `--idle-exit` (1h; 0 never) with no
+   session stream and no request in flight, or after 10 s with none and an
+   empty registry; idle exit closes the listener first, then roots + cache
+   save. A starting daemon waits ≤5 s for the lock (one exiting). /health
+   `rootStats` + `idleRootsCap`; doctor prints them. Verified live (sandbox
+   HOME): grace stop, idle exit, auto-start by the next proxy.
+**risks**: the resident factor is from one repository; a client arriving
+in the moment a daemon decides to exit idle gets a transport error and
+reconnects (proxy retry; EnsureRunning starts the next daemon); a
+root's grace stop races a returning client (its child restarts on
+demand); two clients on one root with different flags rebuild it on
 each other's (re)opens; a call the in-process server would refuse before its guard
 (e.g. `delete:false`) can still reach the hook from the proxy; /access is
 one more round-trip per read/edit, only when a hook is set.
+**optional extensions**: an e2e test of auto-start after an idle exit
+(checked by hand only: it needs a built binary, as the blue/green e2e);
+a per-repository child-LSP budget (see the worktree entry below).
 
 **Worktree / same-tree sharing in one daemon** (Carl: "a great candidate if
 there is worktree or multi same tree session sharing optimizations").

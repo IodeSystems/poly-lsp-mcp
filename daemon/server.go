@@ -75,6 +75,11 @@ type healthOut struct {
 		// Warm is false while a takeover daemon is still bringing up the
 		// roots it will take over.
 		Warm bool `json:"warm"`
+		// RootStats: each root's clients and resident estimate;
+		// IdleRootsCap the bound on the client-less ones (bytes, < 0 none).
+		RootStats    []RootStat `json:"rootStats,omitempty"`
+		IdleRootsCap int64      `json:"idleRootsCap"`
+		Clients      int64      `json:"clients"`
 	}
 }
 
@@ -288,6 +293,8 @@ func (h *host) handler() (http.Handler, error) {
 			out.Body.PID = os.Getpid()
 			out.Body.Roots = reg.Roots()
 			out.Body.Warm = h.takeoverFrom == 0 || h.warm.Load()
+			out.Body.RootStats, out.Body.IdleRootsCap = reg.RootStats()
+			out.Body.Clients = h.clients.Load()
 			return out, nil
 		})
 
@@ -445,8 +452,9 @@ func (h *host) handler() (http.Handler, error) {
 			if rolled := reg.RollbackSession(in.Session); len(rolled) > 0 {
 				log.Printf("daemon: session %s dropped — rolled back %v", in.Session, rolled)
 			}
-			// Drop the session's root refs; a root left with no holders is
-			// idle-evicted (its child LSPs freed) after idleTimeout.
+			// Drop the session's root refs; a root left with no holders
+			// stops its child LSPs after --root-lsp-grace and joins the
+			// LRU of client-less roots.
 			reg.Release(in.Session)
 			out := &watchOut{}
 			out.Body.Released = true

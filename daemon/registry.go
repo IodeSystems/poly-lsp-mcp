@@ -39,10 +39,14 @@ type Registry struct {
 	readOnly  bool
 	validate  bool
 
-	// idleTimeout is how long a root with zero holders lingers before its
-	// server (index + child LSPs + watcher) is evicted. 0 disables eviction
-	// (a root, once opened, stays warm forever — the pre-step-5 behavior).
-	idleTimeout time.Duration
+	// A root's lifetime follows its clients (holders). lspGrace: its child
+	// LSPs stop this long after its last client left; the index stays.
+	// idleCap: the client-less roots kept warm (index and watcher) are an
+	// LRU bounded by their estimated resident bytes (rootResident); past
+	// it the least recently used is evicted. A root with a client is never
+	// evicted. idleCap < 0 = no bound.
+	lspGrace time.Duration
+	idleCap  int64
 
 	// lifecycle and statusDir are applied to every root's child-LSP
 	// manager.
@@ -101,12 +105,16 @@ type entry struct {
 	// lastUsed is the last request that named this root; a takeover warms
 	// the recently used roots. Guarded by Registry.mu.
 	lastUsed time.Time
-	// holders are the sessions currently keeping this root warm (ref count =
-	// len). A root is built on first acquire and evicted idleTimeout after the
-	// last holder leaves — child LSPs (gopls et al., hundreds of MB) are the
-	// expensive thing this frees. Guarded by Registry.mu.
-	holders    map[string]struct{}
-	evictTimer *time.Timer
+	// holders are the sessions currently keeping this root warm (ref
+	// count = len): its clients. A root is built on first acquire; when the
+	// last holder leaves, lspTimer stops its child LSPs (gopls et al.,
+	// hundreds of MB) after Registry.lspGrace, and the root joins the LRU
+	// of client-less roots (see trimLocked). Guarded by Registry.mu.
+	holders     map[string]struct{}
+	lspTimer    *time.Timer
+	lspsStopped bool
+	// size is rootResident once the bring-up ended, 0 before.
+	size int64
 }
 
 // NewRegistry builds the host registry. cfg/reg come from the daemon's
@@ -114,24 +122,55 @@ type entry struct {
 // every hosted server (per-connection policy overrides are a later slice).
 func NewRegistry(cfg *config.Config, reg *config.Registry, readOnly, validate bool) *Registry {
 	return &Registry{
-		cfg:         cfg,
-		reg:         reg,
-		cache:       symbols.NewParseCache(),
-		cachePath:   filepath.Join(ConfigHome(), "cache.gob"),
-		readOnly:    readOnly,
-		validate:    validate,
-		idleTimeout: defaultIdleTimeout,
-		idx:         IndexDefaults{SymlinkDepth: symbols.DefaultSymlinkDepth},
-		hub:         newHub(),
-		servers:     map[string]*entry{},
+		cfg:       cfg,
+		reg:       reg,
+		cache:     symbols.NewParseCache(),
+		cachePath: filepath.Join(ConfigHome(), "cache.gob"),
+		readOnly:  readOnly,
+		validate:  validate,
+		lspGrace:  DefaultRootLSPGrace,
+		idleCap:   DefaultIdleRootsMB << 20,
+		idx:       IndexDefaults{SymlinkDepth: symbols.DefaultSymlinkDepth},
+		hub:       newHub(),
+		servers:   map[string]*entry{},
 	}
 }
 
-// defaultIdleTimeout is how long an unheld root stays warm before eviction.
-// Long enough that a client reconnecting (a new agent turn, an editor
-// restart) finds it warm; short enough that abandoned roots don't pin a
-// gopls fleet.
-const defaultIdleTimeout = 5 * time.Minute
+// The root-lifetime defaults (daemon --root-lsp-grace, --idle-roots-mb).
+// The grace is long enough that a client reconnecting (an upgrade, an
+// editor restart) finds the child LSPs warm; the cap keeps a few large
+// indexes for clients that come back without letting abandoned roots
+// accrete.
+const (
+	DefaultRootLSPGrace = time.Minute
+	DefaultIdleRootsMB  = 1024
+)
+
+// SetRootLifetime sets how long a root's child LSPs outlive its last
+// client (grace) and the bound, in bytes, on the client-less roots kept
+// warm (idleCap; < 0 = none, 0 = keep none). Call before Serve.
+func (r *Registry) SetRootLifetime(grace time.Duration, idleCap int64) {
+	r.lspGrace, r.idleCap = grace, idleCap
+}
+
+// residentFactor is the live Go heap of a hosted root per byte its index
+// read. Measured 2026-10-24 on this repo (393 files, 3.3 MiB): 5.8 for the
+// index with its parse-cache entries (cold cache), 3.6 for the index alone
+// (TestMeasureRootResident, -tags measure, 2 runs); ~9 after one resolved
+// query (TestMeasureWorktreeSharing: +28 MiB). 8 sits between a fresh and
+// a used root. One repository, so a rough figure; the process's RSS runs
+// above live heap by the GC's headroom. See rootResident.
+const residentFactor = 8
+
+// rootResident estimates what a hosted root holds in memory: the bytes its
+// index read (CostReport.Bytes) times residentFactor. Cheap — no heap walk
+// — and per root, which a heap measurement of a process hosting many roots
+// cannot be. Child LSPs are not in it: they are processes of their own,
+// stopped --root-lsp-grace after the root's last client left. The shared
+// parse cache is bounded by its own entry LRU.
+func rootResident(srv *mcp.Server) int64 {
+	return srv.IndexCost().Bytes * residentFactor
+}
 
 // LoadCache seeds the shared parse cache from disk at daemon startup so a
 // restarted daemon comes up warm instead of re-parsing every file. A
@@ -257,8 +296,8 @@ func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.
 		// A failed root opened again, or a root opened with other index
 		// options: build it afresh for this client, keeping the holders
 		// the old one had.
-		if e.evictTimer != nil {
-			e.evictTimer.Stop()
+		if e.lspTimer != nil {
+			e.lspTimer.Stop()
 		}
 		carried = e.holders
 		delete(r.servers, root)
@@ -297,44 +336,216 @@ func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.
 	} else {
 		log.Printf("daemon: opened root %s", root)
 	}
-	r.mu.Lock()
-	// An unheld root (a one-shot /query, a takeover's warm) is evicted
-	// like a released one, so nothing nobody holds stays warm forever.
-	if cur, ok := r.servers[root]; ok && cur == e && len(e.holders) == 0 {
-		r.scheduleEvictLocked(root, e)
+	var size int64
+	if err == nil {
+		size = rootResident(srv)
 	}
+	r.mu.Lock()
+	var victims []string
+	if cur, ok := r.servers[root]; ok && cur == e {
+		e.size = size
+		// An unheld root (a one-shot /query, a takeover's warm) is
+		// client-less from the start.
+		if len(e.holders) == 0 {
+			victims = r.unheldLocked(root, e)
+		}
+		victims = append(victims, r.trimLocked()...)
+	}
+	evicted := r.dropLocked(victims)
 	r.mu.Unlock()
+	r.shutdown(evicted)
 	return srv, err
 }
 
-// holdLocked adds a holder and cancels any pending eviction. Caller holds mu.
+// holdLocked adds a holder and cancels a pending child-LSP stop. Caller
+// holds mu.
 func (r *Registry) holdLocked(e *entry, holder string) {
 	if e.holders == nil {
 		e.holders = map[string]struct{}{}
 	}
 	e.holders[holder] = struct{}{}
-	if e.evictTimer != nil {
-		e.evictTimer.Stop()
-		e.evictTimer = nil
+	if e.lspTimer != nil {
+		e.lspTimer.Stop()
+		e.lspTimer = nil
 	}
+	e.lspsStopped = false
 }
 
-// Release drops `holder`'s ref on every root it holds. A root whose last
-// holder just left is scheduled for eviction after idleTimeout (a
-// reconnecting client cancels it via Acquire). Called when a client's
-// /session/watch connection drops.
+// Release drops `holder`'s ref on every root it holds: called when a
+// client's session stream drops. A root whose last holder just left
+// becomes client-less (see unheldLocked), and the client-less roots are
+// trimmed to idleCap.
 func (r *Registry) Release(holder string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var victims []string
 	for root, e := range r.servers {
 		if _, ok := e.holders[holder]; !ok {
 			continue
 		}
 		delete(e.holders, holder)
 		if len(e.holders) == 0 {
-			r.scheduleEvictLocked(root, e)
+			victims = append(victims, r.unheldLocked(root, e)...)
 		}
 	}
+	victims = append(victims, r.trimLocked()...)
+	evicted := r.dropLocked(victims)
+	r.mu.Unlock()
+	r.shutdown(evicted)
+}
+
+// unheldLocked starts a client-less root's grace: its child LSPs stop
+// lspGrace from now unless a client comes back. A root whose bring-up
+// failed holds nothing worth keeping and is returned to evict now (a new
+// open builds it again). One still building is left to its bring-up's
+// end, which calls this again. Caller holds mu.
+func (r *Registry) unheldLocked(root string, e *entry) []string {
+	select {
+	case <-e.ready:
+	default:
+		return nil
+	}
+	if e.err != nil {
+		return []string{root}
+	}
+	if e.lspTimer != nil {
+		e.lspTimer.Stop()
+	}
+	e.lspTimer = time.AfterFunc(max(r.lspGrace, 0), func() { r.stopLSPs(root, e) })
+	return nil
+}
+
+// stopLSPs stops root's child LSPs if it is still e and client-less: the
+// end of its grace. The index and watcher stay; a client that comes back
+// starts each child again on its first request that needs one.
+func (r *Registry) stopLSPs(root string, e *entry) {
+	r.mu.Lock()
+	if r.servers[root] != e || len(e.holders) > 0 {
+		r.mu.Unlock()
+		return
+	}
+	e.lspTimer, e.lspsStopped = nil, true
+	r.mu.Unlock()
+	if n := e.srv.StopLSPs(); n > 0 {
+		log.Printf("daemon: root %s: no client for %s; stopped %d child LSP(s)", root, r.lspGrace, n)
+	}
+}
+
+// trimLocked picks the client-less roots to evict so that what the rest
+// hold (their rootResident estimates) is within idleCap: the least
+// recently used first. A root with a client, or still building, is never
+// picked. Caller holds mu.
+func (r *Registry) trimLocked() []string {
+	if r.idleCap < 0 {
+		return nil
+	}
+	type idle struct {
+		root string
+		e    *entry
+	}
+	var lru []idle
+	var total int64
+	for root, e := range r.servers {
+		if len(e.holders) > 0 {
+			continue
+		}
+		select {
+		case <-e.ready:
+		default:
+			continue
+		}
+		lru = append(lru, idle{root, e})
+		total += e.size
+	}
+	// A cap of 0 keeps no client-less root, whatever its size.
+	over := func() bool { return total > r.idleCap || r.idleCap == 0 }
+	if !over() {
+		return nil
+	}
+	slices.SortFunc(lru, func(a, b idle) int { return a.e.lastUsed.Compare(b.e.lastUsed) })
+	var out []string
+	for _, v := range lru {
+		if !over() {
+			break
+		}
+		out = append(out, v.root)
+		total -= v.e.size
+		log.Printf("daemon: evicting client-less root %s (~%d MiB; --idle-roots-mb %d)", v.root, v.e.size>>20, r.idleCap>>20)
+	}
+	return out
+}
+
+// dropLocked removes roots from the registry and their kept notifications,
+// and returns their entries for shutdown. Caller holds mu.
+func (r *Registry) dropLocked(roots []string) []*entry {
+	var out []*entry
+	for _, root := range roots {
+		e, ok := r.servers[root]
+		if !ok {
+			continue
+		}
+		if e.lspTimer != nil {
+			e.lspTimer.Stop()
+		}
+		delete(r.servers, root)
+		r.hub.forget(root)
+		out = append(out, e)
+	}
+	return out
+}
+
+// shutdown shuts evicted servers down (index, child LSPs, watcher), in
+// the background: the caller may be a request handler. The shared parse
+// cache is daemon-owned, so a re-open still comes up warm on parses.
+func (r *Registry) shutdown(evicted []*entry) {
+	for _, e := range evicted {
+		go func() {
+			<-e.ready
+			if e.srv != nil {
+				e.srv.Shutdown()
+			}
+		}()
+	}
+}
+
+// Len is how many roots the daemon hosts, with a client or not.
+func (r *Registry) Len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.servers)
+}
+
+// RootStat is one hosted root, for /health and doctor.
+type RootStat struct {
+	Root    string `json:"root"`
+	State   string `json:"state"` // building | up | failed
+	Clients int    `json:"clients"`
+	// Resident is the root's estimated resident bytes (rootResident: the
+	// bytes its index read × residentFactor); child LSPs not included.
+	Resident    int64 `json:"residentBytes"`
+	IdleSec     int64 `json:"idleSec"`               // since a request last named it
+	LSPsStopped bool  `json:"lspsStopped,omitempty"` // by --root-lsp-grace, since its last client left
+}
+
+// RootStats lists the hosted roots, sorted, and the client-less cap.
+func (r *Registry) RootStats() ([]RootStat, int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]RootStat, 0, len(r.servers))
+	for root, e := range r.servers {
+		st := RootStat{Root: root, State: "building", Clients: len(e.holders), Resident: e.size,
+			IdleSec: int64(time.Since(e.lastUsed) / time.Second), LSPsStopped: e.lspsStopped}
+		select {
+		case <-e.ready:
+			st.State = "up"
+			if e.err != nil {
+				st.State = "failed"
+			}
+		default:
+		}
+		out = append(out, st)
+	}
+	slices.SortFunc(out, func(a, b RootStat) int { return strings.Compare(a.Root, b.Root) })
+	return out, r.idleCap
 }
 
 // heldBy lists the roots holder holds.
@@ -348,41 +559,6 @@ func (r *Registry) heldBy(holder string) []string {
 		}
 	}
 	return out
-}
-
-// scheduleEvictLocked arms the idle-eviction timer for an unheld root. Caller
-// holds mu. idleTimeout <= 0 disables eviction.
-func (r *Registry) scheduleEvictLocked(root string, e *entry) {
-	if r.idleTimeout <= 0 {
-		return
-	}
-	if e.evictTimer != nil {
-		e.evictTimer.Stop()
-	}
-	e.evictTimer = time.AfterFunc(r.idleTimeout, func() { r.evict(root, e) })
-}
-
-// evict shuts down a root's server (index + child LSPs + watcher) IF it is
-// still unheld. Re-checks under mu, so an Acquire that landed after the timer
-// fired (but before this ran) safely cancels the eviction. The shared parse
-// cache is daemon-owned, so a re-open still comes up warm on parses.
-func (r *Registry) evict(root string, want *entry) {
-	r.mu.Lock()
-	e, ok := r.servers[root]
-	if !ok || e != want || len(e.holders) > 0 {
-		r.mu.Unlock()
-		return // gone already, rebuilt, or re-acquired
-	}
-	delete(r.servers, root)
-	e.evictTimer = nil
-	r.mu.Unlock()
-	r.hub.forget(root)
-
-	<-e.ready
-	if e.srv != nil {
-		e.srv.Shutdown()
-	}
-	log.Printf("daemon: evicted idle root %s", root)
 }
 
 // retire tells the sessions on root (to) that its index options changed
@@ -728,8 +904,8 @@ func (r *Registry) Close() {
 	r.mu.Lock()
 	servers := make([]*entry, 0, len(r.servers))
 	for _, e := range r.servers {
-		if e.evictTimer != nil {
-			e.evictTimer.Stop()
+		if e.lspTimer != nil {
+			e.lspTimer.Stop()
 		}
 		servers = append(servers, e)
 	}

@@ -51,6 +51,9 @@ const (
 	// StopLRU: a project root's child stopped to make room under
 	// Manager.RootsMax for another root of the same language.
 	StopLRU = "lru"
+	// StopNoClient: the daemon stopped a root's children a grace period
+	// after the root's last client left (daemon --root-lsp-grace).
+	StopNoClient = "no-client"
 )
 
 // ChildStats counts lifecycle events for one child. Crash restarts and
@@ -62,6 +65,7 @@ type ChildStats struct {
 	MemoryStops   int    `json:"memoryStops"`
 	PressureStops int    `json:"pressureStops"`
 	LRUStops      int    `json:"lruStops,omitempty"`
+	ClientStops   int    `json:"clientStops,omitempty"` // StopNoClient
 	LastStop      string `json:"lastStop,omitempty"`
 	LastStopAt    string `json:"lastStopAt,omitempty"`  // RFC 3339
 	LastStopRSS   int64  `json:"lastStopRSS,omitempty"` // bytes, at stop time
@@ -240,6 +244,8 @@ func (m *Manager) stopChild(k childKey, reason string, rss int64) bool {
 		sl.stats.PressureStops++
 	case StopLRU:
 		sl.stats.LRUStops++
+	case StopNoClient:
+		sl.stats.ClientStops++
 	}
 	sl.stats.LastStop = reason
 	sl.stats.LastStopAt = time.Now().Format(time.RFC3339)
@@ -259,6 +265,28 @@ func (m *Manager) stopChild(k childKey, reason string, rss int64) bool {
 		m.OnStop(name, k.dir, reason)
 	}
 	return true
+}
+
+// StopAll stops every running child for reason, as a policy stop: each
+// starts again on the next RouteByURI for its files. A child busy waking
+// is left running. Returns how many stopped.
+func (m *Manager) StopAll(reason string) int {
+	m.mu.RLock()
+	var keys []childKey
+	pids := map[childKey]int{}
+	for k, child := range m.children {
+		keys = append(keys, k)
+		pids[k] = child.Pid()
+	}
+	m.mu.RUnlock()
+	n := 0
+	for _, k := range keys {
+		rss, _ := m.rssOf(pids[k])
+		if m.stopChild(k, reason, rss) {
+			n++
+		}
+	}
+	return n
 }
 
 // monitor applies Lifecycle every Interval until Shutdown.

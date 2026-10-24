@@ -53,6 +53,11 @@ type doctorReport struct {
 	// whether it is this binary's (daemon.BuildID). Absent with no daemon.
 	DaemonBuild   string `json:"daemonBuild,omitempty"`
 	DaemonMatches *bool  `json:"daemonMatches,omitempty"`
+	// DaemonRoots are the running daemon's roots: clients, resident
+	// estimate (bytes indexed × a measured factor; see daemon.RootStat);
+	// DaemonIdleCap bounds the client-less ones (bytes, < 0 none).
+	DaemonRoots   []daemon.RootStat `json:"daemonRoots,omitempty"`
+	DaemonIdleCap *int64            `json:"daemonIdleRootsCap,omitempty"`
 	// UpgradeFailures are the builds a daemon upgrade failed to; PrevExe
 	// the binary kept from before the last upgrade.
 	UpgradeFailures map[string]daemon.UpgradeFailure `json:"upgradeFailures,omitempty"`
@@ -224,6 +229,10 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 					rep.Daemon += ", build " + build + ", NOT this binary's (" + daemon.BuildID() + ")"
 					rep.Advisories = append(rep.Advisories, "the running daemon is another build; the next `mcp --daemon` client of this build asks it to upgrade (blue/green), or restart it now: poly-lsp-mcp daemon --restart")
 				}
+				// A daemon from before root stats answers without them.
+				if h, err := daemon.NewClient(st.Socket).Health(2 * time.Second); err == nil {
+					rep.DaemonRoots, rep.DaemonIdleCap = h.RootStats, &h.IdleRootsCap
+				}
 			}
 			// Upgrades that failed, and the binary to go back to (see
 			// daemon/rollback.go).
@@ -273,6 +282,21 @@ func printDoctor(r doctorReport) {
 	fmt.Printf("config    %s\n", r.Config)
 	fmt.Printf("git       %s\n", r.Git)
 	fmt.Printf("daemon    %s\n", r.Daemon)
+	var idle int64
+	for _, d := range r.DaemonRoots {
+		who := fmt.Sprintf("%d client(s)", d.Clients)
+		if d.Clients == 0 {
+			who = "no client, used " + (time.Duration(d.IdleSec) * time.Second).String() + " ago"
+			if d.LSPsStopped {
+				who += ", child LSPs stopped"
+			}
+			idle += d.Resident
+		}
+		fmt.Printf("          root %s: %s, ~%.1f MiB resident (est.), %s\n", d.Root, d.State, float64(d.Resident)/(1<<20), who)
+	}
+	if len(r.DaemonRoots) > 0 && r.DaemonIdleCap != nil && *r.DaemonIdleCap >= 0 {
+		fmt.Printf("          client-less roots ~%.1f of %d MiB (--idle-roots-mb)\n", float64(idle)/(1<<20), *r.DaemonIdleCap>>20)
+	}
 	if r.Update != nil {
 		fmt.Printf("update    %s\n", r.Update.text())
 	}

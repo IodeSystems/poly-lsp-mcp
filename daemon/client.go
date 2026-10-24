@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 )
@@ -132,6 +133,28 @@ type Health struct {
 	PID      int      `json:"pid"`
 	Roots    []string `json:"roots"`
 	Warm     bool     `json:"warm"`
+	// RootStats: per root, its clients and resident estimate (rootResident);
+	// IdleRootsCap bounds the client-less ones (bytes; < 0 = none).
+	RootStats    []RootStat `json:"rootStats,omitempty"`
+	IdleRootsCap int64      `json:"idleRootsCap"`
+	Clients      int64      `json:"clients"`
+}
+
+// Health asks the daemon's /health, bounded by d.
+func (c *Client) Health(d time.Duration) (Health, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://poly-lsp/health", nil)
+	if err != nil {
+		return Health{}, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return Health{}, &transportError{err}
+	}
+	var h Health
+	err = decode(resp, &h)
+	return h, err
 }
 
 // takeover asks a warm takeover daemon to take the main socket.

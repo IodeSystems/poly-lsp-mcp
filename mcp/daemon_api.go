@@ -13,6 +13,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -105,6 +106,17 @@ func (s *Server) Shutdown() {
 	s.stopManagerIfPresent()
 	s.stopFileWatch()
 	s.maybeSaveCache()
+}
+
+// StopLSPs stops the root's running child LSPs, as an idle stop does:
+// each starts again on the next request that needs it, and the index
+// stays. A daemon calls it a grace period after a root's last client
+// left. Returns how many stopped.
+func (s *Server) StopLSPs() int {
+	if s.manager == nil {
+		return 0
+	}
+	return s.manager.StopAll(multiplex.StopNoClient)
 }
 
 // CallOptions carries a per-CONNECTION policy the daemon enforces at its

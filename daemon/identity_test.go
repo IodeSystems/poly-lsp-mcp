@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 )
@@ -53,6 +54,8 @@ func TestServeRefusesWhileTheLockIsHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer held.Release()
+	defer func(d time.Duration) { lockWait = d }(lockWait)
+	lockWait = 100 * time.Millisecond
 	cfg, _, _ := config.LoadOrDefault("nonexistent.yaml")
 	reg, _ := cfg.Build()
 	socket := filepath.Join(t.TempDir(), "d.sock")

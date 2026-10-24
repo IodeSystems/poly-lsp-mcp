@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -262,6 +263,10 @@ type engine struct {
 	// (node_modules, vendor, dist…): the walk reaches those and nothing
 	// else under it. See namedSkipPaths.
 	named []string
+	// shadow hides a file behind a stronger-typed sibling (foo.js beside
+	// foo.ts) unless the selector names the file: namedFiles.
+	shadow     *config.ShadowChecker
+	namedFiles map[string]bool
 
 	// ordSeq feeds treeNode.fileOrd during the workspace walk.
 	ordSeq int
@@ -695,6 +700,11 @@ func (s *Server) buildTreeFor(selector string) (*engine, error) {
 	// non-edge query never pays to compute the workspace-tuned cap.
 	e.excl = s.excludeSet()
 	e.named = namedSkipPaths(selector)
+	e.shadow = s.registry.NewShadowChecker()
+	e.namedFiles = map[string]bool{}
+	for _, p := range selectorPaths(selector) {
+		e.namedFiles[p] = true
+	}
 	e.walkDir(root, project, false)
 	return e, nil
 }
@@ -767,6 +777,11 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip bool) {
 		// (search.go). Directories are never probed.
 		if !de.IsDir() && looksBinaryFile(childAbs) {
 			continue
+		}
+		if !de.IsDir() {
+			if _, ok := e.shadow.Shadowed(childAbs); ok && !e.namedFiles[relPath(childAbs, e.s.getRoot())] {
+				continue
+			}
 		}
 		rel := relPath(childAbs, e.s.getRoot())
 		e.ordSeq++

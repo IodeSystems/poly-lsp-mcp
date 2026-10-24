@@ -957,6 +957,7 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		defer cfg.cost.end()
 	}
 	read, counted, over, stopped := 0, 0, false, false
+	shadow := reg.NewShadowChecker()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -991,6 +992,14 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		}
 		ex := DefaultExtractor(lang.Name)
 		if ex == nil {
+			return nil
+		}
+		// A lesser-typed file beside its stronger sibling (foo.js beside
+		// foo.ts) would define every name twice. See config.ShadowRule.
+		if rule, ok := shadow.Shadowed(path); ok {
+			if cfg.cost != nil {
+				cfg.cost.shadow(rule)
+			}
 			return nil
 		}
 		info, err := d.Info()

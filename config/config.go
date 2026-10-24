@@ -73,15 +73,18 @@ type Config struct {
 	Bindings    []Binding  `yaml:"bindings,omitempty"`
 	Schemas     []Schema   `yaml:"schemas,omitempty"`
 	AutoSchemas bool       `yaml:"auto_schemas,omitempty"`
+	// Shadows: nil (key absent) = DefaultShadows; [] = none. See shadow.go.
+	Shadows []ShadowRule `yaml:"shadows,omitempty"`
 }
 
 // Registry is the in-memory lookup view: extension → language. Built from a
 // Config via Build. Extensions are normalized to lowercase, leading dot
 // stripped, so callers may pass ".go", "go", or "GO" interchangeably.
 type Registry struct {
-	byExt  map[string]*Language
-	byName map[string]*Language
-	order  []*Language
+	byExt   map[string]*Language
+	byName  map[string]*Language
+	order   []*Language
+	shadows []ShadowRule
 }
 
 // Default returns the baked-in registry for go/ts/py plus tree-sitter-only
@@ -287,6 +290,21 @@ func (c *Config) Build() (*Registry, error) {
 		}
 		if lang.LSP == nil && lang.TreeSitter == "" {
 			return nil, fmt.Errorf("language %s: must declare at least one of lsp / treesitter", lang.Name)
+		}
+	}
+	r.shadows = c.Shadows
+	if r.shadows == nil {
+		r.shadows = DefaultShadows()
+	}
+	for i, s := range r.shadows {
+		if s.Name == "" || len(s.Over) == 0 || len(s.Hides) == 0 {
+			return nil, fmt.Errorf("shadow rule %d: name, over and hides are required", i)
+		}
+		for j := range s.Over {
+			s.Over[j] = normalizeExt(s.Over[j])
+		}
+		for j := range s.Hides {
+			s.Hides[j] = normalizeExt(s.Hides[j])
 		}
 	}
 	return r, nil

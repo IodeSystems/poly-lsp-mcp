@@ -232,6 +232,7 @@ func (s *Server) runProactiveOpen() {
 		return
 	}
 	ig := s.getIgnores()
+	shadow := s.registry.NewShadowChecker()
 	var opened int
 	start := time.Now()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -250,6 +251,10 @@ func (s *Server) runProactiveOpen() {
 			return nil
 		}
 		if ig.KnownIgnored(root, path) {
+			return nil
+		}
+		// foo.js beside foo.ts: the child LSP already has the source.
+		if _, ok := shadow.Shadowed(path); ok {
 			return nil
 		}
 		info, err := d.Info()

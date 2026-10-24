@@ -192,6 +192,12 @@ the client (dun) retries with its own decisions and reports them.
   node_query reaches a skipped dir (node_modules…) only along a path the
   selector names. Usage log `~/.poly-lsp/usage.jsonl` + `poly-lsp-mcp
   usage` (`4dc0cf5`).
+- ✅ shadowing (Carl): a lesser-typed file beside a stronger one of the
+  same name (foo.js/foo.ts, foo.js/foo.d.ts, foo.py/foo.pyi) is out of the
+  index, broad node_query and didOpen; reachable by naming its path;
+  counted in the report. `shadows:` in config. visionbridge: 20 hidden.
+  Not handled: creating foo.ts does not evict an already-indexed foo.js
+  until the next build.
 - ◻ dun side: read the `poly-lsp-mcp/index` notification, choose excludes,
   respawn, report what it decided and how to reverse it. Protocol sent to
   dun-a8.

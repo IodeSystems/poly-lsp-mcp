@@ -22,11 +22,12 @@ import (
 // Build is sequential, so BuildCost takes no lock. Read it after Build
 // returns.
 type BuildCost struct {
-	root   string
-	start  time.Time
-	wall   time.Duration
-	dirs   map[string]*dirCost // repo-relative, slash-separated; "" = root
-	nested map[string]bool     // directories with their own .git
+	root     string
+	start    time.Time
+	wall     time.Duration
+	dirs     map[string]*dirCost // repo-relative, slash-separated; "" = root
+	nested   map[string]bool     // directories with their own .git
+	shadowed map[string]int      // files hidden by a stronger sibling, by rule
 }
 
 type dirCost struct {
@@ -38,7 +39,7 @@ type dirCost struct {
 
 // NewBuildCost returns an empty recorder for WithCost.
 func NewBuildCost() *BuildCost {
-	return &BuildCost{dirs: map[string]*dirCost{}, nested: map[string]bool{}}
+	return &BuildCost{dirs: map[string]*dirCost{}, nested: map[string]bool{}, shadowed: map[string]int{}}
 }
 
 // WithCost records per-directory cost into c.
@@ -72,6 +73,8 @@ func (c *BuildCost) dir(p string) {
 	}
 }
 
+func (c *BuildCost) shadow(rule string) { c.shadowed[rule]++ }
+
 func (c *BuildCost) file(p string, size int64, cost time.Duration, cached bool) {
 	d := path.Dir(c.rel(p))
 	if d == "." {
@@ -99,6 +102,9 @@ type CostReport struct {
 	WallMs   int64     `json:"wallMs"`   // the whole walk
 	Heaviest []DirCost `json:"heaviest"` // by cost, at most 10
 	Hint     string    `json:"hint,omitempty"`
+	// Shadowed: files left out because a stronger-typed sibling exists
+	// (foo.js beside foo.ts), by rule. Not in Files.
+	Shadowed map[string]int `json:"shadowed,omitempty"`
 }
 
 // DirCost is one directory's share of the build, its subdirectories included.
@@ -169,6 +175,12 @@ func (c *BuildCost) Report() CostReport {
 		Bytes:  total.bytes,
 		Cached: total.cached,
 		WallMs: c.wall.Milliseconds(),
+	}
+	if len(c.shadowed) > 0 {
+		rep.Shadowed = map[string]int{}
+		for k, v := range c.shadowed {
+			rep.Shadowed[k] = v
+		}
 	}
 	if total.bytes == 0 {
 		return rep
@@ -256,6 +268,14 @@ func (r CostReport) Text() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "index: %d files, %s, %s walk, %d from the parse cache\n",
 		r.Files, humanBytes(r.Bytes), time.Duration(r.WallMs)*time.Millisecond, r.Cached)
+	if len(r.Shadowed) > 0 {
+		var parts []string
+		for k, v := range r.Shadowed {
+			parts = append(parts, fmt.Sprintf("%d %s", v, k))
+		}
+		sort.Strings(parts)
+		fmt.Fprintf(&b, "shadowed (a stronger-typed file of the same name exists; reachable by naming the path): %s\n", strings.Join(parts, ", "))
+	}
 	if len(r.Heaviest) == 0 {
 		return b.String()
 	}

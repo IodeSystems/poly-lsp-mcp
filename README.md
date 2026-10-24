@@ -278,6 +278,17 @@ schemas:
 # scan touches every YAML/JSON file looking for distinctive top-level
 # keys.
 auto_schemas: true
+
+# Shadowing: in one directory, a file ending in one of `over` hides the
+# same-named file ending in one of `hides` (foo.js beside foo.ts). Hidden
+# from the index, broad node_query and child-LSP opens; reachable by
+# naming its path; counted in the index report. Omit the key for these
+# defaults; `shadows: []` turns it off.
+shadows:
+  - {name: ts over js,   over: [ts, tsx, mts, cts], hides: [js, jsx, mjs, cjs]}
+  - {name: ts over d.ts, over: [ts, tsx, mts, cts], hides: [d.ts, d.mts, d.cts]}
+  - {name: d.ts over js, over: [d.ts, d.mts, d.cts], hides: [js, mjs, cjs]}
+  - {name: pyi over py,  over: [pyi], hides: [py]}
 ```
 
 ## Cross-language linkage — three tiers

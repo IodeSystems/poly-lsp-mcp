@@ -194,7 +194,13 @@ func (s *Server) watchableFile(path string) bool {
 	if lang == "" || symbols.DefaultExtractor(lang) == nil {
 		return false
 	}
-	return !s.pathIgnored(path)
+	if s.pathIgnored(path) {
+		return false
+	}
+	// tsc rewriting foo.js beside foo.ts must not put the shadowed file
+	// back. A fresh checker: the event may be the sibling's creation.
+	_, shadowed := s.registry.NewShadowChecker().Shadowed(path)
+	return !shadowed
 }
 
 // watchRefreshFile reads a changed file off disk and refreshes its slice

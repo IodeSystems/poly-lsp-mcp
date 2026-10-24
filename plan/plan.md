@@ -145,6 +145,8 @@ full text in `plan/reviews/2026-10-22-python-repo-dogfood.md` — local only,
 reviews are not committed. Not yet triaged; claims are the reviewer's, not re-measured. Ranked asks:
 1. ◻ gitignore not applied on the query/MCP path (`.venv` indexed; 15:1
    venv:first-party lines). Reported as wiring, not `symbols.Build` logic.
+   Confirmed 2026-10-24: `buildTree` (mcp/query.go) walks with no ignore
+   set at all; see the startup entry's blocking decision.
 2. ◻ `#Name` scans; 6,000 files → 97s, 33s sys (suspect per-dir git
    subprocess in `checkIgnore`). Name index, or fail fast. The per-FILE
    `check-ignore` in the index walk is gone (see the initialize entry);
@@ -171,26 +173,29 @@ and `poly-lsp-mcp status`. **risks**: `ps -o rss=` output format; peer-cred
 via LOCAL_PEERCRED untested live; Windows does not build (not in scope).
 **blocking decisions**: none.
 
-◐ **MCP `initialize` takes 52–82 s on dun** (dun-a8 for Carl, 2026-10-24).
-Measured with a bare stdio client (`initialize`, then `tools/list`) against
-`~/local/src/iodesystems/dun`. The child LSPs were not the cost; they were ready
-0.3 s after the index. Causes:
-1. The index and `@derived` walks called `FileIgnored`, which runs one `git
-   check-ignore` per file it does not know (22,513 spawns). They now use
-   `KnownIgnored`, the snapshot taken for the walk. 52 s → 11–16 s.
-   (`87eccae`)
-2. 48 agent worktrees in `.claude/worktrees/` (20,708 files against 1,304 of
-   dun's own) were walked as dun's code. `DirIgnored` now skips any
-   directory with its own `.git` (only when the root is a repo). 2.3–2.9 s;
-   watcher 2,070 → 50 dirs; proactive didOpen 15,900 → 390 files.
-Fix 2 is in the working tree, not committed. **next**: Carl's decisions
-below, then commit fix 2 and report to dun-a8. **risks**: still over dun's 1.5 s wait; the remainder is the
-`cache.gob` load (0.97 s, a 97 MB file of mostly stale worktree entries) and
-`goOperationIDSites` re-parsing Go outside the parse cache (0.87 s).
-**blocking decisions**: (a) submodules are skipped by the same rule — keep?
-(b) answer `initialize` at once and build in the background, with tool calls
-waiting up to a bound and then saying "still indexing"? **assumption**: a
-nested checkout is never this project's code.
+◐ **Instant startup; the client decides what to index** (dun-a8 for Carl,
+2026-10-24). dun's `initialize` took 52–82 s: one `git check-ignore` per file
+(`87eccae`) and 48 untracked agent worktrees indexed as dun (dun now ignores
+them, its `75c2608`). Carl's direction: everything async to the user, what a
+call needs resolved before its first use; hard limits with a post-mortem;
+the client (dun) retries with its own decisions and reports them.
+- ✅ cost report by directory (`43e5e4e`): initialize/notification `index`,
+  log, status file, `poly-lsp-mcp index`.
+- ✅ async initialize, `--index-max-files` 10000 with post-mortem,
+  `--exclude` (`a019fc7`). dun: initialize 0.07 s; ready notification at
+  2.3 s; first tool call 3.9 s. Demo (3 worktrees, limit 500): fails with
+  `.claude/worktrees/` 75%, retry with `--exclude` answers at 0.46 s.
+- ◻ dun side: read the `poly-lsp-mcp/index` notification, choose excludes,
+  respawn, report what it decided and how to reverse it. Protocol sent to
+  dun-a8.
+**next**: dun's adoption. **risks**: the 10000 default is a guess (dun 455
+files; worktree case 22,012); a failed bring-up refuses node_read too;
+`daemon` has no `--exclude` or limit yet; the `query` tree walk still does
+not honour `.gitignore` (review item 1) — only `--exclude`.
+**blocking decisions**: should `node_query`'s tree honour `.gitignore`
+(hides gitignored files such as dun's generated `mobile/src/gql/`)?
+**optional extensions**: `cache.gob` load (0.97 s) and `goOperationIDSites`
+re-parse (0.87 s) are now off the handshake but still on time-to-ready.
 
 ◐ **The volcycle bench — a real agent, a real Android app, and the first
 measurement of what this surface is like to USE — 2026-08-04/05.** Lives at

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iodesystems/poly-lsp-mcp/setup"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -67,6 +68,7 @@ func (s *Server) startAsyncInit() {
 		err := s.Init()
 		s.setInitErr(err)
 		s.notifyIndexState(err, time.Since(start))
+		s.notifySetup()
 	}()
 }
 
@@ -121,6 +123,34 @@ func (s *Server) notifyIndexState(err error, took time.Duration) {
 		"level":  level,
 		"logger": indexLogger,
 		"data":   data,
+	})
+}
+
+// setupLogger is the notifications/message logger for install hints.
+const setupLogger = "poly-lsp-mcp/setup"
+
+// setupHints are the install hints for the languages the last build found.
+func (s *Server) setupHints() []setup.Lang {
+	return setup.Hints(s.registry, s.IndexCost().Languages)
+}
+
+// notifySetup tells the client, once per bring-up, which languages the
+// workspace holds and what a missing child LSP would add and needs. Level
+// warning when one is missing, so a client can show it; info otherwise.
+func (s *Server) notifySetup() {
+	langs := s.setupHints()
+	if len(langs) == 0 {
+		return
+	}
+	level := "info"
+	missing := setup.Missing(langs)
+	if missing > 0 {
+		level = "warning"
+	}
+	s.sendNotification("notifications/message", map[string]any{
+		"level":  level,
+		"logger": setupLogger,
+		"data":   map[string]any{"languages": langs, "missing": missing},
 	})
 }
 

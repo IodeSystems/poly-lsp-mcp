@@ -27,17 +27,22 @@ func writeTree(t *testing.T, files map[string]string) string {
 // arrived (a tool call has returned, so it has).
 func indexNote(t *testing.T, s *mcpSession) map[string]any {
 	t.Helper()
+	return loggerNote(t, s, indexLogger)
+}
+
+func loggerNote(t *testing.T, s *mcpSession, logger string) map[string]any {
+	t.Helper()
 	notes := s.serverNotes("notifications/message")
 	for _, n := range notes {
 		var p struct {
 			Logger string         `json:"logger"`
 			Data   map[string]any `json:"data"`
 		}
-		if json.Unmarshal(n.Params, &p) == nil && p.Logger == indexLogger {
+		if json.Unmarshal(n.Params, &p) == nil && p.Logger == logger {
 			return p.Data
 		}
 	}
-	t.Fatalf("no %s notification among %d", indexLogger, len(notes))
+	t.Fatalf("no %s notification among %d", logger, len(notes))
 	return nil
 }
 
@@ -118,5 +123,28 @@ func TestExcludesDropDirectories(t *testing.T) {
 	r := s.callTool("node_query", map[string]any{"selector": "#Drop"})
 	if len(r.Content) > 0 && strings.Contains(r.Content[0].Text, "vendored") {
 		t.Errorf("an excluded directory answered a query: %s", r.Content[0].Text)
+	}
+}
+
+// After bring-up the server says which languages the workspace holds and,
+// for a missing child LSP, what it would add and how to install it — the
+// hint a client relays to the user.
+func TestSetupNotificationNamesMissingLSP(t *testing.T) {
+	dir := writeTree(t, map[string]string{"a.go": "package p\n\nfunc A() {}\n"})
+	t.Setenv("PATH", t.TempDir()) // no gopls
+	s := startSessionWith(t, dir, nil, nil, func(srv *Server) { srv.SetAsyncInit(true) })
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.callTool("node_query", map[string]any{"selector": "#A"})
+
+	note := loggerNote(t, s, setupLogger)
+	langs, _ := note["languages"].([]any)
+	if note["missing"] != float64(1) || len(langs) != 1 {
+		t.Fatalf("setup notification: %v", note)
+	}
+	g := langs[0].(map[string]any)
+	install, _ := g["install"].(map[string]any)
+	if g["lang"] != "go" || g["adds"] == nil || install == nil || install["cmd"] != "go install golang.org/x/tools/gopls@latest" {
+		t.Errorf("go entry should carry adds and install: %v", g)
 	}
 }

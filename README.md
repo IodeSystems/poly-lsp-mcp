@@ -100,6 +100,11 @@ checks the binary PATH runs (and stale copies behind it), the child LSP for
 each language the workspace holds with its version and install command, git,
 and the daemon. Exits 1 when a language in use has no child LSP.
 
+The MCP server says the same after bring-up: `notifications/message` from
+logger `poly-lsp-mcp/setup` (level `warning` when one is missing), data
+`{languages: [{lang, files, lsp: {name, found, path}, adds, install: {cmd,
+needs}}], missing}` — the shape `doctor --json` uses for `languages`.
+
 ### Dev: rebuild on spawn
 
 poly-lsp-mcp is always *spawned* — dun runs it off `PATH`, editors launch the

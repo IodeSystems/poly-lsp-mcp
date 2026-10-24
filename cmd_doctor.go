@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +17,7 @@ import (
 
 	"github.com/iodesystems/poly-lsp-mcp/daemon"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
+	"github.com/iodesystems/poly-lsp-mcp/setup"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -25,47 +25,29 @@ import (
 // no further message.
 var errDoctor = errors.New("doctor found problems")
 
-// lspInstall says how to get each default child LSP, and lspVersionArgs how
-// to ask it its version. A config may name others; those get no hint.
-var (
-	lspInstall = map[string]string{
-		"gopls":                      "go install golang.org/x/tools/gopls@latest",
-		"typescript-language-server": "npm install -g typescript-language-server typescript",
-		"pylsp":                      "pipx install python-lsp-server   (or: pip install python-lsp-server)",
-		"clangd":                     "apt install clangd   ·   brew install llvm (macOS; or the Xcode command line tools' clangd)",
-	}
-	lspVersionArgs = map[string][]string{
-		"gopls":                      {"version"},
-		"typescript-language-server": {"--version"},
-		"pylsp":                      {"--version"},
-		"clangd":                     {"--version"},
-	}
-)
-
-// doctorLang is one language's backend check.
-type doctorLang struct {
-	Language string `json:"language"`
-	Files    int    `json:"files"` // indexable files in the workspace
-	LSP      string `json:"lsp,omitempty"`
-	Path     string `json:"path,omitempty"`
-	Version  string `json:"version,omitempty"`
-	Missing  bool   `json:"missing,omitempty"`
-	Install  string `json:"install,omitempty"`
+// lspVersionArgs asks each default child LSP its version. A config may
+// name others; those are reported without one.
+var lspVersionArgs = map[string][]string{
+	"gopls":                      {"version"},
+	"typescript-language-server": {"--version"},
+	"pylsp":                      {"--version"},
+	"clangd":                     {"--version"},
 }
 
 type doctorReport struct {
-	Binary     string       `json:"binary"`
-	OnPath     string       `json:"onPath"` // what `poly-lsp-mcp` resolves to
-	Build      string       `json:"build"`
-	Platform   string       `json:"platform"`
-	Config     string       `json:"config"`
-	Root       string       `json:"root"`
-	Partial    bool         `json:"partialCount,omitempty"`
-	Languages  []doctorLang `json:"languages"`
-	Git        string       `json:"git"`
-	Daemon     string       `json:"daemon"`
-	Problems   []string     `json:"problems,omitempty"`
-	Advisories []string     `json:"advisories,omitempty"`
+	Binary     string            `json:"binary"`
+	OnPath     string            `json:"onPath"` // what `poly-lsp-mcp` resolves to
+	Build      string            `json:"build"`
+	Platform   string            `json:"platform"`
+	Config     string            `json:"config"`
+	Root       string            `json:"root"`
+	Partial    bool              `json:"partialCount,omitempty"`
+	Languages  []setup.Lang      `json:"languages"`          // the shape of the poly-lsp-mcp/setup notification
+	Versions   map[string]string `json:"versions,omitempty"` // child LSP → its version line
+	Git        string            `json:"git"`
+	Daemon     string            `json:"daemon"`
+	Problems   []string          `json:"problems,omitempty"`
+	Advisories []string          `json:"advisories,omitempty"`
 }
 
 // doctorCmd checks what poly-lsp needs to run well here: the binary on
@@ -134,32 +116,21 @@ a different poly-lsp-mcp than this one.`,
 			ign := git.LoadIgnores(root)
 			counts, partial := symbols.CountLanguages(root, reg, ign, 5*time.Second)
 			rep.Partial = partial
-			for _, lang := range reg.Languages() {
-				d := doctorLang{Language: lang.Name, Files: counts[lang.Name]}
-				if lang.LSP == nil {
-					if d.Files > 0 {
-						rep.Languages = append(rep.Languages, d)
-					}
-					continue
-				}
-				d.LSP = lang.LSP.Cmd
-				if p, err := exec.LookPath(lang.LSP.Cmd); err != nil {
-					d.Missing = true
-					d.Install = lspInstall[lang.LSP.Cmd]
-				} else {
-					d.Path = p
-					d.Version = probeVersion(p, lspVersionArgs[lang.LSP.Cmd])
-				}
-				if d.Missing && d.Files > 0 {
-					msg := fmt.Sprintf("%s: %d file(s) but %s is not on PATH — tree-sitter only: ::in/::out unresolved, edits not validated", lang.Name, d.Files, d.LSP)
-					if d.Install != "" {
-						msg += "; install: " + d.Install
+			rep.Languages = setup.Hints(reg, counts)
+			rep.Versions = map[string]string{}
+			for _, l := range rep.Languages {
+				switch {
+				case l.LSP == nil:
+				case l.LSP.Found:
+					rep.Versions[l.LSP.Name] = probeVersion(l.LSP.Path, lspVersionArgs[l.LSP.Name])
+				default:
+					msg := fmt.Sprintf("%s: %d file(s) but %s is not on PATH — tree-sitter only; it would add %s", l.Lang, l.Files, l.LSP.Name, l.Adds)
+					if l.Install != nil {
+						msg += fmt.Sprintf("; install (needs %s): %s", strings.Join(l.Install.Needs, ", "), l.Install.Cmd)
 					}
 					rep.Problems = append(rep.Problems, msg)
 				}
-				rep.Languages = append(rep.Languages, d)
 			}
-			sort.SliceStable(rep.Languages, func(i, j int) bool { return rep.Languages[i].Files > rep.Languages[j].Files })
 
 			if p, err := exec.LookPath("git"); err != nil {
 				rep.Git = "missing"
@@ -205,23 +176,16 @@ func printDoctor(r doctorReport) {
 		note = " (count stopped at 5 s; partial)"
 	}
 	fmt.Printf("\nlanguages in %s%s:\n", r.Root, note)
-	unused := 0
 	for _, d := range r.Languages {
-		if d.Files == 0 {
-			unused++ // in --json; a missing LSP for an absent language is noise
-			continue
-		}
 		state := "tree-sitter only (no child LSP configured)"
 		switch {
-		case d.Missing:
-			state = d.LSP + " MISSING"
-		case d.LSP != "":
-			state = d.LSP + " " + d.Version
+		case d.LSP == nil:
+		case d.LSP.Found:
+			state = d.LSP.Name + " " + r.Versions[d.LSP.Name]
+		default:
+			state = d.LSP.Name + " MISSING"
 		}
-		fmt.Printf("  %-12s %6d files  %s\n", d.Language, d.Files, state)
-	}
-	if unused > 0 {
-		fmt.Printf("  (%d more configured language(s) with no files here; --json lists them)\n", unused)
+		fmt.Printf("  %-12s %6d files  %s\n", d.Lang, d.Files, state)
 	}
 	for _, p := range r.Problems {
 		fmt.Printf("\nPROBLEM  %s\n", p)

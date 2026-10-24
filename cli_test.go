@@ -89,11 +89,14 @@ func TestDoctorFlagsMissingLSP(t *testing.T) {
 	}
 	found := false
 	for _, p := range rep.Problems {
-		if strings.Contains(p, "gopls is not on PATH") && strings.Contains(p, "go install golang.org/x/tools/gopls") {
+		if strings.Contains(p, "gopls is not on PATH") && strings.Contains(p, "go install golang.org/x/tools/gopls") && strings.Contains(p, "needs go") {
 			found = true
 		}
 	}
 	if !found {
 		t.Errorf("problems should name gopls and how to install it: %v", rep.Problems)
+	}
+	if len(rep.Languages) != 1 || rep.Languages[0].Install == nil || rep.Languages[0].Install.Needs[0] != "go" {
+		t.Errorf("languages should carry the machine-readable hint: %+v", rep.Languages)
 	}
 }

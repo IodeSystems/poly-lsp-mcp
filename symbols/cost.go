@@ -31,6 +31,7 @@ type BuildCost struct {
 	wall     time.Duration
 	dirs     map[string]*dirCost // repo-relative, slash-separated; "" = root
 	nested   map[string]bool     // directories with their own .git
+	langs    map[string]int      // indexable files per language
 	shadowed map[string]int      // files hidden by a stronger sibling, by rule
 }
 
@@ -43,7 +44,7 @@ type dirCost struct {
 
 // NewBuildCost returns an empty recorder for WithCost.
 func NewBuildCost() *BuildCost {
-	return &BuildCost{dirs: map[string]*dirCost{}, nested: map[string]bool{}, shadowed: map[string]int{}}
+	return &BuildCost{dirs: map[string]*dirCost{}, nested: map[string]bool{}, shadowed: map[string]int{}, langs: map[string]int{}}
 }
 
 // WithCost records per-directory cost into c.
@@ -79,6 +80,8 @@ func (c *BuildCost) dir(p string) {
 
 func (c *BuildCost) shadow(rule string) { c.shadowed[rule]++ }
 
+func (c *BuildCost) lang(name string) { c.langs[name]++ }
+
 func (c *BuildCost) file(p string, size int64, cost time.Duration, cached bool) {
 	d := path.Dir(c.rel(p))
 	if d == "." {
@@ -106,6 +109,8 @@ type CostReport struct {
 	WallMs   int64     `json:"wallMs"`   // the whole walk
 	Heaviest []DirCost `json:"heaviest"` // by cost, at most 10
 	Hint     string    `json:"hint,omitempty"`
+	// Languages: indexable files per language (read or counted).
+	Languages map[string]int `json:"languages,omitempty"`
 	// Shadowed: files left out because a stronger-typed sibling exists
 	// (foo.js beside foo.ts), by rule. Not in Files.
 	Shadowed map[string]int `json:"shadowed,omitempty"`
@@ -179,6 +184,12 @@ func (c *BuildCost) Report() CostReport {
 		Bytes:  total.bytes,
 		Cached: total.cached,
 		WallMs: c.wall.Milliseconds(),
+	}
+	if len(c.langs) > 0 {
+		rep.Languages = map[string]int{}
+		for k, v := range c.langs {
+			rep.Languages[k] = v
+		}
 	}
 	if len(c.shadowed) > 0 {
 		rep.Shadowed = map[string]int{}

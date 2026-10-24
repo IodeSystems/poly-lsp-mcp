@@ -1009,6 +1009,9 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		if info.Size() > maxFileSize {
 			return nil
 		}
+		if cfg.cost != nil {
+			cfg.cost.lang(lang.Name)
+		}
 		if !over && cfg.budget.set() &&
 			((cfg.budget.Ops > 0 && read >= cfg.budget.Ops) ||
 				(cfg.budget.Time > 0 && time.Since(walkStart) > cfg.budget.Time)) {

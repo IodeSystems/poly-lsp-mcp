@@ -29,6 +29,7 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/setup"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -789,6 +790,9 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		res["index"] = map[string]any{"state": "building", "notification": indexLogger}
 	} else if c := s.IndexCost(); c.Files > 0 {
 		res["index"] = c
+		if h := s.setupHints(); len(h) > 0 {
+			res["setup"] = map[string]any{"languages": h, "missing": setup.Missing(h)}
+		}
 		if err := s.waitReady(); err != nil {
 			res["indexError"] = s.indexFailure(err)
 		}

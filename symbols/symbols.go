@@ -1342,7 +1342,10 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			links = append(links, link{p, p})
 		}
 	} else {
-		_ = walk(root, root, 0, nil, nil, nil)
+		// From the real root, mapped to root: WalkDir does not follow a
+		// root that is itself a link, which would come back as a link to
+		// the root, a loop.
+		_ = walk(realRoot, root, 0, nil, nil, nil)
 	}
 	for _, l := range links {
 		if stopped {

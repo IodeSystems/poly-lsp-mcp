@@ -274,6 +274,31 @@ func TestSymlinkLoopAborted(t *testing.T) {
 	}
 }
 
+// A root that is itself a symlink indexes as its target does, under the
+// link's path: the root's own link is not a loop.
+func TestSymlinkedRootIndexes(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	writeFiles(t, real, map[string]string{
+		"a.go":     "package a\n\nfunc AName() {}\n",
+		"sub/b.go": "package sub\n\nfunc BName() {}\n",
+	})
+	root := filepath.Join(base, "link")
+	symlink(t, real, root)
+	idx, rep := buildReport(t, root)
+	if loops := leftOut(rep, LeftLinkLoop); len(loops) != 0 {
+		t.Errorf("the root's own link reported as a loop: %v", rep.LeftOut)
+	}
+	if rep.Files != 2 {
+		t.Errorf("files = %d, want 2: %v", rep.Files, rep.LeftOut)
+	}
+	for name, want := range map[string]string{"AName": "a.go", "BName": "sub/b.go"} {
+		if got := files(idx, root, name); len(got) != 1 || got[0] != want {
+			t.Errorf("%s in %v, want [%s] (relative to the link)", name, got, want)
+		}
+	}
+}
+
 // A link whose target leaves the root is not followed, unless an include
 // names the link.
 func TestSymlinkLeavingRoot(t *testing.T) {

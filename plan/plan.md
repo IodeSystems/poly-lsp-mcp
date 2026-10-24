@@ -465,7 +465,9 @@ the client (dun) retries with its own decisions and reports them.
   matcher moved to internal/pathpat. Symlinks inside the root followed
   after plain files (dedupe by real path), loops / leaving root / beyond
   `--symlink-depth` (4) reported; manifest lists links apart (`ls-files
-  --stage`). `leftOut` capped at 20 per reason, `leftOutBy` {count, hint}.
+  --stage`). A root that is itself a link walks from its target, mapped
+  to the link (was "symlink loop ." and 0 names, 2026-10-24;
+  `TestSymlinkedRootIndexes`). `leftOut` capped at 20 per reason, `leftOutBy` {count, hint}.
   CI: CGO_ENABLED=0 vet+test job (release.yml; runs on tags and dispatch
   only). Commits: `ad808e7` `70ca7ad` `60272e4` `a07beb7`.
   **risks**: the watcher does not apply over-size/minified/LFS, so an edit

@@ -18,6 +18,7 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/daemon"
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
+	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
 func mcpCmd(l *loader) *cobra.Command {
@@ -158,7 +159,7 @@ func statusCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "List the child LSPs of every running poly-lsp-mcp process",
+		Short: "List the child LSPs and index cost of every running poly-lsp-mcp process",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			dir := daemon.StatusDir()
@@ -196,7 +197,17 @@ func statusCmd() *cobra.Command {
 						c.Starts, c.CrashRestarts, c.IdleStops, c.MemoryStops, c.PressureStops, last)
 				}
 			}
-			return w.Flush()
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			for _, f := range files {
+				var rep symbols.CostReport
+				if len(f.Index) == 0 || json.Unmarshal(f.Index, &rep) != nil || rep.Files == 0 {
+					continue
+				}
+				fmt.Printf("\n%d %s\n%s", f.PID, f.Root, rep.Text())
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the status files as one JSON array")

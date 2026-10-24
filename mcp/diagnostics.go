@@ -186,6 +186,7 @@ func (s *Server) startManagerIfPresent(idx *symbols.Index) {
 	if len(langs) == 0 {
 		return
 	}
+	s.manager.StatusIndex = func() any { return s.IndexCost() }
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := s.manager.Start(ctx, s.getRoot(), pathToURI(s.getRoot()), langs); err != nil {

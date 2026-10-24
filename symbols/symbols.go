@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/smacker/go-tree-sitter/c"
 	"github.com/smacker/go-tree-sitter/cpp"
@@ -845,6 +846,8 @@ type buildConfig struct {
 	// plugins are convention extractors (F2) that run after the lexical
 	// walk and add typed, confidence-labelled edges to the index.
 	plugins []Plugin
+	// cost, if set, records what each directory cost the walk.
+	cost *BuildCost
 }
 
 // WithCache plumbs a ParseCache through Build. Files whose
@@ -881,6 +884,10 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		ign = git.LoadIgnores(root)
 	}
 	var pluginFiles []PluginFile
+	if cfg.cost != nil {
+		cfg.cost.begin(root)
+		defer cfg.cost.end()
+	}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -891,6 +898,9 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			}
 			if ign.DirIgnored(root, path) {
 				return fs.SkipDir
+			}
+			if cfg.cost != nil {
+				cfg.cost.dir(path)
 			}
 			return nil
 		}
@@ -921,6 +931,7 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		if info.Size() > maxFileSize {
 			return nil
 		}
+		fileStart := time.Now()
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", path, err)
@@ -931,7 +942,8 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			Language: lang.Name,
 		})
 		var hits []Hit
-		if h, ok := cfg.cache.Get(lang.Name, content); ok {
+		h, cached := cfg.cache.Get(lang.Name, content)
+		if cached {
 			hits = h
 		} else {
 			hits = ex.Extract(content)
@@ -949,6 +961,9 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			default:
 				idx.InsertComment(ref.Name, path, lang.Name, ref.Line, ref.Col)
 			}
+		}
+		if cfg.cost != nil {
+			cfg.cost.file(path, info.Size(), time.Since(fileStart), cached)
 		}
 		return nil
 	})

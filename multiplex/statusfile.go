@@ -19,6 +19,9 @@ type StatusFile struct {
 	Root      string        `json:"root"`
 	UpdatedAt string        `json:"updatedAt"` // RFC 3339
 	Children  []ChildStatus `json:"children"`
+	// Index is what the owning server's last index build cost, by
+	// directory (symbols.CostReport), when the owner supplies it.
+	Index json.RawMessage `json:"index,omitempty"`
 }
 
 // statusPath is unique per manager: one process (the daemon) can hold a
@@ -41,12 +44,18 @@ func (m *Manager) writeStatus() {
 	if m.stopping() {
 		return
 	}
-	b, err := json.MarshalIndent(StatusFile{
+	sf := StatusFile{
 		PID:       os.Getpid(),
 		Root:      m.startCwd,
 		UpdatedAt: time.Now().Format(time.RFC3339),
 		Children:  m.Status(),
-	}, "", "  ")
+	}
+	if m.StatusIndex != nil {
+		if raw, err := json.Marshal(m.StatusIndex()); err == nil {
+			sf.Index = raw
+		}
+	}
+	b, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
 		return
 	}

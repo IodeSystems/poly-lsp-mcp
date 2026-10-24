@@ -94,9 +94,10 @@ type Server struct {
 	initialized bool
 	shutdown    bool
 
-	indexMu    sync.RWMutex
-	index      *symbols.Index
-	indexBuilds int // count of BuildIndex calls; a test seam for "did this process build the index itself"
+	indexMu     sync.RWMutex
+	index       *symbols.Index
+	indexCost   symbols.CostReport // guarded by indexMu
+	indexBuilds int                // count of BuildIndex calls; a test seam for "did this process build the index itself"
 	// ignores is the workspace's gitignore set, guarded by indexMu
 	// alongside the index it was resolved with.
 	ignores *git.IgnoreSet
@@ -640,12 +641,17 @@ func (s *Server) BuildIndex() error {
 	// branch switch that changes .gitignore is picked up.
 	s.setIgnores(git.LoadIgnores(root))
 	s.indexBuilds++
-	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache))
+	cost := symbols.NewBuildCost()
+	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache), symbols.WithCost(cost))
 	if err != nil {
 		return fmt.Errorf("index build failed for %s: %w", root, err)
 	}
 	s.setIndex(idx)
+	s.setIndexCost(cost.Report())
 	s.logf("index: indexed %d names from %s", len(idx.Names()), root)
+	for _, line := range strings.Split(strings.TrimSpace(s.IndexCost().Text()), "\n") {
+		s.logf("%s", line)
+	}
 	s.seedConflicted(root)
 
 	resolver := bindings.NewResolver(root)
@@ -749,6 +755,11 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 	}
 	if sc := s.schemaHealth(); sc != nil {
 		res["schemas"] = sc
+	}
+	// What the index cost, by directory, so the client can decide what to
+	// ignore. Absent when no index was built (no root).
+	if c := s.IndexCost(); c.Files > 0 {
+		res["index"] = c
 	}
 	s.reply(req, res)
 }
@@ -897,6 +908,20 @@ func (s *Server) pathIgnored(path string) bool {
 		return false
 	}
 	return s.getIgnores().FileIgnored(root, path)
+}
+
+func (s *Server) setIndexCost(c symbols.CostReport) {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	s.indexCost = c
+}
+
+// IndexCost reports what the last index build cost, by directory; zero
+// before the first build.
+func (s *Server) IndexCost() symbols.CostReport {
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
+	return s.indexCost
 }
 
 func (s *Server) setIndex(idx *symbols.Index) {

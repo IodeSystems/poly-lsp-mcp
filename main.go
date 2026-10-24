@@ -99,6 +99,7 @@ starts). Run a subcommand for anything else.`,
 		Example: `  poly-lsp-mcp query --root . 'file[path=main.go] > *'
   poly-lsp-mcp query --root . ':explain #runQuery'
   poly-lsp-mcp mcp --root .
+  poly-lsp-mcp index --root .
   poly-lsp-mcp status`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -117,7 +118,7 @@ starts). Run a subcommand for anything else.`,
 		return err
 	})
 	root.PersistentFlags().StringVar(&l.configPath, "config", "poly-lsp-mcp.yaml", "language registry config file")
-	root.AddCommand(lspCmd(l), mcpCmd(l), queryCmd(l), statusCmd(), daemonCmd(l))
+	root.AddCommand(lspCmd(l), mcpCmd(l), queryCmd(l), indexCmd(l), statusCmd(), daemonCmd(l))
 	return root
 }
 

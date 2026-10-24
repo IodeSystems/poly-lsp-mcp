@@ -57,6 +57,9 @@ type Manager struct {
 	// Shutdown. See ReadStatusFiles.
 	StatusDir string
 	statusMu  sync.Mutex
+	// StatusIndex, if set, supplies the status file's index field. Set
+	// before Start.
+	StatusIndex func() any
 
 	// Test seams; nil = read /proc.
 	readRSS func(pid int) (int64, error)

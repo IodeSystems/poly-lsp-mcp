@@ -25,7 +25,42 @@ import (
 // itself without depending on gopls/tsserver/pylsp being installed.
 var polyLspMcpBinary string
 
+// fakeLSPArg makes the test binary act as a minimal LSP server: initialize
+// succeeds, every other request gets -32601, "exit" ends the process. It
+// depends on no tool on PATH, unlike polyLspMcpBinary, whose own child
+// (gopls) is looked up on PATH.
+const fakeLSPArg = "--fake-lsp"
+
+func runFakeLSP() {
+	r := bufio.NewReader(os.Stdin)
+	for {
+		msg, err := jsonrpc.Read(r)
+		if err != nil || msg.Method == "exit" {
+			return
+		}
+		if msg.IsNotification() {
+			continue
+		}
+		resp := &jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID}
+		switch msg.Method {
+		case "initialize":
+			resp.Result = json.RawMessage(`{"capabilities":{}}`)
+		case "shutdown":
+			resp.Result = json.RawMessage(`null`)
+		default:
+			resp.Error = &jsonrpc.Error{Code: -32601, Message: "method not found: " + msg.Method}
+		}
+		if jsonrpc.Write(os.Stdout, resp) != nil {
+			return
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == fakeLSPArg {
+		runFakeLSP()
+		return
+	}
 	dir, err := os.MkdirTemp("", "poly-lsp-mcp-srv-test-*")
 	if err != nil {
 		panic(err)
@@ -381,8 +416,14 @@ func TestMergeCapabilitiesHandlesNilAndBadInputs(t *testing.T) {
 // language server installed.
 func makeGoOverrideRegistry(t *testing.T) *config.Registry {
 	t.Helper()
+	return makeGoRegistry(t, &config.LSP{Cmd: polyLspMcpBinary})
+}
+
+// makeGoRegistry returns a registry where "go" uses the given child LSP.
+func makeGoRegistry(t *testing.T, lsp *config.LSP) *config.Registry {
+	t.Helper()
 	cfg := &config.Config{Languages: []config.Language{
-		{Name: "go", Extensions: []string{"go", "mod"}, LSP: &config.LSP{Cmd: polyLspMcpBinary}, TreeSitter: "go"},
+		{Name: "go", Extensions: []string{"go", "mod"}, LSP: lsp, TreeSitter: "go"},
 	}}
 	reg, err := cfg.Build()
 	if err != nil {
@@ -440,7 +481,13 @@ func TestDocumentSymbolWithManagerReturnsContent(t *testing.T) {
 }
 
 func TestForwardsUnknownTextDocumentMethodToChild(t *testing.T) {
-	reg := makeGoOverrideRegistry(t)
+	// The child is the fake LSP, not poly-lsp-mcp: the latter spawns gopls
+	// itself and answers null when gopls is not on PATH (as on CI).
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := makeGoRegistry(t, &config.LSP{Cmd: exe, Args: []string{fakeLSPArg}})
 	mgr := multiplex.NewManager(reg)
 	dir := makeGoWorkspace(t, "Foo")
 

@@ -98,6 +98,11 @@ func mcpCmd(l *loader) *cobra.Command {
 			if roots.auto {
 				log.Print("mcp: --lsp-roots is ignored in --daemon mode; pass it to `poly-lsp-mcp daemon`")
 			}
+			// The daemon builds each root's index with its own settings
+			// (include: from its config); these flags do not reach it.
+			if idx.anyway || len(idx.includes) > 0 || cmd.Flags().Changed("symlink-depth") {
+				log.Print("mcp: --index-anyway, --include and --symlink-depth are ignored in --daemon mode")
+			}
 			log.Printf("mcp: proxying root %s to shared daemon (readOnly=%v validate=%v)", root, readOnly, validate)
 			return daemon.RunProxy(client, root, os.Stdin, os.Stdout)
 		}
@@ -120,7 +125,7 @@ func mcpCmd(l *loader) *cobra.Command {
 		}
 
 		srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
-		if err := idx.apply(srv); err != nil {
+		if err := idx.apply(srv, cfg); err != nil {
 			return err
 		}
 		if len(idx.excludes) > 0 {

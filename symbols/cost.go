@@ -32,8 +32,12 @@ type BuildCost struct {
 	dirs     map[string]*dirCost // repo-relative, slash-separated; "" = root
 	nested   map[string]bool     // directories with their own .git
 	langs    map[string]int      // indexable files per language
-	leftOut  []LeftOut           // see CostReport.LeftOut
+	leftOut  []LeftOut           // see CostReport.LeftOut; at most leftOutCap per reason
+	leftN    map[string]int      // every left-out entry, by reason: the true count
+	skipped  map[string]bool     // skipped dirs already recorded
 	shadowed map[string]int      // files hidden by a stronger sibling, by rule
+	// symlinkDepth is the build's --symlink-depth, for the hint.
+	symlinkDepth int
 }
 
 type dirCost struct {
@@ -45,7 +49,8 @@ type dirCost struct {
 
 // NewBuildCost returns an empty recorder for WithCost.
 func NewBuildCost() *BuildCost {
-	return &BuildCost{dirs: map[string]*dirCost{}, nested: map[string]bool{}, shadowed: map[string]int{}, langs: map[string]int{}}
+	return &BuildCost{dirs: map[string]*dirCost{}, nested: map[string]bool{}, shadowed: map[string]int{}, langs: map[string]int{},
+		leftN: map[string]int{}, skipped: map[string]bool{}}
 }
 
 // WithCost records per-directory cost into c.
@@ -84,25 +89,106 @@ func (c *BuildCost) shadow(rule string) { c.shadowed[rule]++ }
 func (c *BuildCost) lang(name string) { c.langs[name]++ }
 
 func (c *BuildCost) unreadable(p string) {
-	c.leftOut = append(c.leftOut, LeftOut{Dir: c.rel(p), Reason: LeftUnreadable})
+	if c != nil {
+		c.LeaveOut(c.rel(p), LeftUnreadable)
+	}
 }
 
-// LeaveOut records a directory the build did not look into, and why.
+// LeaveOut records a directory (or file) the build did not look into, and
+// why.
 func (c *BuildCost) LeaveOut(dir, reason string) {
-	c.leftOut = append(c.leftOut, LeftOut{Dir: dir, Reason: reason})
+	if c == nil {
+		return
+	}
+	c.leftN[reason]++
+	if c.leftN[reason] <= leftOutCap {
+		c.leftOut = append(c.leftOut, LeftOut{Dir: dir, Reason: reason})
+	}
 }
+
+// skippedDir records a skipDirs directory once, however many of its files
+// git lists.
+func (c *BuildCost) skippedDir(rel string) {
+	if c == nil || c.skipped[rel] {
+		return
+	}
+	c.skipped[rel] = true
+	c.LeaveOut(rel, LeftSkipped)
+}
+
+// leftOutCap bounds the entries listed per reason. A repo with thousands of
+// generated bundles over the size cap would otherwise put thousands of
+// paths in every notification; the count stays exact in LeftOutBy.
+const leftOutCap = 20
 
 // LeftOut is a directory (or file) the index does not cover, and why.
 type LeftOut struct {
 	Dir    string `json:"dir"`
-	Reason string `json:"reason"` // git-ignored | worktree of this repo | another repo | excluded | unreadable
+	Reason string `json:"reason"` // one of the Left* constants, or a git.Nested reason
 }
 
 const (
 	LeftIgnored    = "git-ignored"
 	LeftExcluded   = "excluded"
 	LeftUnreadable = "unreadable"
+	// LeftSkipped: a skipDirs directory (node_modules, vendor, dist, …).
+	LeftSkipped = "skipped dir"
+	// LeftOverSize: a file over maxFileSize.
+	LeftOverSize = "over size"
+	// LeftMinified: a *.min.* file, one long line of generated code.
+	LeftMinified = "minified"
+	// LeftLFS: a Git LFS pointer whose content was never fetched.
+	LeftLFS = "LFS pointer (not downloaded)"
+	// LeftLinkLeaves: a symlink whose target is outside the root.
+	LeftLinkLeaves = "symlink leaves root"
+	// LeftLinkLoop: a dir symlink back to a directory already open on its
+	// path.
+	LeftLinkLoop = "symlink loop"
+	// LeftLinkDepth: a symlink more than --symlink-depth links deep.
+	LeftLinkDepth = "symlink depth"
+	// LeftLinkIndexed: a symlink whose target is indexed under its own path.
+	LeftLinkIndexed = "symlink to indexed path"
+	// LeftLinkBroken: a symlink whose target does not exist.
+	LeftLinkBroken = "symlink broken"
 )
+
+// LeftOutReason is one reason's total, and how to refine or revert it.
+type LeftOutReason struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+	Hint   string `json:"hint,omitempty"`
+}
+
+// leftOutHint names the way to override a reason, or what to do about it.
+// "" where there is nothing to say beyond the reason itself.
+func leftOutHint(reason string, depth int) string {
+	switch reason {
+	case LeftSkipped:
+		return "index one anyway: --include <dir> (repeatable) or include: in poly-lsp-mcp.yaml"
+	case LeftOverSize:
+		return "index one anyway, whatever its size: --include <path> or include: in poly-lsp-mcp.yaml"
+	case LeftMinified:
+		return "index one anyway: --include <path> or include: in poly-lsp-mcp.yaml"
+	case LeftLFS:
+		return "git lfs pull fetches the content; the next build indexes it"
+	case LeftLinkLeaves:
+		return "follow one anyway: --include <link path>"
+	case LeftLinkLoop:
+		return "the target is a directory already open on the same path; nothing is lost"
+	case LeftLinkDepth:
+		if depth == 0 {
+			return "symlinks are not followed (--symlink-depth 0); --symlink-depth N follows N links deep"
+		}
+		return fmt.Sprintf("follow deeper: --symlink-depth %d (now %d)", depth+1, depth)
+	case LeftLinkIndexed:
+		return "the target is indexed under its own path, once"
+	case git.NestedWorktree, git.NestedRepo:
+		return "index one as part of this workspace: --include <dir>"
+	case LeftExcluded:
+		return "drop the --exclude to index it again"
+	}
+	return ""
+}
 
 func (c *BuildCost) file(p string, size int64, cost time.Duration, cached bool) {
 	d := path.Dir(c.rel(p))
@@ -132,8 +218,13 @@ type CostReport struct {
 	Heaviest []DirCost `json:"heaviest"` // by cost, at most 10
 	Hint     string    `json:"hint,omitempty"`
 	// LeftOut: what the build did not look into, and why — git-ignored
-	// directories, nested repositories, --exclude, unreadable paths.
+	// directories, nested repositories, --exclude, unreadable paths,
+	// skipped dirs, files over size, minified or LFS pointers, symlinks
+	// not followed. At most leftOutCap entries per reason.
 	LeftOut []LeftOut `json:"leftOut,omitempty"`
+	// LeftOutBy: every reason in LeftOut, with its true count and the way
+	// to refine or revert it. Sorted by reason.
+	LeftOutBy []LeftOutReason `json:"leftOutBy,omitempty"`
 	// Languages: indexable files per language (read or counted).
 	Languages map[string]int `json:"languages,omitempty"`
 	// Shadowed: files left out because a stronger-typed sibling exists
@@ -211,6 +302,10 @@ func (c *BuildCost) Report() CostReport {
 		WallMs: c.wall.Milliseconds(),
 	}
 	rep.LeftOut = append([]LeftOut(nil), c.leftOut...)
+	for r, n := range c.leftN {
+		rep.LeftOutBy = append(rep.LeftOutBy, LeftOutReason{Reason: r, Count: n, Hint: leftOutHint(r, c.symlinkDepth)})
+	}
+	sort.Slice(rep.LeftOutBy, func(i, j int) bool { return rep.LeftOutBy[i].Reason < rep.LeftOutBy[j].Reason })
 	if len(c.langs) > 0 {
 		rep.Languages = map[string]int{}
 		for k, v := range c.langs {
@@ -322,23 +417,30 @@ func (r CostReport) Text() string {
 		for _, l := range r.LeftOut {
 			byReason[l.Reason] = append(byReason[l.Reason], l.Dir)
 		}
-		var reasons []string
-		for k := range byReason {
-			reasons = append(reasons, k)
+		// The true counts and hints; a report from before LeftOutBy (a
+		// status file of an older server) counts what it lists.
+		by := r.LeftOutBy
+		if len(by) == 0 {
+			for k, dirs := range byReason {
+				by = append(by, LeftOutReason{Reason: k, Count: len(dirs)})
+			}
+			sort.Slice(by, func(i, j int) bool { return by[i].Reason < by[j].Reason })
 		}
-		sort.Strings(reasons)
 		b.WriteString("left out:\n")
-		for _, k := range reasons {
-			dirs := byReason[k]
+		for _, lr := range by {
+			dirs := byReason[lr.Reason]
 			shown := dirs
 			if len(shown) > 5 {
 				shown = shown[:5]
 			}
 			more := ""
-			if len(dirs) > 5 {
-				more = fmt.Sprintf(" … and %d more", len(dirs)-5)
+			if lr.Count > len(shown) {
+				more = fmt.Sprintf(" … and %d more", lr.Count-len(shown))
 			}
-			fmt.Fprintf(&b, "  %-22s %3d  %s%s\n", k, len(dirs), strings.Join(shown, ", "), more)
+			fmt.Fprintf(&b, "  %-22s %3d  %s%s\n", lr.Reason, lr.Count, strings.Join(shown, ", "), more)
+			if lr.Hint != "" {
+				fmt.Fprintf(&b, "  %-22s      %s\n", "", lr.Hint)
+			}
 		}
 	}
 	if len(r.Heaviest) == 0 {

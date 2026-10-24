@@ -29,7 +29,6 @@ func queryCmd(l *loader) *cobra.Command {
 		verbose  bool
 		asJSON   bool
 		resolve  bool
-		include  []string
 	)
 	cmd := &cobra.Command{
 		Use:   "query [flags] <selector>",
@@ -49,7 +48,6 @@ with ':explain ' to see what each step cost instead of the matches.`,
 	f.StringVar(&budget, "budget", "", "query budget: Nms wall-clock (bare = ms) or Nops deterministic work units (default 10000ms). Raise when a query reports it stopped early.")
 	f.BoolVar(&verbose, "verbose", false, "log which config was resolved and other startup detail")
 	f.BoolVar(&asJSON, "json", false, "print ONE JSON document (matches with node, file, type, @, and for an edge from/to and conf; total, offset, stop-early flags) instead of the grouped text tree")
-	f.StringArrayVar(&include, "include", nil, "gitignore-style pattern naming a left-out dir or file to search inside anyway (node_modules, vendor/, .claude/worktrees/a1, *.js for shadowed files); repeatable. .git is never included")
 	idx := indexFlags(f)
 	f.BoolVar(&resolve, "resolve", false, "resolve ::in/::out edges through child LSPs (spawns them for this run, e.g. gopls) and label each edge conf: lsp|lexical|unsettled, as node_query does; slower to start")
 
@@ -80,7 +78,7 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		// own child-LSP manager), so this path needs no --resolve. On no daemon,
 		// a dead one, or any transport error, fall back to the standalone path
 		// below — the answer is the same matches, built in-process.
-		if out, ok := queryViaDaemon(verbose, root, asJSON, selector, limit, offset, budget, include); ok {
+		if out, ok := queryViaDaemon(verbose, root, asJSON, selector, limit, offset, budget, idx.includes); ok {
 			fmt.Print(out)
 			return nil
 		}
@@ -88,7 +86,7 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		// No Serve: a query is read-only and never writes the persisted index.
 		// Child LSPs only under --resolve (below).
 		srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
-		if err := idx.apply(srv); err != nil {
+		if err := idx.apply(srv, cfg); err != nil {
 			return err
 		}
 		// It DOES want the parse cache, though. Without it every invocation
@@ -117,7 +115,7 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		if asJSON {
 			query = srv.QueryJSON
 		}
-		if err := query(selector, limit, offset, budget, os.Stdout, include...); err != nil {
+		if err := query(selector, limit, offset, budget, os.Stdout, idx.includes...); err != nil {
 			// main prints a *mcp.SelectorError as plain prose.
 			return err
 		}

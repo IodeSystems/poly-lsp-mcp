@@ -15,6 +15,7 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/server"
+	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
 // errUsage: the command already printed its usage; exit 2 with no message.
@@ -45,6 +46,13 @@ func main() {
 	var se *mcp.SelectorError
 	if errors.As(err, &se) {
 		fmt.Fprintln(os.Stderr, se.Error())
+		os.Exit(1)
+	}
+	// A root that is not a project: the reason, the repositories found, and
+	// the way out.
+	var np *symbols.NotProjectError
+	if errors.As(err, &np) {
+		fmt.Fprint(os.Stderr, "poly-lsp-mcp: "+np.Detail())
 		os.Exit(1)
 	}
 	fmt.Fprintln(os.Stderr, "poly-lsp-mcp:", err)

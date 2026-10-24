@@ -65,7 +65,11 @@ func (s *Server) startAsyncInit() {
 	start := time.Now()
 	go func() {
 		defer close(ready)
-		s.maybeLoadCache()
+		// A root that is not a project fails in milliseconds: Init refuses it
+		// first thing, so the parse cache is not worth loading for it.
+		if s.indexAnyway || symbols.CheckProjectRoot(s.getRoot()) == nil {
+			s.maybeLoadCache()
+		}
 		err := s.Init()
 		s.setInitErr(err)
 		s.notifyIndexState(err, time.Since(start))
@@ -118,6 +122,12 @@ func (s *Server) notifyIndexState(err error, took time.Duration) {
 		if errors.As(err, &be) {
 			data["budget"] = be.Budget.String()
 			data["read"] = be.Read
+		}
+		var np *symbols.NotProjectError
+		if errors.As(err, &np) {
+			data["reason"] = symbols.LeftNotProject
+			data["repos"] = np.Repos
+			data["reposTotal"] = np.Total
 		}
 	}
 	s.sendNotification("notifications/message", map[string]any{
@@ -194,6 +204,10 @@ func (s *Server) indexRemedy(err error) string {
 		}
 		return msg
 	}
+	var np *symbols.NotProjectError
+	if errors.As(err, &np) {
+		return np.Remedy()
+	}
 	return "fix the cause above and restart the server"
 }
 
@@ -216,6 +230,11 @@ func (s *Server) indexFailure(err error) string {
 	var be *symbols.BudgetError
 	if errors.As(err, &be) {
 		msg += be.Report.Text()
+	}
+	var np *symbols.NotProjectError
+	if errors.As(err, &np) {
+		// Detail carries the repositories found and the remedy.
+		return "poly-lsp: the workspace index was not built: " + np.Detail()
 	}
 	return msg + "remedy: " + s.indexRemedy(err)
 }

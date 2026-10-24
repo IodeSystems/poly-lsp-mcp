@@ -127,8 +127,23 @@ a different poly-lsp-mcp than this one.`,
 			}
 
 			ign := git.LoadIgnores(root)
-			counts, partial := symbols.CountLanguages(root, reg, ign, 5*time.Second)
-			rep.Partial = partial
+			// A root the server would refuse: say so, and do not count its
+			// languages — they would be every repository's under it.
+			np := symbols.CheckProjectRoot(root)
+			if np != nil {
+				msg := np.Error()
+				if np.Total > 0 {
+					msg += fmt.Sprintf("; git repositories under it (%d): %s", np.Total, strings.Join(np.Repos, ", "))
+					if np.Total > len(np.Repos) {
+						msg += fmt.Sprintf(" … and %d more", np.Total-len(np.Repos))
+					}
+				}
+				rep.Problems = append(rep.Problems, msg+". The server will not index it: "+np.Remedy())
+			}
+			counts := map[string]int{}
+			if np == nil {
+				counts, rep.Partial = symbols.CountLanguages(root, reg, ign, 5*time.Second)
+			}
 			rep.Languages = setup.Hints(reg, counts)
 			rep.Versions = map[string]string{}
 			for _, l := range rep.Languages {
@@ -145,7 +160,12 @@ a different poly-lsp-mcp than this one.`,
 				}
 			}
 
-			pr := symbols.DetectProjectRoots(root, ign, symbols.DefaultRootsTime, symbols.DefaultRootsDirs)
+			// No languages (a root refused above, or an empty one): no roots
+			// to look for, and no 2 s search for them.
+			var pr symbols.ProjectRoots
+			if len(rep.Languages) > 0 {
+				pr = symbols.DetectProjectRoots(root, ign, symbols.DefaultRootsTime, symbols.DefaultRootsDirs)
+			}
 			rep.RootsBounded = pr.Bounded
 			for _, l := range rep.Languages {
 				dirs := pr.Roots[l.Lang]

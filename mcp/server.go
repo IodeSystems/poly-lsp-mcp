@@ -28,6 +28,7 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/internal/bindings"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/pathpat"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -106,6 +107,9 @@ type Server struct {
 	index       *symbols.Index
 	indexCost   symbols.CostReport // guarded by indexMu
 	excludes    []string           // client-chosen dirs to drop; see SetExcludes
+	includes    *pathpat.Set       // client-chosen paths to index anyway; see SetIncludes
+	symlinkDep  int                // --symlink-depth; see SetSymlinkDepth
+	indexAnyway bool               // index a root that is not a project; see SetIndexAnyway
 	nested      []git.Nested       // nested repos left out by the last build; guarded by indexMu
 	indexBuilds int                // count of BuildIndex calls; a test seam for "did this process build the index itself"
 	// ignores is the workspace's gitignore set, guarded by indexMu
@@ -312,6 +316,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		proactiveOpen: true,
 		gitPrewarm:    true,
 		fileWatch:     true,
+		symlinkDep:    symbols.DefaultSymlinkDepth,
 	}
 	s.SetLegacyTools(false)
 	s.parseCache = symbols.NewParseCache()
@@ -663,6 +668,14 @@ func (s *Server) BuildIndex() error {
 	if root == "" {
 		return errors.New("no workspace root configured")
 	}
+	// Before anything costs time: a home directory or a directory of clones
+	// is not one project. See symbols.CheckProjectRoot.
+	if !s.indexAnyway {
+		if np := symbols.CheckProjectRoot(root); np != nil {
+			s.setIndexCost(symbols.CostReport{})
+			return np
+		}
+	}
 	// Resolved alongside the walk so the watcher filters by exactly the
 	// same set the build used, and re-resolved on every rebuild so a
 	// branch switch that changes .gitignore is picked up.
@@ -674,7 +687,17 @@ func (s *Server) BuildIndex() error {
 	// skips them too.
 	manifest := git.LoadManifest(root)
 	if manifest != nil {
-		s.setNested(manifest.Nested)
+		// A nested repo an include names or leads to is not left out: it
+		// leaves the ignore set and the query tree's skips, and the build
+		// walks it for what the patterns cover.
+		var nested []git.Nested
+		for _, n := range manifest.Nested {
+			if s.includes.Covers(n.Dir) || s.includes.OnWay(n.Dir) {
+				continue
+			}
+			nested = append(nested, n)
+		}
+		s.setNested(nested)
 	} else {
 		s.setNested(nil)
 	}
@@ -686,7 +709,10 @@ func (s *Server) BuildIndex() error {
 	cost := symbols.NewBuildCost()
 	if manifest != nil {
 		for _, n := range manifest.Nested {
-			cost.LeaveOut(n.Dir, n.Reason)
+			// Opened only along a path: the rest of it is still left out.
+			if !s.includes.Covers(n.Dir) {
+				cost.LeaveOut(n.Dir, n.Reason)
+			}
 		}
 	}
 	for _, d := range ignoredDirs {
@@ -696,7 +722,8 @@ func (s *Server) BuildIndex() error {
 		cost.LeaveOut(git.CleanExclude(d), symbols.LeftExcluded)
 	}
 	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache), symbols.WithCost(cost),
-		symbols.WithIgnores(ign), symbols.WithBudget(s.indexBudget), symbols.WithManifest(manifest))
+		symbols.WithIgnores(ign), symbols.WithBudget(s.indexBudget), symbols.WithManifest(manifest),
+		symbols.WithInclude(s.includes), symbols.WithSymlinkDepth(s.symlinkDep))
 	if err != nil {
 		var be *symbols.BudgetError
 		if errors.As(err, &be) {
@@ -978,6 +1005,19 @@ func (s *Server) handleToolsCall(req *jsonrpc.Message) {
 // index and from every walk, as though .gitignore listed them. Set before
 // the first build.
 func (s *Server) SetExcludes(dirs []string) { s.excludes = dirs }
+
+// SetIncludes indexes what these gitignore-style patterns cover even when a
+// heuristic would leave it out (over size, minified, LFS pointer, skipped
+// dir, nested repo, symlink leaving the root). Set before the first build.
+func (s *Server) SetIncludes(patterns []string) { s.includes = pathpat.New(patterns) }
+
+// SetSymlinkDepth follows symlinks at most n links deep; 0 follows none.
+// New servers use symbols.DefaultSymlinkDepth.
+func (s *Server) SetSymlinkDepth(n int) { s.symlinkDep = n }
+
+// SetIndexAnyway indexes the root even when it is not a project (the home
+// directory, a directory of clones). See symbols.CheckProjectRoot.
+func (s *Server) SetIndexAnyway(on bool) { s.indexAnyway = on }
 
 // excludeSet is the client's excludes alone, without git's ignores; nil
 // when there are none.

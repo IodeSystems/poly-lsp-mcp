@@ -276,6 +276,7 @@ func (r *Registry) build(root string) *mcp.Server {
 		}
 	}
 	srv := mcp.New(r.reg, root, r.cfg.Bindings, schemas)
+	srv.SetIncludes(r.cfg.Include)
 	srv.SetReadOnly(r.readOnly)
 	srv.SetValidateEdits(r.validate)
 	srv.SetParseCache(r.cache)

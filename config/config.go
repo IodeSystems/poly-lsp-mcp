@@ -75,6 +75,10 @@ type Config struct {
 	AutoSchemas bool       `yaml:"auto_schemas,omitempty"`
 	// Shadows: nil (key absent) = DefaultShadows; [] = none. See shadow.go.
 	Shadows []ShadowRule `yaml:"shadows,omitempty"`
+	// Include: gitignore-style patterns the index covers even where a
+	// heuristic leaves them out (over size, minified, LFS pointer, skipped
+	// dir, nested repo, symlink leaving the root). Joined with --include.
+	Include []string `yaml:"include,omitempty"`
 }
 
 // Registry is the in-memory lookup view: extension → language. Built from a

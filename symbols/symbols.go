@@ -27,6 +27,7 @@ import (
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
+	"github.com/iodesystems/poly-lsp-mcp/internal/pathpat"
 	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
@@ -820,9 +821,28 @@ var skipDirs = map[string]bool{
 	".gradle": true,
 }
 
-// maxFileSize caps any single file we'll index, in bytes. Files larger
-// than this are silently skipped — generated bundles are not the target.
+// maxFileSize caps any single file we'll index, in bytes. A file larger
+// than this is skipped and reported as LeftOverSize — generated bundles are
+// not the target. --include indexes one anyway.
 const maxFileSize = 1 << 20 // 1 MiB
+
+// lfsPointer is how every Git LFS pointer file begins. A repository cloned
+// without `git lfs pull` holds these ~130-byte stubs in place of the
+// content; indexing one indexes "version", "oid" and "sha256".
+var lfsPointer = []byte("version https://git-lfs.github.com/spec/v1")
+
+// DefaultSymlinkDepth bounds nested symlink hops: a link inside a followed
+// dir link is two deep. Four covers a monorepo's shared-package links
+// without letting a link farm multiply the tree.
+const DefaultSymlinkDepth = 4
+
+// minified reports whether a base name is a *.min.* file (foo.min.js,
+// foo.min.css): one line of generated code, every name in it a duplicate
+// of its source or a mangled one-letter local.
+func minified(base string) bool {
+	i := strings.Index(base, ".min.")
+	return i > 0 && i+len(".min.") < len(base)
+}
 
 // BuildOption tunes Build. Variadic so callers without special needs
 // can keep using the bare two-argument form.
@@ -846,12 +866,32 @@ type buildConfig struct {
 	budget Budget
 	// manifest, if set, is the file set to index instead of a walk.
 	manifest *git.Manifest
+	// include overrides the heuristic exclusions. See WithInclude.
+	include *pathpat.Set
+	// symlinkDepth bounds nested symlink hops; set by WithSymlinkDepth,
+	// else DefaultSymlinkDepth.
+	symlinkDepth    int
+	symlinkDepthSet bool
 }
 
 // WithManifest indexes the files git lists instead of walking root. nil
 // keeps the walk (not a repo).
 func WithManifest(m *git.Manifest) BuildOption {
 	return func(cfg *buildConfig) { cfg.manifest = m }
+}
+
+// WithInclude indexes what inc covers even when a heuristic would leave it
+// out: over size, minified, LFS pointer, a skipped dir, a nested repository
+// the manifest lists, a symlink whose target leaves the root. It does not
+// override .gitignore or --exclude: those are the repository's and the
+// client's own decisions, not a guess.
+func WithInclude(inc *pathpat.Set) BuildOption {
+	return func(cfg *buildConfig) { cfg.include = inc }
+}
+
+// WithSymlinkDepth follows symlinks at most n deep; 0 follows none.
+func WithSymlinkDepth(n int) BuildOption {
+	return func(cfg *buildConfig) { cfg.symlinkDepth, cfg.symlinkDepthSet = n, true }
 }
 
 // WithCache plumbs a ParseCache through Build. Files whose
@@ -945,6 +985,11 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	default:
 		ign = git.LoadIgnores(root)
 	}
+	maxDepth := DefaultSymlinkDepth
+	if cfg.symlinkDepthSet {
+		maxDepth = cfg.symlinkDepth
+	}
+	inc := cfg.include
 	var pluginFiles []PluginFile
 	if cfg.budget.set() && cfg.cost == nil {
 		cfg.cost = NewBuildCost() // the trace needs one
@@ -953,15 +998,55 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	var spentAt time.Time
 	if cfg.cost != nil {
 		cfg.cost.begin(root)
+		cfg.cost.symlinkDepth = maxDepth
 		defer cfg.cost.end()
 	}
 	read, counted, over, stopped := 0, 0, false, false
+	dupes := 0 // files a link led back to, already indexed
 	shadow := reg.NewShadowChecker()
 
-	// visit indexes one file. info is asked for only once the cheap checks
-	// pass. fs.SkipAll ends the build's file loop (budget spent and the
-	// trace's count run out).
-	visit := func(path string, info func() (fs.FileInfo, error)) error {
+	// realRoot is root with its symlinks resolved, so a link's target can be
+	// placed inside or outside it.
+	realRoot := root
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		realRoot = r
+	}
+	// indexed holds every file read or counted, by key: its path for a file
+	// reached without a link; for one reached through a link, its target's
+	// path under root when inside it (so it matches that file's own key),
+	// else the target itself. A link to a file already in it is not indexed
+	// twice.
+	indexed := map[string]bool{}
+	keyOf := func(real string) string {
+		if r, ok := within(realRoot, real); ok {
+			return filepath.Join(root, r)
+		}
+		return real
+	}
+	relOf := func(p string) string {
+		r, err := filepath.Rel(root, p)
+		if err != nil {
+			return ""
+		}
+		return filepath.ToSlash(r)
+	}
+
+	// visit indexes one file, at path (as indexed) and rel (root-relative,
+	// slash-separated). key is its dedupe key (see indexed). info is asked
+	// for only once the cheap checks pass. fs.SkipAll ends the build's file
+	// loop (budget spent and the trace's count run out).
+	visit := func(path, rel, key string, info func() (fs.FileInfo, error)) error {
+		// .git is never indexed, include or not. A skipped dir is entered
+		// only for what an include pattern covers.
+		if skip := skipDirOf(rel); skip != "" {
+			repoState := skip[strings.LastIndexByte(skip, '/')+1:] == ".git"
+			if repoState || !inc.Covers(rel) {
+				if !repoState {
+					cfg.cost.skippedDir(skip)
+				}
+				return nil
+			}
+		}
 		// KnownIgnored, not FileIgnored: every path a build visits existed
 		// when LoadIgnores ran, so the snapshot already has the answer.
 		// FileIgnored's git fallback spawned one `git check-ignore` per
@@ -990,11 +1075,24 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			}
 			return nil
 		}
+		forced := inc.Covers(rel)
+		if !forced && minified(filepath.Base(path)) {
+			cfg.cost.LeaveOut(rel, LeftMinified)
+			return nil
+		}
 		fi, err := info()
 		if err != nil || !fi.Mode().IsRegular() {
-			return nil // gone since git listed it, or a symlink: not followed
+			return nil // gone since git listed it, or not a file
 		}
-		if fi.Size() > maxFileSize {
+		// An included file is indexed whatever its size. The budget still
+		// bounds the build: it is checked before each read, though a file
+		// once started is read whole.
+		if !forced && fi.Size() > maxFileSize {
+			cfg.cost.LeaveOut(rel, LeftOverSize)
+			return nil
+		}
+		if indexed[key] {
+			dupes++ // reached once already, through a link
 			return nil
 		}
 		if cfg.cost != nil {
@@ -1014,6 +1112,7 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 				stopped = true
 				return fs.SkipAll
 			}
+			indexed[key] = true
 			cfg.cost.file(path, fi.Size(), 0, false)
 			return nil
 		}
@@ -1022,11 +1121,16 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		if err != nil {
 			// Skipped and named, not fatal: one unreadable file must not
 			// cost the whole index.
-			if cfg.cost != nil {
-				cfg.cost.unreadable(path)
-			}
+			cfg.cost.unreadable(path)
 			return nil
 		}
+		// Checked on the read already done: a pointer is a few hundred
+		// bytes, so no separate open.
+		if !forced && bytes.HasPrefix(content, lfsPointer) {
+			cfg.cost.LeaveOut(rel, LeftLFS)
+			return nil
+		}
+		indexed[key] = true
 		read++
 		pluginFiles = append(pluginFiles, PluginFile{
 			Path:     path,
@@ -1060,43 +1164,208 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		return nil
 	}
 
+	// Symlinks are followed after the files reached without one, so that a
+	// link to a file or directory already indexed under its own path is
+	// known as one and not indexed twice.
+	type link struct{ path, phys string }
+	var links []link
+
+	// ownPath reports whether a directory inside the root, given relative to
+	// it, is indexed under its own path: not under a skipped dir and not
+	// ignored, excluded or a nested repository. A link to such a directory
+	// would only index its files a second time.
+	ownPath := func(rel string) bool {
+		if rel == "." {
+			return true
+		}
+		if skipDirOf(rel+"/x") != "" && !inc.Covers(rel) {
+			return false
+		}
+		return !ign.DirIgnored(root, filepath.Join(root, filepath.FromSlash(rel)))
+	}
+
+	// walk walks phys, indexing each file under mapped (the same path,
+	// except under a followed dir link, where phys is the target and mapped
+	// the link). depth is how many links deep phys is; branch the real
+	// directories open on its path, for loop detection. need, if set, must
+	// pass for a file to be visited; own, if set, is the ignore set of a
+	// nested repository walked as part of this one, rooted at phys.
+	var walk func(phys, mapped string, depth int, branch map[string]bool, need func(string) bool, own *git.IgnoreSet) error
+	var follow func(path, phys string, depth int, branch map[string]bool) error
+
+	walk = func(phys, mapped string, depth int, branch map[string]bool, need func(string) bool, own *git.IgnoreSet) error {
+		err := filepath.WalkDir(phys, func(p string, d fs.DirEntry, err error) error {
+			mp := mapped + p[len(phys):]
+			if err != nil {
+				// An unreadable directory is skipped and named, not fatal.
+				if d != nil && d.IsDir() && p != phys {
+					cfg.cost.unreadable(mp)
+					return fs.SkipDir
+				}
+				return nil
+			}
+			rel := relOf(mp)
+			if d.IsDir() {
+				if p == phys {
+					return nil
+				}
+				name := d.Name()
+				if name == ".git" {
+					return fs.SkipDir
+				}
+				if skipDirs[name] && !inc.Covers(rel) && !inc.OnWay(rel) {
+					cfg.cost.skippedDir(rel)
+					return fs.SkipDir
+				}
+				// Under a link, the target's own path is ignored too: a link
+				// into a tree must not bring back what .gitignore drops there.
+				if ign.DirIgnored(root, mp) || own.DirIgnored(phys, p) || (depth > 0 && ign.DirIgnored(root, keyOf(p))) {
+					return fs.SkipDir
+				}
+				if depth == 0 && need == nil && cfg.cost != nil {
+					cfg.cost.dir(mp)
+				}
+				return nil
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				if ign.KnownIgnored(root, mp) || own.KnownIgnored(phys, p) {
+					return nil
+				}
+				if depth == 0 {
+					links = append(links, link{mp, p})
+					return nil
+				}
+				// Inside a followed link: follow now, with every real
+				// directory between the target and this link open.
+				return follow(mp, p, depth+1, openTo(branch, phys, filepath.Dir(p)))
+			}
+			if need != nil && !need(rel) {
+				return nil
+			}
+			if own.KnownIgnored(phys, p) {
+				return nil
+			}
+			key := mp
+			if depth > 0 {
+				key = keyOf(p) // p is real: phys is, and WalkDir follows no link
+				if ign.KnownIgnored(root, key) {
+					return nil
+				}
+			}
+			return visit(mp, rel, key, d.Info)
+		})
+		if stopped {
+			return fs.SkipAll
+		}
+		return err
+	}
+
+	// follow follows one symlink at path (as indexed); phys is where it is
+	// on disk. depth counts it.
+	follow = func(path, phys string, depth int, branch map[string]bool) error {
+		rel := relOf(path)
+		if depth > maxDepth {
+			cfg.cost.LeaveOut(rel, LeftLinkDepth)
+			return nil
+		}
+		real, err := filepath.EvalSymlinks(phys)
+		if err != nil {
+			cfg.cost.LeaveOut(rel, LeftLinkBroken)
+			return nil
+		}
+		trel, inside := within(realRoot, real)
+		if !inside && !inc.Covers(rel) {
+			cfg.cost.LeaveOut(rel, LeftLinkLeaves)
+			return nil
+		}
+		fi, err := os.Stat(real)
+		if err != nil {
+			cfg.cost.LeaveOut(rel, LeftLinkBroken)
+			return nil
+		}
+		// A target .gitignore drops is not brought back through a link.
+		if inside && (ign.KnownIgnored(root, keyOf(real)) || (fi.IsDir() && ign.DirIgnored(root, keyOf(real)))) {
+			cfg.cost.LeaveOut(rel, LeftIgnored)
+			return nil
+		}
+		if !fi.IsDir() {
+			key := keyOf(real)
+			if indexed[key] {
+				cfg.cost.LeaveOut(rel, LeftLinkIndexed)
+				return nil
+			}
+			return visit(path, rel, key, func() (fs.FileInfo, error) { return fi, nil })
+		}
+		if branch[real] {
+			cfg.cost.LeaveOut(rel, LeftLinkLoop)
+			return nil
+		}
+		if inside && ownPath(filepath.ToSlash(trel)) {
+			cfg.cost.LeaveOut(rel, LeftLinkIndexed)
+			return nil
+		}
+		open := make(map[string]bool, len(branch)+1)
+		for k := range branch {
+			open[k] = true
+		}
+		open[real] = true
+		dupes0, files0 := dupes, read+counted
+		err = walk(real, path, depth, open, nil, nil)
+		// Everything it led to was indexed already (another link to the
+		// same place came first): name it rather than drop it unseen.
+		if dupes > dupes0 && read+counted == files0 {
+			cfg.cost.LeaveOut(rel, LeftLinkIndexed)
+		}
+		return err
+	}
+
 	if cfg.manifest != nil {
 		// git already knows the file set: iterate it, walk nothing.
 		for _, rel := range cfg.manifest.Files {
-			if inSkipDir(rel) {
-				continue
-			}
 			path := filepath.Join(root, filepath.FromSlash(rel))
-			if visit(path, func() (fs.FileInfo, error) { return os.Lstat(path) }) == fs.SkipAll {
+			if visit(path, rel, path, func() (fs.FileInfo, error) { return os.Lstat(path) }) == fs.SkipAll {
 				break
 			}
 		}
+		// A nested repository an include pattern names or leads to is
+		// walked — git lists it as one entry — under its own ignores, and
+		// only for what the patterns cover.
+		for _, n := range cfg.manifest.Nested {
+			if stopped || !(inc.Covers(n.Dir) || inc.OnWay(n.Dir)) {
+				continue
+			}
+			dir := filepath.Join(root, filepath.FromSlash(n.Dir))
+			_ = walk(dir, dir, 0, nil, inc.Covers, git.LoadIgnores(dir))
+		}
+		for _, l := range cfg.manifest.Links {
+			p := filepath.Join(root, filepath.FromSlash(l))
+			links = append(links, link{p, p})
+		}
 	} else {
-		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				// An unreadable directory is skipped and named, not fatal.
-				if d != nil && d.IsDir() && path != root {
-					if cfg.cost != nil {
-						cfg.cost.unreadable(path)
-					}
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if d.IsDir() {
-				if skipDirs[d.Name()] {
-					return fs.SkipDir
-				}
-				if ign.DirIgnored(root, path) {
-					return fs.SkipDir
-				}
-				if cfg.cost != nil {
-					cfg.cost.dir(path)
-				}
-				return nil
-			}
-			return visit(path, d.Info)
-		})
+		_ = walk(root, root, 0, nil, nil, nil)
+	}
+	for _, l := range links {
+		if stopped {
+			break
+		}
+		// git lists a link under an excluded or skipped dir like any file.
+		rel := relOf(l.path)
+		if ign.KnownIgnored(root, l.path) {
+			continue
+		}
+		if skip := skipDirOf(rel); skip != "" && !inc.Covers(rel) {
+			cfg.cost.skippedDir(skip)
+			continue
+		}
+		// A link's own directories are open: a link to one of them is a
+		// loop. Real, since no link was followed to reach it.
+		open := map[string]bool{realRoot: true}
+		for d := filepath.Dir(relOf(l.path)); d != "." && d != "/"; d = filepath.Dir(d) {
+			open[filepath.Join(realRoot, d)] = true
+		}
+		if follow(l.path, l.phys, 1, open) == fs.SkipAll {
+			break
+		}
 	}
 	if over {
 		cfg.cost.end()
@@ -1116,18 +1385,48 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	return idx, nil
 }
 
-// inSkipDir reports whether a root-relative, slash-separated path runs
-// through a skipped directory. git may track a vendor/ or dist/ tree; the
-// index leaves it out the same as a walk would.
-func inSkipDir(rel string) bool {
+// within reports whether p is root or under it, and its path relative to
+// root. Both are real (symlink-free) absolute paths.
+func within(root, p string) (string, bool) {
+	if p == root {
+		return ".", true
+	}
+	if r, ok := strings.CutPrefix(p, root+string(filepath.Separator)); ok {
+		return r, true
+	}
+	return "", false
+}
+
+// openTo returns branch plus every directory from top down to dir, which
+// lies under top.
+func openTo(branch map[string]bool, top, dir string) map[string]bool {
+	out := make(map[string]bool, len(branch)+4)
+	for k := range branch {
+		out[k] = true
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		out[d] = true
+		if d == top || filepath.Dir(d) == d {
+			break
+		}
+	}
+	return out
+}
+
+// skipDirOf is the outermost skipped directory a root-relative,
+// slash-separated path runs through; "" when none. git may track a vendor/
+// or dist/ tree; the index leaves it out the same as a walk would.
+func skipDirOf(rel string) string {
+	off := 0
 	for {
-		i := strings.IndexByte(rel, '/')
+		i := strings.IndexByte(rel[off:], '/')
 		if i < 0 {
-			return false
+			return ""
 		}
-		if skipDirs[rel[:i]] {
-			return true
+		start := strings.LastIndexByte(rel[:off+i], '/') + 1
+		if skipDirs[rel[start:off+i]] {
+			return rel[:off+i]
 		}
-		rel = rel[i+1:]
+		off += i + 1
 	}
 }

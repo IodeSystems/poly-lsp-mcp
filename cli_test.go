@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/iodesystems/poly-lsp-mcp/internal/ts"
+	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
 // An unknown subcommand used to fall through to the stdio LSP server, which
@@ -60,6 +61,63 @@ func TestDaemonReplayFlags(t *testing.T) {
 	want := []string{"--allow=/a", "--allow=/b", "--lsp-idle-stop=5m0s", "--read-only=true"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("replayFlags = %q, want %q", got, want)
+	}
+}
+
+// `index` and `doctor` on a directory of clones say what the server says:
+// not a project, the repositories found, and the ways out; `index
+// --index-anyway` indexes it.
+func TestIndexAndDoctorRefuseDirOfClones(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := t.TempDir()
+	for _, r := range []string{"a", "b", "c"} {
+		if err := os.MkdirAll(filepath.Join(dir, r, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, r, "main.go"), []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(args ...string) ([]byte, error) {
+		root := newRoot()
+		root.SetArgs(args)
+		stdout := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		err := root.Execute()
+		w.Close()
+		os.Stdout = stdout
+		b, _ := io.ReadAll(r)
+		return b, err
+	}
+
+	_, err := run("index", "--root", dir)
+	var np *symbols.NotProjectError
+	if !errors.As(err, &np) || !slices.Equal(np.Repos, []string{"a", "b", "c"}) {
+		t.Fatalf("index: want a not-a-project refusal naming a, b, c; got %v", err)
+	}
+	if d := np.Detail(); !strings.Contains(d, "--root "+filepath.Join(dir, "a")) || !strings.Contains(d, "--index-anyway") {
+		t.Errorf("the refusal names both ways out:\n%s", d)
+	}
+	if out, err := run("index", "--root", dir, "--index-anyway"); err != nil || !strings.Contains(string(out), "index: 3 files") {
+		t.Errorf("index --index-anyway: %v\n%s", err, out)
+	}
+
+	out, err := run("doctor", "--root", dir, "--json")
+	if !errors.Is(err, errDoctor) {
+		t.Fatalf("doctor: want errDoctor, got %v", err)
+	}
+	var rep doctorReport
+	if err := json.Unmarshal(out, &rep); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	found := false
+	for _, p := range rep.Problems {
+		found = found || (strings.Contains(p, "not a project") && strings.Contains(p, "a, b, c") && strings.Contains(p, "--index-anyway"))
+	}
+	if !found {
+		t.Errorf("doctor problems should carry the refusal: %v", rep.Problems)
 	}
 }
 

@@ -1,18 +1,21 @@
-package mcp
+// Package pathpat is the gitignore-style matcher behind every `include`:
+// node_query's argument and the index's --include / `include:`.
+package pathpat
 
 import (
 	"path"
 	"strings"
 )
 
-// includeSet is node_query's `include` argument: gitignore-style patterns
-// naming dead ends (skipped dirs, nested repos, excluded dirs, shadowed
-// files) the walk should enter anyway.
+// Set is a list of gitignore-style patterns naming dead ends (skipped dirs,
+// nested repos, excluded dirs, shadowed files; for the index also over-size,
+// minified and LFS files and links that leave the root) a walk should enter
+// anyway.
 //
 // Why a small matcher and not the git package's: that one answers "is this
 // path ignored" against a repo's own ignore files. This one answers the
 // reverse question for a list the caller typed, and needs one thing it lacks,
-// onWay — a pattern like `.claude/worktrees/a1` must let the walk step
+// OnWay — a pattern like `.claude/worktrees/a1` must let the walk step
 // through `.claude` to reach it.
 //
 // Semantics, as gitignore:
@@ -25,19 +28,19 @@ import (
 // pattern never reaches THROUGH a left-out dir to something beside it: `*.js`
 // does not open node_modules to find .js files. That would turn every
 // include into a full walk of every dead end.
-type includeSet struct{ pats []includePat }
+type Set struct{ pats []pat }
 
-type includePat struct {
+type pat struct {
 	segs    []string
 	dirOnly bool
 }
 
-// newIncludeSet compiles patterns; blanks are dropped. nil when none remain.
-func newIncludeSet(patterns []string) *includeSet {
-	var set includeSet
+// New compiles patterns; blanks are dropped. nil when none remain.
+func New(patterns []string) *Set {
+	var set Set
 	for _, p := range patterns {
 		p = strings.TrimPrefix(strings.TrimSpace(p), "./")
-		ip := includePat{}
+		ip := pat{}
 		if strings.HasSuffix(p, "/") {
 			ip.dirOnly = true
 			p = strings.TrimRight(p, "/")
@@ -59,9 +62,9 @@ func newIncludeSet(patterns []string) *includeSet {
 	return &set
 }
 
-// matches reports whether rel (root-relative, slash-separated) is named by a
+// Matches reports whether rel (root-relative, slash-separated) is named by a
 // pattern itself. Everything under a matching dir is included by the caller.
-func (s *includeSet) matches(rel string, isDir bool) bool {
+func (s *Set) Matches(rel string, isDir bool) bool {
 	if s == nil {
 		return false
 	}
@@ -74,11 +77,11 @@ func (s *includeSet) matches(rel string, isDir bool) bool {
 	return false
 }
 
-// onWay reports whether dir rel lies on the route to something an anchored
+// OnWay reports whether dir rel lies on the route to something an anchored
 // pattern names, so the walk steps in and takes only what leads there. A
 // pattern that starts with ** (which includes every slash-free one) names no
 // route: it would step into every dead end.
-func (s *includeSet) onWay(rel string) bool {
+func (s *Set) OnWay(rel string) bool {
 	if s == nil {
 		return false
 	}
@@ -91,14 +94,14 @@ func (s *includeSet) onWay(rel string) bool {
 	return false
 }
 
-// covers reports whether rel is, or sits under, a path a pattern names.
-func (s *includeSet) covers(rel string) bool {
+// Covers reports whether rel is, or sits under, a path a pattern names.
+func (s *Set) Covers(rel string) bool {
 	if s == nil {
 		return false
 	}
 	segs := strings.Split(rel, "/")
 	for i := 1; i <= len(segs); i++ {
-		if s.matches(strings.Join(segs[:i], "/"), i < len(segs)) {
+		if s.Matches(strings.Join(segs[:i], "/"), i < len(segs)) {
 			return true
 		}
 	}

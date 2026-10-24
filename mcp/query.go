@@ -16,6 +16,7 @@ import (
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
+	"github.com/iodesystems/poly-lsp-mcp/internal/pathpat"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -271,8 +272,8 @@ type engine struct {
 	// exactly that, so the walk follows the named path and nothing beside it.
 	named []string
 	// inc is the caller's include patterns: any dead end one matches is
-	// entered and walked fully, not just along a named path. See includeSet.
-	inc *includeSet
+	// entered and walked fully, not just along a named path. See pathpat.Set.
+	inc *pathpat.Set
 	// nested are the nested repositories the index left out (worktrees,
 	// other clones), by dir → reason: skipped like node_modules.
 	nested map[string]string
@@ -689,7 +690,7 @@ func (s *Server) buildTree() (*engine, error) { return s.buildTreeFor("") }
 
 // buildTreeFor is buildTree for one selector: a path the selector names
 // inside a skipped directory is walked, so it can match. include opens dead
-// ends wholesale: see includeSet.
+// ends wholesale: see pathpat.Set.
 func (s *Server) buildTreeFor(selector string, include ...string) (*engine, error) {
 	root := s.getRoot()
 	if root == "" {
@@ -719,7 +720,7 @@ func (s *Server) buildTreeFor(selector string, include ...string) (*engine, erro
 	// non-edge query never pays to compute the workspace-tuned cap.
 	e.excl = s.excludeSet()
 	e.named = selectorPaths(selector)
-	e.inc = newIncludeSet(include)
+	e.inc = pathpat.New(include)
 	e.nested = map[string]string{}
 	for _, n := range s.nestedRepos() {
 		e.nested[n.Dir] = n.Reason
@@ -774,9 +775,9 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip, inFull bool) {
 			switch {
 			case skipScanDir(de.Name()) || nestedReason != "":
 				switch {
-				case e.inc.matches(childRel, isDir):
+				case e.inc.Matches(childRel, isDir):
 					childFull = true
-				case e.reachesNamed(childRel) || e.inc.onWay(childRel):
+				case e.reachesNamed(childRel) || e.inc.OnWay(childRel):
 					childInSkip = true
 				default:
 					if nestedReason != "" {
@@ -787,9 +788,9 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip, inFull bool) {
 					continue
 				}
 			case inSkip:
-				if e.inc.matches(childRel, isDir) {
+				if e.inc.Matches(childRel, isDir) {
 					childFull = true
-				} else if !e.reachesNamed(childRel) && !e.inc.onWay(childRel) {
+				} else if !e.reachesNamed(childRel) && !e.inc.OnWay(childRel) {
 					continue
 				}
 			}
@@ -798,9 +799,9 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip, inFull bool) {
 		// the index is not a node either.
 		if isDir && !childFull && e.excl.DirIgnored(e.s.getRoot(), childAbs) {
 			switch {
-			case e.inc.matches(childRel, true):
+			case e.inc.Matches(childRel, true):
 				childFull = true
-			case e.inc.onWay(childRel):
+			case e.inc.OnWay(childRel):
 				childInSkip = true
 			default:
 				e.pruned[leftExcluded]++
@@ -817,7 +818,7 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip, inFull bool) {
 			continue
 		}
 		if !isDir && !childFull {
-			if _, ok := e.shadow.Shadowed(childAbs); ok && !e.namedFiles[childRel] && !e.inc.matches(childRel, false) {
+			if _, ok := e.shadow.Shadowed(childAbs); ok && !e.namedFiles[childRel] && !e.inc.Matches(childRel, false) {
 				e.pruned[leftShadowed]++
 				continue
 			}
@@ -5088,7 +5089,7 @@ func (e *engine) noteDeadEnd(rel string) {
 
 // leftOutReason names why a root-relative path is not in the tree, or "".
 func (e *engine) leftOutReason(rel string) string {
-	if e.inc.covers(rel) {
+	if e.inc.Covers(rel) {
 		return "" // opened by include: the tree holds it
 	}
 	for d, reason := range e.nested {

@@ -1,8 +1,8 @@
-package mcp
+package pathpat
 
 import "testing"
 
-func TestIncludeSetMatches(t *testing.T) {
+func TestSetMatches(t *testing.T) {
 	tests := []struct {
 		pat   string
 		rel   string
@@ -30,14 +30,14 @@ func TestIncludeSetMatches(t *testing.T) {
 		{"[", "x", false, false}, // malformed matches nothing
 	}
 	for _, tt := range tests {
-		got := newIncludeSet([]string{tt.pat}).matches(tt.rel, tt.isDir)
+		got := New([]string{tt.pat}).Matches(tt.rel, tt.isDir)
 		if got != tt.want {
 			t.Errorf("%q matches(%q, dir=%v) = %v, want %v", tt.pat, tt.rel, tt.isDir, got, tt.want)
 		}
 	}
 }
 
-func TestIncludeSetOnWayAndCovers(t *testing.T) {
+func TestSetOnWayAndCovers(t *testing.T) {
 	tests := []struct {
 		pat  string
 		rel  string
@@ -55,16 +55,16 @@ func TestIncludeSetOnWayAndCovers(t *testing.T) {
 		{"node_modules/", "node_modules/x/a.ts", false, true},
 	}
 	for _, tt := range tests {
-		s := newIncludeSet([]string{tt.pat})
-		if got := s.onWay(tt.rel); got != tt.way {
+		s := New([]string{tt.pat})
+		if got := s.OnWay(tt.rel); got != tt.way {
 			t.Errorf("%q onWay(%q) = %v, want %v", tt.pat, tt.rel, got, tt.way)
 		}
-		if got := s.covers(tt.rel); got != tt.cove {
+		if got := s.Covers(tt.rel); got != tt.cove {
 			t.Errorf("%q covers(%q) = %v, want %v", tt.pat, tt.rel, got, tt.cove)
 		}
 	}
-	var none *includeSet
-	if none.matches("a", true) || none.onWay("a") || none.covers("a") || newIncludeSet([]string{" ", "/"}) != nil {
+	var none *Set
+	if none.Matches("a", true) || none.OnWay("a") || none.Covers("a") || New([]string{" ", "/"}) != nil {
 		t.Error("an empty set matches nothing")
 	}
 }

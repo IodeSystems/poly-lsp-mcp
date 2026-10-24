@@ -19,8 +19,14 @@ import (
 // out with the reason, because they are not this project's code — unlike a
 // submodule, which is tracked and comes through --recurse-submodules.
 type Manifest struct {
-	// Files are root-relative, slash-separated, in git's order.
+	// Files are root-relative, slash-separated, in git's order. Symlinks
+	// are not among them.
 	Files []string
+	// Links are the symlinks, root-relative: tracked ones by their mode
+	// (120000), untracked ones by an Lstat. A build follows them under
+	// limits; a dir link has no extension, so without this it would be
+	// dropped unseen with the non-indexable files.
+	Links []string
 	// Nested are the nested repositories left out.
 	Nested []Nested
 }
@@ -43,7 +49,9 @@ func LoadManifest(root string) *Manifest {
 	if _, err := exec.LookPath("git"); err != nil {
 		return nil
 	}
-	tracked, err := lsFiles(root, "--cached", "--recurse-submodules")
+	// --stage for the mode: it is how a tracked symlink is told apart
+	// without an Lstat per file. --recurse-submodules supports it.
+	tracked, err := lsFiles(root, "--cached", "--recurse-submodules", "--stage")
 	if err != nil {
 		return nil
 	}
@@ -51,10 +59,30 @@ func LoadManifest(root string) *Manifest {
 	if err != nil {
 		return nil
 	}
-	m := &Manifest{Files: tracked}
+	m := &Manifest{Files: make([]string, 0, len(tracked)+len(others))}
+	last := ""
+	for _, e := range tracked {
+		// "<mode> <object> <stage>\t<path>". A conflicted path comes once per
+		// stage, in a row: keep the first.
+		meta, p, ok := strings.Cut(e, "\t")
+		if !ok || p == last {
+			continue
+		}
+		last = p
+		if strings.HasPrefix(meta, "120000 ") {
+			m.Links = append(m.Links, p)
+			continue
+		}
+		m.Files = append(m.Files, p)
+	}
 	common := commonDir(root)
 	for _, p := range others {
 		if !strings.HasSuffix(p, "/") {
+			// Untracked files are few next to tracked ones; one Lstat each.
+			if fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(p))); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				m.Links = append(m.Links, p)
+				continue
+			}
 			m.Files = append(m.Files, p)
 			continue
 		}

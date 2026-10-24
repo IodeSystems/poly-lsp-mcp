@@ -75,6 +75,35 @@ func TestManifestClassifiesNestedRepos(t *testing.T) {
 	}
 }
 
+// A symlink, tracked or not, is listed in Links and not in Files: a dir
+// link has no extension, and the build must see it to follow it.
+func TestManifestListsLinks(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	root := t.TempDir()
+	run(t, root, "init", "-q")
+	write(t, filepath.Join(root, "pkg", "a.go"), "package pkg\n")
+	if err := os.Symlink("pkg", filepath.Join(root, "tracked")); err != nil {
+		t.Fatal(err)
+	}
+	run(t, root, "add", ".")
+	run(t, root, "commit", "-qm", "init")
+	if err := os.Symlink("pkg/a.go", filepath.Join(root, "untracked.go")); err != nil {
+		t.Fatal(err)
+	}
+	m := LoadManifest(root)
+	if m == nil {
+		t.Fatal("expected a manifest")
+	}
+	if !slices.Equal(m.Files, []string{"pkg/a.go"}) {
+		t.Errorf("files = %v, want [pkg/a.go]", m.Files)
+	}
+	if !slices.Equal(m.Links, []string{"tracked", "untracked.go"}) {
+		t.Errorf("links = %v, want [tracked untracked.go]", m.Links)
+	}
+}
+
 func TestManifestNilOutsideARepo(t *testing.T) {
 	if LoadManifest(t.TempDir()) != nil {
 		t.Error("not a repo: no manifest, the caller walks")

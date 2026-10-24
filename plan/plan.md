@@ -304,7 +304,7 @@ the client (dun) retries with its own decisions and reports them.
   + (BudgetError or a memory stop) + several roots → refine line in the
   setup notification (`hints`, `roots`) and budget remedy; auto → roots and
   revert line; doctor lists roots and offers the flag. Status shows each
-  child's root. This repo: doctor finds 4 go roots (3 are testdata fixtures).
+  child's root. This repo: doctor finds 1 go root (testdata/ and fixtures under a test dir are not roots; were 4).
   **risks**: memory — 8 children per language can cost more than one at the
   root (each child has its own baseline); the cap and idle-stop bound it,
   nothing measured on a real monorepo yet. Routing — a file outside every

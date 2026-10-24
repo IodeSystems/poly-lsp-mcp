@@ -93,7 +93,7 @@ func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, ma
 			return nil
 		}
 		if d.IsDir() {
-			if p != root && (skipDirs[d.Name()] || ign.DirIgnored(root, p)) {
+			if p != root && (skipDirs[d.Name()] || ign.DirIgnored(root, p) || fixtureDir(root, p)) {
 				return fs.SkipDir
 			}
 			dirs++
@@ -167,6 +167,35 @@ func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, ma
 		sort.Strings(out.Roots[lang])
 	}
 	return out
+}
+
+// testDirs are the directory names test code conventionally lives under.
+var testDirs = map[string]bool{"test": true, "tests": true, "__tests__": true, "spec": true, "specs": true}
+
+// fixtureDir reports whether dir (under root) holds test fixtures, which
+// carry markers (go.mod, package.json) of projects that are not this one's:
+// `testdata` anywhere (Go's convention; the go tool ignores it), and
+// `fixtures` / `__fixtures__` under a test dir. On this repo the three Go
+// modules under testdata/fixtures/ made doctor report 4 Go roots and offer
+// --lsp-roots auto for a one-module repo. Detection only: they stay indexed.
+func fixtureDir(root, dir string) bool {
+	name := filepath.Base(dir)
+	if name == "testdata" {
+		return true
+	}
+	if name != "fixtures" && name != "__fixtures__" {
+		return false
+	}
+	rel, err := filepath.Rel(root, filepath.Dir(dir))
+	if err != nil || rel == "." {
+		return false
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if testDirs[seg] {
+			return true
+		}
+	}
+	return false
 }
 
 func hasFile(dir, name string) bool {

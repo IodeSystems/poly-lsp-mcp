@@ -49,6 +49,26 @@ func TestProjectRootsTwoGoModules(t *testing.T) {
 	}
 }
 
+// Test fixtures are not project roots: testdata anywhere, fixtures and
+// __fixtures__ under a test dir. A fixtures dir elsewhere still counts.
+func TestProjectRootsSkipFixtures(t *testing.T) {
+	root := rootsTree(t,
+		"go.mod",
+		"testdata/fixtures/a/go.mod",
+		"pkg/testdata/b/go.mod",
+		"test/fixtures/c/package.json", "test/fixtures/c/tsconfig.json",
+		"web/__tests__/__fixtures__/d/tsconfig.json", "web/__tests__/__fixtures__/d/package.json",
+		"fixtures/e/go.mod", // not under a test dir: a root
+	)
+	got := detect(root)
+	if want := []string{".", "fixtures/e"}; !reflect.DeepEqual(relRoots(root, got.Roots["go"]), want) {
+		t.Errorf("go roots = %v, want %v", relRoots(root, got.Roots["go"]), want)
+	}
+	if ts := got.Roots["typescript"]; len(ts) != 0 {
+		t.Errorf("typescript roots = %v, want none", relRoots(root, ts))
+	}
+}
+
 // go.work tells gopls about every module: one root, at the workspace.
 func TestProjectRootsGoWorkKeepsOne(t *testing.T) {
 	root := rootsTree(t, "go.work", "a/go.mod", "b/go.mod")

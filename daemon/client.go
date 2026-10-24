@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -113,7 +114,7 @@ func (c *Client) WatchSession(ctx context.Context) error {
 	c.setHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return err
+		return &transportError{err}
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -130,6 +131,12 @@ type Health struct {
 	Protocol int      `json:"protocol"`
 	PID      int      `json:"pid"`
 	Roots    []string `json:"roots"`
+	Warm     bool     `json:"warm"`
+}
+
+// takeover asks a warm takeover daemon to take the main socket.
+func (c *Client) takeover(socket string) error {
+	return c.postJSON("/takeover", map[string]string{"socket": socket}, nil)
 }
 
 // Hello is the version handshake: it says this client's build and returns
@@ -199,7 +206,7 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	c.setHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return err
+		return &transportError{err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -213,10 +220,23 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 			if err == io.EOF {
 				return nil
 			}
-			return err
+			return &transportError{err}
 		}
 		fn(ev)
 	}
+}
+
+// transportError is a failure to reach the daemon or to read its answer,
+// as opposed to an answer: the proxy reconnects on one, and retries a
+// read-only call.
+type transportError struct{ err error }
+
+func (e *transportError) Error() string { return "daemon connection: " + e.err.Error() }
+func (e *transportError) Unwrap() error { return e.err }
+
+func isTransport(err error) bool {
+	var te *transportError
+	return errors.As(err, &te)
 }
 
 // Event is one notification from /session/events.
@@ -318,7 +338,7 @@ func (c *Client) get(path string, q url.Values, out any) error {
 	c.setHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return err
+		return &transportError{err}
 	}
 	return decode(resp, out)
 }
@@ -336,14 +356,17 @@ func (c *Client) postJSON(path string, body, out any) error {
 	c.setHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return err
+		return &transportError{err}
 	}
 	return decode(resp, out)
 }
 
 func decode(resp *http.Response, out any) error {
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	b, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		return &transportError{rerr}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("daemon: %s: %s", resp.Status, bytes.TrimSpace(b))
 	}

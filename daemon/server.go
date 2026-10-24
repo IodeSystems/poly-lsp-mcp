@@ -5,16 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
-	"path/filepath"
 	"strconv"
-	"syscall"
-	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
@@ -34,137 +29,14 @@ type peerInfo struct {
 	PID int
 }
 
-// Config parameterizes the daemon server.
-type Config struct {
-	Socket string     // listen path; "" = SocketPath()
-	Allow  *AllowList // declared root prefixes a client may address
-	Reg    *Registry  // the per-root server host
-	Args   []string   // the flags it was started with, recorded in daemon.json
-}
-
-// Serve runs the daemon: it listens on the unix socket (peer-cred gated),
-// serves the gat/huma handler, records the state file, and blocks until
-// SIGINT/SIGTERM, then tears down hosted servers gracefully. It is the
-// process `poly-lsp-mcp daemon` becomes.
-func Serve(cfg Config) error {
-	socket := cfg.Socket
-	if socket == "" {
-		socket = SocketPath()
-	}
-
-	// The lock first: of two daemons started at once, the loser stops here,
-	// before it touches the socket or daemon.json, and its starter's poll
-	// finds the winner.
-	lock, err := TryLock()
-	if err != nil {
-		if errors.Is(err, ErrLocked) {
-			if st, ok := ReadState(); ok {
-				return fmt.Errorf("daemon: already running (pid %d, %s)", st.PID, st.Socket)
-			}
-			return fmt.Errorf("daemon: already running (%s is held)", LockPath())
-		}
-		return fmt.Errorf("daemon: lock: %w", err)
-	}
-	defer lock.Release()
-
-	ln, err := listenUnix(socket)
-	if err != nil {
-		return err
-	}
-
-	// Seed the shared cache before serving so the first root opens warm.
-	cfg.Reg.LoadCache()
-
-	h := &host{allow: cfg.Allow, reg: cfg.Reg}
-	h.up = newUpgrader(func(req UpgradeRequest) error {
-		return errors.New("blue/green upgrade is not available in this build")
-	})
-	handler, err := h.handler()
-	if err != nil {
-		_ = ln.Close()
-		return err
-	}
-	ctx, stopWatch := context.WithCancel(context.Background())
-	defer stopWatch()
-	if exe, err := selfExe(); err == nil {
-		go watchSelf(ctx, h.up, exe)
-	}
-
-	srv := &http.Server{
-		Handler: handler,
-		// Stash the accepted conn's peer creds for per-connection policy.
-		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
-			uid, pid, err := peerCred(c)
-			if err != nil {
-				return ctx
-			}
-			return context.WithValue(ctx, peerKey{}, peerInfo{UID: uid, PID: pid})
-		},
-	}
-
-	removeState, err := WriteState(socket, cfg.Args)
-	if err != nil {
-		log.Printf("daemon: write state: %v (continuing)", err)
-	}
-	defer removeState()
-
-	// Graceful shutdown: SIGTERM is what --stop/--restart send.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
-		log.Print("daemon: shutting down")
-		cfg.Reg.Close()
-		cfg.Reg.SaveCache()
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sctx)
-	}()
-
-	log.Printf("daemon: listening on %s (pid %d, build %s, allow %v)", socket, os.Getpid(), BuildID(), cfg.Allow.Prefixes())
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		return err
-	}
-	return nil
-}
-
-// listenUnix creates the socket with tight permissions: dir 0700, socket
-// 0600. A stale socket file whose owner is gone is unlinked and replaced
-// (the raglit "drop a stale daemon.json" move, applied to the socket).
-func listenUnix(socket string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
-		return nil, fmt.Errorf("daemon: socket dir: %w", err)
-	}
-	// If something is already listening, refuse; if it's a stale file,
-	// remove it and take over.
-	if _, err := os.Stat(socket); err == nil {
-		if c, derr := net.Dial("unix", socket); derr == nil {
-			_ = c.Close()
-			return nil, fmt.Errorf("daemon: socket %s is already served (another daemon is running)", socket)
-		}
-		if err := os.Remove(socket); err != nil {
-			return nil, fmt.Errorf("daemon: remove stale socket: %w", err)
-		}
-	}
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		return nil, fmt.Errorf("daemon: listen %s: %w", socket, err)
-	}
-	if err := os.Chmod(socket, 0o600); err != nil {
-		_ = ln.Close()
-		return nil, fmt.Errorf("daemon: chmod socket: %w", err)
-	}
-	// Reject any connecting uid but our own at accept — redundant with
-	// 0600 in the normal case, which is the point: it still holds if the
-	// mode bits are ever wrong.
-	return &credListener{Listener: ln, selfUID: os.Getuid()}, nil
-}
-
 // credListener drops connections whose peer uid is not the daemon's own,
 // or cannot be read, before net/http ever sees them.
 type credListener struct {
 	net.Listener
 	selfUID int
+	// bound is the socket file as bound: a takeover that fails after the
+	// rename is detected by the main path no longer being this file.
+	bound os.FileInfo
 }
 
 func (l *credListener) Accept() (net.Conn, error) {
@@ -200,6 +72,9 @@ type healthOut struct {
 		Protocol int      `json:"protocol"`
 		PID      int      `json:"pid"`
 		Roots    []string `json:"roots"`
+		// Warm is false while a takeover daemon is still bringing up the
+		// roots it will take over.
+		Warm bool `json:"warm"`
 	}
 }
 
@@ -339,13 +214,6 @@ type fileSymbolsOut struct {
 	}
 }
 
-// host is one daemon process's serving state, shared by its handlers.
-type host struct {
-	allow *AllowList
-	reg   *Registry
-	up    *upgrader
-}
-
 type helloIn struct {
 	Body struct {
 		Build    string `json:"build"`
@@ -362,6 +230,17 @@ type Hello struct {
 	Protocol int    `json:"protocol"`
 	PID      int    `json:"pid"`
 	VCSTime  string `json:"vcsTime,omitempty"`
+}
+
+type takeoverIn struct {
+	Body struct {
+		Socket string `json:"socket"`
+	}
+}
+type takeoverOut struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
 }
 
 type upgradeIn struct{ Body UpgradeRequest }
@@ -399,6 +278,7 @@ func (h *host) handler() (http.Handler, error) {
 			out.Body.Protocol = Protocol
 			out.Body.PID = os.Getpid()
 			out.Body.Roots = reg.Roots()
+			out.Body.Warm = h.takeoverFrom == 0 || h.warm.Load()
 			return out, nil
 		})
 
@@ -419,6 +299,18 @@ func (h *host) handler() (http.Handler, error) {
 		func(_ context.Context, in *upgradeIn) (*upgradeOut, error) {
 			out := &upgradeOut{}
 			out.Body = h.up.request(in.Body)
+			return out, nil
+		})
+
+	// Green's side of a blue/green swap; only blue (its takeover-from pid,
+	// by peer credentials) may call it. See takeover.go.
+	gat.Register(api, g, op("takeover", http.MethodPost, "/takeover", "Take over the main socket from the daemon being replaced."),
+		func(ctx context.Context, in *takeoverIn) (*takeoverOut, error) {
+			if err := h.takeOver(ctx, in.Body.Socket); err != nil {
+				return nil, huma.Error409Conflict(err.Error())
+			}
+			out := &takeoverOut{}
+			out.Body.OK = true
 			return out, nil
 		})
 
@@ -519,7 +411,10 @@ func (h *host) handler() (http.Handler, error) {
 			if in.Session == "" {
 				return nil, huma.Error400BadRequest("X-Poly-Session header is required")
 			}
-			<-ctx.Done() // blocks until the client disconnects
+			select { // blocks until the client disconnects, or this daemon hands over
+			case <-ctx.Done():
+			case <-h.draining:
+			}
 			if rolled := reg.RollbackSession(in.Session); len(rolled) > 0 {
 				log.Printf("daemon: session %s dropped — rolled back %v", in.Session, rolled)
 			}
@@ -595,7 +490,7 @@ func (h *host) handler() (http.Handler, error) {
 	if err := gat.RegisterHuma(api, g, ""); err != nil {
 		return nil, err
 	}
-	router.Get("/session/events", eventsHandler(reg, nil))
+	router.Get("/session/events", eventsHandler(reg, h.draining))
 	return router, nil
 }
 

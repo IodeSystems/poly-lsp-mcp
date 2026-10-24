@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -55,6 +56,13 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 	// For every hosted root; a client's /open adds its own excludes and may
 	// set its own budget (mcp --daemon --exclude/--index-budget).
 	idx := indexFlags(f)
+	warmRecent := f.Duration("warm-recent", 30*time.Minute, "an upgrade's new daemon warms the roots requested within this long before it takes over; older roots come up on their next request")
+	// Set by a daemon starting its replacement (blue/green; daemon/takeover.go).
+	takeoverFrom := f.Int("takeover-from", 0, "pid of the daemon this one replaces")
+	var warm multiFlag
+	f.Var(&warm, "warm", "root to bring up before taking over (repeatable)")
+	_ = f.MarkHidden("takeover-from")
+	_ = f.MarkHidden("warm")
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		if buildID {
@@ -73,7 +81,13 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		}
 		// What this daemon was started with, recorded in daemon.json: a bare
 		// --restart replays it, and a takeover starts the new build with it.
-		args := replayFlags(cmd.Flags(), "stop", "restart", "help", "build-id")
+		// A takeover daemon's --socket is its side socket, not a choice to
+		// replay; it records the main one when it takes over.
+		skip := []string{"stop", "restart", "help", "build-id", "takeover-from", "warm"}
+		if *takeoverFrom != 0 {
+			skip = append(skip, "socket")
+		}
+		args := replayFlags(cmd.Flags(), skip...)
 		if restart {
 			if len(args) == 0 {
 				if st, ok := daemon.ReadState(); ok {
@@ -113,7 +127,8 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		dreg.SetStatusDir(daemon.StatusDir())
 		dreg.SetUsageLog(daemon.UsagePath())
 		dreg.SetIndexDefaults(idx.excludes, idx.budget)
-		return daemon.Serve(daemon.Config{Socket: socket, Allow: al, Reg: dreg, Args: args})
+		return daemon.Serve(daemon.Config{Socket: socket, Allow: al, Reg: dreg, Args: args,
+			TakeoverFrom: *takeoverFrom, Warm: warm, WarmRecent: *warmRecent})
 	}
 	return cmd
 }

@@ -16,11 +16,10 @@ import (
 // proxyHarness drives RunProxy over pipes as an MCP client would.
 type proxyHarness struct {
 	t    *testing.T
-	in   *io.PipeWriter
+	in   io.WriteCloser
 	mu   sync.Mutex
 	msgs []map[string]any
 	cond *sync.Cond
-	done chan error
 	id   int
 }
 
@@ -28,12 +27,25 @@ func startProxy(t *testing.T, c *Client, root string, opts OpenOptions) *proxyHa
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	h := &proxyHarness{t: t, in: inW, done: make(chan error, 1)}
-	h.cond = sync.NewCond(&h.mu)
+	done := make(chan error, 1)
 	go func() {
-		h.done <- RunProxy(func() (*Client, error) { return c, nil }, root, opts, inR, outW)
+		done <- RunProxy(func() (*Client, error) { return c, nil }, root, opts, inR, outW)
 		_ = outW.Close()
 	}()
+	h := newHarness(t, inW, outR)
+	t.Cleanup(func() {
+		h.request("shutdown", nil)
+		_ = inW.Close()
+		<-done
+	})
+	return h
+}
+
+// newHarness reads the proxy's stdout (out) and writes its stdin (in).
+func newHarness(t *testing.T, in io.WriteCloser, out io.Reader) *proxyHarness {
+	h := &proxyHarness{t: t, in: in}
+	h.cond = sync.NewCond(&h.mu)
+	outR := out
 	go func() {
 		sc := bufio.NewScanner(outR)
 		sc.Buffer(make([]byte, 1<<20), 1<<24)
@@ -47,11 +59,6 @@ func startProxy(t *testing.T, c *Client, root string, opts OpenOptions) *proxyHa
 			}
 		}
 	}()
-	t.Cleanup(func() {
-		h.request("shutdown", nil)
-		_ = inW.Close()
-		<-h.done
-	})
 	return h
 }
 

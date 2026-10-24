@@ -59,6 +59,49 @@ func lockPath(path string, wait time.Duration) (*Lock, error) {
 	}
 }
 
+// lockFD is the descriptor a takeover daemon finds the daemon lock on:
+// the first of exec.Cmd.ExtraFiles.
+const lockFD = 3
+
+// inheritedLock is the daemon lock a takeover daemon was started with. An
+// flock belongs to the open file description, not the process, so the
+// child shares it from its first instruction: the lock passes from the
+// old daemon to the new one with no moment where neither holds it, and a
+// third daemon starting meanwhile is refused as before.
+func inheritedLock() (*Lock, error) {
+	f := os.NewFile(lockFD, LockPath())
+	if f == nil {
+		return nil, errors.New("no daemon lock passed on fd 3")
+	}
+	// It must be the lock file, and locked: on the shared description a
+	// second LOCK_EX is a no-op that succeeds.
+	fi, err := f.Stat()
+	want, werr := os.Stat(LockPath())
+	if err != nil || werr != nil || !os.SameFile(fi, want) {
+		_ = f.Close()
+		return nil, fmt.Errorf("fd %d is not %s", lockFD, LockPath())
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("fd %d: the daemon lock is not held: %w", lockFD, err)
+	}
+	return &Lock{f: f}, nil
+}
+
+// closeOnly closes this process's descriptor without unlocking: after a
+// hand-over the description is shared with the new daemon, and LOCK_UN
+// would release the lock for it too.
+func (l *Lock) closeOnly() {
+	if l == nil || l.f == nil {
+		return
+	}
+	_ = l.f.Close()
+	l.f = nil
+}
+
+// file is the lock's descriptor, to pass to a takeover daemon.
+func (l *Lock) file() *os.File { return l.f }
+
 // Release lets go of the lock. Safe on nil and more than once.
 func (l *Lock) Release() {
 	if l == nil || l.f == nil {

@@ -503,6 +503,50 @@ func (r *Registry) Roots() []string {
 	return out
 }
 
+// RecentRoots are the roots a takeover warms: held by a session now, or
+// requested within window, and up. Warming every root the daemon ever
+// opened would cost the swap the memory of roots nobody is using.
+func (r *Registry) RecentRoots(window time.Duration) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for root, e := range r.servers {
+		select {
+		case <-e.ready:
+			if e.err != nil {
+				continue
+			}
+		default:
+		}
+		if len(e.holders) > 0 || time.Since(e.lastUsed) <= window {
+			out = append(out, root)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// OpenBatches counts the open (commit:false) edit batches on every root.
+func (r *Registry) OpenBatches() int {
+	r.mu.Lock()
+	servers := make([]*entry, 0, len(r.servers))
+	for _, e := range r.servers {
+		servers = append(servers, e)
+	}
+	r.mu.Unlock()
+	n := 0
+	for _, e := range servers {
+		select {
+		case <-e.ready:
+			if e.srv != nil {
+				n += e.srv.OpenBatches()
+			}
+		default:
+		}
+	}
+	return n
+}
+
 // RollbackSession discards any open edit batch the session holds on ANY
 // hosted root, reverting its staged files to their pre-batch bytes. Called
 // when a client's /session/watch connection drops, so a vanished client

@@ -95,3 +95,12 @@ func (s *Server) RollbackSession(sess string) (discarded int, ok bool) {
 	delete(s.batches, sid)
 	return n, true
 }
+
+// OpenBatches is how many sessions hold an open (commit:false) batch. A
+// daemon hands over to a new build at a moment with none: a batch lives
+// in this process, and would be rolled back by the hand-over.
+func (s *Server) OpenBatches() int {
+	s.editMu.Lock()
+	defer s.editMu.Unlock()
+	return len(s.batches)
+}

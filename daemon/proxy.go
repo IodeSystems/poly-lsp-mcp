@@ -89,7 +89,7 @@ func RunProxy(client *Client, root string, in io.Reader, out io.Writer) error {
 					"tools":     map[string]any{},
 					"resources": map[string]any{},
 				},
-				"serverInfo": map[string]any{"name": "poly-lsp-mcp", "version": Version},
+				"serverInfo": map[string]any{"name": "poly-lsp-mcp", "version": BuildID()},
 			})
 		case "notifications/initialized":
 			// no-op

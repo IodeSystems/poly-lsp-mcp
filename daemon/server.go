@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -49,6 +50,21 @@ func Serve(cfg Config) error {
 	if socket == "" {
 		socket = SocketPath()
 	}
+
+	// The lock first: of two daemons started at once, the loser stops here,
+	// before it touches the socket or daemon.json, and its starter's poll
+	// finds the winner.
+	lock, err := TryLock()
+	if err != nil {
+		if errors.Is(err, ErrLocked) {
+			if st, ok := ReadState(); ok {
+				return fmt.Errorf("daemon: already running (pid %d, %s)", st.PID, st.Socket)
+			}
+			return fmt.Errorf("daemon: already running (%s is held)", LockPath())
+		}
+		return fmt.Errorf("daemon: lock: %w", err)
+	}
+	defer lock.Release()
 
 	ln, err := listenUnix(socket)
 	if err != nil {
@@ -95,7 +111,7 @@ func Serve(cfg Config) error {
 		_ = srv.Shutdown(sctx)
 	}()
 
-	log.Printf("daemon: listening on %s (pid %d, allow %v)", socket, os.Getpid(), cfg.Allow.Prefixes())
+	log.Printf("daemon: listening on %s (pid %d, build %s, allow %v)", socket, os.Getpid(), BuildID(), cfg.Allow.Prefixes())
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -167,10 +183,13 @@ func (l *credListener) Accept() (net.Conn, error) {
 
 type healthOut struct {
 	Body struct {
-		OK      bool     `json:"ok"`
-		Version string   `json:"version"`
-		PID     int      `json:"pid"`
-		Roots   []string `json:"roots"`
+		OK bool `json:"ok"`
+		// Version is Build, kept under its old name for older clients.
+		Version  string   `json:"version"`
+		Build    string   `json:"build"`
+		Protocol int      `json:"protocol"`
+		PID      int      `json:"pid"`
+		Roots    []string `json:"roots"`
 	}
 }
 
@@ -311,7 +330,7 @@ type fileSymbolsOut struct {
 // of ops), served here over the unix socket instead of TCP.
 func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 	router := chi.NewRouter()
-	api := humachi.New(router, huma.DefaultConfig("poly-lsp", Version))
+	api := humachi.New(router, huma.DefaultConfig("poly-lsp", strconv.Itoa(Protocol)))
 	g, err := gat.New()
 	if err != nil {
 		return nil, err
@@ -324,7 +343,9 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 		func(_ context.Context, _ *struct{}) (*healthOut, error) {
 			out := &healthOut{}
 			out.Body.OK = true
-			out.Body.Version = Version
+			out.Body.Version = BuildID()
+			out.Body.Build = BuildID()
+			out.Body.Protocol = Protocol
 			out.Body.PID = os.Getpid()
 			out.Body.Roots = reg.Roots()
 			return out, nil

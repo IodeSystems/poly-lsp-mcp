@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -22,6 +23,7 @@ func daemonCmd(l *loader) *cobra.Command {
 		noValidate bool
 		stop       bool
 		restart    bool
+		buildID    bool
 		allow      multiFlag
 	)
 	cmd := &cobra.Command{
@@ -42,10 +44,18 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 	f.BoolVar(&stop, "stop", false, "stop the running daemon and exit")
 	f.BoolVar(&restart, "restart", false, "restart the running daemon (replaying its flags) and exit")
 	f.Var(&allow, "allow", "directory prefix a client may address roots under (repeatable; default $HOME)")
+	// Asked of a candidate binary before an upgrade runs it (ProbeBuild):
+	// it says which build it is, and that it runs at all.
+	f.BoolVar(&buildID, "build-id", false, "print this binary's build identity and exit")
+	_ = f.MarkHidden("build-id")
 	lifecycle := lifecycleFlags(f)
 	rootsFlag := lspRootsFlags(f)
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		if buildID {
+			fmt.Println(daemon.BuildID())
+			return nil
+		}
 		if stop {
 			return daemon.Stop()
 		}

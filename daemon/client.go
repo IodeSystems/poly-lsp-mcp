@@ -74,6 +74,17 @@ func NewClient(socket string) *Client {
 	}
 }
 
+// retarget is c dialing socket instead, the same session and policy. c
+// itself when the socket is unchanged.
+func (c *Client) retarget(socket string) *Client {
+	if socket == c.socket {
+		return c
+	}
+	n := NewClient(socket)
+	n.session, n.readOnly, n.validate = c.session, c.readOnly, c.validate
+	return n
+}
+
 // newSessionID returns a random hex token. crypto/rand failure is fatal to
 // randomness, so fall back to a fixed marker rather than an empty id (which
 // would collide with the daemon's implicit local session).

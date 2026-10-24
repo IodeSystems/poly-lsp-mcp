@@ -36,21 +36,26 @@ var lspVersionArgs = map[string][]string{
 }
 
 type doctorReport struct {
-	Binary     string            `json:"binary"`
-	OnPath     string            `json:"onPath"` // what `poly-lsp-mcp` resolves to
-	Build      string            `json:"build"`
-	Platform   string            `json:"platform"`
-	Runtime    string            `json:"runtime"` // tree-sitter runtime: "cgo" or "pure-go"
-	Config     string            `json:"config"`
-	Root       string            `json:"root"`
-	Partial    bool              `json:"partialCount,omitempty"`
-	Languages  []setup.Lang      `json:"languages"`          // the shape of the poly-lsp-mcp/setup notification
-	Versions   map[string]string `json:"versions,omitempty"` // child LSP → its version line
-	Git        string            `json:"git"`
-	Daemon     string            `json:"daemon"`
-	Problems   []string          `json:"problems,omitempty"`
-	Advisories []string          `json:"advisories,omitempty"`
-	Update     *updateInfo       `json:"update,omitempty"` // absent when nothing is known
+	Binary    string            `json:"binary"`
+	OnPath    string            `json:"onPath"` // what `poly-lsp-mcp` resolves to
+	Build     string            `json:"build"`
+	BuildID   string            `json:"buildId"` // daemon.BuildID: what the daemon handshake compares
+	Platform  string            `json:"platform"`
+	Runtime   string            `json:"runtime"` // tree-sitter runtime: "cgo" or "pure-go"
+	Config    string            `json:"config"`
+	Root      string            `json:"root"`
+	Partial   bool              `json:"partialCount,omitempty"`
+	Languages []setup.Lang      `json:"languages"`          // the shape of the poly-lsp-mcp/setup notification
+	Versions  map[string]string `json:"versions,omitempty"` // child LSP → its version line
+	Git       string            `json:"git"`
+	Daemon    string            `json:"daemon"`
+	// DaemonBuild is the running daemon's build identity; DaemonMatches
+	// whether it is this binary's (daemon.BuildID). Absent with no daemon.
+	DaemonBuild   string      `json:"daemonBuild,omitempty"`
+	DaemonMatches *bool       `json:"daemonMatches,omitempty"`
+	Problems      []string    `json:"problems,omitempty"`
+	Advisories    []string    `json:"advisories,omitempty"`
+	Update        *updateInfo `json:"update,omitempty"` // absent when nothing is known
 
 	// Roots are the project roots of each language with a child LSP,
 	// relative to Root: where --lsp-roots auto would start one each.
@@ -113,6 +118,7 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 				rep.Binary = r
 			}
 			rep.Build = buildInfo()
+			rep.BuildID = daemon.BuildID()
 			// `go install` with no C compiler on the machine builds the pure-Go
 			// parser without a word; this is the one place that says so.
 			if rep.Runtime == "pure-go" {
@@ -202,7 +208,18 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 			rep.Daemon = "not running"
 			if st, ok := daemon.ReadState(); ok && daemon.PidAlive(st.PID) {
 				rep.Daemon = fmt.Sprintf("running, pid %d, since %s", st.PID, st.StartedAt)
-				rep.Advisories = append(rep.Advisories, "a daemon is running; after an upgrade restart it (poly-lsp-mcp daemon --restart) or --daemon clients keep the old binary")
+				build := st.Build
+				if build == "" {
+					build = "unknown (a daemon from before build identities)"
+				}
+				match := st.Build == daemon.BuildID()
+				rep.DaemonBuild, rep.DaemonMatches = build, &match
+				if match {
+					rep.Daemon += ", this build"
+				} else {
+					rep.Daemon += ", build " + build + ", NOT this binary's (" + daemon.BuildID() + ")"
+					rep.Advisories = append(rep.Advisories, "the running daemon is another build; --daemon clients get that build until it restarts: poly-lsp-mcp daemon --restart")
+				}
 			}
 
 			// Last: it is the only step that waits on the network.
@@ -229,7 +246,7 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 }
 
 func printDoctor(r doctorReport) {
-	fmt.Printf("binary    %s\n          %s, %s\n", r.Binary, r.Build, r.Platform)
+	fmt.Printf("binary    %s\n          %s, %s\n          build id %s\n", r.Binary, r.Build, r.Platform, r.BuildID)
 	fmt.Printf("runtime   tree-sitter %s\n", r.Runtime)
 	fmt.Printf("on PATH   %s\n", r.OnPath)
 	fmt.Printf("config    %s\n", r.Config)

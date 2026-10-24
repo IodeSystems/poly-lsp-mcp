@@ -11,9 +11,45 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/iodesystems/poly-lsp-mcp/daemon"
 	"github.com/iodesystems/poly-lsp-mcp/internal/ts"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
+
+// doctor names the running daemon's build and says whether it is this
+// binary's — the check a person runs when --daemon answers look stale.
+func TestDoctorReportsTheDaemonBuild(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// A "running daemon": this test process, recorded as another build.
+	if err := os.MkdirAll(filepath.Join(home, ".poly-lsp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st := daemon.State{PID: os.Getpid(), Socket: "/nowhere", Build: "0123456789ab/deadbeef"}
+	b, _ := json.Marshal(st)
+	if err := os.WriteFile(daemon.StatePath(), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := newRoot()
+	root.SetArgs([]string{"doctor", "--root", t.TempDir(), "--json"})
+	stdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	_ = root.Execute()
+	w.Close()
+	os.Stdout = stdout
+	out, _ := io.ReadAll(r)
+	var rep doctorReport
+	if err := json.Unmarshal(out, &rep); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if rep.DaemonBuild != st.Build || rep.DaemonMatches == nil || *rep.DaemonMatches {
+		t.Fatalf("daemonBuild=%q matches=%v, want %q and false", rep.DaemonBuild, rep.DaemonMatches, st.Build)
+	}
+	if rep.BuildID != daemon.BuildID() || !strings.Contains(rep.Daemon, "NOT this binary's") {
+		t.Fatalf("buildId=%q daemon=%q", rep.BuildID, rep.Daemon)
+	}
+}
 
 // An unknown subcommand used to fall through to the stdio LSP server, which
 // waits on stdin: `poly-lsp-mcp explain …` looked like a hang. It must be an

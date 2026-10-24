@@ -42,10 +42,17 @@ func StartDetached(args []string) error {
 	return nil
 }
 
+// Start polling, as dun's attach: every 50 ms, up to 10 s. A daemon binds
+// its socket before it loads anything, so the first answer comes fast.
+const (
+	startPoll = 50 * time.Millisecond
+	startWait = 10 * time.Second
+)
+
 // EnsureRunning returns a client to a healthy daemon, auto-starting one
-// detached if none is up. args replay into the spawned daemon. The poll
-// loop is flat 150ms/8s, matching raglit; concurrent starters lose the
-// socket-bind race and the loser's poll finds the winner.
+// detached if none is up. args replay into the spawned daemon. Concurrent
+// starters each start one; the daemon lock lets one serve and the others
+// exit, and every starter's poll finds the one that serves.
 func EnsureRunning(args []string) (*Client, error) {
 	c := NewClient(daemonSocket())
 	if c.Healthy() {
@@ -54,12 +61,15 @@ func EnsureRunning(args []string) (*Client, error) {
 	if err := StartDetached(args); err != nil {
 		return nil, fmt.Errorf("auto-start daemon: %w", err)
 	}
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(startWait)
 	for time.Now().Before(deadline) {
+		// Re-read the state each round: the daemon that wins may serve a
+		// socket other than the default (a --socket in its replayed flags).
+		c = c.retarget(daemonSocket())
 		if c.Healthy() {
 			return c, nil
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(startPoll)
 	}
 	return nil, fmt.Errorf("auto-started daemon did not come up on %s (see %s)", c.socket, LogPath())
 }

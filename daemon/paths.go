@@ -10,13 +10,12 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 )
-
-// Version is the daemon protocol/build version recorded in the state
-// file so a client can detect a stale daemon after an upgrade.
-const Version = "0.1.0"
 
 // ConfigHome is the persistent directory holding the state file and log
 // (~/.poly-lsp). Persistent, unlike the socket, because XDG_RUNTIME_DIR
@@ -34,11 +33,36 @@ func ConfigHome() string {
 // correct home for ephemeral sockets — tmpfs, per-user, cleared on
 // logout); fall back to ConfigHome so a machine without XDG set still
 // works.
+//
+// bind(2) refuses a path longer than sun_path (maxSocketPath), and a deep
+// $HOME or $XDG_RUNTIME_DIR reaches it; then the socket is a short name
+// derived from ConfigHome, in the runtime dir or else the temp dir — the
+// fallback dun's dund uses.
 func SocketPath() string {
+	p := filepath.Join(ConfigHome(), "daemon.sock")
 	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
-		return filepath.Join(rt, "poly-lsp", "daemon.sock")
+		p = filepath.Join(rt, "poly-lsp", "daemon.sock")
 	}
-	return filepath.Join(ConfigHome(), "daemon.sock")
+	if len(p) <= maxSocketPath() {
+		return p
+	}
+	sum := sha256.Sum256([]byte(ConfigHome()))
+	name := "poly-lsp-" + hex.EncodeToString(sum[:6]) + ".sock"
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
+		if p := filepath.Join(rt, name); len(p) <= maxSocketPath() {
+			return p
+		}
+	}
+	return filepath.Join(os.TempDir(), name)
+}
+
+// maxSocketPath is the longest unix socket path bind accepts: sun_path less
+// its NUL — 108 bytes on Linux, 104 on macOS and the BSDs.
+func maxSocketPath() int {
+	if runtime.GOOS == "linux" {
+		return 107
+	}
+	return 103
 }
 
 // StatusDir holds one child-LSP status file per manager (per stdio mcp

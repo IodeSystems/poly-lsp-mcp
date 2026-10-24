@@ -146,7 +146,9 @@ reviews are not committed. Not yet triaged; claims are the reviewer's, not re-me
 1. ◻ gitignore not applied on the query/MCP path (`.venv` indexed; 15:1
    venv:first-party lines). Reported as wiring, not `symbols.Build` logic.
 2. ◻ `#Name` scans; 6,000 files → 97s, 33s sys (suspect per-dir git
-   subprocess in `checkIgnore`). Name index, or fail fast.
+   subprocess in `checkIgnore`). Name index, or fail fast. The per-FILE
+   `check-ignore` in the index walk is gone (see the initialize entry);
+   not re-measured on a venv repo.
 3. ◻ budget exhaustion renders as `returned: 0` — must read as partial.
 4. ◻ `func[path=…]` costs a full scan; `file[path=…] > func` is instant.
    Per-file buckets for root-level attr filters; the failure hint advises
@@ -169,15 +171,26 @@ and `poly-lsp-mcp status`. **risks**: `ps -o rss=` output format; peer-cred
 via LOCAL_PEERCRED untested live; Windows does not build (not in scope).
 **blocking decisions**: none.
 
-❓ **mcp test suite hangs** (found 2026-10-22, pre-existing — reproduces at
-`4a207b4`). `go test ./mcp` hits the 10-min timeout; seen in
-`TestEdgeAddressesAreSites`, `TestPathToolsRefuseEscapingPaths`,
-`TestModernQueryAncestorChain`, `TestModernNodeEditRenameRejectsNonSymbol`,
-each alone too (60–120 s timeout). Stack: server
-`send` and test `mcpSession.sendMessage` both blocked on the io.Pipe pair — a
-write/write deadlock, likely an unsolicited server notification the test does
-not read. **next**: read the stacks, find which notification. **risks**: until
-fixed, the mcp package has no full-suite signal. **blocking decisions**: none.
+◐ **MCP `initialize` takes 52–82 s on dun** (dun-a8 for Carl, 2026-10-24).
+Measured with a bare stdio client (`initialize`, then `tools/list`) against
+`~/local/src/iodesystems/dun`. The child LSPs were not the cost; they were ready
+0.3 s after the index. Causes:
+1. The index and `@derived` walks called `FileIgnored`, which runs one `git
+   check-ignore` per file it does not know (22,513 spawns). They now use
+   `KnownIgnored`, the snapshot taken for the walk. 52 s → 11–16 s.
+   (`87eccae`)
+2. 48 agent worktrees in `.claude/worktrees/` (20,708 files against 1,304 of
+   dun's own) were walked as dun's code. `DirIgnored` now skips any
+   directory with its own `.git` (only when the root is a repo). 2.3–2.9 s;
+   watcher 2,070 → 50 dirs; proactive didOpen 15,900 → 390 files.
+Fix 2 is in the working tree, not committed. **next**: Carl's decisions
+below, then commit fix 2 and report to dun-a8. **risks**: still over dun's 1.5 s wait; the remainder is the
+`cache.gob` load (0.97 s, a 97 MB file of mostly stale worktree entries) and
+`goOperationIDSites` re-parsing Go outside the parse cache (0.87 s).
+**blocking decisions**: (a) submodules are skipped by the same rule — keep?
+(b) answer `initialize` at once and build in the background, with tool calls
+waiting up to a bound and then saying "still indexing"? **assumption**: a
+nested checkout is never this project's code.
 
 ◐ **The volcycle bench — a real agent, a real Android app, and the first
 measurement of what this surface is like to USE — 2026-08-04/05.** Lives at

@@ -87,4 +87,4 @@ The project ships from `main` without semver tags today. This section captures t
 - Keyed param reorder/rename ops (preserve call-site args when only shuffling).
 - Signature ops for languages beyond go / ts / py.
 
-See `plan/plan.md` for the full feature history with design rationale.
+See `docs/design.md` for design rationale; git history has the full feature record.

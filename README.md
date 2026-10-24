@@ -561,11 +561,11 @@ testdata/fixtures/gat-greeter/
                              live gat → poly-lsp-mcp @ref fixture +
                              cross-language diagnostic Go server
 examples/embed/              library-mode example
-plan/plan.md                 phased roadmap (all phases shipped)
+docs/                        design decisions, known limits, evaluation
 ```
 
 ## Status
 
 Phase 0 through Phase 5 plus the stacked-branch tail of Phase 3 are all shipped. On top of that, the **derivation model** (`@derived` emit→consume→cascading refactor, with the SQL migration-fold) is complete. The roadmap is effectively complete; further work is scope expansion (new refactor kinds, more `@derived` emitters/modes, more language coverage) and ergonomics.
 
-See `plan/plan.md` for the full feature history with rationale for each design decision.
+Design decisions and their reasons: `docs/design.md`. Accepted limits: `docs/known-limits.md`. Work items are aw4 issues in project `poly-lsp-mcp`.

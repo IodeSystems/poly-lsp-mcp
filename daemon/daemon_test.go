@@ -16,14 +16,26 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 )
 
-// startTestDaemon boots a daemon on a short temp socket (os.MkdirTemp is
-// under /tmp, safely below the 108-byte sun_path limit) hosting the given
-// allow prefix, and returns a client + a stop func. No child LSPs are
-// configured, so it's index-only and fast.
+// testSocket is a socket path for one test, in a fresh directory under /tmp
+// removed at cleanup. Not t.TempDir: on macOS that is under a long
+// /var/folders/... and with the test's name appended it passes the 104-byte
+// sun_path, so bind fails.
+func testSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "pl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "d.sock")
+}
+
+// startTestDaemon boots a daemon on a short temp socket (testSocket)
+// hosting the given allow prefix, and returns a client + a stop func. No
+// child LSPs are configured, so it's index-only and fast.
 func startTestDaemon(t *testing.T, allowRoot string) (*Client, func()) {
 	t.Helper()
-	sockDir := t.TempDir()
-	socket := filepath.Join(sockDir, "d.sock")
+	socket := testSocket(t)
 
 	cfg, _, err := config.LoadOrDefault("nonexistent.yaml")
 	if err != nil {
@@ -476,7 +488,7 @@ func TestRegistryIdleRootsLRU(t *testing.T) {
 // TestListenUnixReclaimsStaleSocket confirms a leftover socket file with
 // no listener is removed and rebound (the kill -9 recovery path).
 func TestListenUnixReclaimsStaleSocket(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "d.sock")
+	socket := testSocket(t)
 	// Create a stale socket file that nothing is listening on: bind then
 	// close the underlying listener but leave the file (simulate crash).
 	ln1, err := net.Listen("unix", socket)
@@ -499,7 +511,7 @@ func TestListenUnixReclaimsStaleSocket(t *testing.T) {
 // TestListenUnixRefusesLiveSocket confirms a second daemon won't steal a
 // socket that is actively served.
 func TestListenUnixRefusesLiveSocket(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "d.sock")
+	socket := testSocket(t)
 	ln1, err := listenUnix(socket)
 	if err != nil {
 		t.Fatal(err)

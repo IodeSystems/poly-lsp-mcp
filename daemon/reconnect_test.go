@@ -19,7 +19,7 @@ import (
 // while a call is in flight.
 func dyingDaemon(t *testing.T) (*Client, *atomic.Int32) {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "d.sock")
+	socket := testSocket(t)
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

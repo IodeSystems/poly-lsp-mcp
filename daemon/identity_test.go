@@ -58,7 +58,7 @@ func TestServeRefusesWhileTheLockIsHeld(t *testing.T) {
 	lockWait = 100 * time.Millisecond
 	cfg, _, _ := config.LoadOrDefault("nonexistent.yaml")
 	reg, _ := cfg.Build()
-	socket := filepath.Join(t.TempDir(), "d.sock")
+	socket := testSocket(t)
 	err = Serve(Config{Socket: socket, Allow: NewAllowList([]string{t.TempDir()}), Reg: NewRegistry(cfg, reg, false, false)})
 	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("Serve = %v, want already running", err)

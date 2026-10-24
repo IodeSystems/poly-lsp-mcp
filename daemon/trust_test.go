@@ -52,8 +52,10 @@ func TestAllowListResolveRejectsEscapes(t *testing.T) {
 
 	if got, err := al.Resolve(inside); err != nil {
 		t.Errorf("Resolve(inside) rejected: %v", err)
-	} else if got != inside {
-		t.Errorf("Resolve(inside) = %q, want canonical %q", got, inside)
+	} else if want, _ := filepath.EvalSymlinks(inside); got != want {
+		// The temp dir may sit under a symlink (/var -> /private/var on
+		// macOS); canonical is the resolved form.
+		t.Errorf("Resolve(inside) = %q, want canonical %q", got, want)
 	}
 
 	// The sibling whose name shares a prefix must be rejected.

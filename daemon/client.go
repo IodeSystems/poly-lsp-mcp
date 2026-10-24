@@ -132,6 +132,23 @@ type Health struct {
 	Roots    []string `json:"roots"`
 }
 
+// Hello is the version handshake: it says this client's build and returns
+// the daemon's.
+func (c *Client) Hello() (Hello, error) {
+	exe, _ := selfExe()
+	body := map[string]any{"build": BuildID(), "protocol": Protocol, "exe": exe, "vcsTime": VCSTime()}
+	var out Hello
+	err := c.postJSON("/hello", body, &out)
+	return out, err
+}
+
+// RequestUpgrade asks the daemon to move to another binary.
+func (c *Client) RequestUpgrade(req UpgradeRequest) (UpgradeAnswer, error) {
+	var out UpgradeAnswer
+	err := c.postJSON("/upgrade", req, &out)
+	return out, err
+}
+
 func (c *Client) health() (Health, error) {
 	var h Health
 	err := c.get("/health", nil, &h)

@@ -118,6 +118,7 @@ func (p *proxy) start() {
 		}
 		log.Printf("proxy: root %s served by daemon %s", p.root, p.client.socket)
 		p.startEvents()
+		go p.handshake(p.client)
 		res, err := p.client.OpenWith(p.root, p.opts)
 		if err != nil {
 			p.openErr = err
@@ -130,6 +131,69 @@ func (p *proxy) start() {
 		}
 		log.Printf("proxy: root %s warm (%d names)", p.root, res.Names)
 	}()
+}
+
+// asked holds the build pairs this process asked an upgrade for: once per
+// pair, never on every reconnect.
+var (
+	askedMu sync.Mutex
+	asked   = map[string]bool{}
+)
+
+func once(key string) bool {
+	askedMu.Lock()
+	defer askedMu.Unlock()
+	if asked[key] {
+		return false
+	}
+	asked[key] = true
+	return true
+}
+
+// handshake compares this proxy's build with the daemon's and, when this
+// proxy's binary is the newer build in place, asks the daemon to move to
+// it: dun's buildDecision. It runs beside the open; a call is served by
+// the daemon as it is meanwhile.
+func (p *proxy) handshake(c *Client) {
+	hi, err := c.Hello()
+	if err != nil {
+		log.Printf("proxy: daemon handshake: %v (a daemon from before build identities: poly-lsp-mcp daemon --restart)", err)
+		return
+	}
+	mine := BuildID()
+	if hi.Build == mine {
+		return
+	}
+	exe, _ := selfExe()
+	onDisk := mine
+	if h, err := HashFile(exe); err != nil || h != ExeHash() {
+		onDisk = ProbeBuild(exe)
+	}
+	switch buildDecision(mine, hi.Build, onDisk) {
+	case proxyIsStale:
+		log.Printf("proxy: this binary was replaced by the daemon's build %s; restart this client to run it", hi.Build)
+	case buildsDiffer:
+		if once("differ " + mine + " " + hi.Build) {
+			log.Printf("proxy: three builds: this proxy %s, its file now %s, the daemon %s; not asking for an upgrade", mine, onDisk, hi.Build)
+		}
+	case upgradeDaemon:
+		if !once(hi.Build + " → " + mine) {
+			return
+		}
+		if VCSTime() != "" && hi.VCSTime != "" && VCSTime() < hi.VCSTime {
+			log.Printf("proxy: the daemon's build %s is a newer commit than this proxy's %s; not asking it to move back", hi.Build, mine)
+			return
+		}
+		a, err := c.RequestUpgrade(UpgradeRequest{Exe: exe, Build: mine, Why: "a client of build " + mine + " connected", Time: VCSTime()})
+		switch {
+		case err != nil:
+			log.Printf("proxy: upgrade request: %v", err)
+		case a.Accepted:
+			log.Printf("proxy: the daemon (%s) is upgrading to this build (%s)", hi.Build, mine)
+		default:
+			log.Printf("proxy: the daemon (%s) will not upgrade to %s: %s", hi.Build, mine, a.Reason)
+		}
+	}
 }
 
 // startEvents follows the daemon's event stream. It binds this proxy's
@@ -183,7 +247,7 @@ func (p *proxy) serve(in io.Reader) error {
 					// reach the client as notifications/message.
 					"logging": map[string]any{},
 				},
-				"serverInfo": map[string]any{"name": "poly-lsp-mcp", "version": BuildID()},
+				"serverInfo": map[string]any{"name": "poly-lsp-mcp", "version": "0.0.0"}, // as the stdio server; BuildID hashes the binary
 				// As an async stdio server: the report arrives in the
 				// notification that ends the bring-up.
 				"index": map[string]any{"state": "building", "notification": indexLogger},

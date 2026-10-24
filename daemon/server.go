@@ -75,10 +75,19 @@ func Serve(cfg Config) error {
 	// Seed the shared cache before serving so the first root opens warm.
 	cfg.Reg.LoadCache()
 
-	handler, err := buildHandler(cfg.Allow, cfg.Reg)
+	h := &host{allow: cfg.Allow, reg: cfg.Reg}
+	h.up = newUpgrader(func(req UpgradeRequest) error {
+		return errors.New("blue/green upgrade is not available in this build")
+	})
+	handler, err := h.handler()
 	if err != nil {
 		_ = ln.Close()
 		return err
+	}
+	ctx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	if exe, err := selfExe(); err == nil {
+		go watchSelf(ctx, h.up, exe)
 	}
 
 	srv := &http.Server{
@@ -330,10 +339,47 @@ type fileSymbolsOut struct {
 	}
 }
 
-// buildHandler wires the gat/huma surface — the same house stack as
-// raglit's buildGatHandler (REST + GraphQL + gRPC + OpenAPI off one set
-// of ops), served here over the unix socket instead of TCP.
+// host is one daemon process's serving state, shared by its handlers.
+type host struct {
+	allow *AllowList
+	reg   *Registry
+	up    *upgrader
+}
+
+type helloIn struct {
+	Body struct {
+		Build    string `json:"build"`
+		Protocol int    `json:"protocol"`
+		Exe      string `json:"exe,omitempty"`
+		VCSTime  string `json:"vcsTime,omitempty"`
+	}
+}
+type helloOut struct{ Body Hello }
+
+// Hello is the daemon's side of the handshake.
+type Hello struct {
+	Build    string `json:"build"`
+	Protocol int    `json:"protocol"`
+	PID      int    `json:"pid"`
+	VCSTime  string `json:"vcsTime,omitempty"`
+}
+
+type upgradeIn struct{ Body UpgradeRequest }
+type upgradeOut struct{ Body UpgradeAnswer }
+
+// buildHandler is the handler of a daemon that does not upgrade (tests).
 func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
+	h := &host{allow: allow, reg: reg, up: newUpgrader(func(UpgradeRequest) error {
+		return errors.New("this daemon does not upgrade")
+	})}
+	return h.handler()
+}
+
+// handler wires the gat/huma surface — the same house stack as raglit's
+// buildGatHandler (REST + GraphQL + gRPC + OpenAPI off one set of ops),
+// served here over the unix socket instead of TCP.
+func (h *host) handler() (http.Handler, error) {
+	allow, reg := h.allow, h.reg
 	router := chi.NewRouter()
 	api := humachi.New(router, huma.DefaultConfig("poly-lsp", strconv.Itoa(Protocol)))
 	g, err := gat.New()
@@ -353,6 +399,26 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 			out.Body.Protocol = Protocol
 			out.Body.PID = os.Getpid()
 			out.Body.Roots = reg.Roots()
+			return out, nil
+		})
+
+	// The version handshake: a client says its build, the daemon its own,
+	// and a client of another build decides (buildDecision) whether to ask
+	// for /upgrade.
+	gat.Register(api, g, op("hello", http.MethodPost, "/hello", "Exchange build identities."),
+		func(_ context.Context, in *helloIn) (*helloOut, error) {
+			if in.Body.Build != "" && in.Body.Build != BuildID() {
+				log.Printf("daemon: a client of build %s (protocol %d) connected", in.Body.Build, in.Body.Protocol)
+			}
+			out := &helloOut{}
+			out.Body = Hello{Build: BuildID(), Protocol: Protocol, PID: os.Getpid(), VCSTime: VCSTime()}
+			return out, nil
+		})
+
+	gat.Register(api, g, op("upgrade", http.MethodPost, "/upgrade", "Ask the daemon to move to another build of its binary."),
+		func(_ context.Context, in *upgradeIn) (*upgradeOut, error) {
+			out := &upgradeOut{}
+			out.Body = h.up.request(in.Body)
 			return out, nil
 		})
 

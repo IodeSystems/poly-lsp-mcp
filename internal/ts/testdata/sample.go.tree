@@ -1,0 +1,81 @@
+source_file named=true [0-124]
+  package_clause named=true [0-9]
+    package named=false [0-7] "package"
+    package_identifier named=true [8-9] "p"
+  
+ named=false [9-11] "\n\n"
+  import_declaration named=true [11-23]
+    import named=false [11-17] "import"
+    import_spec named=true [18-23]
+      path: interpreted_string_literal named=true [18-23]
+        " named=false [18-19] "\""
+        " named=false [22-23] "\""
+  
+ named=false [23-25] "\n\n"
+  type_declaration named=true [25-47]
+    type named=false [25-29] "type"
+    type_spec named=true [30-47]
+      name: type_identifier named=true [30-31] "S"
+      type: struct_type named=true [32-47]
+        struct named=false [32-38] "struct"
+        field_declaration_list named=true [38-47]
+          { named=false [38-39] "{"
+          field_declaration named=true [40-45]
+            name: field_identifier named=true [40-41] "X"
+            type: type_identifier named=true [42-45] "int"
+          } named=false [46-47] "}"
+  
+ named=false [47-49] "\n\n"
+  method_declaration named=true [49-123]
+    func named=false [49-53] "func"
+    receiver: parameter_list named=true [54-60]
+      ( named=false [54-55] "("
+      parameter_declaration named=true [55-59]
+        name: identifier named=true [55-56] "s"
+        type: pointer_type named=true [57-59]
+          * named=false [57-58] "*"
+          type_identifier named=true [58-59] "S"
+      ) named=false [59-60] ")"
+    name: field_identifier named=true [61-62] "A"
+    parameters: parameter_list named=true [62-69]
+      ( named=false [62-63] "("
+      parameter_declaration named=true [63-68]
+        name: identifier named=true [63-64] "x"
+        type: type_identifier named=true [65-68] "int"
+      ) named=false [68-69] ")"
+    result: type_identifier named=true [70-76] "string"
+    body: block named=true [77-123]
+      { named=false [77-78] "{"
+      short_var_declaration named=true [80-92]
+        left: expression_list named=true [80-81]
+          identifier named=true [80-81] "y"
+        := named=false [82-84] ":="
+        right: expression_list named=true [85-92]
+          binary_expression named=true [85-92]
+            left: identifier named=true [85-86] "x"
+            operator: + named=false [87-88] "+"
+            right: selector_expression named=true [89-92]
+              operand: identifier named=true [89-90] "s"
+              . named=false [90-91] "."
+              field: field_identifier named=true [91-92] "X"
+      
+ named=false [92-93] "\n"
+      return_statement named=true [94-121]
+        return named=false [94-100] "return"
+        expression_list named=true [101-121]
+          call_expression named=true [101-121]
+            function: selector_expression named=true [101-111]
+              operand: identifier named=true [101-104] "fmt"
+              . named=false [104-105] "."
+              field: field_identifier named=true [105-111] "Sprint"
+            arguments: argument_list named=true [111-121]
+              ( named=false [111-112] "("
+              identifier named=true [112-113] "y"
+              , named=false [113-114] ","
+              raw_string_literal named=true [115-120] "`raw`"
+              ) named=false [120-121] ")"
+      
+ named=false [121-122] "\n"
+      } named=false [122-123] "}"
+  
+ named=false [123-124] "\n"

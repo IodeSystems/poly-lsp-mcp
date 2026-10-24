@@ -171,6 +171,18 @@ reviews are not committed. Not yet triaged; claims are the reviewer's, not re-me
 `.venv/`; it amplifies #2, #4, #6. **risks**: none taken yet. **blocking
 decisions**: order after #1 is Carl's call.
 
+✅ **Tool surface trimmed; renames cascade** (Carl, 2026-10-24). Tokens
+1338 → 1220 (budget 1240): `include` reads "override excluded path
+patterns"; the rename instruction said once; `includeComments` hidden and ON
+by default (plain-word names skip prose; reply lists files changed and how to
+revert); `resolution` REMOVED — a derived rename (sqlc column, gat
+operation) always cascades to every source and reference, flags contracts
+(DB column needs a migration; GraphQL operation breaks clients), and
+anything narrower is a `commit:false` transaction. node_edit ops now in the
+usage log, to decide `params`/`return` on data. Gaps: the DB-column note
+lacks the table name (DerivRoot carries the column only); the cascade test
+uses hand-built roots, not real gat/sqlc fixtures.
+
 ◻ **Daemon: dun-style start, version check, blue/green upgrade** (Carl,
 2026-10-24: likes dund's start-on-first-use, multi-session upgrade notice and
 self-upgrade). dun-a8's account of dund (cmd/dun/attach.go,

@@ -30,6 +30,14 @@ func TestDoctorReportsTheDaemonBuild(t *testing.T) {
 	if err := os.WriteFile(daemon.StatePath(), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A refused build and a kept binary: doctor names both.
+	fails := `{"bad/00000001":{"failures":2,"error":"exited","at":"2026-10-24T00:00:00Z"}}`
+	if err := os.WriteFile(daemon.UpgradeFailuresPath(), []byte(fails), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(daemon.PrevExePath(), []byte("x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	root := newRoot()
 	root.SetArgs([]string{"doctor", "--root", t.TempDir(), "--json"})
 	stdout := os.Stdout
@@ -48,6 +56,12 @@ func TestDoctorReportsTheDaemonBuild(t *testing.T) {
 	}
 	if rep.BuildID != daemon.BuildID() || !strings.Contains(rep.Daemon, "NOT this binary's") {
 		t.Fatalf("buildId=%q daemon=%q", rep.BuildID, rep.Daemon)
+	}
+	if rep.UpgradeFailures["bad/00000001"].Failures != 2 || rep.PrevExe != daemon.PrevExePath() {
+		t.Fatalf("upgradeFailures=%v prevExe=%q", rep.UpgradeFailures, rep.PrevExe)
+	}
+	if !strings.Contains(strings.Join(rep.Advisories, "\n"), "REFUSED") {
+		t.Errorf("advisories do not say the build is refused: %v", rep.Advisories)
 	}
 }
 

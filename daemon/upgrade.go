@@ -39,15 +39,19 @@ type upgrader struct {
 	probe func(exe string) string
 	// selfTime is this daemon's commit time (VCSTime; a field for tests).
 	selfTime string
+	// refused says why a build is refused after failing before, "" when
+	// it is not (upgradeRefused; see rollback.go).
+	refused func(build string) string
 }
 
 func newUpgrader(run func(UpgradeRequest) error) *upgrader {
-	return &upgrader{run: run, probe: ProbeBuild, selfTime: VCSTime()}
+	return &upgrader{run: run, probe: ProbeBuild, selfTime: VCSTime(), refused: upgradeRefused}
 }
 
 // request vets an upgrade and starts it. Refused: the same build, a move
 // already running, an older commit than this one (so two installs on one
-// machine cannot hand the daemon back and forth), a binary that is not
+// machine cannot hand the daemon back and forth), a build that already
+// failed to take over MaxUpgradeFailures times, a binary that is not
 // there. The candidate is then run (`daemon --build-id`) in the
 // background, and the move starts only if it says the build it was
 // claimed to be.
@@ -57,6 +61,9 @@ func (u *upgrader) request(req UpgradeRequest) UpgradeAnswer {
 	}
 	if req.Time != "" && u.selfTime != "" && req.Time < u.selfTime {
 		return UpgradeAnswer{Reason: "build " + req.Build + " is an older commit (" + req.Time + ") than this daemon's (" + u.selfTime + ")"}
+	}
+	if why := u.refused(req.Build); why != "" {
+		return UpgradeAnswer{Reason: why}
 	}
 	if st, err := os.Stat(req.Exe); err != nil || !st.Mode().IsRegular() {
 		return UpgradeAnswer{Reason: "no binary at " + req.Exe}
@@ -87,6 +94,10 @@ func (u *upgrader) request(req UpgradeRequest) UpgradeAnswer {
 			return
 		}
 		if got == BuildID() {
+			return
+		}
+		if why := u.refused(got); why != "" {
+			log.Printf("daemon: upgrade refused: %s", why)
 			return
 		}
 		req.Build = got

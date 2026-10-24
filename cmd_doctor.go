@@ -51,11 +51,15 @@ type doctorReport struct {
 	Daemon    string            `json:"daemon"`
 	// DaemonBuild is the running daemon's build identity; DaemonMatches
 	// whether it is this binary's (daemon.BuildID). Absent with no daemon.
-	DaemonBuild   string      `json:"daemonBuild,omitempty"`
-	DaemonMatches *bool       `json:"daemonMatches,omitempty"`
-	Problems      []string    `json:"problems,omitempty"`
-	Advisories    []string    `json:"advisories,omitempty"`
-	Update        *updateInfo `json:"update,omitempty"` // absent when nothing is known
+	DaemonBuild   string `json:"daemonBuild,omitempty"`
+	DaemonMatches *bool  `json:"daemonMatches,omitempty"`
+	// UpgradeFailures are the builds a daemon upgrade failed to; PrevExe
+	// the binary kept from before the last upgrade.
+	UpgradeFailures map[string]daemon.UpgradeFailure `json:"upgradeFailures,omitempty"`
+	PrevExe         string                           `json:"prevExe,omitempty"`
+	Problems        []string                         `json:"problems,omitempty"`
+	Advisories      []string                         `json:"advisories,omitempty"`
+	Update          *updateInfo                      `json:"update,omitempty"` // absent when nothing is known
 
 	// Roots are the project roots of each language with a child LSP,
 	// relative to Root: where --lsp-roots auto would start one each.
@@ -220,6 +224,23 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 					rep.Daemon += ", build " + build + ", NOT this binary's (" + daemon.BuildID() + ")"
 					rep.Advisories = append(rep.Advisories, "the running daemon is another build; the next `mcp --daemon` client of this build asks it to upgrade (blue/green), or restart it now: poly-lsp-mcp daemon --restart")
 				}
+			}
+			// Upgrades that failed, and the binary to go back to (see
+			// daemon/rollback.go).
+			if fails := daemon.LoadUpgradeFailures(); len(fails) > 0 {
+				rep.UpgradeFailures = fails
+				for build, f := range fails {
+					state := "will be tried again"
+					if f.Failures >= daemon.MaxUpgradeFailures {
+						state = "REFUSED until " + daemon.UpgradeFailuresPath() + " is removed"
+					}
+					rep.Advisories = append(rep.Advisories, fmt.Sprintf("daemon upgrade to build %s failed %d time(s), last at %s: %s; %s", build, f.Failures, f.At, f.Error, state))
+				}
+			}
+			if st, err := os.Stat(daemon.PrevExePath()); err == nil {
+				rep.PrevExe = daemon.PrevExePath()
+				rep.Advisories = append(rep.Advisories, fmt.Sprintf("the daemon binary before the last upgrade is kept at %s (%s); to go back to it: %s daemon --restart",
+					rep.PrevExe, st.ModTime().Format(time.RFC3339), rep.PrevExe))
 			}
 
 			// Last: it is the only step that waits on the network.

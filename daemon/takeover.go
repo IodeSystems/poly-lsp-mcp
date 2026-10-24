@@ -114,14 +114,24 @@ func (h *host) blueGreen(req UpgradeRequest) (err error) {
 		"message": fmt.Sprintf("poly-lsp daemon upgrading %s → %s (%s); calls keep being served", BuildID(), req.Build, req.Why)})
 	defer func() {
 		if err != nil {
+			n := recordUpgradeFailure(req.Build, err)
+			refused := n >= MaxUpgradeFailures
+			msg := fmt.Sprintf("poly-lsp daemon upgrade to %s failed (attempt %d): %v; still serving %s", req.Build, n, err, BuildID())
+			if refused {
+				msg += "; that build is refused from now on"
+			}
 			h.notice("warning", map[string]any{"state": "failed", "from": BuildID(), "to": req.Build, "error": err.Error(),
-				"recover": recoverHint,
-				"message": fmt.Sprintf("poly-lsp daemon upgrade to %s failed: %v; still serving %s. To recover: %s", req.Build, err, BuildID(), recoverHint)})
+				"attempt": n, "refused": refused, "recover": recoverHint, "prev": PrevExePath(),
+				"message": msg + ". To recover: " + recoverHint})
 		}
 	}()
 
 	// Green loads the cache at its start: give it every parse made so far.
 	h.reg.SaveCache()
+	// The build serving now is the last known good: keep it to go back to.
+	if err := keepPrevExe(); err != nil {
+		log.Printf("daemon: keep %s: %v (continuing)", PrevExePath(), err)
+	}
 	roots := h.reg.RecentRoots(h.warmRecent)
 	side := sideSocket(socket, os.Getpid())
 	_ = os.Remove(side)
@@ -327,6 +337,7 @@ func (h *host) takeOver(ctx context.Context, socket string) error {
 	}
 	h.socket, h.main, h.removeState, h.side = socket, true, remove, ""
 	close(h.tookOver)
+	clearUpgradeFailures(BuildID())
 	ctx2, cancel := context.WithCancel(context.Background())
 	old := h.stopWatch
 	h.stopWatch = func() { cancel(); old() }

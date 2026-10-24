@@ -51,11 +51,21 @@ func startSession(t *testing.T, root string) *mcpSession {
 
 func startSessionFull(t *testing.T, root string, bs []config.Binding, ss []config.Schema) *mcpSession {
 	t.Helper()
+	return startSessionWith(t, root, bs, ss, nil)
+}
+
+// startSessionWith runs configure on the server before Serve starts, for
+// setters that must not race the serving goroutine.
+func startSessionWith(t *testing.T, root string, bs []config.Binding, ss []config.Schema, configure func(*Server)) *mcpSession {
+	t.Helper()
 	reg, err := config.Default().Build()
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := New(reg, root, bs, ss)
+	if configure != nil {
+		configure(srv)
+	}
 
 	sIn, cOut := io.Pipe()
 	cIn, sOut := io.Pipe()

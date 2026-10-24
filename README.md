@@ -144,6 +144,14 @@ Speaks MCP (newline-delimited JSON-RPC) over stdio. The **default surface is thr
 | `node_read` | Read a node whole — a symbol's complete declaration (never truncated), or a file — via a `<file>#<sym>` address or a selector matching exactly one node. |
 | `node_edit` | Edit one node: `oldText`+`newText`, whole-node rewrite, `delete`, `rename` (workspace-wide, atomic), `params`/`return` (signature). Under `--validate`, an edit that introduces a new error is reverted. |
 
+### Startup and index size
+
+`initialize` replies at once with `"index": {"state": "building"}`; the index, bindings and child LSPs come up behind it, and a tool call waits for them. When the bring-up ends, the server sends `notifications/message` from logger `poly-lsp-mcp/index` with `state` (`ready` or `failed`), `ms`, and `index`: files, bytes, and the heaviest directories by share of indexed bytes, each with its file count, bytes, time and the number of nested checkouts (directories with their own `.git`) under it.
+
+Above `--index-max-files` (10000; 0 = off) the build fails. The walk goes on counting without reading, so the failure carries the post-mortem: where the files are. Tool calls then answer with that report and the remedy. A client retries with `--exclude <dir>` (repeatable, relative to `--root`; the directory is dropped from the index, the query tree and every walk, and the repository is not changed), or the directory goes in `.gitignore`.
+
+`poly-lsp-mcp index --root .` prints the same report from the shell (`--json` for the notification's `index` shape); `poly-lsp-mcp status` prints it for every running server.
+
 ### Selector language
 
 CSS selectors, but the document is your codebase. `func` is a tag, `#name` an id, `>` is child, space is descendant, `,` is union; `:has()` / `:not()` / `:where()` behave as in CSS, `:first` / `:last` as in jQuery. One new idea: the reference **graph** rides on pseudo-element syntax — `::in` / `::out` are edges the way `::before` is generated content, and `::grep` / `::comment` / `::signature` / `::body` are other generated views of a node.

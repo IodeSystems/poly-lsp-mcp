@@ -29,6 +29,10 @@ type IgnoreSet struct {
 	files map[string]bool
 	dirs  []string // relative, each ending in "/"
 
+	// noGit: there is no repository behind this set (it exists only to
+	// carry excludes), so the git fallback is never asked.
+	noGit bool
+
 	// mu guards checked, the memo for the pattern fallback below.
 	mu      sync.Mutex
 	checked map[string]bool
@@ -69,6 +73,38 @@ func LoadIgnores(root string) *IgnoreSet {
 	// may match paths that do not exist YET, and Matches falls back to
 	// git for those.
 	return s
+}
+
+// WithExcludes returns a set that also ignores each directory in dirs
+// (relative to root, slash- or OS-separated), as though .gitignore listed
+// it. Excludes are how a CLIENT drops a directory without editing the
+// repository's .gitignore. A nil set (root is not a repo) gains a set that
+// holds only the excludes and never runs git. No excludes: s unchanged.
+func (s *IgnoreSet) WithExcludes(root string, dirs []string) *IgnoreSet {
+	if len(dirs) == 0 {
+		return s
+	}
+	if s == nil {
+		s = &IgnoreSet{root: root, files: map[string]bool{}, checked: map[string]bool{}, noGit: true}
+	}
+	for _, d := range dirs {
+		if d = CleanExclude(d); d != "" {
+			s.dirs = append(s.dirs, d+"/")
+		}
+	}
+	return s
+}
+
+// CleanExclude normalises an exclude to the repo-relative, slash-separated
+// form with no trailing slash. "" for one that names the root or leaves it
+// (absolute, or starting with ..), which callers reject.
+func CleanExclude(d string) string {
+	d = filepath.ToSlash(filepath.Clean(d))
+	d = strings.TrimSuffix(d, "/")
+	if d == "." || d == "" || strings.HasPrefix(d, "/") || d == ".." || strings.HasPrefix(d, "../") {
+		return ""
+	}
+	return d
 }
 
 // rel renders an absolute path as the repo-relative, slash-separated
@@ -144,6 +180,9 @@ func (s *IgnoreSet) checkIgnore(rel string) bool {
 		return v
 	}
 	s.mu.Unlock()
+	if s.noGit {
+		return false
+	}
 
 	cmd := exec.Command("git", "-C", s.root, "check-ignore", "-q", "--", rel)
 	// Exit 0 = ignored, 1 = not ignored, anything else = error.

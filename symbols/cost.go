@@ -224,15 +224,19 @@ func (c *BuildCost) Report() CostReport {
 	rep.Heaviest = out
 	for _, d := range out {
 		if d.NestedCheckouts > 0 {
-			rep.Hint = "a directory with its own .git is another repository indexed as this one; to drop any directory from the index, add it to .gitignore"
+			rep.Hint = "a directory with its own .git is another repository indexed as this one; " + dropHint
 			break
 		}
 	}
 	if rep.Hint == "" && len(out) > 0 {
-		rep.Hint = "to drop a directory from the index, add it to .gitignore"
+		rep.Hint = dropHint
 	}
 	return rep
 }
+
+// dropHint names both ways to drop a directory: the client's, which leaves
+// the repository alone, and the repository's own.
+const dropHint = "to drop a directory from the index, pass --exclude <dir> or add it to .gitignore"
 
 // ancestors returns d and every directory above it, excluding the root.
 func ancestors(d string) []string {

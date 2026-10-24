@@ -848,6 +848,11 @@ type buildConfig struct {
 	plugins []Plugin
 	// cost, if set, records what each directory cost the walk.
 	cost *BuildCost
+	// ignores, if set, replaces the set Build would load from git — so a
+	// caller's excludes apply, and the set is loaded once per caller.
+	ignores *git.IgnoreSet
+	// maxFiles, if > 0, is the hard limit on indexed files. See WithLimit.
+	maxFiles int
 }
 
 // WithCache plumbs a ParseCache through Build. Files whose
@@ -867,6 +872,42 @@ func WithoutGitignore() BuildOption {
 	return func(cfg *buildConfig) { cfg.noGitignore = true }
 }
 
+// WithIgnores uses ign as the ignore filter instead of loading one from
+// git. Ignored under WithoutGitignore.
+func WithIgnores(ign *git.IgnoreSet) BuildOption {
+	return func(cfg *buildConfig) { cfg.ignores = ign }
+}
+
+// WithLimit makes Build fail with a *LimitError when the workspace has more
+// than maxFiles indexable files. 0 = no limit.
+func WithLimit(maxFiles int) BuildOption {
+	return func(cfg *buildConfig) { cfg.maxFiles = maxFiles }
+}
+
+// limitCountFactor bounds the count-only walk after the limit: it stops at
+// this many times the limit, so a root pointed at a home directory still
+// returns quickly.
+const limitCountFactor = 20
+
+// LimitError is a build stopped by WithLimit. Report is the post-mortem:
+// after the limit, the walk went on counting files and bytes without
+// reading them, so it shows where the files are.
+type LimitError struct {
+	Limit  int
+	Report CostReport
+	// Stopped: the count-only walk itself stopped at limitCountFactor×Limit,
+	// so Report.Files is a lower bound.
+	Stopped bool
+}
+
+func (e *LimitError) Error() string {
+	n := fmt.Sprintf("%d", e.Report.Files)
+	if e.Stopped {
+		n = "at least " + n
+	}
+	return fmt.Sprintf("index limit: %s indexable files, limit %d", n, e.Limit)
+}
+
 // Build walks root recursively and indexes every file whose extension is
 // registered in reg. Returns the populated Index. The walk is sequential;
 // concurrent walks are a possible future optimization.
@@ -880,14 +921,22 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	// when root is not a repo or git is unavailable, in which case the
 	// walk proceeds exactly as before.
 	var ign *git.IgnoreSet
-	if !cfg.noGitignore {
+	switch {
+	case cfg.noGitignore:
+	case cfg.ignores != nil:
+		ign = cfg.ignores
+	default:
 		ign = git.LoadIgnores(root)
 	}
 	var pluginFiles []PluginFile
+	if cfg.maxFiles > 0 && cfg.cost == nil {
+		cfg.cost = NewBuildCost() // the post-mortem needs one
+	}
 	if cfg.cost != nil {
 		cfg.cost.begin(root)
 		defer cfg.cost.end()
 	}
+	indexed, over, stopped := 0, false, false
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -931,6 +980,18 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		if info.Size() > maxFileSize {
 			return nil
 		}
+		indexed++
+		if cfg.maxFiles > 0 && indexed > cfg.maxFiles {
+			// Past the limit: count, do not read, so the post-mortem shows
+			// where the files are.
+			over = true
+			if indexed > limitCountFactor*cfg.maxFiles {
+				stopped = true
+				return fs.SkipAll
+			}
+			cfg.cost.file(path, info.Size(), 0, false)
+			return nil
+		}
 		fileStart := time.Now()
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -969,6 +1030,10 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	})
 	if err != nil {
 		return nil, err
+	}
+	if over {
+		cfg.cost.end()
+		return nil, &LimitError{Limit: cfg.maxFiles, Report: cfg.cost.Report(), Stopped: stopped}
 	}
 	// Convention plugins (F2) run after the lexical walk, over the files
 	// it indexed. Zero plugins → this loop is a no-op → the index is

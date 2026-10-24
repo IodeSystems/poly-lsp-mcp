@@ -1,0 +1,120 @@
+package mcp
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func writeTree(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for rel, body := range files {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// indexNote returns the data of the bring-up notification, once it has
+// arrived (a tool call has returned, so it has).
+func indexNote(t *testing.T, s *mcpSession) map[string]any {
+	t.Helper()
+	notes := s.serverNotes("notifications/message")
+	for _, n := range notes {
+		var p struct {
+			Logger string         `json:"logger"`
+			Data   map[string]any `json:"data"`
+		}
+		if json.Unmarshal(n.Params, &p) == nil && p.Logger == indexLogger {
+			return p.Data
+		}
+	}
+	t.Fatalf("no %s notification among %d", indexLogger, len(notes))
+	return nil
+}
+
+// initialize replies before the index exists; the first tool call waits for
+// it; the notification that ends the bring-up carries the cost report.
+func TestAsyncInitializeRepliesBeforeTheIndex(t *testing.T) {
+	dir := writeTree(t, map[string]string{"a.go": "package p\n\nfunc F() {}\n"})
+	s := startSessionWith(t, dir, nil, nil, func(srv *Server) { srv.SetAsyncInit(true) })
+	defer s.close()
+
+	resp := s.request("initialize", map[string]any{})
+	var got struct {
+		Index map[string]any `json:"index"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Index["state"] != "building" {
+		t.Errorf("initialize should say the index is building: %s", resp.Result)
+	}
+	s.notify("notifications/initialized", map[string]any{})
+
+	r := s.callTool("node_query", map[string]any{"selector": "#F"})
+	if r.IsError || len(r.Content) == 0 || !strings.Contains(r.Content[0].Text, "F") {
+		t.Fatalf("the first tool call should wait for the index and answer: %+v", r)
+	}
+	note := indexNote(t, s)
+	if note["state"] != "ready" || note["index"] == nil {
+		t.Errorf("bring-up notification: %v", note)
+	}
+}
+
+// Over the limit: the notification and every tool call carry the
+// post-mortem and the remedy, so the client can retry with excludes.
+func TestIndexLimitFailsWithPostMortem(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"a.go":            "package p\n",
+		"vendored/x/b.go": "package x\n",
+		"vendored/x/c.go": "package x\n",
+	})
+	s := startSessionWith(t, dir, nil, nil, func(srv *Server) {
+		srv.SetAsyncInit(true)
+		srv.SetIndexLimit(1)
+	})
+	defer s.close()
+	s.request("initialize", map[string]any{})
+
+	r := s.callTool("node_query", map[string]any{"selector": "file"})
+	if !r.IsError {
+		t.Fatalf("a tool call over the limit should be refused: %+v", r)
+	}
+	text := r.Content[0].Text
+	for _, want := range []string{"index limit", "vendored/x/", "--exclude"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("refusal should contain %q:\n%s", want, text)
+		}
+	}
+	note := indexNote(t, s)
+	if note["state"] != "failed" || note["limit"] != float64(1) || note["remedy"] == nil {
+		t.Errorf("failure notification: %v", note)
+	}
+}
+
+// --exclude drops a directory from the index without touching .gitignore.
+func TestExcludesDropDirectories(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"a.go":            "package p\n\nfunc Keep() {}\n",
+		"vendored/x/b.go": "package x\n\nfunc Drop() {}\n",
+	})
+	s := startSessionWith(t, dir, nil, nil, func(srv *Server) { srv.SetExcludes([]string{"vendored/"}) })
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	if n := s.srv.IndexCost().Files; n != 1 {
+		t.Errorf("indexed %d files, want 1 (vendored/ excluded)", n)
+	}
+	r := s.callTool("node_query", map[string]any{"selector": "#Drop"})
+	if len(r.Content) > 0 && strings.Contains(r.Content[0].Text, "vendored") {
+		t.Errorf("an excluded directory answered a query: %s", r.Content[0].Text)
+	}
+}

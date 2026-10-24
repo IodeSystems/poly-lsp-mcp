@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -255,6 +256,8 @@ func nodePath(n *treeNode) string {
 type engine struct {
 	s       *Server
 	project *treeNode
+	// excl is the client's excludes, resolved once per walk.
+	excl *git.IgnoreSet
 
 	// ordSeq feeds treeNode.fileOrd during the workspace walk.
 	ordSeq int
@@ -682,6 +685,7 @@ func (s *Server) buildTree() (*engine, error) {
 	}
 	// lspLeft is set lazily on the first round-trip (ensureLSPCap), so a
 	// non-edge query never pays to compute the workspace-tuned cap.
+	e.excl = s.excludeSet()
 	e.walkDir(root, project)
 	return e, nil
 }
@@ -697,6 +701,11 @@ func (e *engine) walkDir(abs string, parent *treeNode) {
 			continue
 		}
 		childAbs := filepath.Join(abs, de.Name())
+		// The client's excludes hold here too: a directory it dropped from
+		// the index is not a node either.
+		if de.IsDir() && e.excl.DirIgnored(e.s.getRoot(), childAbs) {
+			continue
+		}
 		// A binary file (ELF, image, compiled test binary) is never a
 		// useful node — no symbols, no readable source, and node_read of
 		// it dumps megabytes of garbage. Skip it before it takes an

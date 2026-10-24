@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -153,7 +152,7 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 	// indexed file.
 	if filepath.Base(ev.Name) == ".gitignore" {
 		if root := s.getRoot(); root != "" {
-			s.setIgnores(git.LoadIgnores(root))
+			s.setIgnores(s.loadIgnores(root))
 		}
 		return
 	}

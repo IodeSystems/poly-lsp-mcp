@@ -93,10 +93,18 @@ type Server struct {
 	gotInit     bool
 	initialized bool
 	shutdown    bool
+	// ready is closed when an asynchronous bring-up ends; nil when the
+	// bring-up was synchronous. initErr is its outcome, either way. Both
+	// guarded by stateMu. See async_init.go.
+	ready      chan struct{}
+	initErr    error
+	asyncInit  bool
+	indexLimit int
 
 	indexMu     sync.RWMutex
 	index       *symbols.Index
 	indexCost   symbols.CostReport // guarded by indexMu
+	excludes    []string           // client-chosen dirs to drop; see SetExcludes
 	indexBuilds int                // count of BuildIndex calls; a test seam for "did this process build the index itself"
 	// ignores is the workspace's gitignore set, guarded by indexMu
 	// alongside the index it was resolved with.
@@ -514,9 +522,14 @@ func (s *Server) SetCachePath(path string) {
 func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	s.enc = json.NewEncoder(out)
 	dec := json.NewDecoder(in)
-	s.maybeLoadCache()
+	if !s.asyncInit {
+		s.maybeLoadCache()
+	}
 	defer s.maybeSaveCache()
 	defer s.stopFileWatch()
+	// Runs first: a bring-up still going would start a watcher after
+	// stopFileWatch and write the cache while it is being saved.
+	defer func() { _ = s.waitReady() }()
 	for {
 		var msg jsonrpc.Message
 		if err := dec.Decode(&msg); err != nil {
@@ -591,6 +604,7 @@ func (s *Server) dispatch(req *jsonrpc.Message) {
 		s.stateMu.Lock()
 		s.shutdown = true
 		s.stateMu.Unlock()
+		_ = s.waitReady() // the bring-up may still be starting the manager
 		s.stopManagerIfPresent()
 		s.stopFileWatch()
 		s.reply(req, json.RawMessage("null"))
@@ -639,11 +653,17 @@ func (s *Server) BuildIndex() error {
 	// Resolved alongside the walk so the watcher filters by exactly the
 	// same set the build used, and re-resolved on every rebuild so a
 	// branch switch that changes .gitignore is picked up.
-	s.setIgnores(git.LoadIgnores(root))
+	ign := s.loadIgnores(root)
+	s.setIgnores(ign)
 	s.indexBuilds++
 	cost := symbols.NewBuildCost()
-	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache), symbols.WithCost(cost))
+	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache), symbols.WithCost(cost),
+		symbols.WithIgnores(ign), symbols.WithLimit(s.indexLimit))
 	if err != nil {
+		var le *symbols.LimitError
+		if errors.As(err, &le) {
+			s.setIndexCost(le.Report) // the post-mortem
+		}
 		return fmt.Errorf("index build failed for %s: %w", root, err)
 	}
 	s.setIndex(idx)
@@ -654,7 +674,7 @@ func (s *Server) BuildIndex() error {
 	}
 	s.seedConflicted(root)
 
-	resolver := bindings.NewResolver(root)
+	resolver := bindings.NewResolverWithIgnores(root, ign)
 	if len(s.bindings) > 0 {
 		n, err := resolver.Apply(idx, s.bindings)
 		if err != nil {
@@ -711,13 +731,18 @@ func (s *Server) BuildIndex() error {
 // handleInitialize builds the symbol index for s.getRoot(), applies any
 // Tier-2 and Tier-3 bindings, and advertises tool capability.
 func (s *Server) handleInitialize(req *jsonrpc.Message) {
-	if s.getRoot() != "" {
+	building := false
+	if s.getRoot() != "" && s.asyncInit {
+		s.startAsyncInit()
+		building = true
+	} else if s.getRoot() != "" {
 		// Init is the shared workspace bring-up (index + manager +
 		// prewarm + watch); the daemon calls it directly. BuildIndex
 		// stays out of it deliberately — a one-shot query needs none of
 		// the lifecycle goroutines.
 		if err := s.Init(); err != nil {
 			log.Printf("mcp initialize: %v", err)
+			s.setInitErr(err)
 		}
 	} else {
 		log.Print("mcp initialize: no workspace root configured; tools will return errors")
@@ -757,9 +782,15 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		res["schemas"] = sc
 	}
 	// What the index cost, by directory, so the client can decide what to
-	// ignore. Absent when no index was built (no root).
-	if c := s.IndexCost(); c.Files > 0 {
+	// ignore. Absent when no index was built (no root). Building: the
+	// report arrives in the notification that ends the bring-up.
+	if building {
+		res["index"] = map[string]any{"state": "building", "notification": indexLogger}
+	} else if c := s.IndexCost(); c.Files > 0 {
 		res["index"] = c
+		if err := s.waitReady(); err != nil {
+			res["indexError"] = s.indexFailure(err)
+		}
 	}
 	s.reply(req, res)
 }
@@ -833,6 +864,10 @@ func (s *Server) handleResourcesRead(req *jsonrpc.Message) {
 		s.replyError(req, errInvalidParams, fmt.Sprintf("unknown resource: %s", p.URI))
 		return
 	}
+	if err := s.waitReady(); err != nil {
+		s.replyError(req, errInternal, s.indexFailure(err))
+		return
+	}
 	text, err := res.Read(s)
 	if err != nil {
 		s.replyError(req, errInternal, err.Error())
@@ -872,6 +907,15 @@ func (s *Server) handleToolsCall(req *jsonrpc.Message) {
 		})
 		return
 	}
+	// What the tool needs is resolved before its first use: wait for the
+	// bring-up, and refuse with the reason if it failed.
+	if err := s.waitReady(); err != nil {
+		s.reply(req, map[string]any{
+			"content": []Content{{Type: "text", Text: s.indexFailure(err)}},
+			"isError": true,
+		})
+		return
+	}
 	content, isError, err := tool.Handler(s, localSession, p.Arguments)
 	if err != nil {
 		content = []Content{{Type: "text", Text: err.Error()}}
@@ -888,6 +932,23 @@ func (s *Server) handleToolsCall(req *jsonrpc.Message) {
 // ignored file and the very next write to it would put it back, so a
 // session that runs a build — or switches branches — drifts back toward
 // indexing everything.
+// SetExcludes drops these directories (relative to the root) from the
+// index and from every walk, as though .gitignore listed them. Set before
+// the first build.
+func (s *Server) SetExcludes(dirs []string) { s.excludes = dirs }
+
+// excludeSet is the client's excludes alone, without git's ignores; nil
+// when there are none.
+func (s *Server) excludeSet() *git.IgnoreSet {
+	var none *git.IgnoreSet
+	return none.WithExcludes(s.getRoot(), s.excludes)
+}
+
+// loadIgnores is git's ignore set for root plus the client's excludes.
+func (s *Server) loadIgnores(root string) *git.IgnoreSet {
+	return git.LoadIgnores(root).WithExcludes(root, s.excludes)
+}
+
 func (s *Server) setIgnores(ig *git.IgnoreSet) {
 	s.indexMu.Lock()
 	defer s.indexMu.Unlock()

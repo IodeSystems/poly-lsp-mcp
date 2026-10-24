@@ -48,6 +48,7 @@ with ':explain ' to see what each step cost instead of the matches.`,
 	f.StringVar(&budget, "budget", "", "query budget: Nms wall-clock (bare = ms) or Nops deterministic work units (default 10000ms). Raise when a query reports it stopped early.")
 	f.BoolVar(&verbose, "verbose", false, "log which config was resolved and other startup detail")
 	f.BoolVar(&asJSON, "json", false, "print ONE JSON document (matches with node, file, type, @, and for an edge from/to and conf; total, offset, stop-early flags) instead of the grouped text tree")
+	idx := indexFlags(f)
 	f.BoolVar(&resolve, "resolve", false, "resolve ::in/::out edges through child LSPs (spawns them for this run, e.g. gopls) and label each edge conf: lsp|lexical|unsettled, as node_query does; slower to start")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -85,6 +86,9 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		// No Serve: a query is read-only and never writes the persisted index.
 		// Child LSPs only under --resolve (below).
 		srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+		if err := idx.apply(srv); err != nil {
+			return err
+		}
 		// It DOES want the parse cache, though. Without it every invocation
 		// re-parses the workspace from scratch — the dominant cost of a one-shot
 		// query, and pure waste when the MCP server has already parsed the same

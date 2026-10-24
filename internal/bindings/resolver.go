@@ -43,6 +43,12 @@ func NewResolver(root string) *Resolver {
 	return &Resolver{root: root, ignores: git.LoadIgnores(root)}
 }
 
+// NewResolverWithIgnores uses ign (the caller's set, excludes included)
+// instead of loading one.
+func NewResolverWithIgnores(root string, ign *git.IgnoreSet) *Resolver {
+	return &Resolver{root: root, ignores: ign}
+}
+
 // Apply walks every binding and inserts the resolved sites into idx.
 // Missing references (the symbol isn't found in the file) are logged
 // and counted but never fatal — partial bindings still improve the

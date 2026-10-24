@@ -109,3 +109,49 @@ func TestBuildRecordsCost(t *testing.T) {
 		t.Errorf("clone/ has its own .git and should be flagged: %v", c.nested)
 	}
 }
+
+// Over the limit the build fails, and the error carries the post-mortem: the
+// walk went on counting, so the report covers every file, not the first
+// maxFiles. A walk that would run away (a root at $HOME) stops counting at
+// limitCountFactor×limit and says the count is a lower bound.
+func TestBuildLimitReportsWhereTheFilesAre(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 25; i++ {
+		sub := "main"
+		if i >= 2 {
+			sub = "vendored/pkg"
+		}
+		p := filepath.Join(dir, sub, "f"+string(rune('a'+i))+".go")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("package p\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Build(dir, reg, WithLimit(5))
+	le, ok := err.(*LimitError)
+	if !ok {
+		t.Fatalf("want *LimitError, got %v", err)
+	}
+	if le.Stopped || le.Report.Files != 25 {
+		t.Errorf("post-mortem should count all 25 files: stopped=%v files=%d", le.Stopped, le.Report.Files)
+	}
+	if len(le.Report.Heaviest) == 0 || le.Report.Heaviest[0].Dir != "vendored/pkg/" {
+		t.Errorf("heaviest should name vendored/pkg/: %+v", le.Report.Heaviest)
+	}
+
+	_, err = Build(dir, reg, WithLimit(1))
+	if le, ok = err.(*LimitError); !ok || !le.Stopped || !strings.Contains(le.Error(), "at least") {
+		t.Errorf("a runaway count stops at %dx the limit and says so: %v", limitCountFactor, err)
+	}
+
+	if _, err := Build(dir, reg, WithLimit(25)); err != nil {
+		t.Errorf("at the limit is not over it: %v", err)
+	}
+}

@@ -61,6 +61,7 @@ func mcpCmd(l *loader) *cobra.Command {
 	f.IntVar(&readCharBudget, "read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
 	f.StringVar(&hookPath, "hook", os.Getenv("POLY_LSP_HOOK"), "path to a host hook executable consulted before every file read/edit (exit 2 = cancel, stdout = injected note); $POLY_LSP_HOOK fallback. See mcp/hook.go")
 	lifecycle := lifecycleFlags(f)
+	idx := indexFlags(f)
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		if readCharBudget > 0 {
@@ -111,6 +112,15 @@ func mcpCmd(l *loader) *cobra.Command {
 		}
 
 		srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+		if err := idx.apply(srv); err != nil {
+			return err
+		}
+		if len(idx.excludes) > 0 {
+			log.Printf("mcp: excluded from the index: %v", []string(idx.excludes))
+		}
+		// initialize replies at once; the index builds behind it and tool
+		// calls wait for it. See mcp/async_init.go.
+		srv.SetAsyncInit(true)
 		srv.SetLegacyTools(legacyTools)
 		srv.SetReadOnly(readOnly)
 		if readOnly {

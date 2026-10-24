@@ -48,6 +48,11 @@ type doctorReport struct {
 	Daemon     string            `json:"daemon"`
 	Problems   []string          `json:"problems,omitempty"`
 	Advisories []string          `json:"advisories,omitempty"`
+
+	// Roots are the project roots of each language with a child LSP,
+	// relative to Root: where --lsp-roots auto would start one each.
+	Roots        map[string][]string `json:"projectRoots,omitempty"`
+	RootsBounded string              `json:"projectRootsBounded,omitempty"`
 }
 
 // doctorCmd checks what poly-lsp needs to run well here: the binary on
@@ -132,6 +137,24 @@ a different poly-lsp-mcp than this one.`,
 				}
 			}
 
+			pr := symbols.DetectProjectRoots(root, ign, symbols.DefaultRootsTime, symbols.DefaultRootsDirs)
+			rep.RootsBounded = pr.Bounded
+			for _, l := range rep.Languages {
+				dirs := pr.Roots[l.Lang]
+				if l.LSP == nil || len(dirs) == 0 {
+					continue
+				}
+				if rep.Roots == nil {
+					rep.Roots = map[string][]string{}
+				}
+				for _, d := range dirs {
+					rep.Roots[l.Lang] = append(rep.Roots[l.Lang], symbols.RelRoot(root, d))
+				}
+				if len(dirs) > 1 {
+					rep.Advisories = append(rep.Advisories, setup.RootsRefine(l.Lang, l.LSP.Name, len(dirs), 8))
+				}
+			}
+
 			if p, err := exec.LookPath("git"); err != nil {
 				rep.Git = "missing"
 				rep.Advisories = append(rep.Advisories, "git is not on PATH: .gitignore is not applied, so ignored files are indexed")
@@ -186,6 +209,24 @@ func printDoctor(r doctorReport) {
 			state = d.LSP.Name + " MISSING"
 		}
 		fmt.Printf("  %-12s %6d files  %s\n", d.Lang, d.Files, state)
+	}
+	if len(r.Roots) > 0 {
+		note := ""
+		if r.RootsBounded != "" {
+			note = " (search " + r.RootsBounded + "; partial)"
+		}
+		fmt.Printf("\nproject roots%s:\n", note)
+		for _, d := range r.Languages {
+			rs := r.Roots[d.Lang]
+			if len(rs) == 0 {
+				continue
+			}
+			names, more := rs, ""
+			if len(names) > 8 { // --json lists them all
+				names, more = names[:8], fmt.Sprintf(", +%d more", len(rs)-8)
+			}
+			fmt.Printf("  %-12s %6d roots  %s%s\n", d.Lang, len(rs), strings.Join(names, ", "), more)
+		}
 	}
 	for _, p := range r.Problems {
 		fmt.Printf("\nPROBLEM  %s\n", p)

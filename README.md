@@ -193,6 +193,21 @@ The index walk has a startup budget, `--index-budget`, in `node_query`'s grammar
 
 When a `node_query` leaves something out, its result carries `leftOut`: `pruned` counts what the walk did not enter, by reason (a skipped directory such as `node_modules/`, `worktree of this repo`, `another repo`, `excluded`; `shadowed` counts files, the rest directories), `deadEnds` counts edges a child LSP resolved into left-out code, and `hint` says how to search inside: name a path in the selector (reaches that path only), or pass `include`, an array of gitignore-style patterns (`node_modules` at any depth, `.claude/worktrees/a1` anchored, `*`/`?`/`**`, trailing `/` for directories). A pattern opens whatever the walk left out for any reason (skipped directory, nested repo, `excluded`, `shadowed`) and walks it fully; `.git` is never entered. `poly-lsp-mcp query --include <pattern>` does the same and may repeat. `leftOut` is absent when nothing was left out.
 
+### Child LSPs per project root — `--lsp-roots`
+
+`--lsp-roots single` (the default) runs one child LSP per language at the workspace root. gopls and typescript-language-server resolve several modules or packages from there; pylsp and clangd in a monorepo do not, and one instance holds every package in memory. `--lsp-roots auto` (on `mcp` and `daemon`) runs one child per (language, project root) instead:
+
+| Language | Project root marker |
+|----------|---------------------|
+| go | `go.mod`; a `go.work` at the workspace root keeps one root there |
+| typescript | `tsconfig.json` beside a `package.json`, or one no other `tsconfig.json` encloses |
+| python | `pyproject.toml`, `setup.py`, `setup.cfg` (nested packages are roots of their own) |
+| c, cpp | `compile_commands.json`, or the outermost `CMakeLists.txt` |
+
+The search skips what the index skips (`node_modules`, `vendor` and the like, gitignored and excluded directories) and stops after 2 s or 20,000 directories, and says so. Each child starts on the first request for a file under its root; a file goes to the nearest enclosing root, else to a child at the workspace root. At most `--lsp-roots-max` (8) run per language: the least recently used is stopped (reason `lru`) and starts again on demand, and idle and memory stops apply to each child as before. `poly-lsp-mcp status` shows each child's root (`LSP ROOT`).
+
+Nothing switches mode by itself. In `single` mode, when the index budget is blown or a child is stopped for memory and a language has several project roots, the `poly-lsp-mcp/setup` notification (`hints`, `roots`) and the budget remedy offer `--lsp-roots auto`; `poly-lsp-mcp doctor` lists the roots per language and offers it when there are several. In `auto` mode the setup notification lists the roots and how to revert (`--lsp-roots single`).
+
 ### Selector language
 
 CSS selectors, but the document is your codebase. `func` is a tag, `#name` an id, `>` is child, space is descendant, `,` is union; `:has()` / `:not()` / `:where()` behave as in CSS, `:first` / `:last` as in jQuery. One new idea: the reference **graph** rides on pseudo-element syntax — `::in` / `::out` are edges the way `::before` is generated content, and `::grep` / `::comment` / `::signature` / `::body` are other generated views of a node.

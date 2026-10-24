@@ -272,6 +272,30 @@ the client (dun) retries with its own decisions and reports them.
   and nodeForLoc). Known gap: a call whose only definition is in left-out
   code and that has no local candidate makes no LSP round-trip, so it is
   not counted.
+- ✅ `--lsp-roots single|auto` (Carl: "mono-repo language server roots as
+  an option to turn on if we bust budget — another info/refine"). Default
+  single = unchanged. auto: one child per (language, project root), started
+  on first use, nearest enclosing root else the workspace root, at most
+  `--lsp-roots-max` 8 per language (LRU stop, reason `lru`); idle/memory
+  stops per child. Roots: symbols/roots.go (go.mod/go.work, tsconfig.json,
+  pyproject/setup.py/setup.cfg, compile_commands/outermost CMakeLists),
+  skipDirs + ignores, bounded 2 s / 20k dirs. Hints (setup/roots.go): single
+  + (BudgetError or a memory stop) + several roots → refine line in the
+  setup notification (`hints`, `roots`) and budget remedy; auto → roots and
+  revert line; doctor lists roots and offers the flag. Status shows each
+  child's root. This repo: doctor finds 4 go roots (3 are testdata fixtures).
+  **risks**: memory — 8 children per language can cost more than one at the
+  root (each child has its own baseline); the cap and idle-stop bound it,
+  nothing measured on a real monorepo yet. Routing — a file outside every
+  root goes to a workspace-root child, which for pylsp/clangd is the old
+  behaviour; nested roots (pkg inside pkg) split a package from its parent,
+  so cross-root references resolve only through what each server finds on
+  its own (installed packages, go.mod replace). A file's root is fixed at
+  Start: a go.mod added later routes nowhere new until restart. Proactive
+  open does not start per-root children (they start on first use), so
+  `poly-lsp-mcp://diagnostics` is empty for unused roots. The memory-stop
+  hint path (OnStop → setup re-send) has no test with a real stop. Not
+  detected: JVM (Gradle/Maven) roots.
 - ◻ dun side: read the `poly-lsp-mcp/index` notification, choose excludes,
   respawn, report what it decided and how to reverse it. Protocol sent to
   dun-a8.

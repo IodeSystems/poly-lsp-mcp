@@ -44,6 +44,9 @@ type Registry struct {
 	// manager.
 	lifecycle multiplex.Lifecycle
 	statusDir string
+	// lspRootsAuto / lspRootsMax: --lsp-roots for every root's server.
+	lspRootsAuto bool
+	lspRootsMax  int
 	// usageLog is every root's node_query usage log; see mcp/usage.go.
 	usageLog string
 
@@ -283,7 +286,15 @@ func (r *Registry) build(root string) *mcp.Server {
 	mgr.Lifecycle = r.lifecycle
 	mgr.StatusDir = r.statusDir
 	srv.SetManager(mgr)
+	srv.SetLSPRoots(r.lspRootsAuto, r.lspRootsMax)
 	return srv
+}
+
+// SetLSPRoots sets --lsp-roots for roots built after the call: auto = a
+// child LSP per project root, at most max running per language. Call
+// before Serve.
+func (r *Registry) SetLSPRoots(auto bool, max int) {
+	r.lspRootsAuto, r.lspRootsMax = auto, max
 }
 
 // SetLifecycle sets the child-LSP lifecycle policy for roots built after

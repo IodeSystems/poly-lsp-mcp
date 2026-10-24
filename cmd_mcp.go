@@ -61,9 +61,14 @@ func mcpCmd(l *loader) *cobra.Command {
 	f.IntVar(&readCharBudget, "read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
 	f.StringVar(&hookPath, "hook", os.Getenv("POLY_LSP_HOOK"), "path to a host hook executable consulted before every file read/edit (exit 2 = cancel, stdout = injected note); $POLY_LSP_HOOK fallback. See mcp/hook.go")
 	lifecycle := lifecycleFlags(f)
+	rootsFlag := lspRootsFlags(f)
 	idx := indexFlags(f)
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		roots, err := rootsFlag()
+		if err != nil {
+			return err
+		}
 		if readCharBudget > 0 {
 			mcp.SetReadCharBudget(readCharBudget)
 		}
@@ -89,6 +94,9 @@ func mcpCmd(l *loader) *cobra.Command {
 			client.SetPolicy(readOnly, validate)
 			if legacyTools {
 				log.Print("mcp: --legacy-tools is ignored in --daemon mode (the daemon serves the modern surface)")
+			}
+			if roots.auto {
+				log.Print("mcp: --lsp-roots is ignored in --daemon mode; pass it to `poly-lsp-mcp daemon`")
 			}
 			log.Printf("mcp: proxying root %s to shared daemon (readOnly=%v validate=%v)", root, readOnly, validate)
 			return daemon.RunProxy(client, root, os.Stdin, os.Stdout)
@@ -148,6 +156,7 @@ func mcpCmd(l *loader) *cobra.Command {
 		mgr.Lifecycle = lifecycle()
 		mgr.StatusDir = daemon.StatusDir()
 		srv.SetManager(mgr)
+		srv.SetLSPRoots(roots.auto, roots.max)
 		return srv.Serve(os.Stdin, os.Stdout)
 	}
 	return cmd
@@ -161,6 +170,28 @@ func lifecycleFlags(f *pflag.FlagSet) func() multiplex.Lifecycle {
 	psi := f.Float64("lsp-psi-threshold", 20, "when /proc/pressure/memory 'some avg10' is at or above this, stop one child LSP per 10s (idle longest, then largest). Linux only. 0 = off")
 	return func() multiplex.Lifecycle {
 		return multiplex.Lifecycle{IdleStop: *idle, MaxRSS: *rssMB << 20, PSIThreshold: *psi}
+	}
+}
+
+// lspRoots is the --lsp-roots choice; see mcp/lsp_roots.go.
+type lspRoots struct {
+	auto bool
+	max  int
+}
+
+// lspRootsFlags registers --lsp-roots and --lsp-roots-max, shared by `mcp`
+// and `daemon`; call the result after parsing.
+func lspRootsFlags(f *pflag.FlagSet) func() (lspRoots, error) {
+	mode := f.String("lsp-roots", "single", "child LSPs per language: single = one at the workspace root; auto = one per project root (go.mod, tsconfig.json, pyproject.toml/setup.py/setup.cfg, compile_commands.json/CMakeLists.txt), each started on first use. For monorepos where one pylsp/clangd resolves wrong or grows large")
+	max := f.Int("lsp-roots-max", 8, "with --lsp-roots auto: at most this many children running per language; the least recently used is stopped to start another")
+	return func() (lspRoots, error) {
+		switch *mode {
+		case "single":
+			return lspRoots{max: *max}, nil
+		case "auto":
+			return lspRoots{auto: true, max: *max}, nil
+		}
+		return lspRoots{}, fmt.Errorf("--lsp-roots %q: want single or auto", *mode)
 	}
 }
 
@@ -189,10 +220,10 @@ func statusCmd() *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "PID\tROOT\tLANG\tSTATE\tCHILD\tRSS\tIDLE\tSTARTS\tCRASH\tIDLE-STOP\tMEM-STOP\tPSI-STOP\tLAST STOP")
+			fmt.Fprintln(w, "PID\tROOT\tLANG\tLSP ROOT\tSTATE\tCHILD\tRSS\tIDLE\tSTARTS\tCRASH\tIDLE-STOP\tMEM-STOP\tPSI-STOP\tLAST STOP")
 			for _, f := range files {
 				if len(f.Children) == 0 {
-					fmt.Fprintf(w, "%d\t%s\t-\tno child LSPs\t\t\t\t\t\t\t\t\t\n", f.PID, f.Root)
+					fmt.Fprintf(w, "%d\t%s\t-\t-\tno child LSPs\t\t\t\t\t\t\t\t\t\n", f.PID, f.Root)
 				}
 				for _, c := range f.Children {
 					last := "-"
@@ -203,8 +234,8 @@ func statusCmd() *cobra.Command {
 					if c.PID != 0 {
 						child, rss = strconv.Itoa(c.PID), fmt.Sprintf("%dM", c.RSS>>20)
 					}
-					fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n",
-						f.PID, f.Root, c.Language, c.State, child, rss, time.Duration(c.IdleSec)*time.Second,
+					fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n",
+						f.PID, f.Root, c.Language, lspRoot(f.Root, c.Root), c.State, child, rss, time.Duration(c.IdleSec)*time.Second,
 						c.Starts, c.CrashRestarts, c.IdleStops, c.MemoryStops, c.PressureStops, last)
 				}
 			}
@@ -223,4 +254,13 @@ func statusCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the status files as one JSON array")
 	return cmd
+}
+
+// lspRoot renders a child's root relative to its workspace root: "." for
+// a child at the workspace root, "-" for a status file from before roots.
+func lspRoot(workspace, root string) string {
+	if root == "" {
+		return "-"
+	}
+	return symbols.RelRoot(workspace, root)
 }

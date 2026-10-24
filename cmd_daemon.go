@@ -43,10 +43,15 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 	f.BoolVar(&restart, "restart", false, "restart the running daemon (replaying its flags) and exit")
 	f.Var(&allow, "allow", "directory prefix a client may address roots under (repeatable; default $HOME)")
 	lifecycle := lifecycleFlags(f)
+	rootsFlag := lspRootsFlags(f)
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		if stop {
 			return daemon.Stop()
+		}
+		roots, err := rootsFlag()
+		if err != nil {
+			return err
 		}
 		if noValidate {
 			validate = false
@@ -73,6 +78,7 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 
 		dreg := daemon.NewRegistry(cfg, reg, readOnly, validate)
 		dreg.SetLifecycle(lifecycle())
+		dreg.SetLSPRoots(roots.auto, roots.max)
 		dreg.SetStatusDir(daemon.StatusDir())
 		dreg.SetUsageLog(daemon.UsagePath())
 		return daemon.Serve(daemon.Config{Socket: socket, Allow: al, Reg: dreg})

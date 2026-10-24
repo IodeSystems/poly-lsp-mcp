@@ -187,6 +187,10 @@ func (s *Server) startManagerIfPresent(idx *symbols.Index) {
 		return
 	}
 	s.manager.StatusIndex = func() any { return s.IndexCost() }
+	if s.lspRootsAuto {
+		s.manager.Roots = s.lspRoots(langs)
+		s.manager.RootsMax = s.lspRootsLimit()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := s.manager.Start(ctx, s.getRoot(), pathToURI(s.getRoot()), langs); err != nil {
@@ -262,7 +266,14 @@ func (s *Server) runProactiveOpen() {
 			return nil
 		}
 		uri := pathToURI(path)
-		child := s.manager.RouteByURI(uri)
+		var child *multiplex.Child
+		if s.lspRootsAuto {
+			// RouteByURI would start every project root's child, and past
+			// --lsp-roots-max stop them again: they start on first use.
+			child = s.manager.Running(uri)
+		} else {
+			child = s.manager.RouteByURI(uri)
+		}
 		if child == nil {
 			return nil
 		}
@@ -337,6 +348,17 @@ func (s *Server) replayOpenDocs(lang string, child *multiplex.Child) {
 		}
 	}
 	s.openDocsMu.Unlock()
+	// Only child's own documents: under --lsp-roots auto a language has a
+	// child per project root, and a document from another root would make
+	// this one report errors for a module it does not hold. The manager
+	// has registered child before calling OnStart, so Running finds it.
+	own := uris[:0]
+	for _, uri := range uris {
+		if s.manager == nil || s.manager.Running(uri) == child {
+			own = append(own, uri)
+		}
+	}
+	uris = own
 
 	replayed := 0
 	for _, uri := range uris {

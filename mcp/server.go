@@ -29,7 +29,6 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
-	"github.com/iodesystems/poly-lsp-mcp/setup"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -145,6 +144,16 @@ type Server struct {
 	// present, edits route didOpen/didChange/didSave through the
 	// matching child and we wait briefly for publishDiagnostics.
 	manager *multiplex.Manager
+
+	// --lsp-roots; see lsp_roots.go. roots is the project-root search,
+	// run at most once (guarded by rootsMu). memHinted: languages whose
+	// memory stop already re-sent the setup notification (hintMu).
+	lspRootsAuto bool
+	lspRootsMax  int
+	rootsMu      sync.Mutex
+	roots        *symbols.ProjectRoots
+	hintMu       sync.Mutex
+	memHinted    map[string]bool
 
 	// openDocs tracks which (URI, version) we've informed the child
 	// about. First write to a URI sends didOpen; subsequent writes
@@ -479,6 +488,7 @@ func (s *Server) SetManager(mgr *multiplex.Manager) {
 	s.manager = mgr
 	if mgr != nil {
 		mgr.OnStart = s.replayOpenDocs
+		mgr.OnStop = s.onChildStop
 	}
 }
 
@@ -816,10 +826,11 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		res["index"] = map[string]any{"state": "building", "notification": indexLogger}
 	} else if c := s.IndexCost(); c.Files > 0 {
 		res["index"] = c
-		if h := s.setupHints(); len(h) > 0 {
-			res["setup"] = map[string]any{"languages": h, "missing": setup.Missing(h)}
+		err := s.waitReady()
+		if data := s.setupData(err); data != nil {
+			res["setup"] = data
 		}
-		if err := s.waitReady(); err != nil {
+		if err != nil {
 			res["indexError"] = s.indexFailure(err)
 		}
 	}
@@ -1110,6 +1121,9 @@ func (s *Server) sendNotification(method string, params map[string]any) {
 func (s *Server) send(m *jsonrpc.Message) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if s.enc == nil {
+		return // driven in-process (daemon, tests): no client stream
+	}
 	if err := s.enc.Encode(m); err != nil {
 		log.Printf("write: %v", err)
 	}

@@ -136,31 +136,57 @@ func (s *Server) setupHints() []setup.Lang {
 
 // notifySetup tells the client, once per bring-up, which languages the
 // workspace holds and what a missing child LSP would add and needs. Level
-// warning when one is missing, so a client can show it; info otherwise.
+// warning when one is missing, or when an --lsp-roots refine hint is
+// offered, so a client can show it; info otherwise. Sent again on a
+// child's first memory stop (see onChildStop): the hints may have changed.
 func (s *Server) notifySetup() {
-	langs := s.setupHints()
-	if len(langs) == 0 {
+	s.stateMu.Lock()
+	err := s.initErr
+	s.stateMu.Unlock()
+	data := s.setupData(err)
+	if data == nil {
 		return
 	}
 	level := "info"
-	missing := setup.Missing(langs)
-	if missing > 0 {
+	if data["missing"].(int) > 0 || (!s.lspRootsAuto && data["hints"] != nil) {
 		level = "warning"
 	}
 	s.sendNotification("notifications/message", map[string]any{
 		"level":  level,
 		"logger": setupLogger,
-		"data":   map[string]any{"languages": langs, "missing": missing},
+		"data":   data,
 	})
+}
+
+// setupData is the poly-lsp-mcp/setup payload: the install hints per
+// language, plus the --lsp-roots hints and the roots they name. nil when
+// the workspace holds no language. err is the bring-up's outcome.
+func (s *Server) setupData(err error) map[string]any {
+	langs := s.setupHints()
+	if len(langs) == 0 {
+		return nil
+	}
+	data := map[string]any{"languages": langs, "missing": setup.Missing(langs)}
+	if hints, roots := s.rootsHints(budgetBlown(err)); len(hints) > 0 {
+		data["hints"] = hints
+		data["roots"] = roots
+	}
+	return data
 }
 
 // indexRemedy says how to get past a failed bring-up.
 func (s *Server) indexRemedy(err error) string {
 	var be *symbols.BudgetError
 	if errors.As(err, &be) {
-		return fmt.Sprintf("get under budget: exclude the heavy directories above (--exclude <dir>, repeatable, relative to the root; "+
+		msg := fmt.Sprintf("get under budget: exclude the heavy directories above (--exclude <dir>, repeatable, relative to the root; "+
 			"the repository is not changed) or add them to .gitignore. Or raise it: --index-budget %s (now %s).",
 			raisedBudget(be), be.Budget)
+		if !s.lspRootsAuto {
+			if hints, _ := s.rootsHints(true); len(hints) > 0 {
+				msg += "\n" + strings.Join(hints, "\n")
+			}
+		}
+		return msg
 	}
 	return "fix the cause above and restart the server"
 }

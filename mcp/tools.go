@@ -2865,11 +2865,44 @@ func (s *Server) resolveFileArg(file string) (string, error) {
 		abs = filepath.Join(root, abs)
 	}
 	abs = filepath.Clean(abs)
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes the workspace root: %q (paths must resolve inside %s)", file, root)
+	if relInside(root, abs) {
+		return abs, nil
 	}
-	return abs, nil
+	// The root and the path may spell one tree through different symlinks:
+	// the daemon serves a root by its resolved path (/private/var/... on
+	// macOS) while the client sends the path it sees (/var/...). Compare
+	// the resolved forms, and answer in the root's spelling, the one the
+	// index keys files by.
+	if rr, err := filepath.EvalSymlinks(root); err == nil {
+		if ra, ok := resolveExisting(abs); ok && relInside(rr, ra) {
+			rel, _ := filepath.Rel(rr, ra)
+			return filepath.Join(root, rel), nil
+		}
+	}
+	return "", fmt.Errorf("path escapes the workspace root: %q (paths must resolve inside %s)", file, root)
+}
+
+// relInside reports whether the cleaned absolute path abs is root or under
+// it, lexically.
+func relInside(root, abs string) bool {
+	rel, err := filepath.Rel(root, abs)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveExisting resolves the symlinks of the cleaned absolute path abs
+// that may not exist yet (a file node_edit creates): its deepest existing
+// ancestor is resolved and the rest appended.
+func resolveExisting(abs string) (string, bool) {
+	rest := ""
+	for p := abs; ; p = filepath.Dir(p) {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, rest), true
+		}
+		if filepath.Dir(p) == p {
+			return "", false
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+	}
 }
 
 // languageForFile dispatches by extension via the registry. Returns ""

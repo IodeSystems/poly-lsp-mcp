@@ -127,3 +127,61 @@ func TestAbsolutePathInsideRootStillWorks(t *testing.T) {
 		t.Errorf("read returned the wrong file: %s", got)
 	}
 }
+
+// The root and a path argument may spell the same tree through different
+// symlinks: the daemon serves a root by its resolved path (/private/var/...
+// on macOS) while the client sends the path it sees (/var/...), and a stdio
+// root under a symlinked /tmp gets back resolved paths from its LSPs. Such
+// a path is inside the root and must be read and written there.
+func TestPathThroughASymlinkToTheRootStillWorks(t *testing.T) {
+	dir := goWorkspace(t, jailSrc)
+	// The link is to the root's parent, as /var is to /private/var.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(filepath.Dir(dir), link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	linked := filepath.Join(link, filepath.Base(dir))
+	for _, c := range []struct{ name, root, path, fresh string }{
+		{"resolved root, linked path", dir, linked, "fresh1.txt"},
+		{"linked root, resolved path", linked, dir, "fresh2.txt"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := startSessionFull(t, c.root, nil, nil)
+			defer s.close()
+			s.request("initialize", map[string]any{})
+			s.notify("notifications/initialized", map[string]any{})
+
+			r := s.callTool("node_read", map[string]any{"node": filepath.Join(c.path, "main.go")})
+			if r.IsError || !strings.Contains(r.Content[0].Text, "Keep") {
+				t.Fatalf("node_read through the other spelling of the root: %s", r.Content[0].Text)
+			}
+			fresh := filepath.Join(c.path, c.fresh)
+			if r := s.callTool("node_edit", map[string]any{"node": fresh, "newText": "x\n"}); r.IsError {
+				t.Fatalf("node_edit of a new file through the other spelling of the root: %s", r.Content[0].Text)
+			}
+			if _, err := os.Stat(filepath.Join(dir, c.fresh)); err != nil {
+				t.Fatalf("the new file is not in the root: %v", err)
+			}
+		})
+	}
+}
+
+// A path that resolves outside the root is refused however it is spelled.
+func TestPathResolvingOutsideTheRootIsRefused(t *testing.T) {
+	dir := goWorkspace(t, jailSrc)
+	outside := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	s := startSessionFull(t, dir, nil, nil)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+	if r := s.callTool("node_edit", map[string]any{"node": filepath.Join(link, "pwned.txt"), "newText": "x\n"}); !r.IsError {
+		t.Error("node_edit through a link to outside the root was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "pwned.txt")); err == nil {
+		t.Fatal("SANDBOX ESCAPE: a file was created outside the root")
+	}
+}

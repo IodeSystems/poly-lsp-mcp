@@ -101,7 +101,14 @@ import (
 // hidden like node_edit's commit/rollback. Fourth raise in a row; the same
 // standing candidate applies (params/return, MEASURED UNUSED). If usage.jsonl
 // shows `include` unused, delete the property and take the 38 back.
-const modernTokenBudget = 1340
+// 1340 → 1300: the first CUT, not a raise. `include`'s description shrank to
+// "override excluded path patterns"; node_edit said "use the rename op" twice
+// (a paragraph, then the op line) and the paragraph folded into the op line;
+// `includeComments` left the schema (a rename rewrites comment mentions by
+// default now, the param stays accepted but hidden). Measured 1338 → 1268.
+// The 1300 ceiling leaves ~30 of headroom so the next addition has to argue
+// for itself.
+const modernTokenBudget = 1300
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

@@ -208,24 +208,32 @@ once doubles child-LSP memory during the swap (gopls was 6 GB on dun);
 cache.gob format needs a version. **blocking decisions**: approve; swap
 memory policy (warm all roots, or only recently used ones).
 
-◻ **Install with Go alone; prebuilt binaries** (Carl via dun-a8,
+✅ **Install with Go alone; prebuilt binaries** (Carl via dun-a8,
 2026-10-24: installable with no system dependency but Go; a path for no Go).
 Install hints for clients: ✅ `f064670` (poly-lsp-mcp/setup notification,
-doctor --json). Pure Go: `github.com/odvcencio/gotreesitter` v0.56.0 builds
-CGO_ENABLED=0 (static, verified) and parses all 11 of our grammars
-(verified on small samples + a 452 KB Go file); ~9x slower parse than cgo
-per file (633 ms vs 73 ms on symbols/*.go), superlinear on one huge file
-(2.5 s vs 72 ms), 5–77 ms lazy load per grammar, +18 MB binary; API not
-source-compatible (Type/Text take lang/src; query cursor differs); trees
-differ slightly (node/error counts) so shape tests need re-baselining;
-single author, 8 months old. Others: xo/transit lacks kotlin/groovy/proto/
-markdown; bonsai lacks cpp/sql/proto and queries; no wazero or ccgo module.
-Proposed: an `internal/ts` adapter, smacker under `//go:build cgo`,
-gotreesitter under `!cgo` — Go turns cgo off when it finds no C compiler,
-so `go install` picks the best runtime by itself. Releases: GitHub Actions
-native runners build cgo binaries for linux/darwin × amd64/arm64 today, no
-pure Go needed. **blocking decisions**: adopt the cgo/!cgo split; publish
-releases (tags, CI, signing).
+doctor --json).
+✅ Go alone: `internal/ts` adapter; smacker under `//go:build cgo` (type
+aliases, no change), `github.com/odvcencio/gotreesitter` v0.56.0 under
+`!cgo`, so `go install` with no C compiler builds a static pure-Go binary.
+The pure-Go side parses with SMACKER'S grammars, converted by ts2go
+(`internal/ts/grammars/generate.sh`): gotreesitter's bundled sql is a
+different grammar and its go/kotlin are newer revisions. Scanners: sql,
+kotlin, tsx ported from smacker's C; python/cpp/markdown reuse
+gotreesitter's. Measured (2026-10-24, this machine): parse ~10x slower
+(BenchmarkParseOnly 6.9 ms vs 0.68 ms), cold `index` of this repo (379
+files, 3.1 MB, fresh XDG_CACHE_HOME) 5.8 s vs 1.0 s; binary 45.5 MB vs
+45.0 MB. Trees identical to cgo on a local corpus for go 150/150, markdown
+100/100, proto 39/40, java 96/100, python 91/100, sql 54/60, groovy 37/40,
+kotlin 132/150, tsx 81/100, cpp 40/60, c 33/60; the rest are error
+recovery, GLR ambiguity picks (kotlin `X::class`, tsx `f<T>(x)`), and
+C's field-on-comment quirk. doctor reports `runtime` and, on pure-go,
+the fast path; a blown index budget's remedy says so too. Two symbol tests
+assert recovery-only shapes on cgo only (groovy `implements`/`enum`,
+conflict-marker fixture). **risks**: pure-Go GLR picks on valid
+kotlin/tsx/c differ from C's (see corpus numbers; `keepRuntimeName` in
+grammars/loader.go records which gotreesitter name heuristics help);
+gotreesitter is single-author. **optional extensions**: fix the tsx/kotlin
+ambiguity picks upstream; a `make test-purego` target.
 ✅ `.github/workflows/release.yml`: on `v*` tag, native build per
 linux|darwin × amd64|arm64 (cgo, no cross-compile), `go vet` + full
 `go test`, smoke (`--help`, `doctor`), tarballs

@@ -12,18 +12,20 @@ import (
 
 var update = flag.Bool("update", false, "rewrite testdata/*.tree from the cgo runtime")
 
+// The samples end in .txt so poly-lsp-mcp indexing this repository (and
+// doctor) does not count them as the workspace's own c/cpp/kotlin/... code.
 var samples = map[string]func() *Language{
-	"sample.go":     Go,
-	"sample.tsx":    TSX,
-	"sample.py":     Python,
-	"sample.sql":    SQL,
-	"sample.java":   Java,
-	"sample.c":      C,
-	"sample.cpp":    Cpp,
-	"sample.kt":     Kotlin,
-	"sample.groovy": Groovy,
-	"sample.md":     Markdown,
-	"sample.proto":  Protobuf,
+	"sample.go.txt":     Go,
+	"sample.tsx.txt":    TSX,
+	"sample.py.txt":     Python,
+	"sample.sql.txt":    SQL,
+	"sample.java.txt":   Java,
+	"sample.c.txt":      C,
+	"sample.cpp.txt":    Cpp,
+	"sample.kt.txt":     Kotlin,
+	"sample.groovy.txt": Groovy,
+	"sample.md.txt":     Markdown,
+	"sample.proto.txt":  Protobuf,
 }
 
 func parse(t *testing.T, lang *Language, src []byte) *Tree {

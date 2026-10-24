@@ -75,7 +75,7 @@ func TestProxyRetriesOnlyReadOnlyCallsAcrossALostDaemon(t *testing.T) {
 			inR, inW := io.Pipe()
 			outR, outW := io.Pipe()
 			done := make(chan error, 1)
-			go func() { done <- RunProxy(connect, root, OpenOptions{}, inR, outW); _ = outW.Close() }()
+			go func() { done <- RunProxy(connect, root, OpenOptions{}, nil, inR, outW); _ = outW.Close() }()
 			h := newHarness(t, inW, outR)
 			defer func() { h.request("shutdown", nil); _ = inW.Close(); <-done }()
 			h.reply(h.request("initialize", map[string]any{}), 5*time.Second)

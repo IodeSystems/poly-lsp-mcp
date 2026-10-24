@@ -273,6 +273,25 @@ func (c *Client) Call(root, name string, arguments json.RawMessage) (content []m
 	return out.Content, out.IsError, nil
 }
 
+// FileAccess is the /access answer: the op and absolute path a read or
+// edit call would hand the file-access hook; OK false when it would reach
+// no hook.
+type FileAccess struct {
+	Op   string `json:"op,omitempty"`
+	Path string `json:"path,omitempty"`
+	OK   bool   `json:"ok"`
+}
+
+// Access asks which file a node_read/node_edit call would touch.
+func (c *Client) Access(root, name string, arguments json.RawMessage) (FileAccess, error) {
+	if arguments == nil {
+		arguments = json.RawMessage("{}")
+	}
+	var out FileAccess
+	err := c.postJSON("/access", map[string]any{"root": root, "name": name, "arguments": arguments}, &out)
+	return out, err
+}
+
 // FileSymbols fragments file content into structural atoms on the daemon
 // — the read-only surface a non-MCP consumer (raglit) hits to avoid a
 // cgo tree-sitter build or a fork per file. language may be "" if path

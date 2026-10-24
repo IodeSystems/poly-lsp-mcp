@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"path/filepath"
@@ -70,11 +71,12 @@ func (h *FileHook) Invoke(op, absPath string) (cancel bool, note string) {
 // result.
 const hookNotePrefix = "[hook] "
 
-// hookBlockedResult builds the tool result for a cancelled operation.
+// HookBlockedResult builds the tool result for a cancelled operation (the
+// daemon proxy, which runs the hook client-side, answers with it too).
 // It is deliberately NOT an error: the model should read the note as
 // guidance (e.g. "read AGENTS.md first"), not as a failure to retry
 // verbatim.
-func hookBlockedResult(note string) []Content {
+func HookBlockedResult(note string) []Content {
 	note = strings.TrimSpace(note)
 	if note == "" {
 		note = "operation cancelled by host hook"
@@ -97,4 +99,62 @@ func (s *Server) fileAccessGuard(op, relPath string) (bool, string) {
 		return false, ""
 	}
 	return h.Invoke(op, abs)
+}
+
+// FileAccessTool reports whether a tool's calls consult the file-access
+// hook: node_read and node_edit, the tools that call fileAccessGuard.
+func FileAccessTool(name string) bool { return name == "node_read" || name == "node_edit" }
+
+// FileAccess is what the guard of a node_read or node_edit call would ask
+// the hook: op (read, edit or create) and the file's absolute path. ok is
+// false when the call would reach no guard — no file, a directory, a
+// missing file it does not create, a malformed or batch-control-only call
+// (those answer their own error, or touch no file). A daemon-hosted root
+// has no hook of its own: the proxy, which runs the client's hook,
+// asks this first (POST /access), so the hook sees the same op and path
+// it would see in-process.
+//
+// It mirrors the guard sites in handleModernNodeRead and
+// handleModernNodeEdit; a change to which branch guards with which op
+// there belongs here too (TestFileAccessMatchesTheGuard).
+func (s *Server) FileAccess(name string, args json.RawMessage) (op, abs string, ok bool) {
+	var p modernEditArgs // node_read's {node} is a subset
+	if json.Unmarshal(args, &p) != nil || strings.TrimSpace(p.Node) == "" {
+		return "", "", false
+	}
+	switch name {
+	case "node_read":
+		op = "read"
+	case "node_edit":
+		if p.Rollback || len(p.ops()) != 1 {
+			return "", "", false
+		}
+	default:
+		return "", "", false
+	}
+	rn, err := s.resolveModernNode(p.Node)
+	if err != nil || rn.isDir {
+		return "", "", false
+	}
+	if name == "node_edit" {
+		switch {
+		case rn.class == "ref" && p.NewText != nil && p.OldText == nil && p.Delete == nil:
+			op = "edit"
+		case p.NewText != nil && (p.OldText == nil || *p.OldText == "" && !rn.exists):
+			if rn.exists || *p.NewText == "" {
+				return "", "", false
+			}
+			op = "create"
+		default:
+			op = "edit"
+		}
+	}
+	if op != "create" && !rn.exists {
+		return "", "", false
+	}
+	abs, err = s.resolveFileArg(rn.file)
+	if err != nil {
+		return "", "", false
+	}
+	return op, abs, true
 }

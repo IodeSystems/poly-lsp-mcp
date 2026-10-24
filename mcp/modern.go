@@ -992,7 +992,7 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		return nil, true, err
 	}
 	if cancel, note := s.fileAccessGuard("read", rn.file); cancel {
-		return hookBlockedResult(note), false, nil
+		return HookBlockedResult(note), false, nil
 	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
@@ -1354,7 +1354,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	// rewrite just the body without repeating the old text.
 	if rn.class == "ref" && p.NewText != nil && p.OldText == nil && p.Delete == nil {
 		if cancel, note := s.fileAccessGuard("edit", rn.file); cancel {
-			return hookBlockedResult(note), false, nil
+			return HookBlockedResult(note), false, nil
 		}
 		return s.applyRangeRewrite(rn.addr, rn.decl, *p.NewText, p.diagnosticOptions)
 	}
@@ -1382,7 +1382,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			return nil, true, fmt.Errorf("creating %s needs non-empty newText", rn.file)
 		}
 		if cancel, note := s.fileAccessGuard("create", rn.file); cancel {
-			return hookBlockedResult(note), false, nil
+			return HookBlockedResult(note), false, nil
 		}
 		return s.applyWholeFileWrite(rn.file, *p.NewText, p.diagnosticOptions)
 	}
@@ -1395,7 +1395,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	// One guard covers every branch below (accept / delete / modify /
 	// rename): all of them rewrite the same file.
 	if cancel, note := s.fileAccessGuard("edit", rn.file); cancel {
-		return hookBlockedResult(note), false, nil
+		return HookBlockedResult(note), false, nil
 	}
 
 	if p.Accept != nil {

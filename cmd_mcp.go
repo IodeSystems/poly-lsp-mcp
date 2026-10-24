@@ -60,7 +60,7 @@ func mcpCmd(l *loader) *cobra.Command {
 	f.BoolVar(&noValidate, "no-validate", false, "turn OFF revert-on-new-diagnostics (see --validate); for when validation itself misfires, e.g. a never-analyzed file with pre-existing errors")
 	f.BoolVar(&daemonMode, "daemon", false, "proxy tool calls to the shared per-user poly-lsp daemon (auto-starting it) instead of building the index in-process; one warm index + child-LSP fleet is shared across every client")
 	f.IntVar(&readCharBudget, "read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
-	f.StringVar(&hookPath, "hook", os.Getenv("POLY_LSP_HOOK"), "path to a host hook executable consulted before every file read/edit (exit 2 = cancel, stdout = injected note); $POLY_LSP_HOOK fallback. See mcp/hook.go")
+	f.StringVar(&hookPath, "hook", os.Getenv("POLY_LSP_HOOK"), "path to a host hook executable consulted before every file read/edit (exit 2 = cancel, stdout = injected note); $POLY_LSP_HOOK fallback; see mcp/hook.go. --daemon: the proxy runs it")
 	lifecycle := lifecycleFlags(f)
 	rootsFlag := lspRootsFlags(f)
 	idx := indexFlags(f)
@@ -125,7 +125,14 @@ func mcpCmd(l *loader) *cobra.Command {
 				client.SetPolicy(readOnly, validate)
 				return client, nil
 			}
-			return daemon.RunProxy(connect, root, opts, os.Stdin, os.Stdout)
+			// The file-access hook runs here, client-side, with this
+			// process's env: the daemon runs no client's hook.
+			var hook *mcp.FileHook
+			if hookPath != "" {
+				hook = &mcp.FileHook{Path: hookPath}
+				log.Printf("mcp: file-access hook armed (proxy): %s", hookPath)
+			}
+			return daemon.RunProxy(connect, root, opts, hook, os.Stdin, os.Stdout)
 		}
 
 		cfg, reg, err := l.load(true)

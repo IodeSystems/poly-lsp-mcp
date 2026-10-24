@@ -241,6 +241,21 @@ from before this work gets no handshake (log says `daemon --restart`).
 dies mid-warm (green exits today); `make test` covers the e2e only without
 -short.
 
+◐ **Daemon usable for dun** (dun #52 asked, Carl decided root lifetime,
+2026-10-24). One commit per slice:
+1. ✅ `feat(daemon): file-access hook in the proxy`. `mcp --daemon` runs
+   `--hook`/`$POLY_LSP_HOOK` itself, client-side with the client's env,
+   before forwarding node_read/node_edit. POST /access names the op and
+   absolute path (`mcp.Server.FileAccess`, mirrors the guard sites in
+   modern.go; `TestFileAccessMatchesTheGuard` keeps them in step). `--hook`
+   help ends "--daemon: the proxy runs it" (dun greps `mcp --help`).
+   A daemon without /access: call goes through, logged (fail-open).
+2. ◻ index options of a later /open apply to a warm root.
+3. ◻ root lifetime follows its clients.
+**risks**: a call the in-process server would refuse before its guard
+(e.g. `delete:false`) can still reach the hook from the proxy; /access is
+one more round-trip per read/edit, only when a hook is set.
+
 **Worktree / same-tree sharing in one daemon** (Carl: "a great candidate if
 there is worktree or multi same tree session sharing optimizations").
 MEASURED, not built (`TestMeasureWorktreeSharing`, `-tags measure`, this

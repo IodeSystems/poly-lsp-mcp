@@ -124,6 +124,15 @@ type callIn struct {
 	}
 }
 
+type accessIn struct {
+	Body struct {
+		Root      string          `json:"root"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+}
+type accessOut struct{ Body FileAccess }
+
 type watchIn struct {
 	Session string `header:"X-Poly-Session"`
 }
@@ -395,6 +404,24 @@ func (h *host) handler() (http.Handler, error) {
 			out := &callOut{}
 			out.Body.Content = content
 			out.Body.IsError = isError
+			return out, nil
+		})
+
+	// The file a node_read/node_edit call would touch, for a proxy that
+	// runs its client's file-access hook before forwarding the call (see
+	// mcp.Server.FileAccess). The hook runs client-side, with the client's
+	// env: the daemon serves many clients and runs none of their hooks.
+	gat.Register(api, g, op("access", http.MethodPost, "/access", "Name the file a read/edit tool call would touch, for the caller's file-access hook."),
+		func(_ context.Context, in *accessIn) (*accessOut, error) {
+			canonical, err := gate(allow, in.Body.Root)
+			if err != nil {
+				return nil, err
+			}
+			out := &accessOut{}
+			// A failed bring-up touches no file: the call answers why.
+			if srv, berr := reg.Get(canonical); berr == nil {
+				out.Body.Op, out.Body.Path, out.Body.OK = srv.FileAccess(in.Body.Name, in.Body.Arguments)
+			}
 			return out, nil
 		})
 

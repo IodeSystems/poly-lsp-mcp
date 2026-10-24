@@ -36,6 +36,10 @@ type proxy struct {
 	connect Connect
 	root    string
 	opts    OpenOptions
+	// hook is the client's file-access hook (--hook / $POLY_LSP_HOOK),
+	// run here, with this process's env, before a read or edit goes to
+	// the daemon. nil = none.
+	hook *mcp.FileHook
 
 	writeMu sync.Mutex
 	enc     *json.Encoder
@@ -83,9 +87,10 @@ type Connect func() (*Client, error)
 // client as a stdio server would write them. When the daemon goes away —
 // an upgrade hands over to a new one — the proxy reconnects, and a
 // read-only call cut by it is sent again once. shutdown is local — the
-// daemon keeps the root warm for other clients.
-func RunProxy(connect Connect, root string, opts OpenOptions, in io.Reader, out io.Writer) error {
-	p := &proxy{connect: connect, root: root, opts: opts, enc: json.NewEncoder(out)}
+// daemon keeps the root warm for other clients. hook, when set, is the
+// client's file-access hook: the proxy runs it (see guard).
+func RunProxy(connect Connect, root string, opts OpenOptions, hook *mcp.FileHook, in io.Reader, out io.Writer) error {
+	p := &proxy{connect: connect, root: root, opts: opts, hook: hook, enc: json.NewEncoder(out)}
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	defer p.cancel()
 	return p.serve(in)
@@ -333,6 +338,9 @@ func (p *proxy) call(name string, args json.RawMessage) map[string]any {
 	if err := l.ready(openWait); err != nil {
 		return toolError("poly-lsp: the daemon could not open the workspace: " + err.Error())
 	}
+	if blocked := p.guard(l.client, name, args); blocked != nil {
+		return blocked
+	}
 	content, isError, err := l.client.Call(p.root, name, args)
 	if err != nil && isTransport(err) {
 		p.lose(l)
@@ -349,6 +357,30 @@ func (p *proxy) call(name string, args json.RawMessage) map[string]any {
 		return toolError("poly-lsp: daemon: " + err.Error())
 	}
 	return map[string]any{"content": content, "isError": isError}
+}
+
+// guard runs the client's file-access hook for a read or edit call, the
+// contract of mcp/hook.go: exit 2 cancels the call and the hook's stdout
+// is the answer, prefixed "[hook] "; anything else lets it through. The
+// daemon names the file and op (/access), as the in-process guard would
+// resolve them. Fail-open like the hook itself: a daemon that cannot say
+// (one from before /access) lets the call through, logged. nil = forward.
+func (p *proxy) guard(c *Client, name string, args json.RawMessage) map[string]any {
+	if !p.hook.Cancelled() || !mcp.FileAccessTool(name) {
+		return nil
+	}
+	a, err := c.Access(p.root, name, args)
+	if err != nil {
+		log.Printf("proxy: file-access hook skipped for %s: the daemon did not name the file: %v", name, err)
+		return nil
+	}
+	if !a.OK {
+		return nil
+	}
+	if cancel, note := p.hook.Invoke(a.Op, a.Path); cancel {
+		return map[string]any{"content": mcp.HookBlockedResult(note), "isError": false}
+	}
+	return nil
 }
 
 // tools lists the catalog, reconnecting once like a read-only call.

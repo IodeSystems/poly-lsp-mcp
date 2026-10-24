@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/iodesystems/poly-lsp-mcp/mcp"
 )
 
 // proxyHarness drives RunProxy over pipes as an MCP client would.
@@ -25,11 +27,17 @@ type proxyHarness struct {
 
 func startProxy(t *testing.T, c *Client, root string, opts OpenOptions) *proxyHarness {
 	t.Helper()
+	return startProxyHook(t, c, root, opts, nil)
+}
+
+// startProxyHook is startProxy with a client file-access hook.
+func startProxyHook(t *testing.T, c *Client, root string, opts OpenOptions, hook *mcp.FileHook) *proxyHarness {
+	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- RunProxy(func() (*Client, error) { return c, nil }, root, opts, inR, outW)
+		done <- RunProxy(func() (*Client, error) { return c, nil }, root, opts, hook, inR, outW)
 		_ = outW.Close()
 	}()
 	h := newHarness(t, inW, outR)

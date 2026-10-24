@@ -41,3 +41,38 @@ func TestUsageLogCountsIgnoredMatches(t *testing.T) {
 		t.Errorf("want 2 queries returning gen/ (1 by name), got %+v", sum)
 	}
 }
+
+// node_edit calls leave a record naming the op, the hidden params used and
+// success or failure; SummarizeUsage counts them apart from node_query.
+func TestUsageLogRecordsNodeEdit(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"go.mod":  "module x\ngo 1.26\n",
+		"main.go": "package main\n\nfunc fetchUser() {}\n\nfunc other() {}\n",
+	})
+	log := filepath.Join(t.TempDir(), "usage.jsonl")
+	s := startSessionWith(t, dir, nil, nil, func(srv *Server) { srv.SetUsageLog(log) })
+	defer s.close()
+	s.request("initialize", map[string]any{})
+
+	s.callTool("node_query", map[string]any{"selector": "func"})
+	s.callTool("node_edit", map[string]any{"node": "main.go#other", "oldText": "other", "newText": "another"})
+	s.callTool("node_edit", map[string]any{"node": "main.go#fetchUser", "rename": "loadUser", "includeComments": false})
+	s.callTool("node_edit", map[string]any{"node": "main.go#nope", "delete": true})
+
+	sum, err := SummarizeUsage(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Queries != 1 || sum.Edits != 3 {
+		t.Errorf("want 1 query and 3 edits, got %+v", sum)
+	}
+	if sum.EditOps["edit"] != 1 || sum.EditOps["rename"] != 1 || sum.EditOps["delete"] != 1 {
+		t.Errorf("editOps = %v", sum.EditOps)
+	}
+	if sum.EditFailed["delete"] != 1 || sum.EditFailed["edit"] != 0 || sum.EditFailed["rename"] != 0 {
+		t.Errorf("editFailed = %v, want only delete", sum.EditFailed)
+	}
+	if sum.EditHidden["includeComments=false"] != 1 {
+		t.Errorf("editHidden = %v", sum.EditHidden)
+	}
+}

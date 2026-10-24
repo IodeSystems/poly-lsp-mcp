@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,9 @@ import (
 )
 
 // Usage log: one JSON line per node_query, so usage decides what the query
-// tree should skip.
+// tree should skip. node_edit calls are logged too (Tool == "node_edit"), so a
+// week of data decides whether params/return earn their schema tokens; lines
+// without a Tool are node_query, which keeps old logs readable.
 //
 // The open question (2026-10-24): should node_query honour .gitignore the
 // way the symbol index does? Doing so hides gitignored files — generated
@@ -23,8 +26,21 @@ import (
 // usageMaxBytes caps the log; at the cap it is moved to usage.jsonl.1.
 const usageMaxBytes = 10 << 20
 
-// UsageRecord is one node_query.
+// UsageRecord is one node_query, or one node_edit when Tool is "node_edit"
+// (then only At, Root and the Op/Hidden/Result fields are set).
 type UsageRecord struct {
+	// Tool is "" for node_query (the original record) or "node_edit".
+	Tool string `json:"tool,omitempty"`
+	// Op, node_edit only: edit | create | delete | rename | params | return |
+	// accept | batch (commit/rollback with no op), or the "+"-joined list
+	// when a call wrongly supplied several. "create" is newText alone, so it
+	// includes span rewrites.
+	Op string `json:"op,omitempty"`
+	// Hidden, node_edit only: the undeclared params used, e.g.
+	// includeComments=true, resolution, commit=false, rollback.
+	Hidden []string `json:"hidden,omitempty"`
+	// Result, node_edit only: "ok" or "error".
+	Result   string `json:"result,omitempty"`
 	At       string `json:"at"` // RFC 3339
 	Root     string `json:"root"`
 	Selector string `json:"selector"`
@@ -82,6 +98,84 @@ func (s *Server) recordUsage(selector string, include []string, rows []*treeNode
 			}
 		}
 	}
+	s.appendUsage(rec)
+}
+
+// withEditUsage wraps node_edit's handler so every call is logged. It lives
+// here, not in modern.go, so the handler keeps its single definition there.
+func withEditUsage(h func(*Server, sessionID, json.RawMessage) ([]Content, bool, error)) func(*Server, sessionID, json.RawMessage) ([]Content, bool, error) {
+	return func(s *Server, sess sessionID, args json.RawMessage) ([]Content, bool, error) {
+		c, isErr, err := h(s, sess, args)
+		s.recordEditUsage(args, isErr || err != nil)
+		return c, isErr, err
+	}
+}
+
+// recordEditUsage logs one node_edit call: which op, which hidden params, and
+// whether it failed. Unparseable arguments log as op "invalid".
+func (s *Server) recordEditUsage(args json.RawMessage, failed bool) {
+	if s.usageLog == "" {
+		return
+	}
+	var p modernEditArgs
+	op := "invalid"
+	var hidden []string
+	if json.Unmarshal(args, &p) == nil {
+		op = editOpKind(&p)
+		if p.IncludeComments != nil {
+			hidden = append(hidden, fmt.Sprintf("includeComments=%t", *p.IncludeComments))
+		}
+		if p.Resolution != nil {
+			hidden = append(hidden, "resolution")
+		}
+		if p.Commit != nil {
+			hidden = append(hidden, fmt.Sprintf("commit=%t", *p.Commit))
+		}
+		if p.Rollback {
+			hidden = append(hidden, "rollback")
+		}
+	}
+	res := "ok"
+	if failed {
+		res = "error"
+	}
+	s.appendUsage(UsageRecord{
+		At: time.Now().Format(time.RFC3339), Root: s.getRoot(),
+		Tool: "node_edit", Op: op, Hidden: hidden, Result: res,
+	})
+}
+
+// editOpKind names a node_edit call's op by what it does (see UsageRecord.Op).
+func editOpKind(p *modernEditArgs) string {
+	var kinds []string
+	switch {
+	case p.OldText != nil:
+		kinds = append(kinds, "edit")
+	case p.Delete != nil:
+		kinds = append(kinds, "delete")
+	case p.NewText != nil:
+		kinds = append(kinds, "create")
+	}
+	if p.Rename != nil {
+		kinds = append(kinds, "rename")
+	}
+	if p.Params != nil {
+		kinds = append(kinds, "params")
+	}
+	if p.Return != nil {
+		kinds = append(kinds, "return")
+	}
+	if p.Accept != nil {
+		kinds = append(kinds, "accept")
+	}
+	if len(kinds) == 0 {
+		return "batch"
+	}
+	return strings.Join(kinds, "+")
+}
+
+// appendUsage writes one record, rotating the log at usageMaxBytes.
+func (s *Server) appendUsage(rec UsageRecord) {
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return
@@ -139,6 +233,13 @@ type UsageSummary struct {
 	IgnoredMatches  int      `json:"ignoredMatches"` // matches in gitignored paths
 	AllMatches      int      `json:"allMatches"`
 	IgnoredExamples []string `json:"ignoredExamples,omitempty"` // up to 10 selectors
+
+	// node_edit: calls by op kind, how many of them failed, and how often each
+	// hidden param was used.
+	Edits      int            `json:"edits"`
+	EditOps    map[string]int `json:"editOps,omitempty"`
+	EditFailed map[string]int `json:"editFailed,omitempty"`
+	EditHidden map[string]int `json:"editHidden,omitempty"`
 }
 
 // SummarizeUsage reads a usage log (and its rotated .1) and totals it.
@@ -154,6 +255,10 @@ func SummarizeUsage(path string) (UsageSummary, error) {
 		for _, line := range strings.Split(string(b), "\n") {
 			var r UsageRecord
 			if line == "" || json.Unmarshal([]byte(line), &r) != nil {
+				continue
+			}
+			if r.Tool == "node_edit" {
+				sum.addEdit(r)
 				continue
 			}
 			sum.Queries++
@@ -177,4 +282,18 @@ func SummarizeUsage(path string) (UsageSummary, error) {
 		return sum, os.ErrNotExist
 	}
 	return sum, nil
+}
+
+func (sum *UsageSummary) addEdit(r UsageRecord) {
+	if sum.EditOps == nil {
+		sum.EditOps, sum.EditFailed, sum.EditHidden = map[string]int{}, map[string]int{}, map[string]int{}
+	}
+	sum.Edits++
+	sum.EditOps[r.Op]++
+	if r.Result == "error" {
+		sum.EditFailed[r.Op]++
+	}
+	for _, h := range r.Hidden {
+		sum.EditHidden[h]++
+	}
 }

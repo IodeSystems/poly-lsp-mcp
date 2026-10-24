@@ -56,7 +56,7 @@ func registerModernTools() map[string]Tool {
 			Name:        "node_edit",
 			Description: modernNodeEditDescription,
 			InputSchema: modernNodeEditSchema,
-			Handler:     handleModernNodeEdit,
+			Handler:     withEditUsage(handleModernNodeEdit),
 			// commit/rollback are HIDDEN, not missing: the rejection help
 			// reveals them exactly when a multi-stage edit is needed, so they
 			// cost no schema budget on every other turn. includeComments is hidden

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/spf13/cobra"
 
@@ -19,7 +20,7 @@ func usageCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "usage",
-		Short: "Summarize node_query usage: how often results come from gitignored or skipped directories",
+		Short: "Summarize node_query and node_edit usage",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			path := daemon.UsagePath()
@@ -43,9 +44,25 @@ func usageCmd() *cobra.Command {
 			for _, ex := range sum.IgnoredExamples {
 				fmt.Printf("    e.g. %s\n", ex)
 			}
+			fmt.Printf("%d node_edit calls\n", sum.Edits)
+			for _, op := range sortedKeys(sum.EditOps) {
+				fmt.Printf("  %-8s %5d (%d failed)\n", op, sum.EditOps[op], sum.EditFailed[op])
+			}
+			for _, h := range sortedKeys(sum.EditHidden) {
+				fmt.Printf("  hidden %s: %d\n", h, sum.EditHidden[h])
+			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the summary as JSON")
 	return cmd
+}
+
+func sortedKeys(m map[string]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

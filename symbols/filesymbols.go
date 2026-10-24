@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // Symbol is one named construct in a file, flattened into a source-

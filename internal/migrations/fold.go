@@ -15,8 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/sql"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // Site is a 1-based file position (byte column).
@@ -95,7 +94,7 @@ func findMigrations(root string) []string {
 
 func applyFile(sc *Schema, file string, data []byte) {
 	p := sitter.NewParser()
-	p.SetLanguage(sql.GetLanguage())
+	p.SetLanguage(sitter.SQL())
 	tree, err := p.ParseCtx(context.Background(), nil, data)
 	if err != nil || tree == nil {
 		return

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // Signature-refactor support for the languages added after the original

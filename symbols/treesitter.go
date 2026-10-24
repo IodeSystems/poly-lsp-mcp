@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // TreeSitterExtractor runs a single compiled tree-sitter query against

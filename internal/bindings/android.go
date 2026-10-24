@@ -7,9 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/java"
-	"github.com/smacker/go-tree-sitter/kotlin"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -202,13 +200,13 @@ func codeStringLiteralSites(path string, data []byte) (string, []androidHit) {
 	return "", nil
 }
 
-var javaStringLiteralQuery = mustQuery(`(string_literal) @s`, java.GetLanguage())
+var javaStringLiteralQuery = mustQuery(`(string_literal) @s`, sitter.Java())
 
 // javaStringLiteralSites returns every string literal in a Java file with the
 // position of its first character (inside the opening quote).
 func javaStringLiteralSites(content []byte) []androidHit {
 	p := sitter.NewParser()
-	p.SetLanguage(java.GetLanguage())
+	p.SetLanguage(sitter.Java())
 	tree, err := p.ParseCtx(context.Background(), nil, content)
 	if err != nil || tree == nil {
 		return nil
@@ -241,7 +239,7 @@ func javaStringLiteralSites(content []byte) []androidHit {
 	return out
 }
 
-var kotlinStringLiteralQuery = mustQuery(`(string_literal) @s`, kotlin.GetLanguage())
+var kotlinStringLiteralQuery = mustQuery(`(string_literal) @s`, sitter.Kotlin())
 
 // kotlinStringLiteralSites returns every NON-INTERPOLATED Kotlin string
 // literal with the position of its first character.
@@ -256,7 +254,7 @@ var kotlinStringLiteralQuery = mustQuery(`(string_literal) @s`, kotlin.GetLangua
 // than from the quote.
 func kotlinStringLiteralSites(content []byte) []androidHit {
 	p := sitter.NewParser()
-	p.SetLanguage(kotlin.GetLanguage())
+	p.SetLanguage(sitter.Kotlin())
 	tree, err := p.ParseCtx(context.Background(), nil, content)
 	if err != nil || tree == nil {
 		return nil

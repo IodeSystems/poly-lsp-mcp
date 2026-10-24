@@ -3,7 +3,7 @@ package symbols
 import (
 	"context"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // WrittenNames returns the names ASSIGNED TO in content, with how many times.

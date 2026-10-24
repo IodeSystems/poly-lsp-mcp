@@ -1,6 +1,10 @@
 package symbols
 
-import "testing"
+import (
+	"testing"
+
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
+)
 
 // The whole point: tree-sitter RETURNS SYMBOLS for input it could not parse,
 // so "FileSymbols succeeded" is not evidence the source is valid. A
@@ -11,8 +15,16 @@ func TestParsesCleanlySeesWhatFileSymbolsHides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(syms) < 3 {
-		t.Fatalf("fixture drift: expected tree-sitter to recover symbols from both sides, got %d", len(syms))
+	// How much survives is the runtime's error recovery: the C runtime
+	// keeps declarations from both sides; the pure-Go one reads `func B()`
+	// after `=======` as a call expression and keeps one side. Either way
+	// symbols come back from a file that does not parse, which is the point.
+	want := 3
+	if sitter.Runtime() == "pure-go" {
+		want = 2
+	}
+	if len(syms) < want {
+		t.Fatalf("fixture drift: expected tree-sitter to recover symbols from the conflicted file, got %d, want >= %d", len(syms), want)
 	}
 	if ParsesCleanly("go", conflicted) {
 		t.Error("a file full of conflict markers must not report a clean parse")

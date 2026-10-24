@@ -3,7 +3,7 @@ package symbols
 import (
 	"context"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // RefKind classifies how a reference SITE uses a name. The vocabulary

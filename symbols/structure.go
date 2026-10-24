@@ -4,17 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/c"
-	"github.com/smacker/go-tree-sitter/cpp"
-	"github.com/smacker/go-tree-sitter/golang"
-	"github.com/smacker/go-tree-sitter/groovy"
-	"github.com/smacker/go-tree-sitter/java"
-	"github.com/smacker/go-tree-sitter/kotlin"
-	markdown "github.com/smacker/go-tree-sitter/markdown/tree-sitter-markdown"
-	"github.com/smacker/go-tree-sitter/python"
-	"github.com/smacker/go-tree-sitter/sql"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // LanguageByName returns the tree-sitter language object for one of our
@@ -24,30 +14,30 @@ import (
 func LanguageByName(name string) *sitter.Language {
 	switch name {
 	case "go":
-		return golang.GetLanguage()
+		return sitter.Go()
 	case "typescript":
-		return tsx.GetLanguage()
+		return sitter.TSX()
 	case "python":
-		return python.GetLanguage()
+		return sitter.Python()
 	case "sql":
-		return sql.GetLanguage()
+		return sitter.SQL()
 	case "java":
-		return java.GetLanguage()
+		return sitter.Java()
 	case "c":
-		return c.GetLanguage()
+		return sitter.C()
 	case "cpp":
-		return cpp.GetLanguage()
+		return sitter.Cpp()
 	case "kotlin":
-		return kotlin.GetLanguage()
+		return sitter.Kotlin()
 	case "groovy":
-		return groovy.GetLanguage()
+		return sitter.Groovy()
 	case "markdown":
 		// The BLOCK grammar. It yields nested `section` nodes whose span
 		// covers a heading AND its body, which is exactly the unit a
 		// document is navigated by. The companion inline grammar (emphasis,
 		// links, code spans) is a separate tree and is not needed for
 		// structure.
-		return markdown.GetLanguage()
+		return sitter.Markdown()
 	}
 	return nil
 }

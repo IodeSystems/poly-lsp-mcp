@@ -3,7 +3,7 @@ package symbols
 import (
 	"sync"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // nodeType returns a node's grammar type WITHOUT allocating.

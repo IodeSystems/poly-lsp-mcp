@@ -7,8 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/golang"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
@@ -108,7 +107,7 @@ var goOpIDQuery = mustGoQuery(`(keyed_element
 // at the content position (past the opening quote) so a rename targets the value.
 func goOperationIDSites(content []byte) []opIDHit {
 	p := sitter.NewParser()
-	p.SetLanguage(golang.GetLanguage())
+	p.SetLanguage(sitter.Go())
 	tree, err := p.ParseCtx(context.Background(), nil, content)
 	if err != nil || tree == nil {
 		return nil
@@ -147,7 +146,7 @@ func goOperationIDSites(content []byte) []opIDHit {
 }
 
 func mustGoQuery(q string) *sitter.Query {
-	query, err := sitter.NewQuery([]byte(q), golang.GetLanguage())
+	query, err := sitter.NewQuery([]byte(q), sitter.Go())
 	if err != nil {
 		panic("bindings: bad go query: " + err.Error())
 	}

@@ -3,7 +3,7 @@ package symbols
 import (
 	"context"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // ParsesCleanly reports whether content parses with no ERROR or MISSING node

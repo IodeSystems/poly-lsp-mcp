@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"sync"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // embeddedGraphQLExtractor wraps a base TS/TSX extractor and ALSO surfaces the

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // ByteRange is half-open: [Start, End). A zero range (Start==End) is a

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // Benchmarks for the layer a CPU profile keeps landing in: a cold node_query

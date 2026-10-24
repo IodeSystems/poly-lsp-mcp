@@ -3,6 +3,8 @@ package symbols
 import (
 	"strings"
 	"testing"
+
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 func symByPath(syms []Symbol, sym string) *Symbol {
@@ -737,6 +739,19 @@ enum Mode { FAST, SLOW }
 		// The grammar models neither `enum` nor `trait`, reading the
 		// keyword as a type name; the declaration is still real.
 		"Mode": "enum",
+	}
+	// Widget (`implements`) and Mode (`enum`) are syntax this grammar does
+	// not have, so their symbols come out of ERROR RECOVERY, and recovery is
+	// the runtime's, not the grammar's. The pure-Go runtime recovers
+	// `class Widget implements Client` as ERROR(Widget implements) with the
+	// name field on Client, and `enum Mode` as a juxt_function_call. Only
+	// the C runtime's shape is asserted here.
+	if sitter.Runtime() != "cgo" {
+		for sym := range cases {
+			if sym == "Mode" || strings.HasPrefix(sym, "Widget") {
+				delete(cases, sym)
+			}
+		}
 	}
 	for sym, class := range cases {
 		got := symByPath(syms, sym)

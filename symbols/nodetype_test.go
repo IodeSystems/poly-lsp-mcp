@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // nodeType must agree with Type() exactly — it is a performance substitution,

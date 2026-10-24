@@ -4,8 +4,7 @@ import (
 	"context"
 	"sync"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/protobuf"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // Proto schema extraction. Tier 3 reads protobuf files declared in
@@ -42,14 +41,14 @@ var (
 )
 
 func initProtoQuery() {
-	q, err := sitter.NewQuery([]byte(protoQuery), protobuf.GetLanguage())
+	q, err := sitter.NewQuery([]byte(protoQuery), sitter.Protobuf())
 	if err != nil {
 		panic("bindings: bad proto tree-sitter query: " + err.Error())
 	}
 	protoCompiled = q
 	protoParserPool.New = func() any {
 		p := sitter.NewParser()
-		p.SetLanguage(protobuf.GetLanguage())
+		p.SetLanguage(sitter.Protobuf())
 		return p
 	}
 }

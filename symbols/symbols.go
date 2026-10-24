@@ -25,18 +25,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/smacker/go-tree-sitter/c"
-	"github.com/smacker/go-tree-sitter/cpp"
-	"github.com/smacker/go-tree-sitter/golang"
-	"github.com/smacker/go-tree-sitter/groovy"
-	"github.com/smacker/go-tree-sitter/java"
-	"github.com/smacker/go-tree-sitter/kotlin"
-	"github.com/smacker/go-tree-sitter/python"
-	"github.com/smacker/go-tree-sitter/sql"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
-
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // goIdentifierQuery captures every node Go's grammar uses to name a
@@ -717,7 +708,7 @@ var defaultExtractors = map[string]Extractor{
 	// literals and comments stop polluting the index. Keywords are
 	// kept for builtin types (int64, string, etc.) which the grammar
 	// reports as type_identifier nodes.
-	"go": mustTreeSitterExtractor(golang.GetLanguage(), goIdentifierQuery, keywordSet(
+	"go": mustTreeSitterExtractor(sitter.Go(), goIdentifierQuery, keywordSet(
 		"string", "int", "int8", "int16", "int32", "int64",
 		"uint", "uint8", "uint16", "uint32", "uint64", "byte", "rune",
 		"float32", "float64", "bool", "any", "error",
@@ -733,18 +724,18 @@ var defaultExtractors = map[string]Extractor{
 	// GraphQL field reference inside a TS query string is invisible (the body is an
 	// opaque string node), which breaks cross-language rename of gat/codegen ops.
 	"typescript": newEmbeddedGraphQLExtractor(
-		mustTreeSitterExtractor(tsx.GetLanguage(), tsxIdentifierQuery, keywordSet(
+		mustTreeSitterExtractor(sitter.TSX(), tsxIdentifierQuery, keywordSet(
 			"string", "number", "boolean", "any", "unknown", "never",
 			"object", "void", "undefined", "null",
 		)),
-		tsx.GetLanguage(),
+		sitter.TSX(),
 	),
-	"sql": mustTreeSitterExtractor(sql.GetLanguage(), sqlIdentifierQuery, nil),
+	"sql": mustTreeSitterExtractor(sitter.SQL(), sqlIdentifierQuery, nil),
 	// Python via tree-sitter. Keywords filter is trimmed to the builtins
 	// the grammar surfaces as identifier nodes — proper Python keywords
 	// (def/class/import/…) are non-identifier nodes and would never match
 	// the query.
-	"python": mustTreeSitterExtractor(python.GetLanguage(), pythonIdentifierQuery, keywordSet(
+	"python": mustTreeSitterExtractor(sitter.Python(), pythonIdentifierQuery, keywordSet(
 		"int", "float", "str", "bool", "bytes", "list", "dict", "tuple",
 		"set", "frozenset", "type", "object", "print", "len", "range",
 		"True", "False", "None",
@@ -754,7 +745,7 @@ var defaultExtractors = map[string]Extractor{
 	// `int`/`boolean`/etc. are primitive-type nodes and never match the
 	// query, and annotations (@Override) are deliberately kept so they
 	// stay queryable.
-	"java": mustTreeSitterExtractor(java.GetLanguage(), javaIdentifierQuery, keywordSet(
+	"java": mustTreeSitterExtractor(sitter.Java(), javaIdentifierQuery, keywordSet(
 		"String", "Object", "Integer", "Boolean", "Long", "Double",
 		"Float", "Byte", "Short", "Character", "Void",
 	)),
@@ -762,14 +753,14 @@ var defaultExtractors = map[string]Extractor{
 	// primitive_type nodes and never match the query, so the filter only
 	// subtracts the stdlib spellings that DO arrive as identifiers —
 	// mostly stdint/stddef typedefs and the null/bool literals.
-	"c":   mustTreeSitterExtractor(c.GetLanguage(), cIdentifierQuery, cKeywords),
-	"cpp": mustTreeSitterExtractor(cpp.GetLanguage(), cppIdentifierQuery, cKeywords),
+	"c":   mustTreeSitterExtractor(sitter.C(), cIdentifierQuery, cKeywords),
+	"cpp": mustTreeSitterExtractor(sitter.Cpp(), cppIdentifierQuery, cKeywords),
 
 	// Kotlin via tree-sitter. The filter subtracts the stdlib types the
 	// grammar reports as type_identifier plus `it` — the implicit lambda
 	// parameter, which is file-local by construction and would otherwise
 	// be one of the most frequent names in any Kotlin repo.
-	"kotlin": mustTreeSitterExtractor(kotlin.GetLanguage(), kotlinIdentifierQuery, keywordSet(
+	"kotlin": mustTreeSitterExtractor(sitter.Kotlin(), kotlinIdentifierQuery, keywordSet(
 		"String", "Int", "Long", "Short", "Byte", "Boolean", "Char",
 		"Float", "Double", "Unit", "Any", "Nothing", "Array",
 		"List", "Map", "Set", "Pair", "it", "true", "false", "null",
@@ -778,7 +769,7 @@ var defaultExtractors = map[string]Extractor{
 	// Groovy via tree-sitter. The filter subtracts the java.lang types
 	// the grammar reports as plain identifiers; `def`, `class` and the
 	// modifiers are distinct node types and never match.
-	"groovy": mustTreeSitterExtractor(groovy.GetLanguage(), groovyIdentifierQuery, keywordSet(
+	"groovy": mustTreeSitterExtractor(sitter.Groovy(), groovyIdentifierQuery, keywordSet(
 		"String", "Object", "Integer", "Boolean", "Long", "Double",
 		"Float", "Byte", "Short", "Character", "List", "Map", "Set",
 		"true", "false", "null", "it", "this",

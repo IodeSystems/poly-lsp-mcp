@@ -132,7 +132,7 @@ func TestDoctorFlagsMissingLSP(t *testing.T) {
 	root := newRoot()
 	var out bytes.Buffer
 	root.SetOut(&out)
-	root.SetArgs([]string{"doctor", "--root", dir, "--json"})
+	root.SetArgs([]string{"doctor", "--root", dir, "--json", "--no-update-check"})
 	stdout := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w

@@ -243,6 +243,14 @@ actionlint clean. **risks**: the first tagged run is UNTESTED until Carl tags;
 macOS tests have never run (see "First run on macOS"), so a failure there
 fails the release; `macos-15-intel` replaces the retired `macos-13` (last
 Intel runner image GitHub offers). Tag, key custody, signing: Carl's.
+✅ `doctor` update check (`updatecheck.go`; `update` object in `--json`,
+`--no-update-check`): origin from build info (`-tags release` → GitHub latest
+release; no vcs.* → proxy `@latest`; vcs.revision → checkout vs upstream),
+24 h cache, 2 s timeouts, silent offline. Source origin limitation, by design:
+no srcDir stamp, so it compares only when `LSP_REBUILD_PATH` names the
+checkout; otherwise it says it can't. A modified checkout is never nagged.
+**risks**: the release path is untested against a real tag/API until Carl
+tags; `-tags release` in release.yml was not actionlint-checked here.
 
 ◻ **First run on macOS** (2026-10-22). Not yet built or run on a Mac.
 **next**: on the Mac, `make install`, then `go test ./multiplex ./daemon .`

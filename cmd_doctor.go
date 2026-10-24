@@ -50,6 +50,7 @@ type doctorReport struct {
 	Daemon     string            `json:"daemon"`
 	Problems   []string          `json:"problems,omitempty"`
 	Advisories []string          `json:"advisories,omitempty"`
+	Update     *updateInfo       `json:"update,omitempty"` // absent when nothing is known
 
 	// Roots are the project roots of each language with a child LSP,
 	// relative to Root: where --lsp-roots auto would start one each.
@@ -66,6 +67,7 @@ func doctorCmd(l *loader) *cobra.Command {
 	var (
 		rootPath string
 		asJSON   bool
+		noUpdate bool
 	)
 	cmd := &cobra.Command{
 		Use:   "doctor",
@@ -77,7 +79,11 @@ holds (gopls, typescript-language-server, pylsp, clangd), git, the daemon.
 A language without its child LSP still works, from tree-sitter alone, but
 its ::in/::out edges are not resolved and edits to it are not validated.
 Exits 1 when a language the workspace holds has no child LSP, or PATH runs
-a different poly-lsp-mcp than this one.`,
+a different poly-lsp-mcp than this one.
+
+It also checks, at most once a day and quietly offline, whether a newer
+poly-lsp-mcp exists for how this binary was built (release, go install, or a
+checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 		Example: `  poly-lsp-mcp doctor
   poly-lsp-mcp doctor --root ../other --json`,
 		Args: cobra.NoArgs,
@@ -199,6 +205,11 @@ a different poly-lsp-mcp than this one.`,
 				rep.Advisories = append(rep.Advisories, "a daemon is running; after an upgrade restart it (poly-lsp-mcp daemon --restart) or --daemon clients keep the old binary")
 			}
 
+			// Last: it is the only step that waits on the network.
+			if !noUpdate {
+				rep.Update = newUpdateChecker().check(classifyBuild(readBuildInfo()))
+			}
+
 			if asJSON {
 				b, _ := json.MarshalIndent(rep, "", "  ")
 				fmt.Println(string(b))
@@ -213,6 +224,7 @@ a different poly-lsp-mcp than this one.`,
 	}
 	cmd.Flags().StringVar(&rootPath, "root", ".", "workspace to check the languages of")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the findings as JSON")
+	cmd.Flags().BoolVar(&noUpdate, "no-update-check", false, "do not look for a newer poly-lsp-mcp")
 	return cmd
 }
 
@@ -223,6 +235,9 @@ func printDoctor(r doctorReport) {
 	fmt.Printf("config    %s\n", r.Config)
 	fmt.Printf("git       %s\n", r.Git)
 	fmt.Printf("daemon    %s\n", r.Daemon)
+	if r.Update != nil {
+		fmt.Printf("update    %s\n", r.Update.text())
+	}
 	note := ""
 	if r.Partial {
 		note = " (count stopped at 5 s; partial)"
@@ -324,6 +339,12 @@ func buildInfo() string {
 		return fmt.Sprintf("commit %s%s (%s), %s", rev, dirty, at, bi.GoVersion)
 	}
 	return fmt.Sprintf("%s %s, %s", bi.Main.Path, bi.Main.Version, bi.GoVersion)
+}
+
+// readBuildInfo adapts debug.ReadBuildInfo to classifyBuild's arguments.
+func readBuildInfo() (*debug.BuildInfo, bool) {
+	bi, _ := debug.ReadBuildInfo()
+	return bi, releaseBuild
 }
 
 // probeVersion runs an LSP's version flag, bounded; first line only.

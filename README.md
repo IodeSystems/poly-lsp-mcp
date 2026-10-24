@@ -126,6 +126,14 @@ checks the binary PATH runs (and stale copies behind it), the child LSP for
 each language the workspace holds with its version and install command, git,
 and the daemon. Exits 1 when a language in use has no child LSP.
 
+`doctor` also looks for a newer poly-lsp-mcp, by how the binary was built: a
+release binary asks GitHub for the latest release, a `go install` binary asks
+the Go module proxy, and a build from a checkout compares the checkout with its
+upstream, but only when `LSP_REBUILD_PATH` names it (the binary carries no
+source path, by design). The answer is one `update` line, or the `update`
+object of `--json`; it is cached for 24 hours, silent when offline, never
+affects the exit status, and `--no-update-check` skips it.
+
 The MCP server says the same after bring-up: `notifications/message` from
 logger `poly-lsp-mcp/setup` (level `warning` when one is missing), data
 `{languages: [{lang, files, lsp: {name, found, path}, adds, install: {cmd,

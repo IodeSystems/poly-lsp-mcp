@@ -40,7 +40,8 @@ install:
 # Release tarball for the CURRENT os/arch, named as the release workflow names
 # it (no version, so /releases/latest/download/<asset> is stable):
 #   dist/poly-lsp-mcp_<os>_<arch>.tar.gz  holding poly-lsp-mcp (+ LICENSE, README.md if present)
-# Unstamped, like every other target here.
+# Unstamped, like every other target here; -tags release is a marker, not a stamp
+# (doctor reads it to pick the release update check).
 GOOS_NAME   := $(shell $(GO) env GOOS)
 GOARCH_NAME := $(shell $(GO) env GOARCH)
 DIST_ASSET  := dist/$(BINARY)_$(GOOS_NAME)_$(GOARCH_NAME).tar.gz
@@ -49,7 +50,7 @@ DIST_ASSET  := dist/$(BINARY)_$(GOOS_NAME)_$(GOARCH_NAME).tar.gz
 dist:
 	rm -rf dist/stage
 	mkdir -p dist/stage
-	CGO_ENABLED=1 $(GO) build -trimpath -o dist/stage/$(BINARY) .
+	CGO_ENABLED=1 $(GO) build -trimpath -tags release -o dist/stage/$(BINARY) .
 	for f in LICENSE README.md; do [ -f $$f ] && cp $$f dist/stage/ || true; done
 	tar -czf $(DIST_ASSET) -C dist/stage $$(ls dist/stage)
 	rm -rf dist/stage

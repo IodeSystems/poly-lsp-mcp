@@ -894,7 +894,12 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			}
 			return nil
 		}
-		if ign.FileIgnored(root, path) {
+		// KnownIgnored, not FileIgnored: every path this walk visits existed
+		// when LoadIgnores ran, so the snapshot already has the answer.
+		// FileIgnored's git fallback spawned one `git check-ignore` per
+		// non-ignored file — on dun, 20k files under untracked worktrees, it
+		// was 48 of the 52 s initialize took.
+		if ign.KnownIgnored(root, path) {
 			return nil
 		}
 		ext := strings.TrimPrefix(filepath.Ext(path), ".")

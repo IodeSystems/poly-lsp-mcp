@@ -74,7 +74,9 @@ func walkFiles(root string, ignores *git.IgnoreSet, fn func(path string, data []
 			}
 			return nil
 		}
-		if ignores.FileIgnored(root, path) {
+		// Snapshot only: the walk sees paths that existed at LoadIgnores
+		// time, so no `git check-ignore` per file (see symbols.Build).
+		if ignores.KnownIgnored(root, path) {
 			return nil
 		}
 		if data, rerr := os.ReadFile(path); rerr == nil {

@@ -1,0 +1,115 @@
+name: release
+
+# Tag push (v*) builds four tarballs + SHA256SUMS and publishes a GitHub
+# release. workflow_dispatch is a dry run: builds and uploads workflow
+# artifacts, creates no release.
+#
+# Asset names carry no version, so
+#   https://github.com/IodeSystems/poly-lsp-mcp/releases/latest/download/<asset>
+# is stable. Signing is not done here (dun's signed manifest points at these).
+# Nothing is stamped into the binary (TestNoBuildTargetStampsTheBinary).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, runner: ubuntu-24.04 }
+          - { goos: linux, goarch: arm64, runner: ubuntu-24.04-arm }
+          - { goos: darwin, goarch: amd64, runner: macos-15-intel }
+          - { goos: darwin, goarch: arm64, runner: macos-14 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go vet ./...
+          go test -count=1 -timeout 900s ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -o poly-lsp-mcp .
+
+      - name: Smoke
+        run: |
+          ./poly-lsp-mcp --help
+          # doctor exits 1 when a child LSP is missing; only a crash fails.
+          rc=0
+          ./poly-lsp-mcp doctor --root . || rc=$?
+          echo "doctor exit: $rc"
+          if [ "$rc" -gt 1 ]; then
+            echo "doctor crashed (exit $rc)" >&2
+            exit 1
+          fi
+
+      - name: Package
+        env:
+          ASSET: poly-lsp-mcp_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+        run: |
+          files="poly-lsp-mcp"
+          for f in LICENSE README.md; do
+            if [ -f "$f" ]; then files="$files $f"; fi
+          done
+          # shellcheck disable=SC2086
+          tar -czf "$ASSET" $files
+          tar -tzf "$ASSET"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: poly-lsp-mcp_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: poly-lsp-mcp_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          ls -l
+          test "$(ls -1 poly-lsp-mcp_*.tar.gz | wc -l)" -eq 4
+          sha256sum poly-lsp-mcp_*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes \
+            dist/poly-lsp-mcp_linux_amd64.tar.gz \
+            dist/poly-lsp-mcp_linux_arm64.tar.gz \
+            dist/poly-lsp-mcp_darwin_amd64.tar.gz \
+            dist/poly-lsp-mcp_darwin_arm64.tar.gz \
+            dist/SHA256SUMS

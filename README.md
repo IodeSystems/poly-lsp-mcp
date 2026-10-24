@@ -83,7 +83,24 @@ cd poly-lsp-mcp
 make install
 ```
 
-Binary lands at `~/.local/bin/poly-lsp-mcp` (`make install BINDIR=...` to
+Or download a prebuilt binary (linux or darwin, amd64 or arm64) from the
+latest GitHub release and check it against `SHA256SUMS`:
+
+```sh
+os=$(uname -s | tr A-Z a-z); arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+base=https://github.com/IodeSystems/poly-lsp-mcp/releases/latest/download
+curl -fsSLO "$base/poly-lsp-mcp_${os}_${arch}.tar.gz"
+curl -fsSLO "$base/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+tar -xzf "poly-lsp-mcp_${os}_${arch}.tar.gz" poly-lsp-mcp
+install -m 755 poly-lsp-mcp ~/.local/bin/
+```
+
+Asset names carry no version. Releases are unsigned here; dun publishes the
+signed manifest that points at them. `make dist` builds the same tarball for
+this machine under `dist/`.
+
+From source, the binary lands at `~/.local/bin/poly-lsp-mcp` (`make install BINDIR=...` to
 change), on Linux and macOS. Needs Go and a C compiler (tree-sitter is cgo;
 on macOS the Xcode command line tools). Without a checkout:
 `go install github.com/iodesystems/poly-lsp-mcp@latest` (to `~/go/bin`).

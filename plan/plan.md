@@ -211,6 +211,15 @@ so `go install` picks the best runtime by itself. Releases: GitHub Actions
 native runners build cgo binaries for linux/darwin × amd64/arm64 today, no
 pure Go needed. **blocking decisions**: adopt the cgo/!cgo split; publish
 releases (tags, CI, signing).
+✅ `.github/workflows/release.yml`: on `v*` tag, native build per
+linux|darwin × amd64|arm64 (cgo, no cross-compile), `go vet` + full
+`go test`, smoke (`--help`, `doctor`), tarballs
+`poly-lsp-mcp_{os}_{arch}.tar.gz` + `SHA256SUMS` via `gh release create`;
+`workflow_dispatch` = dry run. `make dist` builds the local tarball.
+actionlint clean. **risks**: the first tagged run is UNTESTED until Carl tags;
+macOS tests have never run (see "First run on macOS"), so a failure there
+fails the release; `macos-15-intel` replaces the retired `macos-13` (last
+Intel runner image GitHub offers). Tag, key custody, signing: Carl's.
 
 ◻ **First run on macOS** (2026-10-22). Not yet built or run on a Mac.
 **next**: on the Mac, `make install`, then `go test ./multiplex ./daemon .`

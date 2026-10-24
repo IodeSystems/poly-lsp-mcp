@@ -37,6 +37,24 @@ install:
 	mv -f $(BINDIR)/.$(BINARY).tmp $(BINDIR)/$(BINARY)
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "warning: $(BINDIR) is not on PATH" >&2 ;; esac
 
+# Release tarball for the CURRENT os/arch, named as the release workflow names
+# it (no version, so /releases/latest/download/<asset> is stable):
+#   dist/poly-lsp-mcp_<os>_<arch>.tar.gz  holding poly-lsp-mcp (+ LICENSE, README.md if present)
+# Unstamped, like every other target here.
+GOOS_NAME   := $(shell $(GO) env GOOS)
+GOARCH_NAME := $(shell $(GO) env GOARCH)
+DIST_ASSET  := dist/$(BINARY)_$(GOOS_NAME)_$(GOARCH_NAME).tar.gz
+
+.PHONY: dist
+dist:
+	rm -rf dist/stage
+	mkdir -p dist/stage
+	CGO_ENABLED=1 $(GO) build -trimpath -o dist/stage/$(BINARY) .
+	for f in LICENSE README.md; do [ -f $$f ] && cp $$f dist/stage/ || true; done
+	tar -czf $(DIST_ASSET) -C dist/stage $$(ls dist/stage)
+	rm -rf dist/stage
+	@echo $(DIST_ASSET)
+
 # Benchmarks. Generated fixtures, so a number means the same thing next month
 # — never benchmark the live repo, it drifts with every commit.
 #
@@ -126,6 +144,7 @@ help:
 	@echo ""
 	@echo "  build           - go build into ./$(BINARY)"
 	@echo "  install         - build into \$$BINDIR (default ~/.local/bin)"
+	@echo "  dist            - dist/$(BINARY)_<os>_<arch>.tar.gz for this machine"
 	@echo "  test            - short test suite (skips live-LSP / live-gat e2e)"
 	@echo "  test-all        - full test suite, no -short"
 	@echo "  test-race       - short suite + race detector (standing gate)"

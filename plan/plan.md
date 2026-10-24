@@ -252,6 +252,12 @@ the client (dun) retries with its own decisions and reports them.
   `include` opt-in for broad traversal inside node_modules; not-a-project
   root detection (home dir, dir of clones); symlink/LFS/binary/monorepo
   edge cases.
+- ✅ dead ends rolled up: node_query result `leftOut` {pruned, deadEnds,
+  hint} by reason, not per item (pruned: dirs the walk skipped, files for
+  shadowed; deadEnds: LSP edges resolved into left-out code, from refineFar
+  and nodeForLoc). Known gap: a call whose only definition is in left-out
+  code and that has no local candidate makes no LSP round-trip, so it is
+  not counted.
 - ◻ dun side: read the `poly-lsp-mcp/index` notification, choose excludes,
   respawn, report what it decided and how to reverse it. Protocol sent to
   dun-a8.

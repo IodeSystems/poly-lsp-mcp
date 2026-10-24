@@ -412,7 +412,9 @@ func (e *engine) refineFar(far []*treeNode, siteAbs string, line, col int) ([]*t
 			return []*treeNode{externalStub(defAbs, defLine, far[0].leaf)}, refLSP
 		}
 		// Inside the root but no candidate span matched (a decl the tree
-		// did not model): genuinely unsettled, not certain.
+		// did not model, or one in left-out code): genuinely unsettled,
+		// not certain. Left-out code is counted as a dead end.
+		e.noteDeadEnd(defRel)
 		return far, refUnsettled
 	}
 	e.lspResolved++

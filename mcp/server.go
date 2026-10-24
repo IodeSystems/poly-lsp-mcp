@@ -107,7 +107,7 @@ type Server struct {
 	index       *symbols.Index
 	indexCost   symbols.CostReport // guarded by indexMu
 	excludes    []string           // client-chosen dirs to drop; see SetExcludes
-	nested      []string           // nested repos left out by the last build; guarded by indexMu
+	nested      []git.Nested       // nested repos left out by the last build; guarded by indexMu
 	indexBuilds int                // count of BuildIndex calls; a test seam for "did this process build the index itself"
 	// ignores is the workspace's gitignore set, guarded by indexMu
 	// alongside the index it was resolved with.
@@ -663,7 +663,11 @@ func (s *Server) BuildIndex() error {
 	// ignore set so every other walk (proactive open, watcher, bindings)
 	// skips them too.
 	manifest := git.LoadManifest(root)
-	s.setNested(manifest.NestedDirs())
+	if manifest != nil {
+		s.setNested(manifest.Nested)
+	} else {
+		s.setNested(nil)
+	}
 	snapshot := git.LoadIgnores(root)
 	ignoredDirs := snapshot.IgnoredDirs() // before excludes join the set
 	ign := s.withClientDirs(root, snapshot)
@@ -979,20 +983,21 @@ func (s *Server) loadIgnores(root string) *git.IgnoreSet {
 // withClientDirs adds the client's excludes and the nested repositories
 // the last build left out to an ignore set.
 func (s *Server) withClientDirs(root string, ign *git.IgnoreSet) *git.IgnoreSet {
-	s.indexMu.RLock()
-	nested := s.nested
-	s.indexMu.RUnlock()
-	return ign.WithExcludes(root, append(append([]string(nil), s.excludes...), nested...))
+	dirs := append([]string(nil), s.excludes...)
+	for _, n := range s.nestedRepos() {
+		dirs = append(dirs, n.Dir)
+	}
+	return ign.WithExcludes(root, dirs)
 }
 
-func (s *Server) setNested(dirs []string) {
+func (s *Server) setNested(n []git.Nested) {
 	s.indexMu.Lock()
-	s.nested = dirs
+	s.nested = n
 	s.indexMu.Unlock()
 }
 
-// nestedDirs are the nested repositories the last build left out.
-func (s *Server) nestedDirs() []string {
+// nestedRepos are the nested repositories the last build left out.
+func (s *Server) nestedRepos() []git.Nested {
 	s.indexMu.RLock()
 	defer s.indexMu.RUnlock()
 	return s.nested

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -269,8 +270,13 @@ type engine struct {
 	// exactly that, so the walk follows the named path and nothing beside it.
 	named []string
 	// nested are the nested repositories the index left out (worktrees,
-	// other clones): skipped like node_modules.
-	nested map[string]bool
+	// other clones), by dir → reason: skipped like node_modules.
+	nested map[string]string
+	// pruned and deadEnds are the query's dead ends, rolled up by reason:
+	// what the walk did not enter (dirs; files for shadowed), and edges a
+	// child LSP resolved into left-out code. See leftOutRollup.
+	pruned   map[string]int
+	deadEnds map[string]int
 	// shadow hides a file behind a stronger-typed sibling (foo.js beside
 	// foo.ts) unless the selector names the file: namedFiles.
 	shadow     *config.ShadowChecker
@@ -708,10 +714,11 @@ func (s *Server) buildTreeFor(selector string) (*engine, error) {
 	// non-edge query never pays to compute the workspace-tuned cap.
 	e.excl = s.excludeSet()
 	e.named = selectorPaths(selector)
-	e.nested = map[string]bool{}
-	for _, d := range s.nestedDirs() {
-		e.nested[d] = true
+	e.nested = map[string]string{}
+	for _, n := range s.nestedRepos() {
+		e.nested[n.Dir] = n.Reason
 	}
+	e.pruned, e.deadEnds = map[string]int{}, map[string]int{}
 	e.shadow = s.registry.NewShadowChecker()
 	e.namedFiles = map[string]bool{}
 	for _, p := range selectorPaths(selector) {
@@ -747,8 +754,20 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip bool) {
 		childAbs := filepath.Join(abs, de.Name())
 		childInSkip := inSkip
 		childRel := relPath(childAbs, e.s.getRoot())
-		if skipScanDir(de.Name()) || (de.IsDir() && e.nested[childRel]) {
-			if de.Name() == ".git" || !e.reachesNamed(childRel) {
+		nestedReason := ""
+		if de.IsDir() {
+			nestedReason = e.nested[childRel]
+		}
+		if skipScanDir(de.Name()) || nestedReason != "" {
+			if de.Name() == ".git" {
+				continue
+			}
+			if !e.reachesNamed(childRel) {
+				if nestedReason != "" {
+					e.pruned[nestedReason]++
+				} else {
+					e.pruned[de.Name()+"/"]++
+				}
 				continue
 			}
 			childInSkip = true
@@ -758,6 +777,7 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip bool) {
 		// The client's excludes hold here too: a directory it dropped from
 		// the index is not a node either.
 		if de.IsDir() && e.excl.DirIgnored(e.s.getRoot(), childAbs) {
+			e.pruned[leftExcluded]++
 			continue
 		}
 		// A binary file (ELF, image, compiled test binary) is never a
@@ -771,6 +791,7 @@ func (e *engine) walkDir(abs string, parent *treeNode, inSkip bool) {
 		}
 		if !de.IsDir() {
 			if _, ok := e.shadow.Shadowed(childAbs); ok && !e.namedFiles[relPath(childAbs, e.s.getRoot())] {
+				e.pruned[leftShadowed]++
 				continue
 			}
 		}
@@ -5017,7 +5038,65 @@ func (e *engine) nodeForLoc(loc implLoc) *treeNode {
 	if !filepath.IsLocal(rel) {
 		return externalStub(loc.abs, loc.line, identAt(loc.abs, loc.line, loc.col))
 	}
-	return e.declAt(rel, loc.line)
+	n := e.declAt(rel, loc.line)
+	if n == nil {
+		e.noteDeadEnd(rel)
+	}
+	return n
+}
+
+const (
+	leftExcluded = "excluded"
+	leftShadowed = "shadowed"
+)
+
+// noteDeadEnd counts an edge whose far end a child LSP placed at rel, inside
+// the root, where the tree holds no node — when the reason is that rel was
+// left out.
+func (e *engine) noteDeadEnd(rel string) {
+	if r := e.leftOutReason(rel); r != "" && e.deadEnds != nil {
+		e.deadEnds[r]++
+	}
+}
+
+// leftOutReason names why a root-relative path is not in the tree, or "".
+func (e *engine) leftOutReason(rel string) string {
+	for d, reason := range e.nested {
+		if rel == d || strings.HasPrefix(rel, d+"/") {
+			return reason
+		}
+	}
+	for _, seg := range strings.Split(path.Dir(rel), "/") {
+		if seg != ".git" && skipScanDir(seg) {
+			return seg + "/"
+		}
+	}
+	abs := filepath.Join(e.s.getRoot(), filepath.FromSlash(rel))
+	if e.excl.KnownIgnored(e.s.getRoot(), abs) {
+		return leftExcluded
+	}
+	if _, ok := e.shadow.Shadowed(abs); ok {
+		return leftShadowed
+	}
+	return ""
+}
+
+// leftOutRollup is the query's dead ends for the result: what the walk did
+// not enter and edges that ended in left-out code, by reason. nil when none.
+func (e *engine) leftOutRollup() map[string]any {
+	if len(e.pruned) == 0 && len(e.deadEnds) == 0 {
+		return nil
+	}
+	out := map[string]any{
+		"hint": "not searched; a path named in the selector is searched even inside these",
+	}
+	if len(e.pruned) > 0 {
+		out["pruned"] = e.pruned // dirs; files for shadowed
+	}
+	if len(e.deadEnds) > 0 {
+		out["deadEnds"] = e.deadEnds // edges a child LSP resolved into left-out code
+	}
+	return out
 }
 
 // declAt returns the innermost declared node in rel whose span contains

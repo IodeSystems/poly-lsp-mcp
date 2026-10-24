@@ -26,7 +26,7 @@ func TestSkippedDirReachableWhenNamed(t *testing.T) {
 		}
 		return r.Content[0].Text
 	}
-	if got := text("func"); strings.Contains(got, "node_modules") {
+	if got := text("func"); strings.Contains(got, "node_modules/lib") || strings.Contains(got, "libFn") {
 		t.Errorf("broad traversal walked node_modules:\n%s", got)
 	}
 	got := text("file[path=node_modules/lib/index.ts] > *")

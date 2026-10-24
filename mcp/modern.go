@@ -392,6 +392,11 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 	if rollup := fragmentRollup(rows); len(rollup) > 0 {
 		payload["rollup"] = rollup
 	}
+	// Dead ends, rolled up: what this query did not search and why, so a
+	// zero reads as "not in what was searched", with the way in.
+	if lo := e.leftOutRollup(); lo != nil {
+		payload["leftOut"] = lo
+	}
 	// Never cut off silently: say there's more, and how to reach it.
 	if end < total || capped || e.workExceeded {
 		payload["truncated"] = true

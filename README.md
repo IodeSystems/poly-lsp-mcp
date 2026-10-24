@@ -174,6 +174,8 @@ The index walk has a startup budget, `--index-budget`, in `node_query`'s grammar
 
 `node_query` skips `node_modules`, `vendor`, `dist`, `build` and the like in broad traversal, but a selector that names a path inside one (`file[path=node_modules/react/index.d.ts]`, `#'vendor/x' func`) reaches that path and nothing beside it. It does not apply `.gitignore`; every `node_query` appends one line to `~/.poly-lsp/usage.jsonl` (matches, how many were gitignored or in a skipped directory, and whether the selector named them), and `poly-lsp-mcp usage` totals it — the evidence for whether it should.
 
+When a `node_query` leaves something out, its result carries `leftOut`: `pruned` counts what the walk did not enter, by reason (a skipped directory such as `node_modules/`, `worktree of this repo`, `another repo`, `excluded`; `shadowed` counts files, the rest directories), `deadEnds` counts edges a child LSP resolved into left-out code, and `hint` says a named path is searched even inside these. It is absent when nothing was left out.
+
 ### Selector language
 
 CSS selectors, but the document is your codebase. `func` is a tag, `#name` an id, `>` is child, space is descendant, `,` is union; `:has()` / `:not()` / `:where()` behave as in CSS, `:first` / `:last` as in jQuery. One new idea: the reference **graph** rides on pseudo-element syntax — `::in` / `::out` are edges the way `::before` is generated content, and `::grep` / `::comment` / `::signature` / `::body` are other generated views of a node.

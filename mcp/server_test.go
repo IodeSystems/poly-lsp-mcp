@@ -32,6 +32,17 @@ type mcpSession struct {
 
 	notesMu sync.Mutex
 	notes   []jsonrpc.Message
+
+	// Writes go through one goroutine so the test never blocks on them.
+	// io.Pipe has no buffer: a Write returns only when the reader has taken
+	// every byte. The decoder on either side can return a complete message
+	// without reading its trailing newline, so a blocking write left the
+	// test waiting on that newline while the server waited to write its
+	// reply. Which test hung depended on message size against the decoder's
+	// buffer.
+	writeOnce sync.Once
+	writeQ    chan []byte
+	writeDone chan struct{}
 }
 
 func startSession(t *testing.T, root string) *mcpSession {
@@ -64,9 +75,38 @@ func startSessionFull(t *testing.T, root string, bs []config.Binding, ss []confi
 
 func (s *mcpSession) sendMessage(msg *jsonrpc.Message) {
 	s.t.Helper()
-	if err := json.NewEncoder(s.clientW).Encode(msg); err != nil {
+	b, err := json.Marshal(msg)
+	if err != nil {
 		s.t.Fatalf("encode: %v", err)
 	}
+	s.startWriter()
+	s.writeQ <- append(b, '\n')
+}
+
+func (s *mcpSession) startWriter() {
+	s.writeOnce.Do(func() {
+		s.writeQ = make(chan []byte, 64)
+		s.writeDone = make(chan struct{})
+		go func() {
+			defer close(s.writeDone)
+			for b := range s.writeQ {
+				if _, err := s.clientW.Write(b); err != nil {
+					// The server is gone; drain so senders never block.
+					for range s.writeQ {
+					}
+					return
+				}
+			}
+		}()
+	})
+}
+
+// closeWriter delivers every queued message, then closes the server's input.
+func (s *mcpSession) closeWriter() {
+	s.startWriter()
+	close(s.writeQ)
+	<-s.writeDone
+	s.clientW.Close()
 }
 
 func (s *mcpSession) request(method string, params any) *jsonrpc.Message {
@@ -126,7 +166,7 @@ func (s *mcpSession) notify(method string, params any) {
 func (s *mcpSession) close() {
 	s.t.Helper()
 	s.request("shutdown", nil)
-	s.clientW.Close()
+	s.closeWriter()
 	select {
 	case <-s.done:
 	case <-time.After(2 * time.Second):
@@ -212,7 +252,7 @@ func TestInitializeReturnsProtocolVersionAndServerInfo(t *testing.T) {
 func TestPreInitMethodsAreRejected(t *testing.T) {
 	s := startSession(t, "")
 	defer func() {
-		s.clientW.Close()
+		s.closeWriter()
 		<-s.done
 	}()
 	resp := s.request("tools/list", nil)
@@ -233,7 +273,7 @@ func TestDoubleInitializeRejected(t *testing.T) {
 
 func TestEOFWithoutShutdownReturnsSentinel(t *testing.T) {
 	s := startSession(t, "")
-	s.clientW.Close()
+	s.closeWriter()
 	select {
 	case got := <-s.done:
 		if !errors.Is(got, ErrExitWithoutShutdown) {

@@ -3,6 +3,16 @@
 > Moved here from plan.md as phases completed. Current state + active work live
 > in plan.md; deferred opt-ins in icebox.md.
 
+## mcp test suite hangs (DONE 2026-10-24)
+
+`go test ./mcp` hit the timeout in a different test on each run. The harness
+joins client and server with `io.Pipe`, which has no buffer, and
+`json.Decoder` can return a message before it reads the trailing newline, so
+the writer stayed blocked on that byte while the reader blocked writing its
+reply. Size-dependent, so it moved between tests. Fixed in the harness only
+(`mcp/server_test.go`: one writer goroutine per session, flushed on close);
+real stdio has kernel pipe buffers. Full `go test -race ./mcp` passes, 42 s.
+
 ## Child-LSP memory lifecycle (DONE 2026-10-22)
 
 Asked for by dun-51 after the 2026-10-22 OOM kills (kernel OOM killed

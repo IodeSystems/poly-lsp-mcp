@@ -378,18 +378,11 @@ Tiers 1–3 answer *"are these the same symbol?"*. Generated code needs a strong
 
 Because the link is **declared, not guessed**, cross-namespace lexical matches stay advisory: `node_refactor` renames the authoritative sites and returns the lexical ones under `candidates` — *recommendations, not actions* — unless you opt in with `applyCandidates: true`.
 
-### The variance model
+### Renaming a derived name
 
-Renaming a `@derived` **source** (a column, an operation) is *mode-ambiguous*: rename the underlying definition (cascading to every dependent), or alias it locally? `node_refactor` **fails closed** — applies nothing, returns `variance: true` plus the source(s) and the modes:
+Renaming a `@derived` **source** (a column, an operation) cascades by default: every source the name derives from, the derived name and every reference are renamed in one validated transaction. The rename never refuses. The reply's `cascade` field lists each source (`file:line`), the reference count, and a one-line note when a source is an outside contract: a renamed SQL column needs a database migration; a renamed GraphQL operation breaks external clients that call it by name.
 
-| mode | effect | automated |
-|------|--------|-----------|
-| `underlying` | rename the source + cascade every reference; derived layers regenerate | ✅ |
-| `projection` | rename one projection/alias, leave the source | manual |
-| `mapping` | keep the source name, add an alias so the derived name changes | manual |
-| `hide` | (delete) drop from a view / json tag instead of dropping the source | manual |
-
-Prescribe one with `resolution: {mode, target}`; `target` (`file:line`) disambiguates **fan-in** when more than one source shares a name. Same fail-closed posture as the candidates rule — extended from *whether* to act to *how*.
+For anything narrower (one source of several, a local alias), stage plain edits with `commit: false` and commit when the result is right. To undo a cascade, rename back.
 
 ## Diagnostics in edit responses (MCP)
 
@@ -421,7 +414,7 @@ Supports Go, TypeScript (.ts/.tsx/.js), and Python.
 }
 ```
 
-- **rename**: workspace-wide, with declared-binding + aliasing safety. Also rewrites whole-word mentions in comments and prose by default (the reply lists the files and how to get a code-only rename); a plain lowercase-word old name (`save`, `data`) leaves prose alone and reports the skipped count. `includeComments: true|false` is a hidden override. Cross-namespace lexical guesses are returned as `candidates` (apply with `applyCandidates: true`); renaming a `@derived` source fails closed pending `resolution: {mode, target}` — see [Derivation-aware refactoring](#derivation-aware-refactoring-derived).
+- **rename**: workspace-wide, with declared-binding + aliasing safety. Also rewrites whole-word mentions in comments and prose by default (the reply lists the files and how to get a code-only rename); a plain lowercase-word old name (`save`, `data`) leaves prose alone and reports the skipped count. `includeComments: true|false` is a hidden override. Cross-namespace lexical guesses are returned as `candidates` (apply with `applyCandidates: true`); renaming a `@derived` source cascades to every source and reference — see [Derivation-aware refactoring](#derivation-aware-refactoring-derived).
 - **params**: rebuilds the function declaration. When arity changes, callers across the workspace are rewritten best-effort — args truncated on shrink, padded with language-appropriate zero values on growth (`""`, `0`, `false`, `nil` / `null` / `None`, `[]` / `{}`, …). Spread / splat callers are reported as `skipped` so you decide.
 - **return**: replaces the existing return type or inserts one into a previously-void declaration.
 
@@ -524,6 +517,6 @@ plan/plan.md                 phased roadmap (all phases shipped)
 
 ## Status
 
-Phase 0 through Phase 5 plus the stacked-branch tail of Phase 3 are all shipped. On top of that, the **derivation model** (`@derived` emit→consume→fail-closed variance refactor, with the SQL migration-fold) is complete. The roadmap is effectively complete; further work is scope expansion (new refactor kinds, more `@derived` emitters/modes, more language coverage) and ergonomics.
+Phase 0 through Phase 5 plus the stacked-branch tail of Phase 3 are all shipped. On top of that, the **derivation model** (`@derived` emit→consume→cascading refactor, with the SQL migration-fold) is complete. The roadmap is effectively complete; further work is scope expansion (new refactor kinds, more `@derived` emitters/modes, more language coverage) and ergonomics.
 
 See `plan/plan.md` for the full feature history with rationale for each design decision.

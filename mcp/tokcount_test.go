@@ -108,7 +108,10 @@ import (
 // default now, the param stays accepted but hidden). Measured 1338 → 1268.
 // The 1300 ceiling leaves ~30 of headroom so the next addition has to argue
 // for itself.
-const modernTokenBudget = 1300
+// 1300 → 1240: `resolution` left node_edit entirely (a rename of a @derived
+// name always cascades; anything narrower is a commit:false batch). Measured
+// 1268 → 1220; 1240 keeps ~20 of headroom.
+const modernTokenBudget = 1240
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

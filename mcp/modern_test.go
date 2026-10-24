@@ -1033,8 +1033,9 @@ func TestModernNodeEditRenameOnlyModifiers(t *testing.T) {
 		"node": "main.go#Free", "delete": true,
 		"resolution": map[string]any{"mode": "underlying", "target": "x"},
 	})
-	if !r.IsError || !strings.Contains(r.Content[0].Text, "resolution only applies to rename") {
-		t.Errorf("resolution outside rename should error; got %+v", r.Content)
+	// resolution is gone entirely (a derived rename always cascades).
+	if !r.IsError || !strings.Contains(r.Content[0].Text, `no argument "resolution"`) {
+		t.Errorf("resolution should be an unknown argument; got %+v", r.Content)
 	}
 }
 

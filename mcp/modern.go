@@ -105,8 +105,7 @@ oldText+newText — replace a snippet inside the node. oldText must occur exactl
 newText alone — REPLACES a span address (@start-end: ::body/::signature/::grep/a conflict); CREATES a file at a new path; refused on a symbol (use oldText) and never inserts one.
 delete:true — excise the node.
 accept:"mine"|"theirs" — resolve merge conflicts (whole file, or one block by its @start-end span); markers go too. A conflicted file indexes both sides as PEERS; ::conflict/::mine/::theirs/::base read them apart (sides carry their ref).
-params [{name,type}] / return — rebuild the parameter list / return type (go/typescript/python).
-resolution:{mode,target} — rename only.`
+params [{name,type}] / return — rebuild the parameter list / return type (go/typescript/python).`
 
 var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"node":{"type":"string","description":"Address or selector."},` +
@@ -117,9 +116,7 @@ var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"properties":{"name":{"type":"string"},"type":{"type":"string"}},"required":["name","type"]}},` +
 	`"return":{"type":"string"},` +
 	`"delete":{"type":"boolean"},` +
-	`"accept":{"type":"string","enum":["mine","theirs"]},` +
-	`"resolution":{"type":"object","properties":{"mode":{"type":"string",` +
-	`"enum":["underlying","projection","mapping","hide"]},"target":{"type":"string"}}}},` +
+	`"accept":{"type":"string","enum":["mine","theirs"]}},` +
 	`"required":["node"]}`)
 
 // --------------------------------------------------------- node_query
@@ -1141,10 +1138,6 @@ type modernEditArgs struct {
 	// prose mentions are renamed, except for a plain-word old name. An explicit
 	// value overrides both.
 	IncludeComments *bool `json:"includeComments,omitempty"`
-	Resolution      *struct {
-		Mode   string `json:"mode"`
-		Target string `json:"target"`
-	} `json:"resolution,omitempty"`
 
 	diagnosticOptions
 }
@@ -1330,9 +1323,6 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		if p.IncludeComments != nil {
 			return nil, true, errors.New("includeComments only applies to rename")
 		}
-		if p.Resolution != nil {
-			return nil, true, errors.New("resolution only applies to rename")
-		}
 	}
 
 	// Open the batch when staging; flag the edit that closes it. Every edit
@@ -1489,14 +1479,10 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 				"rename needs a SYMBOL address (file#Name): %s is %s, which has no identifier to rename. Address the declaration you mean (e.g. %s#TheName) and rename THAT",
 				rn.addr, what, rn.file)
 		}
-		mode, target := "", ""
-		if p.Resolution != nil {
-			mode, target = p.Resolution.Mode, p.Resolution.Target
-		}
 		// applyCandidates is always false here: the old two-phase
 		// preview/apply workflow is gone. Cross-namespace lexical
 		// guesses still surface under `candidates`, never auto-applied.
-		return s.refactorRename(rn.name, *p.Rename, p.IncludeComments, false, mode, target, p.diagnosticOptions, nil)
+		return s.refactorRename(rn.name, *p.Rename, p.IncludeComments, false, p.diagnosticOptions, nil)
 	default: // params / return
 		ro := refactorOps{}
 		if p.Params != nil {

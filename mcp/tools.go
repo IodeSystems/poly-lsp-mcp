@@ -238,8 +238,7 @@ func registerLegacyTools() map[string]Tool {
     "kind":            {"type": "string", "enum": ["rename"], "description": "Legacy shape. Prefer refactor:{rename: X}."},
     "newName":         {"type": "string", "description": "Required when kind='rename'."},
     "includeComments": {"type": "boolean", "description": "Rename word-boundary mentions in comments / prose / non-indexed file types. Default true, except when the old name is a plain lowercase word (save, data): then prose is left alone and the reply says how many were skipped."},
-    "applyCandidates": {"type": "boolean", "description": "Also rename the lexical name-match sites that are cross-namespace GUESSES. Default false: those sites are returned under 'candidates' (recommendations) and NOT touched — review them, then re-run with applyCandidates:true. Authoritative sites (declared @derived/binding, child-LSP) are always renamed."},
-    "resolution": {"type": "object", "description": "Resolves the variance when the target is a @derived source (a derivation-graph node — gat operation / sqlc column). Without it, such a rename is NOT applied and returns variance:true with the modes to choose from. mode='underlying' cascades the rename to the source + all references (the only automated mode); projection/mapping/hide are recognized but manual. target='file:line' picks one source when fan-in is ambiguous.", "properties": {"mode": {"type": "string", "enum": ["underlying", "projection", "mapping", "hide"]}, "target": {"type": "string"}}}
+    "applyCandidates": {"type": "boolean", "description": "Also rename the lexical name-match sites that are cross-namespace GUESSES. Default false: those sites are returned under 'candidates' (recommendations) and NOT touched — review them, then re-run with applyCandidates:true. Authoritative sites (declared @derived/binding, child-LSP) are always renamed."}
   },
   "required": []
 }`),
@@ -1610,13 +1609,6 @@ func handleNodeRefactor(s *Server, sess sessionID, args json.RawMessage) ([]Cont
 		// guesses across namespaces (otherwise they're returned as candidates,
 		// not touched). Explicit intent to act on a guess.
 		ApplyCandidates bool `json:"applyCandidates"`
-		// Resolution resolves the variance when the rename target is a @derived
-		// source (a derivation graph node): mode ∈ underlying|projection|mapping|hide,
-		// target picks one source when fan-in is ambiguous. Absent → fail-closed.
-		Resolution struct {
-			Mode   string `json:"mode"`
-			Target string `json:"target"`
-		} `json:"resolution"`
 		// Node address ("<file>#<sym>") — resolves to the symbol's
 		// identifier range (what a refactor pins on).
 		Node string `json:"node"`
@@ -1660,7 +1652,7 @@ func handleNodeRefactor(s *Server, sess sessionID, args json.RawMessage) ([]Cont
 	}
 	signatureOps := ops.Params != nil || ops.Return != ""
 	if !signatureOps {
-		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.Resolution.Mode, p.Resolution.Target, p.diagnosticOptions, nil)
+		return s.refactorRename(p.rangeArgs, ops.Rename, p.IncludeComments, p.ApplyCandidates, p.diagnosticOptions, nil)
 	}
 	return s.refactorSignature(p.rangeArgs, ops, p.IncludeComments, p.diagnosticOptions)
 }
@@ -1747,7 +1739,7 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 	}
 	if ops.Rename != "" && ops.Rename != oldName {
 		nameRangeArgs := nameRangeAfterSignature(a, postSig, out)
-		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, "", "", diagnosticOptions{}, txn)
+		renameContent, renameIsErr, renameErr := s.refactorRename(nameRangeArgs, ops.Rename, includeComments, false, diagnosticOptions{}, txn)
 		if renameErr != nil {
 			return renameContent, renameIsErr, renameErr
 		}
@@ -1994,7 +1986,7 @@ func byteOffsetToLineColPos(content []byte, offset int) (int, int) {
 // includeComments is tri-state. nil = the default: comment and prose mentions
 // are rewritten too, unless the old name is a plain word (see plainWordName).
 // An explicit true or false overrides both the default and that guard.
-func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bool, applyCandidates bool, mode, target string, opts diagnosticOptions, txn *validationTxn) ([]Content, bool, error) {
+func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bool, applyCandidates bool, opts diagnosticOptions, txn *validationTxn) ([]Content, bool, error) {
 	ownTxn := txn == nil
 	if ownTxn {
 		txn = s.beginValidationTxn(opts)
@@ -2019,22 +2011,14 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bo
 		return nil, true, errors.New("range is empty; pass the identifier's nameStart/nameEnd range")
 	}
 
-	// Variance model: when name is a @derived source (a derivation-graph node), a
-	// rename is mode-ambiguous and is NOT applied until resolution.mode says how.
-	if roots := s.getDerivRoots(name); len(roots) > 0 {
-		switch mode {
-		case "":
-			return s.varianceResponse(name, roots), false, nil
-		case "underlying":
-			if len(roots) > 1 && target == "" {
-				return s.varianceResponse(name, roots), false, nil // fan-in: pick a source
-			}
-			applyCandidates = true // cascade: rename the source + every reference
-		case "projection", "mapping", "hide":
-			return s.modeNotAutomatedResponse(name, mode, roots), false, nil
-		default:
-			return nil, true, fmt.Errorf("unknown resolution mode %q (use underlying|projection|mapping|hide)", mode)
-		}
+	// A @derived name (a derivation-graph node: gat operation, sqlc column,
+	// Android resource) always cascades: rename every source it derives from,
+	// the derived name and every reference, in this one transaction. The
+	// rename never refuses; the reply says what cascaded and the way back.
+	// A narrower change is a staged batch of plain edits (commit:false).
+	cascade := s.getDerivRoots(name)
+	if len(cascade) > 0 {
+		applyCandidates = true // cascade: rename the sources + every reference
 	}
 
 	// Prefer a TYPE-SCOPED rename from the child language server: it resolves
@@ -2042,7 +2026,14 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bo
 	// touches only that method's decl/impls/usages, never the unrelated
 	// llm.Rewriter.IsLive. Only a tree-sitter-only language (no child LSP)
 	// falls through to the lexical path and its collision guard.
-	lspEdits, triedLSP, lspErr := s.goplsRenameEdits(a, newName)
+	// A cascade spans languages (schema column, resolver, client), so it
+	// skips the single-language server and takes the name-keyed path.
+	var lspEdits []resolvedEdit
+	var triedLSP bool
+	var lspErr error
+	if len(cascade) == 0 {
+		lspEdits, triedLSP, lspErr = s.goplsRenameEdits(a, newName)
+	}
 	if triedLSP && lspErr != nil {
 		// A server serves this file but refused — surface it. Do NOT fall
 		// back to lexical: that is the unsafe path this replaces.
@@ -2066,7 +2057,8 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bo
 		// merely share the name — renaming all corrupts the ones the caller
 		// didn't mean (dogfood: ab_bench islive-rename). Refuse, show the
 		// collision, rather than silently damage code.
-		if collisions := s.lexicalRenameCollision(name, resolved, idx.LookupExisting(name)); len(collisions) > 0 {
+		// A cascade declares the name in several places ON PURPOSE.
+		if collisions := s.lexicalRenameCollision(name, resolved, idx.LookupExisting(name)); len(cascade) == 0 && len(collisions) > 0 {
 			pkgs := map[string]struct{}{}
 			for _, c := range collisions {
 				pkgs[c.Package] = struct{}{}
@@ -2082,6 +2074,15 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bo
 					"BLOCKED: %q is declared in %d packages by symbols that share the name but are probably UNRELATED. This rename is lexical (name-keyed, not type-scoped, because no language server serves this file), so applying it would rewrite EVERY %q across the workspace — including the declarations you did NOT mean — and corrupt them. Inspect `collisions`. To rename only the one you intend, edit its declaration and usages with scoped node_edit oldText/newText (unique per node).",
 					name, len(pkgs), name),
 			}), true, nil
+		}
+	}
+
+	cascadeSources, cascadeRefs := 0, 0
+	for _, e := range resolved {
+		if atDerivSource(cascade, e) {
+			cascadeSources++
+		} else {
+			cascadeRefs++
 		}
 	}
 
@@ -2192,6 +2193,9 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bo
 			note += " Any occurrences left are in comments/strings/prose (not identifiers) and were intentionally skipped — pass includeComments:true to rename those too."
 		}
 		payload["note"] = note
+	}
+	if len(cascade) > 0 {
+		payload["cascade"] = s.cascadeReport(name, newName, cascade, cascadeSources, cascadeRefs)
 	}
 	if len(commentMentions) > 0 {
 		files := make([]string, 0, len(commentMentions))
@@ -2743,47 +2747,44 @@ func jsonContent(value any) []Content {
 	return []Content{{Type: "text", Text: string(raw)}}
 }
 
-// varianceResponse is the fail-closed result for renaming a @derived source without a
-// resolution mode: nothing is applied; the caller gets the source(s) and the modes to
-// choose from. Re-run with resolution:{mode,target} to act.
-func (s *Server) varianceResponse(name string, roots []bindings.DerivRoot) []Content {
-	root := s.getRoot()
-	srcs := make([]map[string]any, 0, len(roots))
+// atDerivSource reports whether edit e is the declaration of one of roots.
+func atDerivSource(roots []bindings.DerivRoot, e resolvedEdit) bool {
 	for _, r := range roots {
-		srcs = append(srcs, map[string]any{
-			"kind": r.Kind, "file": relPath(r.Source.File, root), "line": r.Source.Line, "col": r.Source.Col,
-		})
+		if r.Source.File == e.AbsFile && r.Source.Line == e.Line {
+			return true
+		}
 	}
-	howto := "re-run with resolution:{mode:'underlying'} to cascade the rename to the source + all references."
-	if len(roots) > 1 {
-		howto = fmt.Sprintf("fan-in: %d sources share this name — re-run with resolution:{mode:'underlying', target:'<file:line>'} to pick one.", len(roots))
-	}
-	return jsonContent(map[string]any{
-		"variance": true,
-		"applied":  false,
-		"name":     name,
-		"reason":   "this symbol is a @derived source (a derivation-graph node); a rename is mode-ambiguous and was NOT applied.",
-		"sources":  srcs,
-		"modes": []map[string]any{
-			{"mode": "underlying", "automated": true, "effect": "rename the source and cascade every reference; the generated/derived layers regenerate."},
-			{"mode": "projection", "automated": false, "effect": "rename only a specific projection/alias, leaving the source (manual)."},
-			{"mode": "mapping", "automated": false, "effect": "keep the source name; add an alias so the derived name changes (manual)."},
-			{"mode": "hide", "automated": false, "effect": "on delete: drop from a view / json tag instead of dropping the source (manual)."},
-		},
-		"howToProceed": howto,
-	})
+	return false
 }
 
-// modeNotAutomatedResponse handles a recognized-but-manual resolution mode.
-func (s *Server) modeNotAutomatedResponse(name, mode string, roots []bindings.DerivRoot) []Content {
-	return jsonContent(map[string]any{
-		"variance":     true,
-		"applied":      false,
-		"name":         name,
-		"mode":         mode,
-		"reason":       "mode '" + mode + "' is recognized but not automated; only 'underlying' (cascade rename of the source) applies automatically.",
-		"howToProceed": "apply '" + mode + "' by hand (alias / view / tag edit), or use resolution:{mode:'underlying'} to cascade.",
-	})
+// cascadeReport says what a derived rename cascaded over, which sources are
+// outside contracts that now need a follow-up, and the way back.
+func (s *Server) cascadeReport(name, newName string, cascade []bindings.DerivRoot, sources, refs int) map[string]any {
+	wsRoot := s.getRoot()
+	srcs := make([]map[string]any, 0, len(cascade))
+	var contracts []string
+	for _, r := range cascade {
+		at := fmt.Sprintf("%s:%d", relPath(r.Source.File, wsRoot), r.Source.Line)
+		srcs = append(srcs, map[string]any{"kind": r.Kind, "source": at})
+		switch r.Kind {
+		case "sqlc-column":
+			contracts = append(contracts, fmt.Sprintf("renamed DB column %s → %s (%s): the database needs a migration (the code now expects the new name)", name, newName, at))
+		case "gat-operation":
+			contracts = append(contracts, fmt.Sprintf("renamed GraphQL operation %s → %s (%s): external clients calling it by name break", name, newName, at))
+		}
+	}
+	rep := map[string]any{
+		"mode":       "underlying",
+		"sources":    srcs,
+		"references": refs,
+		"note": fmt.Sprintf("%q is @derived, so the rename cascaded: %d source declaration(s) and %d reference(s) renamed in one transaction. "+
+			"For a narrower change (one source, a local alias), stage edits with commit:false and commit when right; to undo this one, rename %q back to %q.",
+			name, sources, refs, newName, name),
+	}
+	if len(contracts) > 0 {
+		rep["contracts"] = contracts
+	}
+	return rep
 }
 
 func relPath(abs, root string) string {

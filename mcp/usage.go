@@ -37,7 +37,7 @@ type UsageRecord struct {
 	// includes span rewrites.
 	Op string `json:"op,omitempty"`
 	// Hidden, node_edit only: the undeclared params used, e.g.
-	// includeComments=true, resolution, commit=false, rollback.
+	// includeComments=true, commit=false, rollback.
 	Hidden []string `json:"hidden,omitempty"`
 	// Result, node_edit only: "ok" or "error".
 	Result   string `json:"result,omitempty"`
@@ -124,9 +124,6 @@ func (s *Server) recordEditUsage(args json.RawMessage, failed bool) {
 		op = editOpKind(&p)
 		if p.IncludeComments != nil {
 			hidden = append(hidden, fmt.Sprintf("includeComments=%t", *p.IncludeComments))
-		}
-		if p.Resolution != nil {
-			hidden = append(hidden, "resolution")
 		}
 		if p.Commit != nil {
 			hidden = append(hidden, fmt.Sprintf("commit=%t", *p.Commit))

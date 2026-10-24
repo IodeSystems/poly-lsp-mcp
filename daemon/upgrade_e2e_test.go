@@ -171,6 +171,15 @@ func TestBlueGreenUpgradeEndToEnd(t *testing.T) {
 	if hl, err := NewClient(st.Socket).health(); err != nil || hl.Build != idB || hl.PID != st.PID {
 		t.Fatalf("health after the swap: %+v %v", hl, err)
 	}
+	// The client was told, in-band: upgrading by A, upgraded by the proxy.
+	up := h.logged(daemonLogger, 5*time.Second, func(d map[string]any) bool { return d["state"] == "upgrading" })
+	if up["from"] != idA || up["to"] != idB {
+		t.Errorf("upgrading notice: %v", up)
+	}
+	done := h.logged(daemonLogger, 10*time.Second, func(d map[string]any) bool { return d["state"] == "upgraded" })
+	if done["from"] != idA || done["to"] != idB {
+		t.Errorf("upgraded notice: %v", done)
+	}
 	// B warmed the root A had open, and the same proxy reconnected to it.
 	dlog, _ := os.ReadFile(LogPath())
 	if !strings.Contains(string(dlog), "warm: 1 root(s)") || !strings.Contains(string(dlog), "took over") {

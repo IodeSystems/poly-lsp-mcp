@@ -32,6 +32,9 @@ type Config struct {
 	// WarmRecent: the roots requested within this long are the ones a
 	// takeover warms. 0 = the default.
 	WarmRecent time.Duration
+
+	// stop ends the daemon as SIGTERM does (tests, which serve in-process).
+	stop chan struct{}
 }
 
 // host is one daemon process's serving state, shared by its handlers.
@@ -164,7 +167,10 @@ func Serve(cfg Config) error {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sig)
 	go func() {
-		<-sig
+		select {
+		case <-sig:
+		case <-cfg.stop:
+		}
 		log.Print("daemon: shutting down")
 		h.shutdown(5*time.Second, true)
 	}()

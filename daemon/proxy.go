@@ -42,6 +42,8 @@ type proxy struct {
 
 	mu  sync.Mutex
 	cur *link
+	// daemonBuild is the build of the daemon last said hello to.
+	daemonBuild string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -113,6 +115,17 @@ func (p *proxy) replyErr(req *jsonrpc.Message, code int, msg string) {
 // notify writes a notification to the client.
 func (p *proxy) notify(method string, params json.RawMessage) {
 	p.send(&jsonrpc.Message{JSONRPC: "2.0", Method: method, Params: params})
+}
+
+// daemonNotice writes a poly-lsp-mcp/daemon notification, as the daemon
+// writes its own (upgrading, failed).
+func (p *proxy) daemonNotice(level string, data map[string]any) {
+	raw, err := json.Marshal(map[string]any{"level": level, "logger": daemonLogger, "data": data})
+	if err != nil {
+		return
+	}
+	log.Printf("proxy: %s", data["message"])
+	p.notify("notifications/message", raw)
 }
 
 func (p *proxy) current() *link {
@@ -218,6 +231,16 @@ func (p *proxy) handshake(c *Client) {
 	if err != nil {
 		log.Printf("proxy: daemon handshake: %v (a daemon from before build identities: poly-lsp-mcp daemon --restart)", err)
 		return
+	}
+	p.mu.Lock()
+	prev := p.daemonBuild
+	p.daemonBuild = hi.Build
+	p.mu.Unlock()
+	if prev != "" && prev != hi.Build {
+		// The daemon this proxy reconnected to is another build than the
+		// one it lost: an upgrade went through.
+		p.daemonNotice("info", map[string]any{"state": "upgraded", "from": prev, "to": hi.Build,
+			"message": fmt.Sprintf("poly-lsp daemon upgraded %s → %s; this session reconnected", prev, hi.Build)})
 	}
 	mine := BuildID()
 	if hi.Build == mine {

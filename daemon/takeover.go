@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -67,6 +68,22 @@ var (
 	linger    = warmWait + time.Minute // green exits if no takeover comes by then
 )
 
+// recoverHint is how a person gets a working daemon after a failed
+// upgrade: a plain stop-and-start, on whatever binary PATH runs.
+const recoverHint = "poly-lsp-mcp daemon --restart"
+
+// notice tells every connected client about the daemon itself, as
+// notifications/message from logger poly-lsp-mcp/daemon, one per state
+// (upgrading, failed; the proxy says upgraded once it reconnects).
+func (h *host) notice(level string, data map[string]any) {
+	params, err := json.Marshal(map[string]any{"level": level, "logger": daemonLogger, "data": data})
+	if err != nil {
+		return
+	}
+	log.Printf("daemon: %s", data["message"])
+	h.reg.hub.broadcast("notifications/message", params)
+}
+
 // defaultWarmRecent: a takeover warms the roots requested within this long.
 const defaultWarmRecent = 30 * time.Minute
 
@@ -86,13 +103,22 @@ func sideSocket(main string, pid int) string {
 // blueGreen is the upgrader's move on the serving daemon: start req.Exe
 // as green, wait for it to warm, hand over. It returns nil once green
 // serves the main socket; blue then drains and exits.
-func (h *host) blueGreen(req UpgradeRequest) error {
+func (h *host) blueGreen(req UpgradeRequest) (err error) {
 	h.mu.Lock()
 	main, socket, lock := h.main, h.socket, h.lock
 	h.mu.Unlock()
 	if !main || lock == nil {
 		return errors.New("this daemon does not serve the main socket")
 	}
+	h.notice("info", map[string]any{"state": "upgrading", "from": BuildID(), "to": req.Build, "why": req.Why,
+		"message": fmt.Sprintf("poly-lsp daemon upgrading %s → %s (%s); calls keep being served", BuildID(), req.Build, req.Why)})
+	defer func() {
+		if err != nil {
+			h.notice("warning", map[string]any{"state": "failed", "from": BuildID(), "to": req.Build, "error": err.Error(),
+				"recover": recoverHint,
+				"message": fmt.Sprintf("poly-lsp daemon upgrade to %s failed: %v; still serving %s. To recover: %s", req.Build, err, BuildID(), recoverHint)})
+		}
+	}()
 
 	// Green loads the cache at its start: give it every parse made so far.
 	h.reg.SaveCache()

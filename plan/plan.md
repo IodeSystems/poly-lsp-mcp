@@ -159,8 +159,9 @@ reviews are not committed. Not yet triaged; claims are the reviewer's, not re-me
    `::out` returned 0 after a full burn.
 6. ◻ no persisted index observed on macOS (`~/Library/Caches/poly-lsp-mcp/`
    never created); 12.5s floor per call.
-7. ◻ say when a backend LSP is missing (`python: pylsp MISSING — lexical
-   only`).
+7. ◐ say when a backend LSP is missing (`python: pylsp MISSING — lexical
+   only`). `poly-lsp-mcp doctor` does, from the shell (`e825a47`); the MCP
+   ready notification does not yet.
 8. ✅ `status` with no rows now says so; `explain` was not a subcommand (see
    CLI-1 above).
 **next**: reproduce #1 in a scratch repo with a committed `.gitignore` and a

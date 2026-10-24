@@ -96,7 +96,7 @@ func TestSocketPathFitsSunPath(t *testing.T) {
 // new one.
 func TestStateCarriesBuildAndIsRemovedOnlyByItsOwner(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	remove, err := WriteState("/s")
+	remove, err := WriteState("/s", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

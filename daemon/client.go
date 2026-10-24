@@ -123,16 +123,90 @@ func (c *Client) WatchSession(ctx context.Context) error {
 // Healthy reports whether the daemon answers /health.
 func (c *Client) Healthy() bool { return probeHealth(c.hc) }
 
+// Health is the /health answer.
+type Health struct {
+	OK       bool     `json:"ok"`
+	Build    string   `json:"build"`
+	Protocol int      `json:"protocol"`
+	PID      int      `json:"pid"`
+	Roots    []string `json:"roots"`
+}
+
+func (c *Client) health() (Health, error) {
+	var h Health
+	err := c.get("/health", nil, &h)
+	return h, err
+}
+
 // Open warms a root on the daemon and returns the indexed-name count.
 func (c *Client) Open(root string) (int, error) {
-	var out struct {
-		Root  string `json:"root"`
-		Names int    `json:"names"`
-	}
-	if err := c.postJSON("/open", map[string]string{"root": root}, &out); err != nil {
+	res, err := c.OpenWith(root, OpenOptions{})
+	if err != nil {
 		return 0, err
 	}
-	return out.Names, nil
+	if res.Error != "" {
+		return 0, fmt.Errorf("daemon: %s", res.Error)
+	}
+	return res.Names, nil
+}
+
+// OpenResult is the /open answer: the canonical root, its indexed-name
+// count, and the failed bring-up's post-mortem ("" when it is up).
+type OpenResult struct {
+	Root  string `json:"root"`
+	Names int    `json:"names"`
+	Error string `json:"error"`
+}
+
+// OpenWith opens a root with the client's index options, holding it for
+// this session. It returns when the root's bring-up has ended.
+func (c *Client) OpenWith(root string, opts OpenOptions) (OpenResult, error) {
+	body := struct {
+		Root string `json:"root"`
+		OpenOptions
+	}{root, opts}
+	var out OpenResult
+	err := c.postJSON("/open", body, &out)
+	return out, err
+}
+
+// Events holds /session/events open and calls fn with each notification
+// until ctx ends or the daemon closes the stream. Like WatchSession, it
+// binds the session's lifetime: when it drops, the daemon rolls back the
+// session's batches and releases its holds.
+func (c *Client) Events(ctx context.Context, fn func(Event)) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://poly-lsp/session/events", nil)
+	if err != nil {
+		return err
+	}
+	c.setHeaders(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("daemon: %s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var ev Event
+		if err := dec.Decode(&ev); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		fn(ev)
+	}
+}
+
+// Event is one notification from /session/events.
+type Event struct {
+	Root   string          `json:"root,omitempty"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
 }
 
 // Tools returns the tool catalog for a root.

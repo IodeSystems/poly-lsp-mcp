@@ -24,13 +24,16 @@ type State struct {
 	// Exe is the binary the daemon runs, for doctor and for the recover
 	// hint after a failed upgrade.
 	Exe string `json:"exe,omitempty"`
+	// Args are the daemon flags it was started with: a bare --restart
+	// replays them, and a takeover starts the new build with them.
+	Args []string `json:"args,omitempty"`
 }
 
 // WriteState records the running daemon (this process) and returns a
 // remover the daemon defers so the file disappears on clean shutdown.
 // Call it holding the daemon lock: only the lock holder owns the file.
 // Written to a temp file and renamed, so a reader never sees half of it.
-func WriteState(socket string) (remove func(), err error) {
+func WriteState(socket string, args []string) (remove func(), err error) {
 	exe, _ := selfExe()
 	st := State{
 		PID:       os.Getpid(),
@@ -39,6 +42,7 @@ func WriteState(socket string) (remove func(), err error) {
 		Build:     BuildID(),
 		Protocol:  Protocol,
 		Exe:       exe,
+		Args:      args,
 	}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {

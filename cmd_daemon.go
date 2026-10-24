@@ -9,6 +9,8 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/iodesystems/poly-lsp-mcp/daemon"
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
+	"github.com/iodesystems/poly-lsp-mcp/mcp"
 )
 
 // daemonCmd runs (or controls) the shared per-user daemon: one process
@@ -50,6 +52,9 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 	_ = f.MarkHidden("build-id")
 	lifecycle := lifecycleFlags(f)
 	rootsFlag := lspRootsFlags(f)
+	// For every hosted root; a client's /open adds its own excludes and may
+	// set its own budget (mcp --daemon --exclude/--index-budget).
+	idx := indexFlags(f)
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		if buildID {
@@ -66,8 +71,24 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		if noValidate {
 			validate = false
 		}
+		// What this daemon was started with, recorded in daemon.json: a bare
+		// --restart replays it, and a takeover starts the new build with it.
+		args := replayFlags(cmd.Flags(), "stop", "restart", "help", "build-id")
 		if restart {
-			return daemon.Restart(replayFlags(cmd.Flags(), "stop", "restart", "help"))
+			if len(args) == 0 {
+				if st, ok := daemon.ReadState(); ok {
+					args = st.Args
+				}
+			}
+			return daemon.Restart(args)
+		}
+		for _, d := range idx.excludes {
+			if git.CleanExclude(d) == "" {
+				return fmt.Errorf("--exclude %q: want a directory inside the root, relative to it", d)
+			}
+		}
+		if err := mcp.New(nil, "", nil, nil).SetIndexBudget(idx.budget); err != nil {
+			return err
 		}
 
 		cfg, reg, err := l.load(true)
@@ -91,7 +112,8 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		dreg.SetLSPRoots(roots.auto, roots.max)
 		dreg.SetStatusDir(daemon.StatusDir())
 		dreg.SetUsageLog(daemon.UsagePath())
-		return daemon.Serve(daemon.Config{Socket: socket, Allow: al, Reg: dreg})
+		dreg.SetIndexDefaults(idx.excludes, idx.budget)
+		return daemon.Serve(daemon.Config{Socket: socket, Allow: al, Reg: dreg, Args: args})
 	}
 	return cmd
 }

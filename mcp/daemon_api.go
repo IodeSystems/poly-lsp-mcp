@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -39,10 +40,61 @@ func (s *Server) Init() error {
 	if err := s.BuildIndex(); err != nil {
 		return err
 	}
-	s.startManagerIfPresent(s.getIndex())
-	s.kickGitPrewarm()
+	s.StartLSPs()
 	s.kickFileWatch()
 	return nil
+}
+
+// StartLSPs starts the child-LSP manager and the git prewarm over the
+// built index. Once per server: Init calls it, and a daemon that warmed a
+// root without its child LSPs (BringUp(false), a takeover) calls it on the
+// root's first real request.
+func (s *Server) StartLSPs() {
+	s.lspOnce.Do(func() {
+		s.startManagerIfPresent(s.getIndex())
+		s.kickGitPrewarm()
+	})
+}
+
+// BringUp is a daemon-hosted root's bring-up: what an asynchronous stdio
+// initialize runs behind its reply, run in the caller's goroutine — build
+// the index (bounded by SetIndexBudget), start the watcher, and, when
+// startLSPs, the child LSPs. It ends with the same poly-lsp-mcp/index and
+// poly-lsp-mcp/setup notifications, which reach the client through
+// SetNotifier. A takeover warms with startLSPs false: a second gopls fleet
+// while the old daemon still runs its own would double the memory the swap
+// costs, and a child LSP is not what makes a root slow to come back.
+func (s *Server) BringUp(startLSPs bool) error {
+	start := time.Now()
+	var err error
+	if s.getRoot() == "" {
+		err = errors.New("no workspace root configured")
+	} else {
+		err = s.BuildIndex()
+	}
+	if err == nil {
+		if startLSPs {
+			s.StartLSPs()
+		}
+		s.kickFileWatch()
+	}
+	s.setInitErr(err)
+	s.notifyIndexState(err, time.Since(start))
+	s.notifySetup()
+	return err
+}
+
+// IndexFailure is what a tool call answers when the bring-up failed: the
+// error, the post-mortem when there is one, and the remedy — the text a
+// stdio server returns, for the daemon to return the same.
+func (s *Server) IndexFailure(err error) string { return s.indexFailure(err) }
+
+// SetNotifier routes this server's unsolicited notifications (index and
+// setup state, conflicts, warnings) to fn instead of a stdio stream: a
+// daemon has no stream per root, and fans them out to the sessions that
+// hold the root. Set before the bring-up.
+func (s *Server) SetNotifier(fn func(method string, params map[string]any)) {
+	s.notifier = fn
 }
 
 // Shutdown tears down the child-LSP manager and file watcher and

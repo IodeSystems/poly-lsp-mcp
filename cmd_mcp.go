@@ -16,6 +16,7 @@ import (
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/daemon"
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
@@ -84,19 +85,26 @@ func mcpCmd(l *loader) *cobra.Command {
 		// to the shared daemon over its unix socket. The workspace index,
 		// child LSPs, and parse cache live once in the daemon.
 		if daemonMode {
-			client, err := daemon.EnsureRunning(nil)
-			if err != nil {
-				return fmt.Errorf("mcp: daemon: %w", err)
+			// The client's index choices travel with its /open: they shape
+			// the root when this open builds it. Only flags given on this
+			// command line; the rest are the daemon's own.
+			opts := daemon.OpenOptions{Excludes: idx.excludes}
+			for _, d := range idx.excludes {
+				if git.CleanExclude(d) == "" {
+					return fmt.Errorf("--exclude %q: want a directory inside the root, relative to it", d)
+				}
 			}
-			// Carry this client's policy to the daemon (enforced per-connection at
-			// its boundary). --legacy-tools has no daemon surface — the daemon
-			// serves the modern surface only.
-			client.SetPolicy(readOnly, validate)
+			if cmd.Flags().Changed("index-budget") {
+				opts.Budget = idx.budget
+			}
+			if cmd.Flags().Changed("lsp-roots") {
+				opts.LSPRoots = "single"
+				if roots.auto {
+					opts.LSPRoots = "auto"
+				}
+			}
 			if legacyTools {
 				log.Print("mcp: --legacy-tools is ignored in --daemon mode (the daemon serves the modern surface)")
-			}
-			if roots.auto {
-				log.Print("mcp: --lsp-roots is ignored in --daemon mode; pass it to `poly-lsp-mcp daemon`")
 			}
 			// The daemon builds each root's index with its own settings
 			// (include: from its config); these flags do not reach it.
@@ -104,7 +112,19 @@ func mcpCmd(l *loader) *cobra.Command {
 				log.Print("mcp: --index-anyway, --include and --symlink-depth are ignored in --daemon mode")
 			}
 			log.Printf("mcp: proxying root %s to shared daemon (readOnly=%v validate=%v)", root, readOnly, validate)
-			return daemon.RunProxy(client, root, os.Stdin, os.Stdout)
+			// Reached behind the initialize reply: starting a daemon can
+			// take seconds, and initialize answers at once.
+			connect := func() (*daemon.Client, error) {
+				client, err := daemon.EnsureRunning(nil)
+				if err != nil {
+					return nil, err
+				}
+				// Carry this client's policy to the daemon (enforced
+				// per-connection at its boundary).
+				client.SetPolicy(readOnly, validate)
+				return client, nil
+			}
+			return daemon.RunProxy(connect, root, opts, os.Stdin, os.Stdout)
 		}
 
 		cfg, reg, err := l.load(true)

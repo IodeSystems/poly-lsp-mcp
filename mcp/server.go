@@ -102,6 +102,11 @@ type Server struct {
 	asyncInit   bool
 	indexBudget symbols.Budget
 	usageLog    string // see usage.go
+	// lspOnce: the child LSPs start at most once per server (StartLSPs).
+	lspOnce sync.Once
+	// notifier, when set, receives notifications in place of the stdio
+	// stream (a daemon-hosted root); see SetNotifier.
+	notifier func(method string, params map[string]any)
 
 	indexMu     sync.RWMutex
 	index       *symbols.Index
@@ -1151,6 +1156,10 @@ func (s *Server) replyError(req *jsonrpc.Message, code int, msg string) {
 // Best effort by construction: a client that never registered a handler
 // simply drops it, and nothing here waits on or retries.
 func (s *Server) sendNotification(method string, params map[string]any) {
+	if s.notifier != nil {
+		s.notifier(method, params)
+		return
+	}
 	raw, err := json.Marshal(params)
 	if err != nil {
 		return

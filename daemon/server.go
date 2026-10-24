@@ -39,6 +39,7 @@ type Config struct {
 	Socket string     // listen path; "" = SocketPath()
 	Allow  *AllowList // declared root prefixes a client may address
 	Reg    *Registry  // the per-root server host
+	Args   []string   // the flags it was started with, recorded in daemon.json
 }
 
 // Serve runs the daemon: it listens on the unix socket (peer-cred gated),
@@ -92,7 +93,7 @@ func Serve(cfg Config) error {
 		},
 	}
 
-	removeState, err := WriteState(socket)
+	removeState, err := WriteState(socket, cfg.Args)
 	if err != nil {
 		log.Printf("daemon: write state: %v (continuing)", err)
 	}
@@ -200,12 +201,16 @@ type openIn struct {
 	Session string `header:"X-Poly-Session"`
 	Body    struct {
 		Root string `json:"root"`
+		OpenOptions
 	}
 }
 type openOut struct {
 	Body struct {
 		Root  string `json:"root"`
 		Names int    `json:"names"`
+		// Error is the failed bring-up's post-mortem and remedy (what a
+		// tool call on the root answers), "" when the root is up.
+		Error string `json:"error,omitempty"`
 	}
 }
 
@@ -353,24 +358,39 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 
 	gat.Register(api, g, op("open", http.MethodPost, "/open", "Open (warm) a workspace root."),
 		func(_ context.Context, in *openIn) (*openOut, error) {
-			srv, canonical, err := resolveServer(allow, reg, in.Body.Root, in.Session)
+			if err := checkOpenOptions(in.Body.OpenOptions); err != nil {
+				return nil, huma.Error400BadRequest(err.Error())
+			}
+			canonical, err := gate(allow, in.Body.Root)
 			if err != nil {
 				return nil, err
 			}
+			var srv *mcp.Server
+			var berr error
+			if in.Session != "" {
+				srv, berr = reg.Open(in.Session, canonical, in.Body.OpenOptions)
+			} else {
+				srv, berr = reg.get(canonical, "", &in.Body.OpenOptions, true)
+			}
 			out := &openOut{}
 			out.Body.Root = canonical
+			if berr != nil {
+				out.Body.Error = srv.IndexFailure(berr)
+				return out, nil
+			}
 			out.Body.Names = srv.IndexedNames()
 			return out, nil
 		})
 
 	gat.Register(api, g, op("tools", http.MethodGet, "/tools", "List the MCP tool catalog for a root."),
 		func(_ context.Context, in *toolsIn) (*toolsOut, error) {
-			srv, _, err := resolveServer(allow, reg, in.Root, "")
-			if err != nil {
+			// The trust gate, but no bring-up: the catalog does not depend
+			// on the index.
+			if _, err := gate(allow, in.Root); err != nil {
 				return nil, err
 			}
 			out := &toolsOut{}
-			tools := srv.Tools()
+			tools := reg.Tools()
 			// A read-only connection sees a read-only catalog even if the
 			// shared server is read-write for other clients.
 			if reg.readOnly || in.ReadOnly {
@@ -388,9 +408,19 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 
 	gat.Register(api, g, op("call", http.MethodPost, "/call", "Invoke an MCP tool against a root."),
 		func(_ context.Context, in *callIn) (*callOut, error) {
-			srv, _, err := resolveServer(allow, reg, in.Body.Root, "")
+			canonical, err := gate(allow, in.Body.Root)
 			if err != nil {
 				return nil, err
+			}
+			// The first call on a root waits for its bring-up, bounded by
+			// the index budget; a failed one answers with its post-mortem,
+			// as the stdio server does.
+			srv, berr := reg.Get(canonical)
+			if berr != nil {
+				out := &callOut{}
+				out.Body.Content = []mcp.Content{{Type: "text", Text: srv.IndexFailure(berr)}}
+				out.Body.IsError = true
+				return out, nil
 			}
 			// Per-connection policy TIGHTENS the daemon baseline (never loosens).
 			pol := mcp.CallOptions{
@@ -466,7 +496,7 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 	// answer for the same workspace are the same text.
 	gat.Register(api, g, op("query", http.MethodPost, "/query", "Evaluate a selector against a root and return the text (or one JSON document) answer."),
 		func(_ context.Context, in *queryIn) (*queryOut, error) {
-			srv, canonical, err := resolveServer(allow, reg, in.Body.Root, "")
+			srv, canonical, err := resolveServer(allow, reg, in.Body.Root)
 			if err != nil {
 				return nil, err
 			}
@@ -499,31 +529,83 @@ func buildHandler(allow *AllowList, reg *Registry) (http.Handler, error) {
 	if err := gat.RegisterHuma(api, g, ""); err != nil {
 		return nil, err
 	}
+	router.Get("/session/events", eventsHandler(reg, nil))
 	return router, nil
 }
 
-// resolveServer runs the trust gate (declared-prefix check) and returns the
-// warm server for the canonical root. When holder != "" the session takes a
-// ref on the root (ref-counted eviction; the /open path). A root outside
-// every allowed prefix is a 403; a build failure is a 500.
-func resolveServer(allow *AllowList, reg *Registry, root, holder string) (*mcp.Server, string, error) {
+// gate is the trust gate (declared-prefix check): the canonical root, or a
+// 400 for no root and a 403 for a root outside every allowed prefix.
+func gate(allow *AllowList, root string) (string, error) {
 	if root == "" {
-		return nil, "", huma.Error400BadRequest("root is required")
+		return "", huma.Error400BadRequest("root is required")
 	}
 	canonical, err := allow.Resolve(root)
 	if err != nil {
-		return nil, "", huma.Error403Forbidden(err.Error())
+		return "", huma.Error403Forbidden(err.Error())
 	}
-	if holder != "" {
-		srv, err := reg.Acquire(holder, canonical)
-		if err != nil {
-			return nil, "", huma.Error500InternalServerError("open root", err)
-		}
-		return srv, canonical, nil
+	return canonical, nil
+}
+
+// resolveServer runs the trust gate and returns the warm server for the
+// canonical root, building it on first use. A build failure is a 500.
+func resolveServer(allow *AllowList, reg *Registry, root string) (*mcp.Server, string, error) {
+	canonical, err := gate(allow, root)
+	if err != nil {
+		return nil, "", err
 	}
 	srv, err := reg.Get(canonical)
 	if err != nil {
 		return nil, "", huma.Error500InternalServerError("open root", err)
 	}
 	return srv, canonical, nil
+}
+
+// eventsHandler is GET /session/events: /session/watch that also streams.
+// The client holds it open for its lifetime; it carries, as NDJSON, every
+// notification of the roots the session holds (and the daemon-wide ones),
+// and when it drops the session's batches are rolled back and its holds
+// released, as /session/watch does. A plain handler beside the huma
+// operations, because it streams.
+func eventsHandler(reg *Registry, draining <-chan struct{}) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		sess := req.Header.Get(sessionHeader)
+		if sess == "" {
+			http.Error(w, "X-Poly-Session header is required", http.StatusBadRequest)
+			return
+		}
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		ch, cancel := reg.hub.subscribe(sess, reg.heldBy(sess))
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		fl.Flush()
+		enc := json.NewEncoder(w)
+		ctx := req.Context()
+		for loop := true; loop; {
+			select {
+			case ev := <-ch:
+				if err := enc.Encode(ev); err != nil {
+					loop = false
+					break
+				}
+				fl.Flush()
+			case <-ctx.Done():
+				loop = false
+			case <-draining:
+				loop = false
+			}
+		}
+		// A newer stream of the same session (a reconnect) owns its holds
+		// and batches now; only the session's current stream releases them.
+		if !cancel() {
+			return
+		}
+		if rolled := reg.RollbackSession(sess); len(rolled) > 0 {
+			log.Printf("daemon: session %s dropped — rolled back %v", sess, rolled)
+		}
+		reg.Release(sess)
+	}
 }

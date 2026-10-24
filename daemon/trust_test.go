@@ -101,3 +101,43 @@ func TestAllowListEmptyDeniesAll(t *testing.T) {
 		t.Error("empty AllowList admitted a root")
 	}
 }
+
+// Admit adds a root opened outside every prefix — its canonical form, once,
+// that root and not its parent — and refuses to add a path that is not a
+// directory.
+func TestAllowListAdmitAddsTheRoot(t *testing.T) {
+	base := t.TempDir()
+	allowed := filepath.Join(base, "allowed")
+	outside := filepath.Join(base, "outside")
+	sibling := filepath.Join(base, "sibling")
+	for _, d := range []string{filepath.Join(allowed, "proj"), outside, sibling} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	al := NewAllowList([]string{allowed})
+	want, _ := resolvePath(outside)
+
+	if c, added, err := al.Admit(filepath.Join(allowed, "proj")); err != nil || added {
+		t.Errorf("Admit(under a prefix) = %q, added=%v, %v; want admitted, not added", c, added, err)
+	}
+	c, added, err := al.Admit(outside)
+	if err != nil || !added || c != want {
+		t.Fatalf("Admit(outside) = %q, added=%v, %v; want %q added", c, added, err, want)
+	}
+	if _, added, _ := al.Admit(outside); added {
+		t.Error("Admit added the same root twice")
+	}
+	if got, err := al.Resolve(outside); err != nil || got != want {
+		t.Errorf("Resolve after Admit = %q, %v", got, err)
+	}
+	if _, err := al.Resolve(sibling); err == nil {
+		t.Error("Admit of one root admitted its sibling")
+	}
+	if got := al.Added(); len(got) != 1 || got[0] != want {
+		t.Errorf("Added() = %q, want [%q]", got, want)
+	}
+	if _, _, err := al.Admit(filepath.Join(base, "missing")); err == nil {
+		t.Error("Admit added a path that does not exist")
+	}
+}

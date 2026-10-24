@@ -66,7 +66,9 @@ func waitState(t *testing.T, d time.Duration, what string, ok func(State) bool) 
 // proxy of build B connects, sees A, and asks it to upgrade into B's
 // binary; A starts B beside itself, B warms the root and takes the
 // socket; A drains and exits; and the proxy, still the same process, is
-// served by B. Read-only calls made all through the swap succeed.
+// served by B. Read-only calls made all through the swap succeed. The
+// workspace is outside $HOME, the default allow list: A's open adds it,
+// and B admits it from its start (--allowed), so it warms it.
 func TestBlueGreenUpgradeEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the binary twice")
@@ -77,8 +79,8 @@ func TestBlueGreenUpgradeEndToEnd(t *testing.T) {
 		t.Fatalf("builds not distinct: %q %q", idA, idB)
 	}
 	env, home := e2eEnv(t)
-	ws := filepath.Join(home, "ws")
-	if err := os.MkdirAll(ws, 0o755); err != nil {
+	ws, err := resolvePath(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 20; i++ {
@@ -184,6 +186,12 @@ func TestBlueGreenUpgradeEndToEnd(t *testing.T) {
 	dlog, _ := os.ReadFile(LogPath())
 	if !strings.Contains(string(dlog), "warm: 1 root(s)") || !strings.Contains(string(dlog), "took over") {
 		t.Errorf("daemon log does not show a warm takeover:\n%s", dlog)
+	}
+	if alog, _ := os.ReadFile(filepath.Join(home, "test-daemon-a.log")); !strings.Contains(string(alog), "allow: added "+ws) {
+		t.Errorf("daemon A did not log adding %s to its allow list:\n%s", ws, alog)
+	}
+	if !strings.Contains(string(dlog), " "+ws+"])") || strings.Contains(string(dlog), "warm "+ws+":") {
+		t.Errorf("daemon B did not start with %s allowed and warm it:\n%s", ws, dlog)
 	}
 	plog, _ := os.ReadFile(filepath.Join(home, "test-proxy.log"))
 	if n := strings.Count(string(plog), "served by daemon"); n < 2 {

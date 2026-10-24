@@ -124,9 +124,13 @@ func TestDaemonEndToEnd(t *testing.T) {
 		t.Error("node_query returned empty content")
 	}
 
-	// a root OUTSIDE the allow prefix is refused
-	if _, err := c.Open("/etc"); err == nil {
-		t.Error("open(/etc) succeeded — trust gate not enforced")
+	// a root OUTSIDE the allow prefix, never opened, is refused by the
+	// entry points that take a root without an open
+	if _, err := c.Query(QueryParams{Root: "/etc", Selector: "*"}); err == nil {
+		t.Error("query(/etc) succeeded — trust gate not enforced")
+	}
+	if _, _, err := c.Call("/etc", "node_query", json.RawMessage(`{"selector":"*"}`)); err == nil {
+		t.Error("call(/etc) succeeded — trust gate not enforced")
 	}
 
 	// FileSymbols: content-first, no root/file access. Language derived
@@ -157,6 +161,39 @@ func TestDaemonEndToEnd(t *testing.T) {
 	// An unknown extension with no explicit language is a 400.
 	if _, _, err := c.FileSymbols("plain", "", "x.unknownext"); err == nil {
 		t.Error("FileSymbols accepted content with no derivable language")
+	}
+}
+
+// A root opened outside every allowed prefix is added to the allow list
+// (the socket admits only this uid, which could run poly-lsp on it
+// in-process anyway): the open succeeds, node_query answers, and the
+// entry points that do not open (/query) admit it afterwards.
+func TestOpenOutsideTheAllowListAddsTheRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"),
+		[]byte("package main\n\nfunc Hello() string { return \"hi\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, stop := startTestDaemon(t, t.TempDir()) // allows another directory
+	defer stop()
+
+	if _, err := c.Query(QueryParams{Root: root, Selector: "#Hello"}); err == nil {
+		t.Fatal("query on a root never opened and outside the allow list succeeded")
+	}
+	// The catalog names no root's content: a proxy asks for it before its
+	// open lands, so it is not gated.
+	if _, err := c.Tools(root); err != nil {
+		t.Fatalf("tools before the open: %v", err)
+	}
+	if names, err := c.Open(root); err != nil || names == 0 {
+		t.Fatalf("open outside the allow list: names=%d err=%v", names, err)
+	}
+	content, isErr, err := c.Call(root, "node_query", json.RawMessage(`{"selector":"#Hello"}`))
+	if err != nil || isErr || len(content) == 0 || !strings.Contains(content[0].Text, "Hello") {
+		t.Fatalf("node_query after the open: isErr=%v err=%v %+v", isErr, err, content)
+	}
+	if out, err := c.Query(QueryParams{Root: root, Selector: "#Hello"}); err != nil || !strings.Contains(out, "Hello") {
+		t.Fatalf("query after the open (root now allowed): %q %v", out, err)
 	}
 }
 

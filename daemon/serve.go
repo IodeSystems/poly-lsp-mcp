@@ -185,7 +185,7 @@ func Serve(cfg Config) error {
 		go h.exitWhenIdle(ctx)
 	}
 	if h.takeoverFrom != 0 {
-		log.Printf("daemon: takeover of pid %d: warming %d root(s) on %s (pid %d, build %s)", h.takeoverFrom, len(cfg.Warm), socket, os.Getpid(), BuildID())
+		log.Printf("daemon: takeover of pid %d: warming %d root(s) on %s (pid %d, build %s, allow %v)", h.takeoverFrom, len(cfg.Warm), socket, os.Getpid(), BuildID(), cfg.Allow.Prefixes())
 		go h.warmRoots(cfg.Warm)
 		go h.awaitTakeover()
 	} else {

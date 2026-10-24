@@ -143,6 +143,11 @@ func (h *host) blueGreen(req UpgradeRequest) (err error) {
 	for _, r := range roots {
 		args = append(args, "--warm="+warmArg(r, h.reg.optionsOf(r)))
 	}
+	// The roots this daemon's opens added to its allow list: green admits
+	// them from its start, so it can warm them and serve their calls.
+	for _, r := range h.allow.Added() {
+		args = append(args, "--allowed="+r)
+	}
 	logf, err := os.OpenFile(LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err

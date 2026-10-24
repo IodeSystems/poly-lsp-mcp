@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 )
 
 // AllowList is the set of directory prefixes a client may address roots
@@ -11,8 +14,16 @@ import (
 // deliberate: compare EvalSymlinks'd, Clean'd ABSOLUTE paths and match on
 // PATH COMPONENTS — /home/u/local must not admit /home/u/localsecrets,
 // and `..` must not walk out. Test the bypasses, not just the happy path.
+//
+// The list is a starting list, not a boundary: the socket admits only
+// peers of the daemon's own uid (credListener), and such a peer can run
+// poly-lsp in-process on any root. So a root a client OPENS outside every
+// prefix is added (Admit); only the entry points that take a root without
+// an open (/call, /access, /query) still refuse one not on the list.
 type AllowList struct {
+	mu       sync.RWMutex
 	prefixes []string // resolved, cleaned, absolute
+	added    []string // roots Admit added, in order (a subset of prefixes)
 }
 
 // NewAllowList resolves each prefix to an absolute, symlink-free, cleaned
@@ -38,16 +49,61 @@ func (al *AllowList) Resolve(root string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve root %q: %w", root, err)
 	}
-	for _, p := range al.prefixes {
-		if pathUnder(abs, p) {
-			return abs, nil
-		}
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	if al.under(abs) {
+		return abs, nil
 	}
 	return "", fmt.Errorf("root %s is not under any allowed prefix %v", abs, al.prefixes)
 }
 
-// Prefixes returns the resolved allow prefixes (for logging).
-func (al *AllowList) Prefixes() []string { return al.prefixes }
+// Admit is Resolve for an open: a root outside every prefix is added to
+// the list (as its canonical form) instead of refused. added reports
+// that it was, for the caller to log.
+func (al *AllowList) Admit(root string) (canonical string, added bool, err error) {
+	abs, err := resolvePath(root)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve root %q: %w", root, err)
+	}
+	al.mu.Lock()
+	defer al.mu.Unlock()
+	if al.under(abs) {
+		return abs, false, nil
+	}
+	// Only a directory is added: a typo must not grow the list.
+	if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
+		return "", false, fmt.Errorf("root %s is not a directory", abs)
+	}
+	al.prefixes = append(al.prefixes, abs)
+	al.added = append(al.added, abs)
+	return abs, true, nil
+}
+
+// under reports whether abs is under a prefix; al.mu must be held.
+func (al *AllowList) under(abs string) bool {
+	for _, p := range al.prefixes {
+		if pathUnder(abs, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// Prefixes returns the resolved allow prefixes, the added roots included
+// (for logging).
+func (al *AllowList) Prefixes() []string {
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	return slices.Clone(al.prefixes)
+}
+
+// Added returns the roots Admit added, for a takeover to carry
+// (--allowed) so the new daemon admits what this one did.
+func (al *AllowList) Added() []string {
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	return slices.Clone(al.added)
+}
 
 // resolvePath makes p absolute, resolves symlinks best-effort (a path
 // that doesn't exist yet keeps its cleaned absolute form), and cleans it.

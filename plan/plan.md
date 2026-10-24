@@ -287,6 +287,27 @@ one more round-trip per read/edit, only when a hook is set.
 (checked by hand only: it needs a built binary, as the blue/green e2e);
 a per-repository child-LSP budget (see the worktree entry below).
 
+✅ **Daemon allow list grows with opens** (Carl's call, 2026-10-24).
+`mcp --daemon` on a root outside `$HOME` (/tmp, /srv, a container's /work)
+got 403 on every call. The socket admits only the daemon's uid
+(credListener), and that uid can run poly-lsp in-process on any root, so
+the list is no boundary against it. Now `/open` admits (`AllowList.Admit`):
+a root outside every prefix is added, resolved, logged `allow: added`;
+only an existing directory. `--allow` stays as the starting list. A
+takeover carries the added roots (`--allowed`, hidden, not replayed by
+`--restart`); green's start log prints its allow list. Other entry points:
+`/call` and `/access` follow the proxy's open (it waits for it), keep the
+403; `/query` (CLI `query` through a running daemon, no open) keeps the
+403 and the CLI runs standalone on it; `/tools` lost its gate (the catalog
+names no root's content, and the proxy asks for it before its open lands,
+so an added root raced into a 403). The allow list is not shown in /health
+or doctor (it was not before). Tests: `TestOpenOutsideTheAllowListAddsTheRoot`,
+`TestAllowListAdmitAddsTheRoot`; `TestBlueGreenUpgradeEndToEnd` now runs on
+a workspace outside the sandbox `$HOME`.
+**risks**: a `--restart` forgets the added roots (the next open adds them
+again; a `query` before it runs standalone); opening `/` admits everything.
+**optional extensions**: show the allow list in /health and doctor.
+
 **Worktree / same-tree sharing in one daemon** (Carl: "a great candidate if
 there is worktree or multi same tree session sharing optimizations").
 MEASURED, not built (`TestMeasureWorktreeSharing`, `-tags measure`, this

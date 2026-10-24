@@ -335,7 +335,7 @@ func (h *host) handler() (http.Handler, error) {
 			if err := checkOpenOptions(in.Body.OpenOptions); err != nil {
 				return nil, huma.Error400BadRequest(err.Error())
 			}
-			canonical, err := gate(allow, in.Body.Root)
+			canonical, err := admit(allow, in.Body.Root)
 			if err != nil {
 				return nil, err
 			}
@@ -358,10 +358,12 @@ func (h *host) handler() (http.Handler, error) {
 
 	gat.Register(api, g, op("tools", http.MethodGet, "/tools", "List the MCP tool catalog for a root."),
 		func(_ context.Context, in *toolsIn) (*toolsOut, error) {
-			// The trust gate, but no bring-up: the catalog does not depend
-			// on the index.
-			if _, err := gate(allow, in.Root); err != nil {
-				return nil, err
+			// No trust gate: the catalog depends on neither the root nor
+			// its index, and a proxy asks for it while its /open may not
+			// have reached the daemon yet — a root that open adds to the
+			// allow list would be refused here first.
+			if in.Root == "" {
+				return nil, huma.Error400BadRequest("root is required")
 			}
 			out := &toolsOut{}
 			tools := reg.Tools()
@@ -538,6 +540,22 @@ func gate(allow *AllowList, root string) (string, error) {
 	canonical, err := allow.Resolve(root)
 	if err != nil {
 		return "", huma.Error403Forbidden(err.Error())
+	}
+	return canonical, nil
+}
+
+// admit is gate for /open: a root outside every allowed prefix is added
+// to the allow list (AllowList.Admit says why that is no loss) and logged.
+func admit(allow *AllowList, root string) (string, error) {
+	if root == "" {
+		return "", huma.Error400BadRequest("root is required")
+	}
+	canonical, added, err := allow.Admit(root)
+	if err != nil {
+		return "", huma.Error400BadRequest(err.Error())
+	}
+	if added {
+		log.Printf("daemon: allow: added %s (opened outside every allowed prefix)", canonical)
 	}
 	return canonical, nil
 }

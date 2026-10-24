@@ -46,7 +46,7 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 	f.BoolVar(&noValidate, "no-validate", false, "turn OFF revert-on-new-diagnostics for hosted roots")
 	f.BoolVar(&stop, "stop", false, "stop the running daemon and exit")
 	f.BoolVar(&restart, "restart", false, "restart the running daemon (replaying its flags) and exit")
-	f.Var(&allow, "allow", "directory prefix a client may address roots under (repeatable; default $HOME)")
+	f.Var(&allow, "allow", "directory prefix a client may address roots under (repeatable; default $HOME); a root a client opens outside them is added")
 	// Asked of a candidate binary before an upgrade runs it (ProbeBuild):
 	// it says which build it is, and that it runs at all.
 	f.BoolVar(&buildID, "build-id", false, "print this binary's build identity and exit")
@@ -63,10 +63,12 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 	warmRecent := f.Duration("warm-recent", 30*time.Minute, "an upgrade's new daemon warms the roots requested within this long before it takes over; older roots come up on their next request")
 	// Set by a daemon starting its replacement (blue/green; daemon/takeover.go).
 	takeoverFrom := f.Int("takeover-from", 0, "pid of the daemon this one replaces")
-	var warm multiFlag
+	var warm, allowed multiFlag
 	f.Var(&warm, "warm", "root to bring up before taking over (repeatable)")
+	f.Var(&allowed, "allowed", "root the replaced daemon added to its allow list (repeatable)")
 	_ = f.MarkHidden("takeover-from")
 	_ = f.MarkHidden("warm")
+	_ = f.MarkHidden("allowed")
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		if buildID {
@@ -87,7 +89,7 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		// --restart replays it, and a takeover starts the new build with it.
 		// A takeover daemon's --socket is its side socket, not a choice to
 		// replay; it records the main one when it takes over.
-		skip := []string{"stop", "restart", "help", "build-id", "takeover-from", "warm"}
+		skip := []string{"stop", "restart", "help", "build-id", "takeover-from", "warm", "allowed"}
 		if *takeoverFrom != 0 {
 			skip = append(skip, "socket")
 		}
@@ -126,6 +128,9 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		al := daemon.NewAllowList(prefixes)
 		if len(al.Prefixes()) == 0 {
 			return errors.New("daemon: no usable --allow prefix (and no home dir); refusing to start with an empty allow-list")
+		}
+		for _, r := range allowed {
+			_, _, _ = al.Admit(r)
 		}
 
 		dreg := daemon.NewRegistry(cfg, reg, readOnly, validate)

@@ -4,12 +4,18 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/mcp"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -114,4 +120,73 @@ func TestMeasureWorktreeOpen(t *testing.T) {
 	t.Logf("shared cache already saves:         %v", coldWorktree-warmWorktree)
 	t.Logf("gopls spawn+init (handshake only):  %v", goplsStart)
 	t.Logf("gopls workspace warmth (to 1st workspace/symbol): %v   <- the dominant, UNSHAREABLE cost", goplsWarm)
+}
+
+// TestMeasureWorktreeSharing: what one daemon shares between two roots that
+// are worktrees of the same repository, and what it holds twice. Two roots
+// in one Registry, as the daemon hosts them: time to open, parse-cache
+// entries added, Go heap retained (after GC), and the child LSPs (count,
+// RSS) once a resolved query has made each load its workspace. Run with:
+//
+//	go test ./daemon/ -tags measure -run TestMeasureWorktreeSharing -v -count=1
+func TestMeasureWorktreeSharing(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.LoadOrDefault("nonexistent.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := cfg.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(t.TempDir(), "wt")
+	if out, err := exec.Command("git", "-C", repoRoot, "worktree", "add", "--detach", wt, "HEAD").CombinedOutput(); err != nil {
+		t.Fatalf("worktree: %v\n%s", err, out)
+	}
+	defer func() { _ = exec.Command("git", "-C", repoRoot, "worktree", "remove", "--force", wt).Run() }()
+
+	r := NewRegistry(cfg, reg, false, false)
+	r.cachePath = "" // cold: no ~/.poly-lsp/cache.gob
+	r.idleTimeout = 0
+	defer r.Close()
+
+	heap := func() uint64 {
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return m.HeapAlloc
+	}
+	h0 := heap()
+	open := func(root string) (time.Duration, int, uint64) {
+		before, c0 := heap(), r.cache.Len()
+		start := time.Now()
+		srv, err := r.Get(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		took := time.Since(start)
+		// A resolved query: each root's gopls loads its workspace.
+		if _, _, err := srv.CallTool("", "node_query", json.RawMessage(`{"selector":"#RollbackSession::in"}`), mcp.CallOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		return took, r.cache.Len() - c0, heap() - before
+	}
+	tA, cA, hA := open(repoRoot)
+	tB, cB, hB := open(wt)
+	t.Logf("root A (repo):     open %v, +%d cache entries, +%d MiB heap", tA.Round(time.Millisecond), cA, hA>>20)
+	t.Logf("root B (worktree): open %v, +%d cache entries, +%d MiB heap", tB.Round(time.Millisecond), cB, hB>>20)
+	t.Logf("cache total %d entries; heap over baseline %d MiB", r.cache.Len(), (heap()-h0)>>20)
+
+	out, _ := exec.Command("ps", "-o", "pid=,rss=,args=", "--ppid", strconv.Itoa(os.Getpid())).Output()
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.Contains(line, "gopls") {
+			n++
+			t.Logf("child LSP: %s", strings.TrimSpace(line))
+		}
+	}
+	t.Logf("gopls processes: %d (one per root)", n)
 }

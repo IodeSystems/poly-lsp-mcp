@@ -183,30 +183,88 @@ usage log, to decide `params`/`return` on data. Gaps: the DB-column note
 lacks the table name (DerivRoot carries the column only); the cascade test
 uses hand-built roots, not real gat/sqlc fixtures.
 
-◻ **Daemon: dun-style start, version check, blue/green upgrade** (Carl,
-2026-10-24: likes dund's start-on-first-use, multi-session upgrade notice and
-self-upgrade). dun-a8's account of dund (cmd/dun/attach.go,
-internal/dundcli/{cli,handover}.go, internal/dund/upgrade.go) is the model.
-Today: `mcp --daemon` auto-starts (spawn.go EnsureRunning, 8 s poll), no
-lock, no build identity (`Version` const "0.1.0"), no upgrade, no notice;
-and none of today's startup work (async init, budget, --exclude, report)
-reaches it. Proposed slices:
-1. flock `~/.poly-lsp/daemon.lock` around start; stamp a build id (VCS
-   revision via debug.ReadBuildInfo, or content hash) into daemon.json.
-2. Daemon parity: async init per root, budget, excludes, index report, the
-   `poly-lsp-mcp/index` notification relayed through the proxy.
-3. Version handshake on connect: proxy build vs daemon build; daemon also
-   watches its own exe.
-4. Blue/green upgrade: new daemon warms on a side socket (cache.gob, index,
-   child LSPs) while the old serves; takes the socket; old drains (bounded)
-   and exits. Proxy retries an idempotent call once on reconnect.
-5. In-band notice: `notifications/message` logger `poly-lsp-mcp/daemon`
-   (upgrading/upgraded/failed); tool calls wait, bounded, during the swap.
-6. Keep exe.prev, roll back after N failed starts (dund's open gap).
-**next**: Carl approves the slices and order. **risks**: two daemons warm at
-once doubles child-LSP memory during the swap (gopls was 6 GB on dun);
-cache.gob format needs a version. **blocking decisions**: approve; swap
-memory policy (warm all roots, or only recently used ones).
+✅ **Daemon: dun-style start, version check, blue/green upgrade** (Carl,
+2026-10-24, approved; dund is the model). README "Daemon mode — `--daemon`".
+One commit per slice:
+1. ✅ `feat(daemon): flock, build identity, socket path fallback`. The
+   serving daemon holds `~/.poly-lsp/daemon.lock` for its life (two
+   daemons started at once: one serves, one exits before binding).
+   daemon.json gains `build` (`<rev12>[+dirty]/<sha256(exe)[:8]>`, from
+   ReadBuildInfo + the executable; no stamp) and `protocol` (2), and
+   `args`. Socket path over sun_path → hashed name. doctor: build id, and
+   whether the running daemon is this build. Start poll 50 ms × 10 s.
+2. ✅ `feat(daemon): stdio parity for daemon-hosted roots` +
+   `feat(daemon): carry --include, --index-anyway, --symlink-depth` (the
+   second after rebasing onto the indexing edge-case slice). BringUp per
+   root (budget, index/setup notifications, leftOut); a notification hub
+   over `GET /session/events` (NDJSON, binds the session like
+   /session/watch) with replay of the latest index/setup to late
+   sessions; failed roots kept (post-mortem on calls, retried by a new
+   /open). Proxy: initialize at once, connect + open behind it, client
+   index flags in /open. Bare `--restart` replays daemon.json args.
+3. ✅ `feat(daemon): version handshake and self-watch`. POST /hello;
+   dun's buildDecision; POST /upgrade once per build pair; refused when not
+   newer by vcs.time. watchSelf: stat 2 s, hash on change, probe
+   `daemon --build-id`.
+4. ✅ `feat(daemon): blue/green upgrade`. Green = `<exe> daemon <args>
+   --takeover-from <pid> --socket <side> --warm <root>…`, lock passed on fd 3
+   (shared flock description: never free during the swap). Warms roots
+   held or used in `--warm-recent` (30m), index only. Quiet point: waits
+   ≤60 s for open edit batches. Swap: green renames its side socket over the
+   main path (atomic; the path always names a listener), rewrites
+   daemon.json; blue ends streams, disables keep-alives, drains 0.5–10 s,
+   exits; listeners never unlink on close. Proxy: relinks with backoff,
+   read-only call retried once, cut node_edit → "re-read and retry".
+5. ✅ `feat(daemon): in-band upgrade notices`. logger
+   `poly-lsp-mcp/daemon`: upgrading/failed from the daemon, upgraded from
+   the proxy; one-line `message` each.
+6. ✅ `feat(daemon): rollback: exe.prev and refused builds`.
+   `~/.poly-lsp/exe.prev` (copied from /proc/self/exe before green starts);
+   `upgrade-failures.json`, refused at 2; doctor reports both.
+Tests: `daemon/{identity,proxy,upgrade,reconnect,notice,rollback}_test.go`;
+`TestBlueGreenUpgradeEndToEnd` builds the binary twice (`-trimpath` makes
+the second a different build), runs daemon A and a proxy of B, and checks
+node_query succeeds throughout the swap and after (skipped under -short).
+**Decisions made (catchable):** `daemon --takeover-from` instead of a
+`daemon serve` subcommand; the proxy's `serverInfo.version` is "0.0.0" as
+the stdio server's (BuildID hashes the binary); child LSPs started EAGERLY
+at bring-up before this (single mode, multiplex Manager.Start) — the warm
+skips them, so they start on a root's first request after a swap.
+**risks**: a cut node_edit may have applied (the error says so); a batch
+still open after the 60 s quiet wait is rolled back by the hand-over;
+vetting refusals (probe mismatch) are logged, not notified; two dirty
+builds of one commit can hand the daemon back and forth (once per pair per
+proxy process; vcs.time ties); not run on macOS (no /proc/self/exe: exe.prev
+copied only while the path is still this build); a client whose daemon is
+from before this work gets no handshake (log says `daemon --restart`).
+**optional extensions**: notify vetting refusals; self-takeover when blue
+dies mid-warm (green exits today); `make test` covers the e2e only without
+-short.
+
+**Worktree / same-tree sharing in one daemon** (Carl: "a great candidate if
+there is worktree or multi same tree session sharing optimizations").
+MEASURED, not built (`TestMeasureWorktreeSharing`, `-tags measure`, this
+repo + a `git worktree` of it in one Registry, gopls on PATH, 2 runs,
+2026-10-24):
+- parse cache: SHARED. Root A cold +387 entries, worktree B +1.
+- index: held TWICE, +28 / +21 MiB Go heap per root (B's figure is the
+  index alone; small).
+- child LSPs: one gopls PER ROOT, 2 processes, RSS 0.87–2.15 GB (A) and
+  0.76–0.87 GB (B) after one resolved query each. The dominant cost.
+- open: A 1.2–1.4 s, B 0.46–0.56 s (both include gopls spawn).
+Sessions on the SAME root already share everything (one server per root).
+Proposals (not implemented):
+1. A child-LSP budget per repository: roots with the same git common dir
+   share one `--lsp-roots-max`-style cap, the least recently used worktree's
+   gopls stopped first (it restarts on demand). Bounds N worktrees to a
+   fixed gopls count; cost: a stopped worktree's first resolved query
+   re-warms (~0.4 s + load).
+2. One gopls per repository with each worktree as a workspace folder
+   (`workspace/didChangeWorkspaceFolders`). Saves the per-process base and
+   shares gopls' in-memory module data; per-package type info stays per
+   folder (different paths). Measure first: RSS of one gopls with 2 folders
+   vs 2 gopls; routing by folder must stay correct for edits/diagnostics.
+The index COW stays iceboxed: 21 MiB/root against ~1 GB of gopls.
 
 ✅ **Install with Go alone; prebuilt binaries** (Carl via dun-a8,
 2026-10-24: installable with no system dependency but Go; a path for no Go).

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iodesystems/poly-lsp-mcp/internal/ts"
 	"github.com/iodesystems/poly-lsp-mcp/setup"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -181,6 +182,11 @@ func (s *Server) indexRemedy(err error) string {
 		msg := fmt.Sprintf("get under budget: exclude the heavy directories above (--exclude <dir>, repeatable, relative to the root; "+
 			"the repository is not changed) or add them to .gitignore. Or raise it: --index-budget %s (now %s).",
 			raisedBudget(be), be.Budget)
+		// A blown budget is where the pure-Go parser's cost shows, so the
+		// fast build is part of the way out.
+		if ts.Runtime() == "pure-go" {
+			msg += " Or parse faster: " + ts.FastPathHint + "."
+		}
 		if !s.lspRootsAuto {
 			if hints, _ := s.rootsHints(true); len(hints) > 0 {
 				msg += "\n" + strings.Join(hints, "\n")

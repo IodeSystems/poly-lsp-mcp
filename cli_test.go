@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 // An unknown subcommand used to fall through to the stdio LSP server, which
@@ -98,5 +100,13 @@ func TestDoctorFlagsMissingLSP(t *testing.T) {
 	}
 	if len(rep.Languages) != 1 || rep.Languages[0].Install == nil || rep.Languages[0].Install.Needs[0] != "go" {
 		t.Errorf("languages should carry the machine-readable hint: %+v", rep.Languages)
+	}
+	if rep.Runtime != ts.Runtime() {
+		t.Errorf("runtime = %q, want %q", rep.Runtime, ts.Runtime())
+	}
+	// The slow parser is said out loud, with the way to the fast one.
+	advised := slices.Contains(rep.Advisories, ts.FastPathHint)
+	if advised != (ts.Runtime() == "pure-go") {
+		t.Errorf("fast-path advisory present = %v on runtime %s: %v", advised, ts.Runtime(), rep.Advisories)
 	}
 }

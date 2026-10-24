@@ -17,6 +17,7 @@ import (
 
 	"github.com/iodesystems/poly-lsp-mcp/daemon"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
+	"github.com/iodesystems/poly-lsp-mcp/internal/ts"
 	"github.com/iodesystems/poly-lsp-mcp/setup"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -39,6 +40,7 @@ type doctorReport struct {
 	OnPath     string            `json:"onPath"` // what `poly-lsp-mcp` resolves to
 	Build      string            `json:"build"`
 	Platform   string            `json:"platform"`
+	Runtime    string            `json:"runtime"` // tree-sitter runtime: "cgo" or "pure-go"
 	Config     string            `json:"config"`
 	Root       string            `json:"root"`
 	Partial    bool              `json:"partialCount,omitempty"`
@@ -90,6 +92,7 @@ a different poly-lsp-mcp than this one.`,
 			}
 			rep := doctorReport{
 				Platform: runtime.GOOS + "/" + runtime.GOARCH,
+				Runtime:  ts.Runtime(),
 				Root:     root,
 				Config:   "defaults (no " + l.configPath + ")",
 			}
@@ -104,6 +107,11 @@ a different poly-lsp-mcp than this one.`,
 				rep.Binary = r
 			}
 			rep.Build = buildInfo()
+			// `go install` with no C compiler on the machine builds the pure-Go
+			// parser without a word; this is the one place that says so.
+			if rep.Runtime == "pure-go" {
+				rep.Advisories = append(rep.Advisories, ts.FastPathHint)
+			}
 			copies := pathCopies("poly-lsp-mcp")
 			if len(copies) == 0 {
 				rep.OnPath = "not on PATH"
@@ -190,6 +198,7 @@ a different poly-lsp-mcp than this one.`,
 
 func printDoctor(r doctorReport) {
 	fmt.Printf("binary    %s\n          %s, %s\n", r.Binary, r.Build, r.Platform)
+	fmt.Printf("runtime   tree-sitter %s\n", r.Runtime)
 	fmt.Printf("on PATH   %s\n", r.OnPath)
 	fmt.Printf("config    %s\n", r.Config)
 	fmt.Printf("git       %s\n", r.Git)

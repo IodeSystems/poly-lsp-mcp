@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/iodesystems/poly-lsp-mcp/internal/ts"
 )
 
 func writeTree(t *testing.T, files map[string]string) string {
@@ -101,6 +103,11 @@ func TestIndexBudgetFailsWithTrace(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("refusal should contain %q:\n%s", want, text)
 		}
+	}
+	// On the pure-Go parser the fast build is part of the remedy; on cgo it
+	// would be noise.
+	if hinted := strings.Contains(text, ts.FastPathHint); hinted != (ts.Runtime() == "pure-go") {
+		t.Errorf("fast-path hint present = %v on runtime %s:\n%s", hinted, ts.Runtime(), text)
 	}
 	note := indexNote(t, s)
 	if note["state"] != "failed" || note["budget"] != "1ops" || note["read"] != float64(1) || note["remedy"] == nil {

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -305,7 +306,8 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		offset = *p.Offset
 	}
 
-	e, err := s.buildTree()
+	queryStart := time.Now()
+	e, err := s.buildTreeFor(sel)
 	if err != nil {
 		return nil, true, err
 	}
@@ -323,6 +325,7 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		need = offset + limit
 	}
 	rows, capped := e.evaluateCapped(list, need)
+	s.recordUsage(sel, rows, time.Since(queryStart))
 
 	// :explain returns a cost TRACE, not matches — a deliberate
 	// result-shape fork. The query still RAN (that is the measured
@@ -724,7 +727,7 @@ func (s *Server) resolveModernNode(node string) (*modernNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	e, err := s.buildTree()
+	e, err := s.buildTreeFor(node)
 	if err != nil {
 		return nil, err
 	}

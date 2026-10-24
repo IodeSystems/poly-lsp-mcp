@@ -74,6 +74,7 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		dreg := daemon.NewRegistry(cfg, reg, readOnly, validate)
 		dreg.SetLifecycle(lifecycle())
 		dreg.SetStatusDir(daemon.StatusDir())
+		dreg.SetUsageLog(daemon.UsagePath())
 		return daemon.Serve(daemon.Config{Socket: socket, Allow: al, Reg: dreg})
 	}
 	return cmd

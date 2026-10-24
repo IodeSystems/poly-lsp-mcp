@@ -118,3 +118,28 @@ func TestExcludesDropDirectories(t *testing.T) {
 		t.Errorf("an excluded directory answered a query: %s", r.Content[0].Text)
 	}
 }
+
+// Above the warning threshold the build goes on; the ready notification
+// says the workspace is large, for the client to show the user.
+func TestLargeWorkspaceWarnsAndServes(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"a.go":            "package p\n\nfunc A() {}\n",
+		"vendored/x/b.go": "package x\n",
+	})
+	s := startSessionWith(t, dir, nil, nil, func(srv *Server) {
+		srv.SetAsyncInit(true)
+		srv.SetIndexWarn(1)
+	})
+	defer s.close()
+	s.request("initialize", map[string]any{})
+
+	r := s.callTool("node_query", map[string]any{"selector": "#A"})
+	if r.IsError {
+		t.Fatalf("a large workspace is still served: %+v", r)
+	}
+	note := indexNote(t, s)
+	large, _ := note["large"].(map[string]any)
+	if note["state"] != "ready" || large == nil || large["files"] != float64(2) {
+		t.Errorf("ready notification should carry `large`: %v", note)
+	}
+}

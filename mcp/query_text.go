@@ -76,7 +76,7 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 			return err
 		}
 	}
-	e, err := s.buildTree()
+	e, err := s.buildTreeFor(selector)
 	if err != nil {
 		return err
 	}
@@ -197,7 +197,7 @@ func (s *Server) QueryJSON(selector string, limit, offset int, budget string, w 
 			return err
 		}
 	}
-	e, err := s.buildTree()
+	e, err := s.buildTreeFor(selector)
 	if err != nil {
 		return err
 	}

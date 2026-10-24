@@ -121,6 +121,7 @@ func mcpCmd(l *loader) *cobra.Command {
 		// initialize replies at once; the index builds behind it and tool
 		// calls wait for it. See mcp/async_init.go.
 		srv.SetAsyncInit(true)
+		srv.SetUsageLog(daemon.UsagePath())
 		srv.SetLegacyTools(legacyTools)
 		srv.SetReadOnly(readOnly)
 		if readOnly {

@@ -34,6 +34,25 @@ func (s *Server) SetAsyncInit(on bool) { s.asyncInit = on }
 // directories that hold the files. See symbols.WithLimit.
 func (s *Server) SetIndexLimit(n int) { s.indexLimit = n }
 
+// SetIndexWarn reports a workspace above n indexable files as large: the
+// build goes on, and the ready notification carries a `large` entry for the
+// client to show the user. 0 = never.
+func (s *Server) SetIndexWarn(n int) { s.indexWarn = n }
+
+// largeIndex is the `large` entry, or nil when the workspace is not large.
+func (s *Server) largeIndex() map[string]any {
+	c := s.IndexCost()
+	if s.indexWarn <= 0 || c.Files <= s.indexWarn {
+		return nil
+	}
+	return map[string]any{
+		"files":     c.Files,
+		"threshold": s.indexWarn,
+		"message": fmt.Sprintf("large workspace: %d indexable files (warning above %d); see index.heaviest for where they are. %s",
+			c.Files, s.indexWarn, "To drop a directory: --exclude <dir> or .gitignore. To silence: raise --index-warn-files."),
+	}
+}
+
 // indexLogger is the notifications/message logger for bring-up state.
 const indexLogger = "poly-lsp-mcp/index"
 
@@ -89,6 +108,10 @@ func (s *Server) notifyIndexState(err error, took time.Duration) {
 		data["schemas"] = sc
 	}
 	level := "info"
+	if l := s.largeIndex(); l != nil && err == nil {
+		level = "warning"
+		data["large"] = l
+	}
 	if err != nil {
 		level = "error"
 		data["state"] = "failed"

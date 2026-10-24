@@ -44,6 +44,8 @@ type Registry struct {
 	// manager.
 	lifecycle multiplex.Lifecycle
 	statusDir string
+	// usageLog is every root's node_query usage log; see mcp/usage.go.
+	usageLog string
 
 	mu      sync.Mutex
 	servers map[string]*entry
@@ -274,6 +276,7 @@ func (r *Registry) build(root string) *mcp.Server {
 	srv.SetReadOnly(r.readOnly)
 	srv.SetValidateEdits(r.validate)
 	srv.SetParseCache(r.cache)
+	srv.SetUsageLog(r.usageLog)
 	// One Manager per root: child LSPs bind to the module root and can't
 	// be shared across roots.
 	mgr := multiplex.NewManager(r.reg)
@@ -290,6 +293,10 @@ func (r *Registry) SetLifecycle(lc multiplex.Lifecycle) { r.lifecycle = lc }
 // SetStatusDir makes roots built after the call write child-LSP status
 // files there. Call before Serve.
 func (r *Registry) SetStatusDir(dir string) { r.statusDir = dir }
+
+// SetUsageLog makes roots built after the call append node_query usage to
+// path. Call before Serve.
+func (r *Registry) SetUsageLog(path string) { r.usageLog = path }
 
 // LanguageForPath derives the tree-sitter grammar name from a path's
 // extension (via the config registry), or "" if none is registered. Used

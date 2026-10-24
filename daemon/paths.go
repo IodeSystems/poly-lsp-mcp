@@ -59,6 +59,12 @@ func StatePath() string {
 	return filepath.Join(ConfigHome(), "daemon.json")
 }
 
+// UsagePath is the node_query usage log (one JSON line per query), shared
+// by every server this user runs. See mcp/usage.go.
+func UsagePath() string {
+	return filepath.Join(ConfigHome(), "usage.jsonl")
+}
+
 // LogPath is where a detached auto-started daemon sends stdout+stderr.
 func LogPath() string {
 	return filepath.Join(ConfigHome(), "daemon.log")

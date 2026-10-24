@@ -100,6 +100,8 @@ type Server struct {
 	initErr    error
 	asyncInit  bool
 	indexLimit int
+	usageLog   string // see usage.go
+	indexWarn  int
 
 	indexMu     sync.RWMutex
 	index       *symbols.Index
@@ -790,6 +792,8 @@ func (s *Server) handleInitialize(req *jsonrpc.Message) {
 		res["index"] = c
 		if err := s.waitReady(); err != nil {
 			res["indexError"] = s.indexFailure(err)
+		} else if l := s.largeIndex(); l != nil {
+			res["indexLarge"] = l
 		}
 	}
 	s.reply(req, res)

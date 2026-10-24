@@ -258,6 +258,10 @@ type engine struct {
 	project *treeNode
 	// excl is the client's excludes, resolved once per walk.
 	excl *git.IgnoreSet
+	// named are the paths the selector names inside a skipped directory
+	// (node_modules, vendor, dist…): the walk reaches those and nothing
+	// else under it. See namedSkipPaths.
+	named []string
 
 	// ordSeq feeds treeNode.fileOrd during the workspace walk.
 	ordSeq int
@@ -658,7 +662,11 @@ func (e *engine) nodeByAddr(rel, sym string, line int) *treeNode {
 
 // buildTree synthesizes the project node and walks the workspace into
 // dir/file nodes. File symbols are NOT parsed here (see kids).
-func (s *Server) buildTree() (*engine, error) {
+func (s *Server) buildTree() (*engine, error) { return s.buildTreeFor("") }
+
+// buildTreeFor is buildTree for one selector: a path the selector names
+// inside a skipped directory is walked, so it can match.
+func (s *Server) buildTreeFor(selector string) (*engine, error) {
 	root := s.getRoot()
 	if root == "" {
 		return nil, fmt.Errorf("no workspace root configured")
@@ -686,21 +694,66 @@ func (s *Server) buildTree() (*engine, error) {
 	// lspLeft is set lazily on the first round-trip (ensureLSPCap), so a
 	// non-edge query never pays to compute the workspace-tuned cap.
 	e.excl = s.excludeSet()
-	e.walkDir(root, project)
+	e.named = namedSkipPaths(selector)
+	e.walkDir(root, project, false)
 	return e, nil
 }
 
-func (e *engine) walkDir(abs string, parent *treeNode) {
+// namedSkipPaths returns the workspace-relative paths a selector names that
+// run through a skipped directory: `node_modules/react/index.d.ts` in
+// path=…, an address, or anywhere in the text.
+//
+// A skipped directory is out of broad traversal because it is large,
+// trivial and collateral: a query for `func` must not walk every
+// dependency. But a selector that names a path inside one is asking for
+// exactly that dependency, so the walk follows the named path and nothing
+// beside it.
+func namedSkipPaths(selector string) []string {
+	var out []string
+	for _, p := range selectorPaths(selector) {
+		for _, seg := range strings.Split(p, "/") {
+			if seg != ".git" && skipScanDir(seg) {
+				out = append(out, p)
+				break
+			}
+		}
+	}
+	return out
+}
+
+var namedPathToken = regexp.MustCompile(`[A-Za-z0-9_.@+\-/#]+`)
+
+// reachesNamed reports whether rel is on the way to, or inside, a path the
+// selector named.
+func (e *engine) reachesNamed(rel string) bool {
+	for _, n := range e.named {
+		if n == rel || strings.HasPrefix(n, rel+"/") || strings.HasPrefix(rel, n+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// walkDir adds abs's children under parent. inSkip: abs is inside a skipped
+// directory the walk entered for a named path, so only children on the way
+// to, or inside, a named path are added.
+func (e *engine) walkDir(abs string, parent *treeNode, inSkip bool) {
 	des, err := os.ReadDir(abs)
 	if err != nil {
 		return
 	}
 	sort.Slice(des, func(i, j int) bool { return des[i].Name() < des[j].Name() })
 	for _, de := range des {
+		childAbs := filepath.Join(abs, de.Name())
+		childInSkip := inSkip
 		if skipScanDir(de.Name()) {
+			if de.Name() == ".git" || !e.reachesNamed(relPath(childAbs, e.s.getRoot())) {
+				continue
+			}
+			childInSkip = true
+		} else if inSkip && !e.reachesNamed(relPath(childAbs, e.s.getRoot())) {
 			continue
 		}
-		childAbs := filepath.Join(abs, de.Name())
 		// The client's excludes hold here too: a directory it dropped from
 		// the index is not a node either.
 		if de.IsDir() && e.excl.DirIgnored(e.s.getRoot(), childAbs) {
@@ -724,7 +777,7 @@ func (e *engine) walkDir(abs string, parent *treeNode) {
 				fileOrd: e.ordSeq,
 			}
 			parent.children = append(parent.children, d)
-			e.walkDir(childAbs, d)
+			e.walkDir(childAbs, d, childInSkip)
 			continue
 		}
 		f := &treeNode{

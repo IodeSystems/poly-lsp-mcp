@@ -148,9 +148,11 @@ Speaks MCP (newline-delimited JSON-RPC) over stdio. The **default surface is thr
 
 `initialize` replies at once with `"index": {"state": "building"}`; the index, bindings and child LSPs come up behind it, and a tool call waits for them. When the bring-up ends, the server sends `notifications/message` from logger `poly-lsp-mcp/index` with `state` (`ready` or `failed`), `ms`, and `index`: files, bytes, and the heaviest directories by share of indexed bytes, each with its file count, bytes, time and the number of nested checkouts (directories with their own `.git`) under it.
 
-Above `--index-max-files` (10000; 0 = off) the build fails. The walk goes on counting without reading, so the failure carries the post-mortem: where the files are. Tool calls then answer with that report and the remedy. A client retries with `--exclude <dir>` (repeatable, relative to `--root`; the directory is dropped from the index, the query tree and every walk, and the repository is not changed), or the directory goes in `.gitignore`.
+Above `--index-warn-files` (10000; 0 = never) the workspace is large: the build goes on, and the notification is level `warning` with a `large` entry (files, threshold, a message for the user). Above `--index-max-files` (100000; 0 = off) the build fails. The walk goes on counting without reading, so the failure carries the post-mortem: where the files are. Tool calls then answer with that report and the remedy. A client retries with `--exclude <dir>` (repeatable, relative to `--root`; the directory is dropped from the index, the query tree and every walk, and the repository is not changed), or the directory goes in `.gitignore`.
 
 `poly-lsp-mcp index --root .` prints the same report from the shell (`--json` for the notification's `index` shape); `poly-lsp-mcp status` prints it for every running server.
+
+`node_query` skips `node_modules`, `vendor`, `dist`, `build` and the like in broad traversal, but a selector that names a path inside one (`file[path=node_modules/react/index.d.ts]`, `#'vendor/x' func`) reaches that path and nothing beside it. It does not apply `.gitignore`; every `node_query` appends one line to `~/.poly-lsp/usage.jsonl` (matches, how many were gitignored or in a skipped directory, and whether the selector named them), and `poly-lsp-mcp usage` totals it — the evidence for whether it should.
 
 ### Selector language
 

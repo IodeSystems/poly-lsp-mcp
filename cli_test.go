@@ -30,7 +30,7 @@ func TestRootHelpListsSubcommands(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, sub := range []string{"lsp", "mcp", "query", "index", "status", "daemon"} {
+	for _, sub := range []string{"lsp", "mcp", "query", "index", "status", "usage", "daemon"} {
 		if !strings.Contains(out.String(), "  "+sub+" ") {
 			t.Errorf("root --help does not list %q:\n%s", sub, out.String())
 		}

@@ -12,22 +12,30 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 )
 
-// defaultIndexMaxFiles is the hard limit on indexable files. dun's own tree
-// is 455 files; with 48 untracked worktrees in it, 22,012, and a 52 s
-// initialize. A build that fails at the limit reports where the files are,
-// which is what a client needs to choose its excludes.
-const defaultIndexMaxFiles = 10000
+// defaultIndexWarnFiles is where a workspace counts as large: the build
+// goes on, and the ready notification says so with the heaviest
+// directories, for the client to show the user. dun's own tree is 455
+// files; with 48 untracked worktrees in it, 22,012.
+//
+// defaultIndexMaxFiles is the hard cap: above it the build fails, with the
+// same report as its post-mortem.
+const (
+	defaultIndexWarnFiles = 10000
+	defaultIndexMaxFiles  = 100000
+)
 
 // indexOpts are the flags that shape the index, shared by mcp, query and
 // index.
 type indexOpts struct {
-	excludes multiFlag
-	maxFiles int
+	excludes  multiFlag
+	warnFiles int
+	maxFiles  int
 }
 
 func indexFlags(f *pflag.FlagSet) *indexOpts {
 	o := &indexOpts{}
 	f.Var(&o.excludes, "exclude", "drop this directory (relative to --root) from the index and every walk, as though .gitignore listed it; repeatable. For a client choosing what to index without editing the repository")
+	f.IntVar(&o.warnFiles, "index-warn-files", defaultIndexWarnFiles, "above this many indexable files the workspace is reported as large (with the directories that hold the files); the build goes on. 0 = never")
 	f.IntVar(&o.maxFiles, "index-max-files", defaultIndexMaxFiles, "fail the index build above this many indexable files, with a report of the directories that hold them; 0 = no limit")
 	return o
 }
@@ -40,6 +48,7 @@ func (o *indexOpts) apply(srv *mcp.Server) error {
 	}
 	srv.SetExcludes(o.excludes)
 	srv.SetIndexLimit(o.maxFiles)
+	srv.SetIndexWarn(o.warnFiles)
 	return nil
 }
 

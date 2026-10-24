@@ -193,6 +193,25 @@ once doubles child-LSP memory during the swap (gopls was 6 GB on dun);
 cache.gob format needs a version. **blocking decisions**: approve; swap
 memory policy (warm all roots, or only recently used ones).
 
+◻ **Install with Go alone; prebuilt binaries** (Carl via dun-a8,
+2026-10-24: installable with no system dependency but Go; a path for no Go).
+Install hints for clients: ✅ `f064670` (poly-lsp-mcp/setup notification,
+doctor --json). Pure Go: `github.com/odvcencio/gotreesitter` v0.56.0 builds
+CGO_ENABLED=0 (static, verified) and parses all 11 of our grammars
+(verified on small samples + a 452 KB Go file); ~9x slower parse than cgo
+per file (633 ms vs 73 ms on symbols/*.go), superlinear on one huge file
+(2.5 s vs 72 ms), 5–77 ms lazy load per grammar, +18 MB binary; API not
+source-compatible (Type/Text take lang/src; query cursor differs); trees
+differ slightly (node/error counts) so shape tests need re-baselining;
+single author, 8 months old. Others: xo/transit lacks kotlin/groovy/proto/
+markdown; bonsai lacks cpp/sql/proto and queries; no wazero or ccgo module.
+Proposed: an `internal/ts` adapter, smacker under `//go:build cgo`,
+gotreesitter under `!cgo` — Go turns cgo off when it finds no C compiler,
+so `go install` picks the best runtime by itself. Releases: GitHub Actions
+native runners build cgo binaries for linux/darwin × amd64/arm64 today, no
+pure Go needed. **blocking decisions**: adopt the cgo/!cgo split; publish
+releases (tags, CI, signing).
+
 ◻ **First run on macOS** (2026-10-22). Not yet built or run on a Mac.
 **next**: on the Mac, `make install`, then `go test ./multiplex ./daemon .`
 and `poly-lsp-mcp status`. **risks**: `ps -o rss=` output format; peer-cred

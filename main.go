@@ -37,6 +37,9 @@ func main() {
 	if errors.Is(err, errUsage) {
 		os.Exit(2)
 	}
+	if errors.Is(err, errDoctor) {
+		os.Exit(1) // the findings are already printed
+	}
 	// A selector error is the answer to what was asked, so it prints as
 	// prose, without the program-name prefix.
 	var se *mcp.SelectorError
@@ -100,7 +103,8 @@ starts). Run a subcommand for anything else.`,
   poly-lsp-mcp query --root . ':explain #runQuery'
   poly-lsp-mcp mcp --root .
   poly-lsp-mcp index --root .
-  poly-lsp-mcp status`,
+  poly-lsp-mcp status
+  poly-lsp-mcp doctor`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -118,7 +122,7 @@ starts). Run a subcommand for anything else.`,
 		return err
 	})
 	root.PersistentFlags().StringVar(&l.configPath, "config", "poly-lsp-mcp.yaml", "language registry config file")
-	root.AddCommand(lspCmd(l), mcpCmd(l), queryCmd(l), indexCmd(l), statusCmd(), usageCmd(), daemonCmd(l))
+	root.AddCommand(lspCmd(l), mcpCmd(l), queryCmd(l), indexCmd(l), statusCmd(), usageCmd(), doctorCmd(l), daemonCmd(l))
 	return root
 }
 

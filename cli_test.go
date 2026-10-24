@@ -2,6 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -30,7 +35,7 @@ func TestRootHelpListsSubcommands(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, sub := range []string{"lsp", "mcp", "query", "index", "status", "usage", "daemon"} {
+	for _, sub := range []string{"lsp", "mcp", "query", "index", "status", "usage", "doctor", "daemon"} {
 		if !strings.Contains(out.String(), "  "+sub+" ") {
 			t.Errorf("root --help does not list %q:\n%s", sub, out.String())
 		}
@@ -53,5 +58,42 @@ func TestDaemonReplayFlags(t *testing.T) {
 	want := []string{"--allow=/a", "--allow=/b", "--lsp-idle-stop=5m0s", "--read-only=true"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("replayFlags = %q, want %q", got, want)
+	}
+}
+
+// doctor names a language the workspace holds whose child LSP is not on
+// PATH, says how to install it, and exits non-zero.
+func TestDoctorFlagsMissingLSP(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir()) // nothing on it: no gopls, no git
+	root := newRoot()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"doctor", "--root", dir, "--json"})
+	stdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	err := root.Execute()
+	w.Close()
+	os.Stdout = stdout
+	b, _ := io.ReadAll(r)
+	if !errors.Is(err, errDoctor) {
+		t.Fatalf("want errDoctor, got %v", err)
+	}
+	var rep doctorReport
+	if err := json.Unmarshal(b, &rep); err != nil {
+		t.Fatalf("%v\n%s", err, b)
+	}
+	found := false
+	for _, p := range rep.Problems {
+		if strings.Contains(p, "gopls is not on PATH") && strings.Contains(p, "go install golang.org/x/tools/gopls") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("problems should name gopls and how to install it: %v", rep.Problems)
 	}
 }

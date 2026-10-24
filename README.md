@@ -85,7 +85,20 @@ make install
 
 Binary lands at `~/.local/bin/poly-lsp-mcp` (`make install BINDIR=...` to
 change), on Linux and macOS. Needs Go and a C compiler (tree-sitter is cgo;
-on macOS the Xcode command line tools).
+on macOS the Xcode command line tools). Without a checkout:
+`go install github.com/iodesystems/poly-lsp-mcp@latest` (to `~/go/bin`).
+
+Child LSPs are optional, one per language: `gopls`, `typescript-language-server`,
+`pylsp`, `clangd`. Without one, that language is served from tree-sitter alone:
+its `::in`/`::out` edges are not resolved and edits to it are not validated.
+
+```sh
+poly-lsp-mcp doctor            # in the workspace
+```
+
+checks the binary PATH runs (and stale copies behind it), the child LSP for
+each language the workspace holds with its version and install command, git,
+and the daemon. Exits 1 when a language in use has no child LSP.
 
 ### Dev: rebuild on spawn
 

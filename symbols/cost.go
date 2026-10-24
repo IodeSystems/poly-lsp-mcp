@@ -2,12 +2,16 @@ package symbols
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 )
 
 // BuildCost records what each directory cost a Build, so the client that
@@ -304,4 +308,41 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
 	}
 	return fmt.Sprintf("%d B", n)
+}
+
+// CountLanguages counts the indexable files per language under root, with
+// the index walk's skips and ignores but no reads. Partial is true when it
+// stopped at limit. For `doctor`: which child LSPs this workspace needs.
+func CountLanguages(root string, reg *config.Registry, ign *git.IgnoreSet, limit time.Duration) (counts map[string]int, partial bool) {
+	counts = map[string]int{}
+	shadow := reg.NewShadowChecker()
+	start := time.Now()
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if time.Since(start) > limit {
+			partial = true
+			return fs.SkipAll
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] || ign.DirIgnored(root, p) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if ign.KnownIgnored(root, p) {
+			return nil
+		}
+		lang := reg.LookupByExt(strings.TrimPrefix(filepath.Ext(p), "."))
+		if lang == nil {
+			return nil
+		}
+		if _, ok := shadow.Shadowed(p); ok {
+			return nil
+		}
+		counts[lang.Name]++
+		return nil
+	})
+	return counts, partial
 }

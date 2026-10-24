@@ -83,7 +83,7 @@ var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."},` +
 	`"budget":{"type":["integer","string"],"description":"limit Nms (bare=ms) or Nops; def 10000ms"},` +
-	`"include":{"type":"array","items":{"type":"string"},"description":"gitignore-style patterns to search inside left-out dirs, e.g. [\"node_modules\"]"}},` +
+	`"include":{"type":"array","items":{"type":"string"},"description":"override excluded path patterns"}},` +
 	`"required":["selector"]}`)
 
 const modernNodeReadDescription = `Read a node whole. node = an address from node_query's matches[].node ("<file>#<sym>" or "<file>"), or a selector matching exactly one node (2+ errors and lists candidates).
@@ -97,9 +97,8 @@ var modernNodeReadSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"required":["node"]}`)
 
 const modernNodeEditDescription = `Edit one node of the projection. node = an address from node_query's matches[].node, or a selector matching exactly one node (2+ errors and lists candidates).
-RENAMING a symbol? Use the rename op — ONE call renames the declaration AND every usage across the WHOLE workspace, atomically. Do NOT rename by hand-editing files one at a time with oldText/newText: that misses usages and leaves the build broken between edits.
 Exactly ONE op:
-rename:"NewName" — workspace-wide semantic rename; lexical guesses reported under candidates, never applied.
+rename:"NewName" — ONE call renames the declaration and every usage, workspace-wide, atomically (never hand-edit a rename with oldText); lexical guesses are reported under candidates, never applied.
 oldText+newText — replace a snippet inside the node. oldText must occur exactly once in the node; the address scopes it, so it need only be unique WITHIN that node — keep it short. Pass the node's whole text to rewrite it entirely, or that text + a new declaration to ADD one next to it.
 newText alone — REPLACES a span address (@start-end: ::body/::signature/::grep/a conflict); CREATES a file at a new path; refused on a symbol (use oldText) and never inserts one.
 delete:true — excise the node.

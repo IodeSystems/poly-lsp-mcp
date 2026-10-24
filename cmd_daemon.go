@@ -53,8 +53,8 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 	_ = f.MarkHidden("build-id")
 	lifecycle := lifecycleFlags(f)
 	rootsFlag := lspRootsFlags(f)
-	// For every hosted root; a client's /open adds its own excludes and may
-	// set its own budget (mcp --daemon --exclude/--index-budget).
+	// For every hosted root; a client's /open adds its own excludes and
+	// includes and may set the rest (mcp --daemon passes those it is given).
 	idx := indexFlags(f)
 	warmRecent := f.Duration("warm-recent", 30*time.Minute, "an upgrade's new daemon warms the roots requested within this long before it takes over; older roots come up on their next request")
 	// Set by a daemon starting its replacement (blue/green; daemon/takeover.go).
@@ -101,6 +101,9 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 				return fmt.Errorf("--exclude %q: want a directory inside the root, relative to it", d)
 			}
 		}
+		if idx.symlinkDepth < 0 {
+			return fmt.Errorf("--symlink-depth %d: want 0 or more", idx.symlinkDepth)
+		}
 		if err := mcp.New(nil, "", nil, nil).SetIndexBudget(idx.budget); err != nil {
 			return err
 		}
@@ -126,7 +129,8 @@ proxies to it. --stop and --restart control a running daemon and exit.`,
 		dreg.SetLSPRoots(roots.auto, roots.max)
 		dreg.SetStatusDir(daemon.StatusDir())
 		dreg.SetUsageLog(daemon.UsagePath())
-		dreg.SetIndexDefaults(idx.excludes, idx.budget)
+		dreg.SetIndexDefaults(daemon.IndexDefaults{Excludes: idx.excludes, Includes: idx.includes,
+			Budget: idx.budget, Anyway: idx.anyway, SymlinkDepth: idx.symlinkDepth})
 		return daemon.Serve(daemon.Config{Socket: socket, Allow: al, Reg: dreg, Args: args,
 			TakeoverFrom: *takeoverFrom, Warm: warm, WarmRecent: *warmRecent})
 	}
@@ -148,6 +152,13 @@ func replayFlags(fs *pflag.FlagSet, skip ...string) []string {
 		}
 		if m, ok := fl.Value.(*multiFlag); ok {
 			for _, v := range *m {
+				out = append(out, "--"+fl.Name+"="+v)
+			}
+			return
+		}
+		// A StringArray (--include) prints as "[a,b]"; replay each value.
+		if s, ok := fl.Value.(pflag.SliceValue); ok {
+			for _, v := range s.GetSlice() {
 				out = append(out, "--"+fl.Name+"="+v)
 			}
 			return

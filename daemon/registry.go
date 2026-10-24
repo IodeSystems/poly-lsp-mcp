@@ -52,10 +52,9 @@ type Registry struct {
 	lspRootsMax  int
 	// usageLog is every root's node_query usage log; see mcp/usage.go.
 	usageLog string
-	// excludes / budget are the daemon's --exclude and --index-budget, for
-	// every root. An /open adds its own excludes and may set the budget.
-	excludes []string
-	budget   string
+	// The daemon's index flags, for every root (see IndexDefaults). An
+	// /open adds its own excludes and includes and may set the rest.
+	idx IndexDefaults
 
 	// hub fans each root's notifications out to the sessions holding it.
 	hub *hub
@@ -68,13 +67,28 @@ type Registry struct {
 }
 
 // OpenOptions are what a client chooses about the index of a root it
-// opens: the stdio server's --exclude, --index-budget and --lsp-roots,
-// carried by the proxy. They apply when the open builds the root; a root
-// already built for another client keeps the options it was built with.
+// opens: the stdio server's --exclude, --include, --index-budget,
+// --index-anyway, --symlink-depth and --lsp-roots, carried by the proxy.
+// They apply when the open builds the root; a root already built for
+// another client keeps the options it was built with.
 type OpenOptions struct {
-	Excludes []string `json:"excludes,omitempty"`
-	Budget   string   `json:"budget,omitempty"`   // "" = the daemon's
-	LSPRoots string   `json:"lspRoots,omitempty"` // "", single or auto; "" = the daemon's
+	Excludes     []string `json:"excludes,omitempty"`
+	Includes     []string `json:"includes,omitempty"`
+	Budget       string   `json:"budget,omitempty"`       // "" = the daemon's
+	IndexAnyway  bool     `json:"indexAnyway,omitempty"`  // or the daemon's
+	SymlinkDepth *int     `json:"symlinkDepth,omitempty"` // nil = the daemon's
+	LSPRoots     string   `json:"lspRoots,omitempty"`     // "", single or auto; "" = the daemon's
+}
+
+// IndexDefaults are the daemon's own index flags, for every root it hosts:
+// --exclude, --include (after the config's include:), --index-budget,
+// --index-anyway, --symlink-depth.
+type IndexDefaults struct {
+	Excludes     []string
+	Includes     []string
+	Budget       string
+	Anyway       bool
+	SymlinkDepth int
 }
 
 type entry struct {
@@ -105,6 +119,7 @@ func NewRegistry(cfg *config.Config, reg *config.Registry, readOnly, validate bo
 		readOnly:    readOnly,
 		validate:    validate,
 		idleTimeout: defaultIdleTimeout,
+		idx:         IndexDefaults{SymlinkDepth: symbols.DefaultSymlinkDepth},
 		hub:         newHub(),
 		servers:     map[string]*entry{},
 	}
@@ -365,16 +380,21 @@ func (r *Registry) build(root string, opts OpenOptions) *mcp.Server {
 		}
 	}
 	srv := mcp.New(r.reg, root, r.cfg.Bindings, schemas)
-	srv.SetIncludes(r.cfg.Include)
 	srv.SetQuiet(true) // one daemon log for every root: the notifications carry the report
 	srv.SetReadOnly(r.readOnly)
 	srv.SetValidateEdits(r.validate)
 	srv.SetParseCache(r.cache)
 	srv.SetUsageLog(r.usageLog)
 	srv.SetNotifier(func(method string, params map[string]any) { r.notify(root, method, params) })
-	excludes := append(append([]string{}, r.excludes...), opts.Excludes...)
-	srv.SetExcludes(excludes)
-	budget := r.budget
+	srv.SetExcludes(append(append([]string{}, r.idx.Excludes...), opts.Excludes...))
+	srv.SetIncludes(append(append(append([]string{}, r.cfg.Include...), r.idx.Includes...), opts.Includes...))
+	srv.SetIndexAnyway(r.idx.Anyway || opts.IndexAnyway)
+	depth := r.idx.SymlinkDepth
+	if opts.SymlinkDepth != nil {
+		depth = *opts.SymlinkDepth
+	}
+	srv.SetSymlinkDepth(depth)
+	budget := r.idx.Budget
 	if opts.Budget != "" {
 		budget = opts.Budget
 	}
@@ -410,6 +430,9 @@ func checkOpenOptions(o OpenOptions) error {
 		if err := mcp.New(nil, "", nil, nil).SetIndexBudget(o.Budget); err != nil {
 			return err
 		}
+	}
+	if o.SymlinkDepth != nil && *o.SymlinkDepth < 0 {
+		return fmt.Errorf("symlinkDepth %d: want 0 or more", *o.SymlinkDepth)
 	}
 	switch o.LSPRoots {
 	case "", "single", "auto":
@@ -451,11 +474,9 @@ func (r *Registry) Tools() []mcp.ToolDescriptor {
 	return slices.Clone(r.catalog)
 }
 
-// SetIndexDefaults sets the daemon's --exclude and --index-budget for roots
-// built after the call. Call before Serve.
-func (r *Registry) SetIndexDefaults(excludes []string, budget string) {
-	r.excludes, r.budget = excludes, budget
-}
+// SetIndexDefaults sets the daemon's index flags for roots built after
+// the call. Call before Serve.
+func (r *Registry) SetIndexDefaults(d IndexDefaults) { r.idx = d }
 
 // SetLSPRoots sets --lsp-roots for roots built after the call: auto = a
 // child LSP per project root, at most max running per language. Call

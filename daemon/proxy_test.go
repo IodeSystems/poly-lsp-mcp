@@ -236,6 +236,41 @@ func TestProxyIndexBudgetFailureAndRetry(t *testing.T) {
 	}
 }
 
+// A directory of clones is refused through the daemon as by a stdio
+// server, and the client's --index-anyway, carried in its /open, gets it
+// indexed — the daemon honours the per-client index flags.
+func TestProxyIndexAnywayReachesTheDaemon(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 3 {
+		for name, body := range map[string]string{".git/HEAD": "ref: refs/heads/main\n", "main.go": fmt.Sprintf("package main\n\nfunc Repo%d() {}\n", i)} {
+			p := filepath.Join(dir, fmt.Sprintf("repo%d", i), name)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	resolved, _ := resolvePath(dir)
+	c, stop := startTestDaemon(t, resolved)
+	defer stop()
+
+	h := startProxy(t, c, dir, OpenOptions{})
+	h.reply(h.request("initialize", map[string]any{}), 5*time.Second)
+	if data := h.logged(indexLogger, 30*time.Second, nil); data["state"] != "failed" || !strings.Contains(fmt.Sprint(data["remedy"]), "--index-anyway") {
+		t.Fatalf("index notification = %v", data)
+	}
+
+	h2 := startProxy(t, NewClient(c.socket), dir, OpenOptions{IndexAnyway: true})
+	h2.reply(h2.request("initialize", map[string]any{}), 5*time.Second)
+	h2.logged(indexLogger, 30*time.Second, func(d map[string]any) bool { return d["state"] == "ready" })
+	text, isErr := callText(t, h2.reply(h2.request("tools/call", map[string]any{"name": "node_query", "arguments": map[string]any{"selector": "#Repo1"}}), 30*time.Second))
+	if isErr || !strings.Contains(text, "Repo1") {
+		t.Fatalf("--index-anyway root: isErr=%v %q", isErr, text)
+	}
+}
+
 // tools/list does not wait for the bring-up: the catalog does not depend
 // on the index.
 func TestDaemonToolsDoNotBuildTheRoot(t *testing.T) {

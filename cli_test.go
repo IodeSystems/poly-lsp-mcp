@@ -157,6 +157,24 @@ func TestIndexAndDoctorRefuseDirOfClones(t *testing.T) {
 	}
 }
 
+// The index flags replay too, each --include on its own, so a --restart or
+// an upgrade's new daemon indexes as the old one did.
+func TestDaemonReplaysIndexFlags(t *testing.T) {
+	cmd, _, err := newRoot().Find([]string{"daemon"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--include", "vendor/", "--include", "*.min.js", "--index-anyway", "--symlink-depth", "2", "--exclude", "x", "--index-budget", "5000ops"}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatal(err)
+	}
+	got := replayFlags(cmd.Flags(), "stop", "restart", "help")
+	want := []string{"--exclude=x", "--include=vendor/", "--include=*.min.js", "--index-anyway=true", "--index-budget=5000ops", "--symlink-depth=2"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("replayFlags = %q, want %q", got, want)
+	}
+}
+
 // doctor names a language the workspace holds whose child LSP is not on
 // PATH, says how to install it, and exits non-zero.
 func TestDoctorFlagsMissingLSP(t *testing.T) {

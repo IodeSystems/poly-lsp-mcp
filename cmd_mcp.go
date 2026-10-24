@@ -88,7 +88,7 @@ func mcpCmd(l *loader) *cobra.Command {
 			// The client's index choices travel with its /open: they shape
 			// the root when this open builds it. Only flags given on this
 			// command line; the rest are the daemon's own.
-			opts := daemon.OpenOptions{Excludes: idx.excludes}
+			opts := daemon.OpenOptions{Excludes: idx.excludes, Includes: idx.includes, IndexAnyway: idx.anyway}
 			for _, d := range idx.excludes {
 				if git.CleanExclude(d) == "" {
 					return fmt.Errorf("--exclude %q: want a directory inside the root, relative to it", d)
@@ -96,6 +96,12 @@ func mcpCmd(l *loader) *cobra.Command {
 			}
 			if cmd.Flags().Changed("index-budget") {
 				opts.Budget = idx.budget
+			}
+			if cmd.Flags().Changed("symlink-depth") {
+				if idx.symlinkDepth < 0 {
+					return fmt.Errorf("--symlink-depth %d: want 0 or more", idx.symlinkDepth)
+				}
+				opts.SymlinkDepth = &idx.symlinkDepth
 			}
 			if cmd.Flags().Changed("lsp-roots") {
 				opts.LSPRoots = "single"
@@ -105,11 +111,6 @@ func mcpCmd(l *loader) *cobra.Command {
 			}
 			if legacyTools {
 				log.Print("mcp: --legacy-tools is ignored in --daemon mode (the daemon serves the modern surface)")
-			}
-			// The daemon builds each root's index with its own settings
-			// (include: from its config); these flags do not reach it.
-			if idx.anyway || len(idx.includes) > 0 || cmd.Flags().Changed("symlink-depth") {
-				log.Print("mcp: --index-anyway, --include and --symlink-depth are ignored in --daemon mode")
 			}
 			log.Printf("mcp: proxying root %s to shared daemon (readOnly=%v validate=%v)", root, readOnly, validate)
 			// Reached behind the initialize reply: starting a daemon can

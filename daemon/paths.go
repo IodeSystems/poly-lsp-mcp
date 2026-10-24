@@ -36,8 +36,8 @@ func ConfigHome() string {
 //
 // bind(2) refuses a path longer than sun_path (maxSocketPath), and a deep
 // $HOME or $XDG_RUNTIME_DIR reaches it; then the socket is a short name
-// derived from ConfigHome, in the runtime dir or else the temp dir — the
-// fallback dun's dund uses.
+// derived from ConfigHome, in the runtime dir, else the temp dir, else
+// /tmp — the fallback dun's dund uses.
 func SocketPath() string {
 	p := filepath.Join(ConfigHome(), "daemon.sock")
 	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
@@ -53,7 +53,11 @@ func SocketPath() string {
 			return p
 		}
 	}
-	return filepath.Join(os.TempDir(), name)
+	if p := filepath.Join(os.TempDir(), name); len(p) <= maxSocketPath() {
+		return p
+	}
+	// $TMPDIR is too deep as well.
+	return filepath.Join("/tmp", name)
 }
 
 // maxSocketPath is the longest unix socket path bind accepts: sun_path less

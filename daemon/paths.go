@@ -6,7 +6,7 @@
 // path. The design is a straight port of raglit's daemon lifecycle
 // (state file, detached auto-start, --stop/--restart, health poll) with
 // the TCP listener swapped for a unix socket gated by peer credentials
-// and declared root prefixes. See plan/plan.md "Daemon mode".
+// and declared root prefixes. See docs/design.md, "Daemon".
 package daemon
 
 import (

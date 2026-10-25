@@ -83,7 +83,7 @@ import (
 // audited line by line and the RENAMING block (measured 10/10 on the
 // --validate bench), params/return, and the op list are all load-bearing.
 // The standing candidate if this needs paying back is params/return, which
-// icebox.md records as MEASURED UNUSED — but dropping an op from the
+// aw4 issue i_1m5r2tw1g34cjn13c7neek records as unused — but dropping an op from the
 // description is how ops become undiscoverable, so that is a deliberate
 // decision, not a token trim.
 // 1280 → 1300: ::conflict / ::mine / ::theirs / ::base. THIRD raise in one
@@ -92,7 +92,7 @@ import (
 // now the two-version read), and each was compressed first — this one cost 9
 // tokens after merging params/return into a single line. If the ceiling is
 // meant to bind rather than track, the lever is dropping params/return
-// (icebox.md: MEASURED UNUSED) for ~27, which is a product decision about
+// (aw4 issue i_1m5r2tw1g34cjn13c7neek) for ~27, which is a product decision about
 // the surface, not a wording exercise.
 // 1300 → 1340: node_query `include`, the one-line schema property (38
 // tokens measured). It is the only on-wire way to search inside a dead end

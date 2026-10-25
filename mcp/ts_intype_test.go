@@ -7,7 +7,7 @@ import (
 )
 
 // A TS type reference must count ONCE per occurrence — no doubling. An
-// earlier ❓ (plan.md) reported `Widget::in.type` = 4 on a 2-use fixture,
+// earlier open item reported `Widget::in.type` = 4 on a 2-use fixture,
 // blamed on a TS-specific site dup. It no longer reproduces in any shape
 // (interface / class / generic / export / .tsx / union / cross-file), so
 // this pins the correct behavior: the count equals the real occurrences,

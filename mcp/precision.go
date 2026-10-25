@@ -576,7 +576,7 @@ func (e *engine) confirmSelfCall(n *treeNode, line, col int) bool {
 	// own note, and it is the first thing the lexical rule reported as
 	// recursive. `refSite` records name/line/col/kind/pos/encl and no
 	// QUALIFIER, so there is no cheap way to tell `Write(x)` from `w.Write(x)`
-	// — see icebox.md for what it would take.
+	// — see docs/design.md, "Selector language" (`:recursive`).
 	e.ensureLSPCap()
 	if e.lspLeft <= 0 || !e.s.lspAvailable(n.abs) {
 		e.probeBlocked() // :recursive degrades to false — not an answer a hint may use

@@ -25,7 +25,7 @@ const ancestorChainMaxDepth = 16
 // (language, sha256(content)) for every file in every ancestor
 // branch's tree. When the user later checks out one of those
 // branches, files whose bytes are unchanged hit the cache and skip
-// re-parsing. See Phase 3 in plan.md for the design.
+// re-parsing. The parse cache is described in docs/design.md, "Indexing".
 func (s *Server) kickGitPrewarm() {
 	if !s.gitPrewarm {
 		return

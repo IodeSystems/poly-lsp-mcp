@@ -303,7 +303,7 @@ func TestResolveDefinitionCachedAcrossQueries(t *testing.T) {
 	}
 }
 
-// :recursive is the edge-semantic predicate the icebox parked until the
+// :recursive is the edge-semantic predicate that waited until the
 // precision pass existed. The soundness case: `fib` really recurses, but
 // `func Write` calling `w.Write` (io.Writer's method, same name) must NOT
 // read as recursive — the exact lexical false positive that blocked it.

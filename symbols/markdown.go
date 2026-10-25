@@ -11,7 +11,7 @@ import (
 // The lexical rule that suits YAML and JSON — keep every token, because a
 // config value is a contract — is wrong for prose. Measured on this
 // repo before this existed: markdown was 34,093 sites, 32% of the whole
-// index and second only to Go; `plan/done.md` alone was the heaviest
+// index and second only to Go; one planning doc alone was the heaviest
 // file in the repository at 16,372 sites, more than twice the largest Go
 // file. Half of all indexed names (4,057 of 7,890) appeared ONLY in
 // docs, and the bulk of those were English stopwords — `on` 251 sites,

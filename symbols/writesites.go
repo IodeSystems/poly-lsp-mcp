@@ -20,7 +20,7 @@ import (
 // so no diagnostic gate can catch it, and a textual bench check scored it as
 // passing while it shipped.
 //
-// It is deliberately NOT the general `.write` edge kind that icebox.md parks:
+// It is deliberately NOT the general `.write` edge kind (aw4 issue i_1m5r2tsm88k1pr1ca2wrmq):
 // no cross-file resolution, no aliasing, no pointer writes. It answers "is this
 // occurrence an assignment target, syntactically" and nothing more, because
 // that is all the guard needs and it is the part that is cheap and sound.

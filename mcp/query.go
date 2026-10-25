@@ -4770,7 +4770,7 @@ func (e *engine) pseudoHolds(n *treeNode, ps *selPseudo) bool {
 		// ∀: everything the structure REACHES (domain: subject
 		// constraints relaxed) must also MATCH as written. The domain is
 		// a reachability set, never an enumeration of paths — cycles
-		// cost nothing, and ∀ needs no bound (see the icebox trade note:
+		// cost nothing, and ∀ needs no bound (see docs/known-limits.md, "Query surface":
 		// one non-matching node kills the ∀ even if a clean path exists
 		// beside it; that is what never enumerating costs).
 		matched := e.evalList(ps.inner, n, false)

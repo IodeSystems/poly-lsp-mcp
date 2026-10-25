@@ -8,7 +8,7 @@ package symbols
 // could not match a field line written the way it appears on screen; behind it
 // the comment was being credited to the declaration BELOW, which in
 // typescript, kotlin and c pulled a neighbour's comment into the next span and
-// destroyed it on delete. See plan/bugs.md.
+// destroyed it on delete.
 func trailingCommentClass() bugClass {
 	return bugClass{
 		name:     "a declaration owns the comment trailing it",
@@ -165,7 +165,7 @@ func docBlockAboveClass() bugClass {
 				// comment but a /* … */ block `marginalia`, and only the
 				// first was recognised as a comment at all. The span stops
 				// before the `;`, which is a sibling of the statement — see
-				// the SQL known-limits note in plan/plan.md.
+				// the SQL entry in docs/known-limits.md, "Languages".
 				src: "-- doc for t\nCREATE TABLE t (a int);\n\n" +
 					"/* doc for u */\nCREATE TABLE u (b int);\n",
 				want: map[string]string{

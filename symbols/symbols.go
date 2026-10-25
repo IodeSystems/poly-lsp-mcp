@@ -3,7 +3,7 @@
 // of which child LSP owns it — the unique value-add of poly-lsp-mcp vs any
 // single-language LSP.
 //
-// Three tiers (see plan/plan.md):
+// Three tiers:
 //
 //   - Tier 1 (this file): lexical. Word-token extraction with optional
 //     keyword filtering per language. Cheap, noisy, useful for

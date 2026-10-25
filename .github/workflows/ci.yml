@@ -1,0 +1,59 @@
+name: ci
+
+# Vet and test on Linux and macOS for every push to main and every pull
+# request. The steps are release.yml's test steps, with the same pinned
+# actions; release.yml stays the tag-push build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: vet and test, ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go vet ./...
+          go test -count=1 -timeout 900s ./...
+
+  # The pure-Go tree-sitter runtime is what `go install` builds on a machine
+  # with no C compiler. Same job as release.yml's pure-go.
+  pure-go:
+    name: vet and test, CGO_ENABLED=0
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go vet ./...
+          go test -count=1 -timeout 900s ./...

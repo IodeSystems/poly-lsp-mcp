@@ -39,7 +39,7 @@ func TestMCPDaemonIsTheDefault(t *testing.T) {
 	// leaves no ~/.poly-lsp to make.
 	run := func(t *testing.T, readOnlyHome bool, args ...string) (home, stderr string) {
 		t.Helper()
-		env, home := e2eEnv(t)
+		env, home := e2eHomeEnv(t) // about the default: $HOME/.poly-lsp
 		// Settings that would choose in-process on their own.
 		kept := env[:0:0]
 		for _, kv := range env {

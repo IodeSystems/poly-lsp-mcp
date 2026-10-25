@@ -47,7 +47,7 @@ func TestLockExcludesASecondHolder(t *testing.T) {
 
 // A daemon that cannot take the lock stops before it binds anything.
 func TestServeRefusesWhileTheLockIsHeld(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv(HomeEnv, t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	held, err := TryLock()
 	if err != nil {
@@ -72,6 +72,7 @@ func TestServeRefusesWhileTheLockIsHeld(t *testing.T) {
 // the default falls back to a short hashed name.
 func TestSocketPathFitsSunPath(t *testing.T) {
 	deep := "/" + strings.Repeat("d", 120)
+	t.Setenv(HomeEnv, "") // the $HOME and $XDG_RUNTIME_DIR defaults
 	t.Setenv("XDG_RUNTIME_DIR", deep)
 	p := SocketPath()
 	if len(p) > maxSocketPath() {
@@ -98,7 +99,7 @@ func TestSocketPathFitsSunPath(t *testing.T) {
 // it only while it still names that daemon: after a takeover it names the
 // new one.
 func TestStateCarriesBuildAndIsRemovedOnlyByItsOwner(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv(HomeEnv, t.TempDir())
 	remove, err := WriteState("/s", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -116,5 +117,57 @@ func TestStateCarriesBuildAndIsRemovedOnlyByItsOwner(t *testing.T) {
 	remove()
 	if _, ok := ReadState(); !ok {
 		t.Fatal("the old daemon's exit removed the new daemon's state")
+	}
+}
+
+// $POLY_LSP_HOME moves every daemon path, the socket included, and a home
+// too deep for sun_path gets the hashed fallback, distinct per home.
+// SetHome makes a relative dir absolute and creates it 0700.
+func TestDaemonHomeMovesEveryPath(t *testing.T) {
+	t.Setenv(HomeEnv, "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	cwd := t.TempDir()
+	old, _ := os.Getwd()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(old) }()
+	cwd, _ = os.Getwd() // a symlinked $TMPDIR resolves
+
+	if h, err := SetHome(""); err != nil || h != "" {
+		t.Fatalf("SetHome(\"\") with no env = %q, %v; want the default", h, err)
+	}
+	h, err := SetHome("rel/dh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(cwd, "rel", "dh")
+	if h != want || os.Getenv(HomeEnv) != want {
+		t.Fatalf("SetHome = %q, $%s = %q; want %q", h, HomeEnv, os.Getenv(HomeEnv), want)
+	}
+	if fi, err := os.Stat(want); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("daemon home not created 0700: %v", err)
+	}
+	for _, p := range []string{StatePath(), LogPath(), LockPath(), PrevExePath(), UpgradeFailuresPath(), UsagePath(), StatusDir()} {
+		if filepath.Dir(p) != want {
+			t.Errorf("%s is not in the daemon home %s", p, want)
+		}
+	}
+	if s := SocketPath(); len(want)+len("/daemon.sock") <= maxSocketPath() && s != filepath.Join(want, "daemon.sock") {
+		t.Errorf("SocketPath = %q, want it in the daemon home", s)
+	}
+	// The flag wins over the env.
+	other := t.TempDir()
+	if h, _ := SetHome(other); h != other {
+		t.Errorf("SetHome(flag) = %q, want %q", h, other)
+	}
+
+	deep := filepath.Join(t.TempDir(), strings.Repeat("d", 110))
+	t.Setenv(HomeEnv, deep)
+	p1 := SocketPath()
+	t.Setenv(HomeEnv, deep+"2")
+	p2 := SocketPath()
+	if len(p1) > maxSocketPath() || len(p2) > maxSocketPath() || p1 == p2 || !strings.HasPrefix(filepath.Base(p1), "poly-lsp-") {
+		t.Fatalf("deep daemon homes: SocketPath %q, %q", p1, p2)
 	}
 }

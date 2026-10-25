@@ -74,7 +74,7 @@ func waitExit(t *testing.T, done chan error, d time.Duration) {
 // removing daemon.json and its socket and letting go of the lock, and the
 // next daemon starts in its place.
 func TestDaemonExitsWithNoClientAndNoRoot(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv(HomeEnv, t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	shortIdle(t, 200*time.Millisecond)
 	root, resolved := goWorkspace(t)
@@ -111,7 +111,7 @@ func TestDaemonExitsWithNoClientAndNoRoot(t *testing.T) {
 // With a client-less root kept, the daemon waits --idle-exit, then exits.
 // Child LSPs of the root stop after --root-lsp-grace meanwhile.
 func TestDaemonExitsAfterIdleExitWithARootKept(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv(HomeEnv, t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	shortIdle(t, 50*time.Millisecond)
 	root, resolved := goWorkspace(t)

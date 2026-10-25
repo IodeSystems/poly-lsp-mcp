@@ -15,7 +15,7 @@ import (
 // returns its socket. Stopped at cleanup.
 func serveInProcess(t *testing.T, allow string) string {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv(HomeEnv, t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	cfg, _, _ := config.LoadOrDefault("nonexistent.yaml")
 	reg, _ := cfg.Build()

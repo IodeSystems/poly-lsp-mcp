@@ -49,6 +49,10 @@ type doctorReport struct {
 	Versions  map[string]string `json:"versions,omitempty"` // child LSP → its version line
 	Git       string            `json:"git"`
 	Daemon    string            `json:"daemon"`
+	// DaemonHome is the directory the daemon paths derive from, and Source
+	// what chose it: --daemon-home, $POLY_LSP_HOME or the default.
+	DaemonHome       string `json:"daemonHome"`
+	DaemonHomeSource string `json:"daemonHomeSource"`
 	// DaemonBuild is the running daemon's build identity; DaemonMatches
 	// whether it is this binary's (daemon.BuildID). Absent with no daemon.
 	DaemonBuild   string `json:"daemonBuild,omitempty"`
@@ -83,6 +87,7 @@ func doctorCmd(l *loader) *cobra.Command {
 		asJSON   bool
 		noUpdate bool
 	)
+	var daemonHome func() (string, error)
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check the install: binary on PATH, child LSPs for this workspace's languages, git, daemon",
@@ -102,6 +107,11 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
   poly-lsp-mcp doctor --root ../other --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			fromEnv := os.Getenv(daemon.HomeEnv) != ""
+			home, err := daemonHome()
+			if err != nil {
+				return err
+			}
 			_, reg, err := l.load(false)
 			if err != nil {
 				return err
@@ -115,6 +125,15 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 				Runtime:  ts.Runtime(),
 				Root:     root,
 				Config:   "defaults (no " + l.configPath + ")",
+
+				DaemonHome:       daemon.ConfigHome(),
+				DaemonHomeSource: "default",
+			}
+			switch {
+			case cmd.Flags().Changed("daemon-home"):
+				rep.DaemonHomeSource = "--daemon-home"
+			case home != "" && fromEnv:
+				rep.DaemonHomeSource = "$" + daemon.HomeEnv
 			}
 			if _, err := os.Stat(l.configPath); err == nil {
 				rep.Config = l.configPath
@@ -273,6 +292,7 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 	cmd.Flags().StringVar(&rootPath, "root", ".", "workspace to check the languages of")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the findings as JSON")
 	cmd.Flags().BoolVar(&noUpdate, "no-update-check", false, "do not look for a newer poly-lsp-mcp")
+	daemonHome = daemonHomeFlag(cmd.Flags())
 	return cmd
 }
 
@@ -283,6 +303,7 @@ func printDoctor(r doctorReport) {
 	fmt.Printf("config    %s\n", r.Config)
 	fmt.Printf("git       %s\n", r.Git)
 	fmt.Printf("daemon    %s\n", r.Daemon)
+	fmt.Printf("          home %s (%s); socket %s\n", r.DaemonHome, r.DaemonHomeSource, daemon.SocketPath())
 	var idle int64
 	for _, d := range r.DaemonRoots {
 		who := fmt.Sprintf("%d client(s)", d.Clients)

@@ -18,11 +18,15 @@ import (
 // them. It is the evidence for what the query tree should skip.
 func usageCmd() *cobra.Command {
 	var asJSON bool
+	var daemonHome func() (string, error)
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Summarize node_query and node_edit usage",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if _, err := daemonHome(); err != nil {
+				return err
+			}
 			path := daemon.UsagePath()
 			sum, err := mcp.SummarizeUsage(path)
 			if errors.Is(err, os.ErrNotExist) {
@@ -55,6 +59,7 @@ func usageCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the summary as JSON")
+	daemonHome = daemonHomeFlag(cmd.Flags())
 	return cmd
 }
 

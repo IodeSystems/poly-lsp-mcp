@@ -54,6 +54,7 @@ exit.`,
 	_ = f.MarkHidden("build-id")
 	lifecycle := lifecycleFlags(f)
 	rootsFlag := lspRootsFlags(f)
+	daemonHome := daemonHomeFlag(f)
 	// For every hosted root; a client's /open adds its own excludes and
 	// includes and may set the rest (mcp --daemon passes those it is given).
 	idx := indexFlags(f)
@@ -76,6 +77,9 @@ exit.`,
 			fmt.Println(daemon.BuildID())
 			return nil
 		}
+		if _, err := daemonHome(); err != nil {
+			return err
+		}
 		if stop {
 			return daemon.Stop()
 		}
@@ -89,8 +93,10 @@ exit.`,
 		// What this daemon was started with, recorded in daemon.json: a bare
 		// --restart replays it, and a takeover starts the new build with it.
 		// A takeover daemon's --socket is its side socket, not a choice to
-		// replay; it records the main one when it takes over.
-		skip := []string{"stop", "restart", "help", "build-id", "takeover-from", "warm", "allowed"}
+		// replay; it records the main one when it takes over. The daemon
+		// home travels as $POLY_LSP_HOME (SetHome), not as a flag: a
+		// `--restart --daemon-home X` must still replay the recorded flags.
+		skip := []string{"stop", "restart", "help", "build-id", "takeover-from", "warm", "allowed", "daemon-home"}
 		if *takeoverFrom != 0 {
 			skip = append(skip, "socket")
 		}
@@ -150,6 +156,19 @@ exit.`,
 			TakeoverFrom: *takeoverFrom, Warm: warm, WarmRecent: *warmRecent, IdleExit: *idleExit})
 	}
 	return cmd
+}
+
+// daemonHomeUsage is --daemon-home's help (the backquoted `dir` names the
+// value in --help). dun-style clients look for
+// "$POLY_LSP_HOME" in `mcp --help` to learn the flag exists.
+const daemonHomeUsage = "`dir`ectory for the daemon's state, log, lock, socket, status files and usage log instead of ~/.poly-lsp (and $XDG_RUNTIME_DIR); $" + daemon.HomeEnv + " fallback, the flag wins; a daemon started from here uses it too. Relative paths are made absolute; created 0700 if missing"
+
+// daemonHomeFlag registers --daemon-home; call the result after parsing,
+// before any daemon path is read. It returns the daemon home in use, ""
+// for the default.
+func daemonHomeFlag(f *pflag.FlagSet) func() (string, error) {
+	dir := f.String("daemon-home", "", daemonHomeUsage)
+	return func() (string, error) { return daemon.SetHome(*dir) }
 }
 
 // replayFlags returns the flags set on this command line as --name=value

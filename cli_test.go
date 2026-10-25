@@ -20,11 +20,7 @@ import (
 // binary's — the check a person runs when --daemon answers look stale.
 func TestDoctorReportsTheDaemonBuild(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	// A "running daemon": this test process, recorded as another build.
-	if err := os.MkdirAll(filepath.Join(home, ".poly-lsp"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv(daemon.HomeEnv, home)
 	st := daemon.State{PID: os.Getpid(), Socket: "/nowhere", Build: "0123456789ab/deadbeef"}
 	b, _ := json.Marshal(st)
 	if err := os.WriteFile(daemon.StatePath(), b, 0o600); err != nil {
@@ -59,6 +55,9 @@ func TestDoctorReportsTheDaemonBuild(t *testing.T) {
 	}
 	if rep.UpgradeFailures["bad/00000001"].Failures != 2 || rep.PrevExe != daemon.PrevExePath() {
 		t.Fatalf("upgradeFailures=%v prevExe=%q", rep.UpgradeFailures, rep.PrevExe)
+	}
+	if rep.DaemonHome != home || rep.DaemonHomeSource != "$"+daemon.HomeEnv {
+		t.Errorf("daemonHome=%q source=%q, want %q from $%s", rep.DaemonHome, rep.DaemonHomeSource, home, daemon.HomeEnv)
 	}
 	if !strings.Contains(strings.Join(rep.Advisories, "\n"), "REFUSED") {
 		t.Errorf("advisories do not say the build is refused: %v", rep.Advisories)
@@ -119,6 +118,7 @@ func TestDaemonReplayFlags(t *testing.T) {
 // --index-anyway` indexes it.
 func TestIndexAndDoctorRefuseDirOfClones(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv(daemon.HomeEnv, t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
 	for _, r := range []string{"a", "b", "c"} {

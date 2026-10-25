@@ -32,16 +32,36 @@ func buildTwo(t *testing.T, dir string) (a, b string) {
 	return a, b
 }
 
-// e2eEnv is a sandbox for real daemons: their own home, runtime dir and
-// cache, no LSP_REBUILD_PATH, and a PATH with no child LSP or git on it,
-// so a root comes up from tree-sitter alone, fast.
+// e2eEnv is a sandbox for real daemons: their own daemon home
+// ($POLY_LSP_HOME), runtime dir and cache, no LSP_REBUILD_PATH, and a PATH
+// with no child LSP or git on it, so a root comes up from tree-sitter
+// alone, fast. $HOME stays the real one; nothing of the daemon's is under it.
 func e2eEnv(t *testing.T) (env []string, home string) {
 	t.Helper()
 	home = t.TempDir()
 	rt := t.TempDir()
 	empty := t.TempDir()
-	env = append(childEnv(), "HOME="+home, "XDG_RUNTIME_DIR="+rt, "XDG_CACHE_HOME="+filepath.Join(home, ".cache"), "PATH="+empty)
+	env = append(childEnv(), HomeEnv+"="+home, "XDG_RUNTIME_DIR="+rt, "XDG_CACHE_HOME="+filepath.Join(home, ".cache"), "PATH="+empty)
 	// This process reads the same daemon.json the daemons write.
+	t.Setenv(HomeEnv, home)
+	t.Setenv("XDG_RUNTIME_DIR", rt)
+	return env, home
+}
+
+// e2eHomeEnv is e2eEnv for a test of the default paths: a sandbox $HOME
+// and no $POLY_LSP_HOME, so the daemon's files are under $HOME/.poly-lsp.
+func e2eHomeEnv(t *testing.T) (env []string, home string) {
+	t.Helper()
+	home = t.TempDir()
+	rt := t.TempDir()
+	empty := t.TempDir()
+	for _, kv := range childEnv() {
+		if !strings.HasPrefix(kv, HomeEnv+"=") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "HOME="+home, "XDG_RUNTIME_DIR="+rt, "XDG_CACHE_HOME="+filepath.Join(home, ".cache"), "PATH="+empty)
+	t.Setenv(HomeEnv, "")
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_RUNTIME_DIR", rt)
 	return env, home
@@ -67,8 +87,8 @@ func waitState(t *testing.T, d time.Duration, what string, ok func(State) bool) 
 // binary; A starts B beside itself, B warms the root and takes the
 // socket; A drains and exits; and the proxy, still the same process, is
 // served by B. Read-only calls made all through the swap succeed. The
-// workspace is outside $HOME, the default allow list: A's open adds it,
-// and B admits it from its start (--allowed), so it warms it.
+// workspace is outside A's --allow list: A's open adds it, and B admits it
+// from its start (--allowed), so it warms it.
 func TestBlueGreenUpgradeEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the binary twice")
@@ -95,7 +115,7 @@ func TestBlueGreenUpgradeEndToEnd(t *testing.T) {
 	}
 	defer logf.Close()
 
-	daemonA := exec.Command(a, "daemon")
+	daemonA := exec.Command(a, "daemon", "--allow="+t.TempDir())
 	daemonA.Env, daemonA.Stdout, daemonA.Stderr, daemonA.Dir = env, logf, logf, home
 	if err := daemonA.Start(); err != nil {
 		t.Fatal(err)

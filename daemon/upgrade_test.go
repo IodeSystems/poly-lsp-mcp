@@ -41,7 +41,7 @@ func fakeBinary(t *testing.T, content string) string {
 // older commit, not to a missing file, not to a file that says another
 // build than claimed, one at a time.
 func TestUpgradeRequestIsVetted(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // the refused-builds record
+	t.Setenv(HomeEnv, t.TempDir()) // the refused-builds record
 	ran := make(chan UpgradeRequest, 4)
 	release := make(chan struct{})
 	u := newUpgrader(func(r UpgradeRequest) error { ran <- r; <-release; return nil })
@@ -102,7 +102,7 @@ func waitIdle(t *testing.T, u *upgrader) {
 // A daemon whose binary is replaced by another build asks itself to move
 // to it; a touch that leaves the content alone does not.
 func TestWatchSelfAsksForAnUpgradeWhenTheBinaryIsReplaced(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // the refused-builds record
+	t.Setenv(HomeEnv, t.TempDir()) // the refused-builds record
 	old := selfCheck
 	selfCheck = 10 * time.Millisecond
 	defer func() { selfCheck = old }()

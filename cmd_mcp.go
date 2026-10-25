@@ -71,8 +71,12 @@ func mcpCmd(l *loader) *cobra.Command {
 	lifecycle := lifecycleFlags(f)
 	rootsFlag := lspRootsFlags(f)
 	idx := indexFlags(f)
+	daemonHome := daemonHomeFlag(f)
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		if _, err := daemonHome(); err != nil {
+			return err
+		}
 		roots, err := rootsFlag()
 		if err != nil {
 			return err
@@ -332,11 +336,15 @@ func lspRootsFlags(f *pflag.FlagSet) func() (lspRoots, error) {
 // (stdio mcp servers and daemon roots), from their status files.
 func statusCmd() *cobra.Command {
 	var asJSON bool
+	var daemonHome func() (string, error)
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "List the child LSPs and index cost of every running poly-lsp-mcp process",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if _, err := daemonHome(); err != nil {
+				return err
+			}
 			dir := daemon.StatusDir()
 			files, err := multiplex.ReadStatusFiles(dir)
 			if err != nil {
@@ -386,6 +394,7 @@ func statusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the status files as one JSON array")
+	daemonHome = daemonHomeFlag(cmd.Flags())
 	return cmd
 }
 

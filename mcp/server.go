@@ -179,6 +179,14 @@ type Server struct {
 	// are written together on every notification.
 	sentDocs map[string][32]byte
 
+	// openGen is the diagnostic store's generation for a URI at the
+	// moment we last sent it didOpen. A publish without a document
+	// version that is the FIRST since that didOpen is not taken as an
+	// edit's result: sourcekit-lsp publishes a just-opened file about a
+	// second later, computed before its build settings load, so a broken
+	// edit reads clean (see waitForEditedText). Same lock as openDocs.
+	openGen map[string]uint64
+
 	// defCache memoizes textDocument/definition answers across queries: a
 	// warm session resolves the same site (an ::in target with N callers,
 	// a :recursive self-call) once instead of per query. Keyed on the
@@ -224,10 +232,13 @@ type Server struct {
 	diagnosticSettle    time.Duration
 	diagnosticSettleSet bool
 
-	// diagnosticWait is the per-edit deadline for publishDiagnostics.
-	// 0 means use the default (1500ms). Tests set a smaller value to
-	// stay fast.
+	// diagnosticWait is the per-edit deadline for the child's diagnostics
+	// of the edited text (--validate-wait). 0 means use the default.
 	diagnosticWait time.Duration
+	// sessionWaits overrides diagnosticWait per daemon session: each
+	// proxy carries its own --validate-wait (CallOptions.ValidateWait).
+	sessionWaitsMu sync.Mutex
+	sessionWaits   map[sessionID]time.Duration
 
 	// proactiveOpen controls whether handleInitialize, after spawning
 	// the manager, walks the workspace and sends didOpen for every
@@ -296,7 +307,10 @@ type Server struct {
 	resources map[string]Resource
 }
 
-const defaultDiagnosticWait = 1500 * time.Millisecond
+// defaultDiagnosticWait caps how long an edit waits for diagnostics of
+// the edited text (--validate-wait). Past it the edit is kept and
+// reported as not validated (validationSkipped: lsp-timeout).
+const defaultDiagnosticWait = 2 * time.Second
 
 // defaultDiagnosticSettle is the quiet window the SIBLING rollup waits
 // out before sampling the store. It is the price of not racing gopls:
@@ -318,6 +332,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		schemas:       schemas,
 		openDocs:      map[string]int32{},
 		sentDocs:      map[string][32]byte{},
+		openGen:       map[string]uint64{},
 		proactiveOpen: true,
 		gitPrewarm:    true,
 		fileWatch:     true,
@@ -502,14 +517,35 @@ func (s *Server) SetManager(mgr *multiplex.Manager) {
 	}
 }
 
-// SetDiagnosticWait overrides the per-edit deadline for waiting on
-// publishDiagnostics. Tests use this to keep fast; main.go leaves it
-// at the default (1500ms).
+// SetDiagnosticWait sets how long an edit waits for the child LSP's
+// diagnostics of the edited text (--validate-wait; default 2s).
 func (s *Server) SetDiagnosticWait(d time.Duration) {
 	s.diagnosticWait = d
 }
 
+// setSessionWait records a daemon session's --validate-wait; 0 leaves
+// the server's own.
+func (s *Server) setSessionWait(sess sessionID, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.sessionWaitsMu.Lock()
+	defer s.sessionWaitsMu.Unlock()
+	if s.sessionWaits == nil {
+		s.sessionWaits = map[sessionID]time.Duration{}
+	}
+	s.sessionWaits[sess] = d
+}
+
+// diagWaitDuration is the active session's wait (the edit holding
+// editMu), else the server's, else the default.
 func (s *Server) diagWaitDuration() time.Duration {
+	s.sessionWaitsMu.Lock()
+	d, ok := s.sessionWaits[s.activeSession]
+	s.sessionWaitsMu.Unlock()
+	if ok {
+		return d
+	}
 	if s.diagnosticWait > 0 {
 		return s.diagnosticWait
 	}

@@ -84,6 +84,9 @@ func (s *Server) RollbackSession(sess string) (discarded int, ok bool) {
 	s.editMu.Lock()
 	defer s.editMu.Unlock()
 	sid := normSession(sess)
+	s.sessionWaitsMu.Lock()
+	delete(s.sessionWaits, sid)
+	s.sessionWaitsMu.Unlock()
 	b := s.batches[sid]
 	if b == nil {
 		return 0, false

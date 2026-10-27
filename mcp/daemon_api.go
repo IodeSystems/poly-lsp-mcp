@@ -127,6 +127,10 @@ func (s *Server) StopLSPs() int {
 type CallOptions struct {
 	ReadOnly bool // reject mutating tools for this call
 	Validate bool // force revert-on-new-diagnostics for this edit
+	// ValidateWait is the client's --validate-wait: how long its edits
+	// wait for diagnostics of the edited text. Not a tightening policy —
+	// each client picks its own latency; 0 keeps the daemon's.
+	ValidateWait time.Duration
 }
 
 // CallTool invokes a registered MCP tool in-process — the exported seam
@@ -156,6 +160,7 @@ func (s *Server) CallTool(sess, name string, args json.RawMessage, opts CallOpti
 	if opts.Validate && IsMutatingTool(name) {
 		args = withValidate(args)
 	}
+	s.setSessionWait(normSession(sess), opts.ValidateWait)
 	return tool.Handler(s, normSession(sess), args)
 }
 

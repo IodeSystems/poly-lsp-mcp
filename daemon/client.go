@@ -22,9 +22,10 @@ import (
 // bind the session's lifetime. readOnlyHeader / validateHeader carry the
 // per-connection policy the daemon enforces at its boundary.
 const (
-	sessionHeader  = "X-Poly-Session"
-	readOnlyHeader = "X-Poly-Read-Only"
-	validateHeader = "X-Poly-Validate"
+	sessionHeader      = "X-Poly-Session"
+	readOnlyHeader     = "X-Poly-Read-Only"
+	validateHeader     = "X-Poly-Validate"
+	validateWaitHeader = "X-Poly-Validate-Wait"
 )
 
 // Client dials a daemon over its unix socket. The URL host is irrelevant
@@ -36,7 +37,10 @@ type Client struct {
 	session  string
 	readOnly bool
 	validate bool
-	hc       *http.Client
+	// validateWait is the proxy's --validate-wait; 0 sends none and the
+	// daemon's own applies.
+	validateWait time.Duration
+	hc           *http.Client
 }
 
 // SetPolicy declares this client's per-connection policy (from the proxy's
@@ -48,6 +52,10 @@ func (c *Client) SetPolicy(readOnly, validate bool) {
 	c.validate = validate
 }
 
+// SetValidateWait declares how long this client's edits wait for the
+// child LSP's diagnostics of the edited text (the proxy's --validate-wait).
+func (c *Client) SetValidateWait(d time.Duration) { c.validateWait = d }
+
 // setHeaders stamps the session + policy headers on a request.
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set(sessionHeader, c.session)
@@ -56,6 +64,9 @@ func (c *Client) setHeaders(req *http.Request) {
 	}
 	if c.validate {
 		req.Header.Set(validateHeader, "true")
+	}
+	if c.validateWait > 0 {
+		req.Header.Set(validateWaitHeader, c.validateWait.String())
 	}
 }
 
@@ -83,7 +94,7 @@ func (c *Client) retarget(socket string) *Client {
 		return c
 	}
 	n := NewClient(socket)
-	n.session, n.readOnly, n.validate = c.session, c.readOnly, c.validate
+	n.session, n.readOnly, n.validate, n.validateWait = c.session, c.readOnly, c.validate, c.validateWait
 	return n
 }
 

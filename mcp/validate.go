@@ -39,6 +39,7 @@ type editOutcome struct {
 	NewErrors    []string // the error diagnostics THIS edit added (code∷message)
 	Validated    bool     // proven clean: LSP answered, no new errors
 	Skipped      string   // "" | "no-lsp" | "lsp-timeout" — safety not provable
+	SkipNote     string   // why, in words, when Skipped is lsp-timeout
 
 	// LostWrites names variables this edit stopped ever ASSIGNING while
 	// leaving them referenced — the one breakage class no diagnostic sees.
@@ -302,10 +303,7 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 	}
 	if !diags.Available || diags.TimedOut {
 		// Cannot PROVE safety — apply, but flag it loudly (fail-open).
-		oc.Skipped = "no-lsp"
-		if diags.TimedOut {
-			oc.Skipped = "lsp-timeout"
-		}
+		oc.Skipped, oc.SkipNote = s.skipped(diags)
 		return oc, nil
 	}
 	introduced := fingerprintMinus(s.settleErrorFingerprint(3*time.Second), baseline)
@@ -418,10 +416,7 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 		return oc
 	}
 	if !diags.Available || diags.TimedOut {
-		oc.Skipped = "no-lsp"
-		if diags.TimedOut {
-			oc.Skipped = "lsp-timeout"
-		}
+		oc.Skipped, oc.SkipNote = t.s.skipped(diags)
 		return oc
 	}
 	introduced := fingerprintMinus(t.s.settleErrorFingerprint(3*time.Second), t.baseline)
@@ -447,6 +442,15 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 	}
 	oc.Reverted = !oc.RevertFailed
 	return oc
+}
+
+// skipped names why an edit could not be validated: no child LSP, or no
+// diagnostics of the edited text within the wait (--validate-wait).
+func (s *Server) skipped(d editDiagnostics) (reason, note string) {
+	if !d.TimedOut {
+		return "no-lsp", ""
+	}
+	return "lsp-timeout", fmt.Sprintf("validation timed out after %s: the child LSP published no diagnostics for the edited text; edit kept, not validated", s.diagWaitDuration())
 }
 
 // currentBatch / setBatch / closeBatch are session-keyed — see session.go.
@@ -619,6 +623,9 @@ func (oc editOutcome) attach(p map[string]any) {
 	} else if oc.Skipped != "" {
 		p["validated"] = false
 		p["validationSkipped"] = oc.Skipped
+		if oc.SkipNote != "" {
+			p["validationNote"] = oc.SkipNote
+		}
 	}
 	if len(oc.LostWrites) > 0 {
 		// `alert` sorts before `diagnostics`, for the reason the rejection's
@@ -651,6 +658,9 @@ func (oc editOutcome) annotate(p map[string]any) {
 	} else if oc.Skipped != "" {
 		p["validated"] = false
 		p["validationSkipped"] = oc.Skipped
+		if oc.SkipNote != "" {
+			p["validationNote"] = oc.SkipNote
+		}
 	}
 }
 

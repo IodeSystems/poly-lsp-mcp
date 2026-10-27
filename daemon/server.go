@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
@@ -122,7 +124,10 @@ type callIn struct {
 	// the daemon baseline (a read-only daemon stays read-only regardless).
 	ReadOnly bool `header:"X-Poly-Read-Only"`
 	Validate bool `header:"X-Poly-Validate"`
-	Body     struct {
+	// ValidateWait is the client's --validate-wait (a Go duration); empty
+	// keeps the daemon's.
+	ValidateWait string `header:"X-Poly-Validate-Wait"`
+	Body         struct {
 		Root      string          `json:"root"`
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -402,6 +407,13 @@ func (h *host) handler() (http.Handler, error) {
 			pol := mcp.CallOptions{
 				ReadOnly: reg.readOnly || in.ReadOnly,
 				Validate: reg.validate || in.Validate,
+			}
+			if in.ValidateWait != "" {
+				d, err := time.ParseDuration(in.ValidateWait)
+				if err != nil || d <= 0 {
+					return nil, huma.Error400BadRequest(fmt.Sprintf("X-Poly-Validate-Wait %q: want a positive duration such as 2s", in.ValidateWait))
+				}
+				pol.ValidateWait = d
 			}
 			content, isError, cerr := srv.CallTool(in.Session, in.Body.Name, in.Body.Arguments, pol)
 			if cerr != nil {

@@ -81,7 +81,8 @@ func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 	srv.SetLegacyTools(true)
 	srv.SetManager(multiplex.NewManager(reg))
 	srv.SetValidateEdits(true)
-	// sourcekit-lsp loads the package before its first diagnostics.
+	// sourcekit-lsp loads the package before its first complete
+	// diagnostics, 2-3 s after the open: past the 2 s default.
 	srv.SetDiagnosticWait(60 * time.Second)
 
 	sIn, cOut := io.Pipe()
@@ -100,11 +101,10 @@ func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 		}
 		return m
 	}
-	// Wait for sourcekit-lsp's first publish for the file the server
-	// opened at bring-up. It arrives a second or more after the open, and
-	// carries no document version; an edit sent before it would take that
-	// publish (for the OLD text) as its own result.
-	waitPublished(t, srv, mainPath)
+	// No settle wait: the edit goes in right after bring-up, while
+	// sourcekit-lsp's first publish for the file (unversioned, computed
+	// before its build settings load) is still due. The edit must not take
+	// that publish as its own result (waitForEditedText).
 	lines := strings.Count(orig, "\n") + 1
 
 	broken := "func greet() -> String {\n    return doesNotExist()\n}\n\nprint(greet())\n"

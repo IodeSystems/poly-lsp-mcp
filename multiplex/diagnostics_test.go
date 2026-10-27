@@ -12,7 +12,7 @@ func TestDiagnosticStorePutGet(t *testing.T) {
 	if got := s.Get("file:///x.go"); got != nil {
 		t.Errorf("unpublished URI = %+v, want nil", got)
 	}
-	s.put("file:///x.go", []Diagnostic{{Message: "boom", Severity: 1}})
+	s.put("file:///x.go", []Diagnostic{{Message: "boom", Severity: 1}}, nil)
 	got := s.Get("file:///x.go")
 	if len(got) != 1 || got[0].Message != "boom" {
 		t.Errorf("Get = %+v, want one boom", got)
@@ -21,7 +21,7 @@ func TestDiagnosticStorePutGet(t *testing.T) {
 
 func TestDiagnosticStoreWaitAfterImmediateReturn(t *testing.T) {
 	s := NewDiagnosticStore()
-	s.put("file:///x.go", []Diagnostic{{Message: "old"}})
+	s.put("file:///x.go", []Diagnostic{{Message: "old"}}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -42,7 +42,7 @@ func TestDiagnosticStoreWaitAfterBlocksThenWakes(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		s.put("file:///x.go", []Diagnostic{{Message: "fresh"}})
+		s.put("file:///x.go", []Diagnostic{{Message: "fresh"}}, nil)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -58,7 +58,7 @@ func TestDiagnosticStoreWaitAfterBlocksThenWakes(t *testing.T) {
 
 func TestDiagnosticStoreWaitAfterTimeoutReturnsLatest(t *testing.T) {
 	s := NewDiagnosticStore()
-	s.put("file:///x.go", []Diagnostic{{Message: "stale"}})
+	s.put("file:///x.go", []Diagnostic{{Message: "stale"}}, nil)
 	since := s.Gen("file:///x.go") // since==current; nothing newer will come
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -100,7 +100,7 @@ func TestDiagnosticStoreAttachParsesPublish(t *testing.T) {
 		if p.Diagnostics == nil {
 			p.Diagnostics = []Diagnostic{}
 		}
-		s.put(p.URI, p.Diagnostics)
+		s.put(p.URI, p.Diagnostics, nil)
 	})
 
 	if handler == nil {
@@ -130,8 +130,8 @@ func TestDiagnosticStoreEmptyListClearsErrors(t *testing.T) {
 	// gopls publishes []diagnostics to mean "this file is now clean".
 	// Last-write-wins must honor that.
 	s := NewDiagnosticStore()
-	s.put("file:///x.go", []Diagnostic{{Message: "broken"}})
-	s.put("file:///x.go", []Diagnostic{}) // cleared
+	s.put("file:///x.go", []Diagnostic{{Message: "broken"}}, nil)
+	s.put("file:///x.go", []Diagnostic{}, nil) // cleared
 	got := s.Get("file:///x.go")
 	if got == nil || len(got) != 0 {
 		t.Errorf("got = %+v, want empty (non-nil)", got)
@@ -147,7 +147,7 @@ func TestWaitAnyAfterSettlesAcrossURIs(t *testing.T) {
 	s := NewDiagnosticStore()
 
 	// A publish that already happened is reported without blocking.
-	s.put("file:///a.go", []Diagnostic{{Message: "boom"}})
+	s.put("file:///a.go", []Diagnostic{{Message: "boom"}}, nil)
 	if got, more := s.WaitAnyAfter(context.Background(), 0, time.Second); !more || got != 1 {
 		t.Fatalf("WaitAnyAfter(since=0) = (%d, %v), want (1, true)", got, more)
 	}
@@ -166,7 +166,7 @@ func TestWaitAnyAfterSettlesAcrossURIs(t *testing.T) {
 	// publish for a URI it never asked about wakes it.
 	go func() {
 		time.Sleep(30 * time.Millisecond)
-		s.put("file:///sibling.go", []Diagnostic{{Message: "fallout"}})
+		s.put("file:///sibling.go", []Diagnostic{{Message: "fallout"}}, nil)
 	}()
 	got, more := s.WaitAnyAfter(context.Background(), 1, 2*time.Second)
 	if !more || got != 2 {
@@ -192,5 +192,21 @@ func TestWaitAnyAfterHonoursContext(t *testing.T) {
 	}
 	if waited := time.Since(start); waited > 2*time.Second {
 		t.Errorf("cancelled wait took %v, want ~20ms", waited)
+	}
+}
+
+// A publish's document version is kept with it; one without a version
+// clears the previous one, so an unversioned publish is never read as
+// carrying the version of an earlier one.
+func TestDiagnosticStoreLatestCarriesVersion(t *testing.T) {
+	s := NewDiagnosticStore()
+	v := 3
+	s.put("file:///x.go", []Diagnostic{{Message: "a"}}, &v)
+	if _, gen, got, ok := s.Latest("file:///x.go"); !ok || got != 3 || gen != 1 {
+		t.Fatalf("Latest = gen %d version %d versioned %v, want 1 3 true", gen, got, ok)
+	}
+	s.put("file:///x.go", []Diagnostic{}, nil)
+	if _, gen, _, ok := s.Latest("file:///x.go"); ok || gen != 2 {
+		t.Fatalf("after an unversioned publish: gen %d versioned %v, want 2 false", gen, ok)
 	}
 }

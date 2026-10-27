@@ -46,6 +46,13 @@ type DiagnosticStore struct {
 	gen    map[string]uint64
 	chans  map[string][]chan struct{}
 
+	// version is the document version the latest publish for a URI
+	// carried; a URI is absent when that publish carried none. gopls and
+	// clangd send it for open documents, sourcekit-lsp never does. It is
+	// what tells an edit's wait a publish for the edited text from one
+	// for the text before it.
+	version map[string]int
+
 	// total counts publishes across ALL URIs, with anyChans waking on
 	// each one. A per-URI gen cannot answer "has the server stopped
 	// talking yet?", which is the question a caller must ask before
@@ -57,9 +64,10 @@ type DiagnosticStore struct {
 
 func NewDiagnosticStore() *DiagnosticStore {
 	return &DiagnosticStore{
-		latest: map[string][]Diagnostic{},
-		gen:    map[string]uint64{},
-		chans:  map[string][]chan struct{}{},
+		latest:  map[string][]Diagnostic{},
+		gen:     map[string]uint64{},
+		chans:   map[string][]chan struct{}{},
+		version: map[string]int{},
 	}
 }
 
@@ -73,6 +81,7 @@ func (s *DiagnosticStore) Attach(c *Child) {
 		}
 		var p struct {
 			URI         string       `json:"uri"`
+			Version     *int         `json:"version"`
 			Diagnostics []Diagnostic `json:"diagnostics"`
 		}
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -81,13 +90,18 @@ func (s *DiagnosticStore) Attach(c *Child) {
 		if p.Diagnostics == nil {
 			p.Diagnostics = []Diagnostic{}
 		}
-		s.put(p.URI, p.Diagnostics)
+		s.put(p.URI, p.Diagnostics, p.Version)
 	})
 }
 
-func (s *DiagnosticStore) put(uri string, diags []Diagnostic) {
+func (s *DiagnosticStore) put(uri string, diags []Diagnostic, version *int) {
 	s.mu.Lock()
 	s.latest[uri] = diags
+	if version != nil {
+		s.version[uri] = *version
+	} else {
+		delete(s.version, uri)
+	}
 	s.gen[uri]++
 	s.total++
 	waiters := s.chans[uri]
@@ -160,6 +174,16 @@ func (s *DiagnosticStore) Get(uri string) []Diagnostic {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.latest[uri]
+}
+
+// Latest returns uri's latest published diagnostics with the generation
+// they arrived at and the document version they carried; versioned is
+// false when that publish carried no version.
+func (s *DiagnosticStore) Latest(uri string) (diags []Diagnostic, gen uint64, version int, versioned bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	version, versioned = s.version[uri]
+	return s.latest[uri], s.gen[uri], version, versioned
 }
 
 // Snapshot returns a copy of the entire store as URI → []Diagnostic.

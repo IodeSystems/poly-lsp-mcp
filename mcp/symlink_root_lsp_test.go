@@ -25,6 +25,10 @@ func TestMain(m *testing.M) {
 		runFakeDefLSP()
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == fakeDiagLSPArg {
+		runFakeDiagLSP()
+		return
+	}
 	os.Exit(m.Run())
 }
 

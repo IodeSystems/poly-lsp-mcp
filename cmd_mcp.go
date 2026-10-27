@@ -35,6 +35,7 @@ func mcpCmd(l *loader) *cobra.Command {
 		noDaemon       bool
 		readCharBudget int
 		hookPath       string
+		validateWait   time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "mcp",
@@ -60,6 +61,7 @@ func mcpCmd(l *loader) *cobra.Command {
 	// problem — the known one being a never-analyzed file with pre-existing
 	// errors, which has no baseline and can false-revert its first edit.
 	f.BoolVar(&validate, "validate", true, "revert-on-new-diagnostics: an edit that introduces a new error is rolled back instead of landing (needs a child LSP; degrades to apply-and-flag without one)")
+	f.DurationVar(&validateWait, "validate-wait", 2*time.Second, "how long an edit waits for the child LSP's diagnostics of the edited text; past it the edit is kept and reported not validated (validationSkipped: lsp-timeout). A cold child (sourcekit-lsp loading a package) can need longer")
 	f.BoolVar(&noValidate, "no-validate", false, "turn OFF revert-on-new-diagnostics (see --validate); for when validation itself misfires, e.g. a never-analyzed file with pre-existing errors")
 	// Daemon mode is the default. --daemon stays accepted: client configs
 	// written when it was opt-in pass it, and dun detects the proxy by the
@@ -86,6 +88,9 @@ func mcpCmd(l *loader) *cobra.Command {
 		}
 		if noValidate {
 			validate = false
+		}
+		if validateWait <= 0 {
+			return fmt.Errorf("--validate-wait %s: want a positive duration", validateWait)
 		}
 		root, err := filepath.Abs(rootPath)
 		if err != nil {
@@ -157,6 +162,7 @@ func mcpCmd(l *loader) *cobra.Command {
 					// Carry this client's policy to the daemon (enforced
 					// per-connection at its boundary).
 					client.SetPolicy(readOnly, validate)
+					client.SetValidateWait(validateWait)
 					return client, nil
 				}
 				// The file-access hook runs here, client-side, with this
@@ -204,6 +210,7 @@ func mcpCmd(l *loader) *cobra.Command {
 			log.Printf("mcp: READ-ONLY — mutating tools are not registered")
 		}
 		srv.SetValidateEdits(validate)
+		srv.SetDiagnosticWait(validateWait)
 		if hookPath != "" {
 			srv.SetFileAccessHook(&mcp.FileHook{Path: hookPath})
 			log.Printf("mcp: file-access hook armed: %s", hookPath)

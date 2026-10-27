@@ -311,6 +311,7 @@ func (s *Server) notifyChildOfOpen(child *multiplex.Child, uri string, content [
 		return
 	}
 	s.openDocs[uri] = 1
+	s.openGen[uri] = s.storeGen(uri)
 	s.openDocsMu.Unlock()
 	s.recordSent(uri, content)
 
@@ -362,10 +363,12 @@ func (s *Server) replayOpenDocs(lang string, child *multiplex.Child) {
 		if err != nil {
 			delete(s.openDocs, uri)
 			delete(s.sentDocs, uri)
+			delete(s.openGen, uri)
 			s.openDocsMu.Unlock()
 			continue
 		}
 		s.openDocs[uri] = 1
+		s.openGen[uri] = s.storeGen(uri)
 		s.openDocsMu.Unlock()
 		s.recordSent(uri, content)
 		if err := child.Notify("textDocument/didOpen", map[string]any{
@@ -446,6 +449,63 @@ func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.Diagnostic
 	}
 }
 
+// waitForEditedText waits for uri's diagnostics of the text just sent as
+// document version `version`, and reports false when ctx ends first. A
+// publish arriving after the edit is not enough: it can describe the
+// text before it.
+//
+//   - A publish carrying a document version (gopls, clangd) is the
+//     edited text's when that version is at least `version`; an older
+//     one is skipped.
+//   - A publish without one (sourcekit-lsp) is skipped when it is the
+//     first since the URI's didOpen. Measured with sourcekit-lsp 6.4.1:
+//     a just-opened file is published about 1 s later with no semantic
+//     errors at all (build settings not loaded yet; an undeclared call
+//     reads clean), then again 1-3 s later with them. The second is
+//     taken. A later publish is then taken once no other arrives for the
+//     settle window (diagSettleDuration).
+//
+// Pull diagnostics (textDocument/diagnostic) would be the clean answer
+// but neither gopls 0.24 nor sourcekit-lsp 6.4.1 advertises it to this
+// client, and sourcekit-lsp's answer right after an open is the same
+// empty list (measured, 2026-10-27).
+func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.DiagnosticStore, uri string, since uint64, version int32) ([]multiplex.Diagnostic, bool) {
+	s.openDocsMu.Lock()
+	openGen, opened := s.openGen[uri]
+	s.openDocsMu.Unlock()
+	after := since
+	for {
+		store.WaitAfter(ctx, uri, after)
+		if ctx.Err() != nil {
+			return nil, false
+		}
+		diags, gen, v, versioned := store.Latest(uri)
+		switch {
+		case versioned && v >= int(version):
+			return diags, true
+		case versioned:
+			after = gen // for an earlier version of the text
+			continue
+		case opened && gen == openGen+1:
+			after = gen // the first publish since didOpen
+			continue
+		}
+		// Unversioned: take the last of a burst.
+		quiet := s.diagSettleDuration()
+		for quiet > 0 {
+			qctx, cancel := context.WithTimeout(ctx, quiet)
+			store.WaitAfter(qctx, uri, gen)
+			cancel()
+			next, g, _, _ := store.Latest(uri)
+			if g == gen {
+				break
+			}
+			diags, gen = next, g
+		}
+		return diags, true
+	}
+}
+
 func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, opts diagnosticOptions) editDiagnostics {
 	if s.manager == nil || len(uris) == 0 {
 		return editDiagnostics{Available: false, Items: []diagnosticJSON{}}
@@ -453,9 +513,10 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 
 	store := s.manager.Diagnostics()
 	type captured struct {
-		uri   string
-		child *multiplex.Child
-		since uint64
+		uri     string
+		child   *multiplex.Child
+		since   uint64
+		version int32
 	}
 
 	// Pre-edit snapshot of every URI's gen counter. Anything that
@@ -474,8 +535,8 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 		// Capture gen BEFORE sending notifications so WaitAfter wakes
 		// on any publish that arrives as a consequence of this edit.
 		since := store.Gen(uri)
-		s.notifyChildOfEdit(child, uri, contents[uri])
-		tracked = append(tracked, captured{uri: uri, child: child, since: since})
+		version := s.notifyChildOfEdit(child, uri, contents[uri])
+		tracked = append(tracked, captured{uri: uri, child: child, since: since, version: version})
 		editedURIs[uri] = struct{}{}
 	}
 
@@ -490,14 +551,16 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 	out := editDiagnostics{Available: true, Items: []diagnosticJSON{}}
 	limit := opts.diagnosticLimit()
 
-	// Phase 1: wait for each edited URI's gen to advance. Diagnostics
-	// for the edited URIs are added first so they show up at the top
-	// of the response — the cap-overflow ordering then favors the
-	// agent's direct edit over sibling fallout.
+	// Phase 1: wait for each edited URI's diagnostics OF THE EDITED
+	// TEXT (waitForEditedText). Diagnostics for the edited URIs are added
+	// first so they show up at the top of the response — the cap-overflow
+	// ordering then favors the agent's direct edit over sibling fallout.
+	// A URI that got none within the deadline reports none: what the
+	// store holds for it describes other text.
 	editedDiags := make(map[string][]multiplex.Diagnostic, len(tracked))
 	for _, c := range tracked {
-		diags := store.WaitAfter(ctx, c.uri, c.since)
-		if ctx.Err() != nil {
+		diags, ok := s.waitForEditedText(ctx, store, c.uri, c.since, c.version)
+		if !ok {
 			out.TimedOut = true
 		}
 		editedDiags[c.uri] = diags
@@ -798,12 +861,13 @@ func severityLabel(sev int) string {
 // + didSave on subsequent edits. Versions monotonically increase per
 // LSP spec. Best-effort: log on failure but don't bubble up — a
 // failing notification just means we won't get diagnostics, not that
-// the edit failed.
-func (s *Server) notifyChildOfEdit(child *multiplex.Child, uri string, content []byte) {
+// the edit failed. Returns the document version sent.
+func (s *Server) notifyChildOfEdit(child *multiplex.Child, uri string, content []byte) int32 {
 	s.openDocsMu.Lock()
 	version, opened := s.openDocs[uri]
 	if !opened {
 		s.openDocs[uri] = 1
+		s.openGen[uri] = s.storeGen(uri)
 		version = 1
 	} else {
 		version++
@@ -824,7 +888,7 @@ func (s *Server) notifyChildOfEdit(child *multiplex.Child, uri string, content [
 			},
 		}); err != nil {
 			log.Printf("mcp didOpen %s: %v", uri, err)
-			return
+			return version
 		}
 	} else {
 		if err := child.Notify("textDocument/didChange", map[string]any{
@@ -837,7 +901,7 @@ func (s *Server) notifyChildOfEdit(child *multiplex.Child, uri string, content [
 			},
 		}); err != nil {
 			log.Printf("mcp didChange %s: %v", uri, err)
-			return
+			return version
 		}
 	}
 	if err := child.Notify("textDocument/didSave", map[string]any{
@@ -846,6 +910,16 @@ func (s *Server) notifyChildOfEdit(child *multiplex.Child, uri string, content [
 	}); err != nil {
 		log.Printf("mcp didSave %s: %v", uri, err)
 	}
+	return version
+}
+
+// storeGen is the diagnostic store's generation for uri, 0 without a
+// manager.
+func (s *Server) storeGen(uri string) uint64 {
+	if s.manager == nil {
+		return 0
+	}
+	return s.manager.Diagnostics().Gen(uri)
 }
 
 // notifyChildOfExternalChange tells the matching child LSP that a file
@@ -928,6 +1002,7 @@ func (s *Server) notifyChildOfExternalDelete(path string) {
 	_, opened := s.openDocs[uri]
 	delete(s.openDocs, uri)
 	delete(s.sentDocs, uri)
+	delete(s.openGen, uri)
 	s.openDocsMu.Unlock()
 	if !opened {
 		return

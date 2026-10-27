@@ -48,6 +48,30 @@ entry here.
   a server can publish a clean result for text it has not analysed in full
   and nothing says so (sourcekit-lsp before its build settings load).
   gopls, clangd and pylsp version their publishes and validate.
+  `trust_unversioned_diagnostics: true` in a language's `lsp` block lets
+  that server's clean result validate; it is off for every default server.
+- **typescript-language-server 5.1.3 is not trusted** (measured
+  2026-10-27, Linux, normal and with the child under a 5% CPU quota):
+  - It publishes nothing for a file whose diagnostics stay empty (it keeps
+    syntax, semantic and suggestion diagnostics per kind and skips an
+    empty-to-empty update). A clean edit to a file with no diagnostics,
+    and an edit that breaks only another file, wait out
+    `--validate-wait` and report `lsp-timeout`.
+  - The first publish of a just-opened file can hold syntax diagnostics
+    only: under the quota it published [] and the semantic result 346 ms
+    later. The skipped first publish after an open covers it; when the
+    server is fast it sends one complete publish instead, so an edit made
+    before the open's publish waits out the cap (`lsp-timeout`, kept).
+  - It coalesces a revert's publish with the next change. The next
+    edit's error baseline then still holds the reverted error, and the
+    same broken edit sent again at once was reported `validated:true`
+    with trust on. gopls does the same (next item), so trusting it would
+    add a false `validated` path, not the only one.
+- **Edit validation, an edit retried right after its revert:** the error
+  baseline is read from the diagnostics store when the edit starts; the
+  reverted text's publish may not have arrived yet, so the reverted
+  error counts as pre-existing and the identical broken edit is kept and
+  reported `validated:true`. gopls 0.24: 5 of 5 retries (2026-10-27).
 - **Edit validation, servers without document versions, opens:** the first
   publish after a file's didOpen is never taken as an edit's result (see
   design.md "Editing"). A server that publishes once per open (pylsp,

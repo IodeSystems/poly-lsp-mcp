@@ -192,6 +192,13 @@ func fakeDiagSession(t *testing.T, mode string, wait time.Duration) (*mcpSession
 // fakeDiagSessionWith is fakeDiagSession with main.go holding text.
 func fakeDiagSessionWith(t *testing.T, mode string, wait time.Duration, text string) (*mcpSession, string) {
 	t.Helper()
+	return fakeDiagSessionTrust(t, mode, wait, text, false)
+}
+
+// fakeDiagSessionTrust is fakeDiagSessionWith with the child's
+// trust_unversioned_diagnostics set to trust.
+func fakeDiagSessionTrust(t *testing.T, mode string, wait time.Duration, text string, trust bool) (*mcpSession, string) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +211,7 @@ func fakeDiagSessionWith(t *testing.T, mode string, wait time.Duration, text str
 	cfg := config.Default()
 	for i := range cfg.Languages {
 		if cfg.Languages[i].Name == "go" {
-			cfg.Languages[i].LSP = &config.LSP{Cmd: exe, Args: []string{fakeDiagLSPArg}, Env: []string{"FAKE_DIAG_MODE=" + mode}}
+			cfg.Languages[i].LSP = &config.LSP{Cmd: exe, Args: []string{fakeDiagLSPArg}, Env: []string{"FAKE_DIAG_MODE=" + mode}, TrustUnversionedDiagnostics: trust}
 		}
 	}
 	reg, err := cfg.Build()
@@ -439,4 +446,39 @@ func TestBatchCommitNotValidatedOnUnconfirmedResult(t *testing.T) {
 	if got, _ := os.ReadFile(path); string(got) != good {
 		t.Fatalf("committed edit not kept: %q", got)
 	}
+}
+
+// trust_unversioned_diagnostics: a clean unversioned result validates the
+// edit, under the same rules that pick it (the first publish after the
+// open is skipped, a clean one while the child loads is skipped). Off,
+// the same result is lsp-unconfirmed.
+func TestEditTrustUnversionedDiagnostics(t *testing.T) {
+	good := "package main\n\nfunc main() { println(1) }\n"
+	for _, mode := range []string{"sourcekit", "loading"} {
+		t.Run(mode, func(t *testing.T) {
+			s, path := fakeDiagSessionTrust(t, mode, 5*time.Second, "package main\n\nfunc main() {}\n", true)
+			if mode == "loading" {
+				waitFirstPublish(t, s, path)
+			}
+			orig, _ := os.ReadFile(path)
+			m := editMain(t, s, path, brokenMain)
+			if m["rejected"] != true || m["reverted"] != true {
+				t.Fatalf("broken edit not reverted: %v", m)
+			}
+			if got, _ := os.ReadFile(path); string(got) != string(orig) {
+				t.Fatalf("file not restored: %q", got)
+			}
+			m = editMain(t, s, path, good)
+			if m["validated"] != true || m["rejected"] == true || m["validationSkipped"] != nil {
+				t.Fatalf("trusted clean unversioned result: want validated:true, got %v", m)
+			}
+		})
+	}
+	t.Run("untrusted", func(t *testing.T) {
+		s, path := fakeDiagSessionTrust(t, "sourcekit", 5*time.Second, "package main\n\nfunc main() {}\n", false)
+		if m := editMain(t, s, path, brokenMain); m["reverted"] != true {
+			t.Fatalf("broken edit not reverted: %v", m)
+		}
+		wantUnconfirmed(t, editMain(t, s, path, good))
+	})
 }

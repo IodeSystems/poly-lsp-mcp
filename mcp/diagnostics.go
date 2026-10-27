@@ -94,12 +94,13 @@ type editDiagnostics struct {
 	DroppedDiagnostics int              `json:"droppedDiagnostics,omitempty"`
 
 	// Unconfirmed: an edited URI's result came from a publish with no
-	// document version (sourcekit-lsp, typescript-language-server). It
-	// may revert an edit but never validates one: such a server can
-	// publish a clean result for text it has not fully analysed
-	// (sourcekit-lsp before its build settings load), and nothing in the
-	// publish says so. With no new errors the edit is reported not
-	// validated (validationSkipped: lsp-unconfirmed).
+	// document version, from a child not configured to be trusted for
+	// one (config.LSP.TrustUnversionedDiagnostics; sourcekit-lsp, any
+	// server not configured so). It may revert an edit but never
+	// validates one: such a server can publish a clean result for text it
+	// has not fully analysed (sourcekit-lsp before its build settings
+	// load), and nothing in the publish says so. With no new errors the
+	// edit is reported not validated (validationSkipped: lsp-unconfirmed).
 	Unconfirmed bool `json:"-"`
 }
 
@@ -472,9 +473,11 @@ func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.Diagnostic
 //     1 s later with no semantic errors at all (build settings not
 //     loaded yet; an undeclared call reads clean), then again 1-3 s
 //     later with them. A later publish is taken once no other arrives
-//     for the settle window (diagSettleDuration), flagged unconfirmed:
-//     its errors can revert the edit, but a clean one does not validate
-//     it. sourcekit-lsp computes only syntactic diagnostics while it has
+//     for the settle window (diagSettleDuration), flagged unconfirmed
+//     unless the child is configured to trust it
+//     (config.LSP.TrustUnversionedDiagnostics; off for every default
+//     server): its errors can revert the edit, but
+//     a clean one does not validate it. sourcekit-lsp computes only syntactic diagnostics while it has
 //     no build settings for a file, and its publish does not say so
 //     (DiagnosticReportManager, swiftlang/sourcekit-lsp); on
 //     macos-15-intel it published [] for a broken edit 2 s after its
@@ -499,7 +502,8 @@ func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.Diagnostic
 // gopls 0.24 answers pulls but versions its publishes;
 // typescript-language-server 5.1.3, clangd and pylsp 1.15 reject them.
 //
-// unconfirmed reports a result from an unversioned publish.
+// unconfirmed reports a result from an unversioned publish of a child
+// not trusted for one.
 func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.DiagnosticStore, child *multiplex.Child, uri string, content []byte, since uint64, version int32) (diags []multiplex.Diagnostic, ok, unconfirmed bool) {
 	s.openDocsMu.Lock()
 	openGen, opened := s.openGen[uri]
@@ -543,7 +547,7 @@ func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.Diagnos
 			}
 			continue
 		}
-		return p.Diags, true, true
+		return p.Diags, true, !child.TrustsUnversionedDiagnostics()
 	}
 }
 

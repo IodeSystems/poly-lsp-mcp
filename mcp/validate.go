@@ -486,10 +486,11 @@ func (s *Server) skipped(d editDiagnostics) (reason, note string) {
 }
 
 // unconfirmed is the skip for an edit whose result came from an
-// unversioned publish (editDiagnostics.Unconfirmed) and showed no new
-// errors: that result may lack errors the child has not computed yet.
+// unversioned publish of a child not trusted for one
+// (editDiagnostics.Unconfirmed) and showed no new errors: that result may
+// lack errors the child has not computed yet.
 func unconfirmed() (reason, note string) {
-	return "lsp-unconfirmed", "the child LSP does not version its diagnostics, so its result (no new errors) cannot be confirmed to be a full analysis of the edited text; edit kept, not validated"
+	return "lsp-unconfirmed", "the child LSP does not version its diagnostics, so its result (no new errors) cannot be confirmed to be a full analysis of the edited text; edit kept, not validated (lsp: trust_unversioned_diagnostics: true in the language's config lets this server's clean results validate)"
 }
 
 // currentBatch / setBatch / closeBatch are session-keyed — see session.go.

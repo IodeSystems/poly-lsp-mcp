@@ -209,7 +209,12 @@ ground; the most verbose variant did worse (more grep scaffolding).
   diagnostics are not reported. **Only a versioned result validates**
   (Carl, 2026-10-27): an unversioned one (sourcekit-lsp,
   typescript-language-server) can revert an edit, but a clean one keeps it
-  with `validated:false`, `validationSkipped: lsp-unconfirmed`. Xcode's
+  with `validated:false`, `validationSkipped: lsp-unconfirmed`, unless the
+  language's `lsp` sets `trust_unversioned_diagnostics: true`
+  (`config.LSP`, `Child.TrustsUnversionedDiagnostics`): then the result
+  the same rules pick validates. Off for every default server; Carl
+  wanted it on for typescript-language-server, and measuring 5.1.3 kept
+  it off (known-limits.md). Xcode's
   sourcekit-lsp on macos-15-intel answered a broken edit with [] under
   "Reloading Package", sent nothing when it ended, and answered the resent
   text with [] again 2 s later (CI, 87d9429): nothing in a publish says it

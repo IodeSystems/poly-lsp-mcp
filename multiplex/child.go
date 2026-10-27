@@ -34,8 +34,10 @@ import (
 // the cause if non-clean.
 type Child struct {
 	name string // display name (the language registry's Name)
-	cmd  *exec.Cmd
-	in   io.WriteCloser
+	// trustUnversioned: config.LSP.TrustUnversionedDiagnostics.
+	trustUnversioned bool
+	cmd              *exec.Cmd
+	in               io.WriteCloser
 
 	writeMu sync.Mutex
 
@@ -107,11 +109,12 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 	}
 
 	c := &Child{
-		name:    name,
-		cmd:     cmd,
-		in:      stdin,
-		pending: make(map[string]chan *jsonrpc.Message),
-		done:    make(chan struct{}),
+		name:             name,
+		trustUnversioned: lsp.TrustUnversionedDiagnostics,
+		cmd:              cmd,
+		in:               stdin,
+		pending:          make(map[string]chan *jsonrpc.Message),
+		done:             make(chan struct{}),
 	}
 
 	go c.readLoop(bufio.NewReader(stdout))
@@ -249,6 +252,11 @@ func (c *Child) Busy() bool {
 	defer c.progressMu.Unlock()
 	return len(c.progress) > 0
 }
+
+// TrustsUnversionedDiagnostics reports whether a clean publish with no
+// document version may validate an edit (config.LSP.
+// TrustUnversionedDiagnostics).
+func (c *Child) TrustsUnversionedDiagnostics() bool { return c.trustUnversioned }
 
 // SetNotificationHandler registers a callback for server-initiated
 // notifications (publishDiagnostics, etc.). Call once during setup.

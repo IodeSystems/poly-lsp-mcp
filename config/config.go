@@ -20,6 +20,16 @@ type LSP struct {
 	Cmd  string   `yaml:"cmd"`
 	Args []string `yaml:"args,omitempty"`
 	Env  []string `yaml:"env,omitempty"`
+	// TrustUnversionedDiagnostics: a clean diagnostics result from this
+	// server that carries no document version may validate an edit. Off
+	// (the default for every server), such a result can only revert one
+	// (validationSkipped: lsp-unconfirmed). Turn it on only for a server
+	// that never publishes a clean result for text it has not fully
+	// analysed. sourcekit-lsp does (before its build settings load);
+	// typescript-language-server 5.1.3 is off too, see
+	// docs/known-limits.md. A server that versions its publishes does not
+	// need it.
+	TrustUnversionedDiagnostics bool `yaml:"trust_unversioned_diagnostics,omitempty"`
 }
 
 // Language is one entry in the registry.

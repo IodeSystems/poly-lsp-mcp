@@ -203,3 +203,44 @@ func TestBuildRejectsUnknownYAMLFields(t *testing.T) {
 		t.Error("Load accepted unknown field 'bogus'")
 	}
 }
+
+// trust_unversioned_diagnostics is off for every default child LSP and
+// for a server that does not set it; a language's lsp block turns it on.
+func TestTrustUnversionedDiagnostics(t *testing.T) {
+	for _, l := range Default().Languages {
+		if l.LSP != nil && l.LSP.TrustUnversionedDiagnostics {
+			t.Errorf("default %s LSP (%s) trusts unversioned diagnostics", l.Name, l.LSP.Cmd)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "poly-lsp-mcp.yaml")
+	yaml := `
+languages:
+  - name: typescript
+    extensions: [ts]
+    lsp:
+      cmd: typescript-language-server
+      args: [--stdio]
+      trust_unversioned_diagnostics: true
+  - name: swift
+    extensions: [swift]
+    lsp:
+      cmd: sourcekit-lsp
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	r, err := cfg.Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !r.LookupByName("typescript").LSP.TrustUnversionedDiagnostics {
+		t.Error("typescript: trust_unversioned_diagnostics: true not read")
+	}
+	if r.LookupByName("swift").LSP.TrustUnversionedDiagnostics {
+		t.Error("swift: trusted without the key")
+	}
+}

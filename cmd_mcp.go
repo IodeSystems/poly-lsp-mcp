@@ -36,6 +36,8 @@ func mcpCmd(l *loader) *cobra.Command {
 		readCharBudget int
 		hookPath       string
 		validateWait   time.Duration
+		allowPaths     []string
+		excludePaths   []string
 	)
 	cmd := &cobra.Command{
 		Use:   "mcp",
@@ -62,6 +64,8 @@ func mcpCmd(l *loader) *cobra.Command {
 	// errors, which has no baseline and can false-revert its first edit.
 	f.BoolVar(&validate, "validate", true, "revert-on-new-diagnostics: an edit that introduces a new error is rolled back instead of landing (needs a child LSP; degrades to apply-and-flag without one)")
 	f.DurationVar(&validateWait, "validate-wait", 2*time.Second, "how long an edit waits for the child LSP's diagnostics of the edited text; past it the edit is kept and reported not validated (validationSkipped: lsp-timeout). A cold child (sourcekit-lsp loading a package) can need longer")
+	f.StringArrayVar(&allowPaths, "allow-path", nil, "access outside the root: node_read / node_edit take an absolute path in this directory (not indexed, not watched; edits checked by a parse only); repeatable. Defaults: $TMPDIR and /tmp. Only the user's own regular files, no symlinks below the directory. Not --exclude, which leaves a directory out of the index")
+	f.StringArrayVar(&excludePaths, "exclude-path", nil, "remove a directory from access outside the root (see --allow-path), defaults included: --exclude-path /tmp turns /tmp off; repeatable. Not --exclude, which leaves a directory out of the index")
 	f.BoolVar(&noValidate, "no-validate", false, "turn OFF revert-on-new-diagnostics (see --validate); for when validation itself misfires, e.g. a never-analyzed file with pre-existing errors")
 	// Daemon mode is the default. --daemon stays accepted: client configs
 	// written when it was opt-in pass it, and dun detects the proxy by the
@@ -91,6 +95,14 @@ func mcpCmd(l *loader) *cobra.Command {
 		}
 		if validateWait <= 0 {
 			return fmt.Errorf("--validate-wait %s: want a positive duration", validateWait)
+		}
+		allowAbs, err := absDirs("--allow-path", allowPaths)
+		if err != nil {
+			return err
+		}
+		excludeAbs, err := absDirs("--exclude-path", excludePaths)
+		if err != nil {
+			return err
 		}
 		root, err := filepath.Abs(rootPath)
 		if err != nil {
@@ -163,6 +175,9 @@ func mcpCmd(l *loader) *cobra.Command {
 					// per-connection at its boundary).
 					client.SetPolicy(readOnly, validate)
 					client.SetValidateWait(validateWait)
+					// Defaults resolve HERE, with this client's $TMPDIR: the
+					// daemon's own may differ (macOS: per-user /var/folders).
+					client.SetPathPolicy(append(mcp.DefaultAllowPaths(), allowAbs...), excludeAbs)
 					return client, nil
 				}
 				// The file-access hook runs here, client-side, with this
@@ -211,6 +226,15 @@ func mcpCmd(l *loader) *cobra.Command {
 		}
 		srv.SetValidateEdits(validate)
 		srv.SetDiagnosticWait(validateWait)
+		cfgAllow, err := absDirs("allow_paths", cfg.AllowPaths)
+		if err != nil {
+			return err
+		}
+		cfgExclude, err := absDirs("exclude_paths", cfg.ExcludePaths)
+		if err != nil {
+			return err
+		}
+		srv.SetPathPolicy(append(append(mcp.DefaultAllowPaths(), cfgAllow...), allowAbs...), append(cfgExclude, excludeAbs...))
 		if hookPath != "" {
 			srv.SetFileAccessHook(&mcp.FileHook{Path: hookPath})
 			log.Printf("mcp: file-access hook armed: %s", hookPath)
@@ -412,4 +436,21 @@ func lspRoot(workspace, root string) string {
 		return "-"
 	}
 	return symbols.RelRoot(workspace, root)
+}
+
+// absDirs makes each directory of a --allow-path style list absolute
+// (against the working directory) and cleans it.
+func absDirs(flag string, dirs []string) ([]string, error) {
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if strings.TrimSpace(d) == "" {
+			return nil, fmt.Errorf("%s: empty directory", flag)
+		}
+		a, err := filepath.Abs(d)
+		if err != nil {
+			return nil, fmt.Errorf("%s %q: %w", flag, d, err)
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }

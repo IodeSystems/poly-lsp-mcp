@@ -101,6 +101,16 @@ func (s *Server) fileAccessGuard(op, relPath string) (bool, string) {
 	return h.Invoke(op, abs)
 }
 
+// fileAccessGuardAbs is fileAccessGuard for a path already resolved: a
+// file outside the root (--allow-path), which resolveFileArg refuses.
+func (s *Server) fileAccessGuardAbs(op, abs string) (bool, string) {
+	h := s.fileAccessHook
+	if !h.Cancelled() {
+		return false, ""
+	}
+	return h.Invoke(op, abs)
+}
+
 // FileAccessTool reports whether a tool's calls consult the file-access
 // hook: node_read and node_edit, the tools that call fileAccessGuard.
 func FileAccessTool(name string) bool { return name == "node_read" || name == "node_edit" }
@@ -118,6 +128,15 @@ func FileAccessTool(name string) bool { return name == "node_read" || name == "n
 // handleModernNodeEdit; a change to which branch guards with which op
 // there belongs here too (TestFileAccessMatchesTheGuard).
 func (s *Server) FileAccess(name string, args json.RawMessage) (op, abs string, ok bool) {
+	return s.FileAccessAs("", name, args, CallOptions{})
+}
+
+// FileAccessAs is FileAccess for a daemon connection: session sess with
+// its policy opts, whose --allow-path lists decide whether a path outside
+// the root is reached at all.
+func (s *Server) FileAccessAs(sess, name string, args json.RawMessage, opts CallOptions) (op, abs string, ok bool) {
+	sid := normSession(sess)
+	s.setSessionPathPolicy(sid, opts.AllowPaths, opts.ExcludePaths)
 	var p modernEditArgs // node_read's {node} is a subset
 	if json.Unmarshal(args, &p) != nil || strings.TrimSpace(p.Node) == "" {
 		return "", "", false
@@ -132,7 +151,7 @@ func (s *Server) FileAccess(name string, args json.RawMessage) (op, abs string, 
 	default:
 		return "", "", false
 	}
-	rn, err := s.resolveModernNode(p.Node)
+	rn, err := s.resolveModernNodeAs(sid, p.Node)
 	if err != nil || rn.isDir {
 		return "", "", false
 	}
@@ -151,6 +170,9 @@ func (s *Server) FileAccess(name string, args json.RawMessage) (op, abs string, 
 	}
 	if op != "create" && !rn.exists {
 		return "", "", false
+	}
+	if rn.out != nil {
+		return op, rn.out.abs, true
 	}
 	abs, err = s.resolveFileArg(rn.file)
 	if err != nil {

@@ -127,6 +127,10 @@ type callIn struct {
 	// ValidateWait is the client's --validate-wait (a Go duration); empty
 	// keeps the daemon's.
 	ValidateWait string `header:"X-Poly-Validate-Wait"`
+	// AllowPaths / ExcludePaths: the client's --allow-path lists as JSON
+	// arrays (see mcp.CallOptions); empty = not sent.
+	AllowPaths   string `header:"X-Poly-Allow-Paths"`
+	ExcludePaths string `header:"X-Poly-Exclude-Paths"`
 	Body         struct {
 		Root      string          `json:"root"`
 		Name      string          `json:"name"`
@@ -135,7 +139,10 @@ type callIn struct {
 }
 
 type accessIn struct {
-	Body struct {
+	Session      string `header:"X-Poly-Session"`
+	AllowPaths   string `header:"X-Poly-Allow-Paths"`
+	ExcludePaths string `header:"X-Poly-Exclude-Paths"`
+	Body         struct {
 		Root      string          `json:"root"`
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -415,6 +422,9 @@ func (h *host) handler() (http.Handler, error) {
 				}
 				pol.ValidateWait = d
 			}
+			if pol.AllowPaths, pol.ExcludePaths, err = pathPolicyHeaders(in.AllowPaths, in.ExcludePaths); err != nil {
+				return nil, huma.Error400BadRequest(err.Error())
+			}
 			content, isError, cerr := srv.CallTool(in.Session, in.Body.Name, in.Body.Arguments, pol)
 			if cerr != nil {
 				// Mirror stdio handleToolsCall: a handler error becomes an
@@ -440,8 +450,13 @@ func (h *host) handler() (http.Handler, error) {
 			}
 			out := &accessOut{}
 			// A failed bring-up touches no file: the call answers why.
+			allowPaths, excludePaths, err := pathPolicyHeaders(in.AllowPaths, in.ExcludePaths)
+			if err != nil {
+				return nil, huma.Error400BadRequest(err.Error())
+			}
 			if srv, berr := reg.Get(canonical); berr == nil {
-				out.Body.Op, out.Body.Path, out.Body.OK = srv.FileAccess(in.Body.Name, in.Body.Arguments)
+				out.Body.Op, out.Body.Path, out.Body.OK = srv.FileAccessAs(in.Session, in.Body.Name, in.Body.Arguments,
+					mcp.CallOptions{AllowPaths: allowPaths, ExcludePaths: excludePaths})
 			}
 			return out, nil
 		})
@@ -634,4 +649,18 @@ func eventsHandler(reg *Registry, draining <-chan struct{}) http.HandlerFunc {
 		}
 		reg.Release(sess)
 	}
+}
+
+// pathPolicyHeaders decodes a connection's --allow-path / --exclude-path
+// headers.
+func pathPolicyHeaders(allow, exclude string) ([]string, []string, error) {
+	a, err := parsePathListHeader("X-Poly-Allow-Paths", allow)
+	if err != nil {
+		return nil, nil, err
+	}
+	x, err := parsePathListHeader("X-Poly-Exclude-Paths", exclude)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a, x, nil
 }

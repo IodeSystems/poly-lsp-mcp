@@ -33,7 +33,7 @@ type indexOpts struct {
 
 func indexFlags(f *pflag.FlagSet) *indexOpts {
 	o := &indexOpts{}
-	f.Var(&o.excludes, "exclude", "drop this directory (relative to --root) from the index and every walk, as though .gitignore listed it; repeatable. For a client choosing what to index without editing the repository")
+	f.Var(&o.excludes, "exclude", "leave out of the index: drop this directory (relative to --root) from the index and every walk, as though .gitignore listed it; repeatable. For a client choosing what to index without editing the repository")
 	f.StringArrayVar(&o.includes, "include", nil, "gitignore-style pattern (node_modules, vendor/, .claude/worktrees/a1, *.min.js) for what to index even where a heuristic leaves it out: over size, minified, LFS pointer, skipped dir, nested repo, symlink leaving the root; repeatable, joined with include: in poly-lsp-mcp.yaml. Does not override .gitignore or --exclude. For query, the patterns also open those dead ends (and shadowed files) to the selector, as node_query's include. .git is never included")
 	f.StringVar(&o.budget, "index-budget", defaultIndexBudget, "startup budget for the index walk: Nms wall-clock (bare = ms) or Nops (one per file read). Over it the build fails with a trace of where the files are and how to get under budget or raise it. 0 = unbounded")
 	f.BoolVar(&o.anyway, "index-anyway", false, "index the root even when it is not a project: the home directory, the filesystem root, or a directory of 3+ git clones that is not inside a repository. Without it such a root is refused, naming the repositories found")

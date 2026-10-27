@@ -79,6 +79,11 @@ type Config struct {
 	// heuristic leaves them out (over size, minified, LFS pointer, skipped
 	// dir, nested repo, symlink leaving the root). Joined with --include.
 	Include []string `yaml:"include,omitempty"`
+	// AllowPaths / ExcludePaths: directories OUTSIDE the root that
+	// node_read / node_edit reach, added to / removed from the defaults
+	// (os.TempDir(), /tmp). Joined with --allow-path / --exclude-path.
+	AllowPaths   []string `yaml:"allow_paths,omitempty"`
+	ExcludePaths []string `yaml:"exclude_paths,omitempty"`
 }
 
 // Registry is the in-memory lookup view: extension → language. Built from a

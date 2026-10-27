@@ -557,11 +557,15 @@ const maxNodeReadBytes = 256 << 10
 // modernNode is a resolved node_read / node_edit target.
 type modernNode struct {
 	class  string
-	file   string // workspace-relative
+	file   string // workspace-relative; absolute for a file outside the root
 	sym    string // "" = whole file
 	addr   string
 	isDir  bool
 	exists bool
+
+	// out is set for a file outside the root (--allow-path): the vetted
+	// path every read and write of it goes through. See outside.go.
+	out *outsideFile
 
 	decl rangeArgs // whole declaration — node_read / newText / delete
 	name rangeArgs // identifier — rename / signature refactors
@@ -598,6 +602,11 @@ func (s *Server) resolveRefSiteAddr(file, startStr, endStr string) (*modernNode,
 	if err != nil {
 		return nil, err
 	}
+	return refSiteNode(file, content, startStr, endStr)
+}
+
+// refSiteNode builds the "<file>@<line>[-<end>]" node from file's content.
+func refSiteNode(file string, content []byte, startStr, endStr string) (*modernNode, error) {
 	lines := splitNodeReadLines(content)
 	start, _ := strconv.Atoi(startStr)
 	end := start
@@ -830,6 +839,12 @@ func (s *Server) resolveClassicAddrInClass(file, symPath, class string) (*modern
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", file, err)
 	}
+	return s.classicNode(file, abs, content, symPath, class)
+}
+
+// classicNode resolves "<file>#<dotted.sym.path>" against file's content
+// (abs names the language by extension).
+func (s *Server) classicNode(file, abs string, content []byte, symPath, class string) (*modernNode, error) {
 	if symPath == "" {
 		endLine, endCol := contentEndPosition(content)
 		r := rangeArgs{File: file, StartLine: 1, StartCol: 1, EndLine: endLine, EndCol: endCol}
@@ -949,6 +964,16 @@ func classicSymMatch(query, cand string) bool {
 // out-of-band write (bash, the user's editor, another agent) that a
 // cache would not have seen.
 func (s *Server) nodeCurrentText(rn *modernNode) (string, error) {
+	if rn.out != nil {
+		content, err := rn.out.read()
+		if err != nil {
+			return "", err
+		}
+		if rn.wholeFile() {
+			return string(content), nil
+		}
+		return readRangeText(content, rn.decl)
+	}
 	abs, err := s.resolveFileArg(rn.file)
 	if err != nil {
 		return "", err
@@ -977,7 +1002,7 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	if strings.TrimSpace(p.Node) == "" {
 		return nil, true, errors.New("node is required")
 	}
-	rn, err := s.resolveModernNode(p.Node)
+	rn, err := s.resolveModernNodeAs(sess, p.Node)
 	if err != nil {
 		return nil, true, err
 	}
@@ -987,16 +1012,26 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	if !rn.exists {
 		return nil, true, fmt.Errorf("no such file: %s", rn.file)
 	}
-	abs, err := s.resolveFileArg(rn.file)
-	if err != nil {
-		return nil, true, err
-	}
-	if cancel, note := s.fileAccessGuard("read", rn.file); cancel {
-		return HookBlockedResult(note), false, nil
-	}
-	content, err := os.ReadFile(abs)
-	if err != nil {
-		return nil, true, fmt.Errorf("read %s: %w", rn.file, err)
+	var abs string
+	var content []byte
+	if rn.out != nil {
+		abs = rn.out.abs
+		if cancel, note := s.fileAccessGuardAbs("read", abs); cancel {
+			return HookBlockedResult(note), false, nil
+		}
+		if content, err = rn.out.read(); err != nil {
+			return nil, true, err
+		}
+	} else {
+		if abs, err = s.resolveFileArg(rn.file); err != nil {
+			return nil, true, err
+		}
+		if cancel, note := s.fileAccessGuard("read", rn.file); cancel {
+			return HookBlockedResult(note), false, nil
+		}
+		if content, err = os.ReadFile(abs); err != nil {
+			return nil, true, fmt.Errorf("read %s: %w", rn.file, err)
+		}
 	}
 
 	// A whole-FILE address is a BROWSE: the existing line-window /
@@ -1019,10 +1054,10 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			lineLimit = *p.LineLimit
 		}
 		out := buildReadPayload(content, rn.file, startLine, lineLimit, 0,
-			targetedSearchAdvice(rn.file, true),
+			readAdvice(rn),
 			fileOutline(s.languageForFile(abs), content))
-		s.attachEnclosingSymbol(out, rn.file, abs, startLine)
-		return jsonContent(out), false, nil
+		s.attachEnclosingSymbolOf(out, rn, abs, startLine)
+		return jsonContent(outsideMark(out, rn)), false, nil
 	}
 
 	// An addressed node PLUS a window is a browse ANCHORED at that node.
@@ -1063,13 +1098,13 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			lineLimit = n // to the end of the node
 		}
 		out := buildReadPayload(content, rn.file, startLine, lineLimit, 0,
-			targetedSearchAdvice(rn.file, true),
+			readAdvice(rn),
 			fileOutline(s.languageForFile(abs), content))
 		out["node"] = rn.addr
 		out["@"] = []int{rn.decl.StartLine, rn.decl.EndLine}
 		// After `node`, so a window anchored inside the addressed symbol does
 		// not repeat the address back as if it were new information.
-		s.attachEnclosingSymbol(out, rn.file, abs, startLine)
+		s.attachEnclosingSymbolOf(out, rn, abs, startLine)
 		// A one-line site address is the shape this exists for, and "drop them
 		// to read it whole" is not advice there — whole IS the one line.
 		span := fmt.Sprintf("spans lines %d-%d; drop startLine/lineLimit to read it whole",
@@ -1081,7 +1116,7 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			"a WINDOW of %s, not the node: %s %s. node_edit matches oldText against the NODE's text, "+
 				"which this view may cut short or overrun",
 			rn.file, rn.addr, span)
-		return jsonContent(out), false, nil
+		return jsonContent(outsideMark(out, rn)), false, nil
 	}
 	text, err := readRangeText(content, rn.decl)
 	if err != nil {
@@ -1109,7 +1144,7 @@ func handleModernNodeRead(s *Server, sess sessionID, args json.RawMessage) ([]Co
 				"node_edit(node:%q, accept:\"mine\"|\"theirs\")",
 			conflictSpans(cs), conflictAddr(rn.file, cs[0]))
 	}
-	return jsonContent(out), false, nil
+	return jsonContent(outsideMark(out, rn)), false, nil
 }
 
 // ---------------------------------------------------------- node_edit
@@ -1323,6 +1358,12 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		if p.IncludeComments != nil {
 			return nil, true, errors.New("includeComments only applies to rename")
 		}
+	}
+
+	// A file outside the root (--allow-path) has its own, narrower path:
+	// no batch, no refactor, a parse check for validation.
+	if _, outside := s.outsideFilePart(p.Node); outside {
+		return s.editOutside(sess, &p, commit)
 	}
 
 	// Open the batch when staging; flag the edit that closes it. Every edit

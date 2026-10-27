@@ -240,6 +240,13 @@ type Server struct {
 	sessionWaitsMu sync.Mutex
 	sessionWaits   map[sessionID]time.Duration
 
+	// pathPolicy: the directories outside the root node_read / node_edit
+	// reach (--allow-path minus --exclude-path); nil = none. sessionPaths
+	// overrides it per daemon connection, under sessionWaitsMu. See
+	// outside.go.
+	pathPolicy   *pathPolicy
+	sessionPaths map[sessionID]*pathPolicy
+
 	// proactiveOpen controls whether handleInitialize, after spawning
 	// the manager, walks the workspace and sends didOpen for every
 	// file with a child LSP. This is how the poly-lsp-mcp://diagnostics

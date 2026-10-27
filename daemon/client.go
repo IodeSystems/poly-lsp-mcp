@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
@@ -26,6 +27,8 @@ const (
 	readOnlyHeader     = "X-Poly-Read-Only"
 	validateHeader     = "X-Poly-Validate"
 	validateWaitHeader = "X-Poly-Validate-Wait"
+	allowPathsHeader   = "X-Poly-Allow-Paths"
+	excludePathsHeader = "X-Poly-Exclude-Paths"
 )
 
 // Client dials a daemon over its unix socket. The URL host is irrelevant
@@ -40,7 +43,11 @@ type Client struct {
 	// validateWait is the proxy's --validate-wait; 0 sends none and the
 	// daemon's own applies.
 	validateWait time.Duration
-	hc           *http.Client
+	// allowPaths / excludePaths: the proxy's --allow-path / --exclude-path
+	// lists, defaults resolved here with this process's $TMPDIR; nil
+	// allowPaths sends none.
+	allowPaths, excludePaths []string
+	hc                       *http.Client
 }
 
 // SetPolicy declares this client's per-connection policy (from the proxy's
@@ -56,6 +63,16 @@ func (c *Client) SetPolicy(readOnly, validate bool) {
 // child LSP's diagnostics of the edited text (the proxy's --validate-wait).
 func (c *Client) SetValidateWait(d time.Duration) { c.validateWait = d }
 
+// SetPathPolicy declares which directories outside the root this client's
+// node_read / node_edit reach (--allow-path minus --exclude-path). Sent on
+// every request; the daemon applies it to this connection only.
+func (c *Client) SetPathPolicy(allow, exclude []string) {
+	c.allowPaths, c.excludePaths = allow, exclude
+	if c.allowPaths == nil {
+		c.allowPaths = []string{}
+	}
+}
+
 // setHeaders stamps the session + policy headers on a request.
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set(sessionHeader, c.session)
@@ -68,6 +85,37 @@ func (c *Client) setHeaders(req *http.Request) {
 	if c.validateWait > 0 {
 		req.Header.Set(validateWaitHeader, c.validateWait.String())
 	}
+	if c.allowPaths != nil {
+		req.Header.Set(allowPathsHeader, pathListHeader(c.allowPaths))
+		req.Header.Set(excludePathsHeader, pathListHeader(c.excludePaths))
+	}
+}
+
+// pathListHeader encodes a directory list as a JSON array, which keeps any
+// byte a path may hold out of the header's syntax.
+func pathListHeader(dirs []string) string {
+	if dirs == nil {
+		dirs = []string{}
+	}
+	b, _ := json.Marshal(dirs)
+	return string(b)
+}
+
+// parsePathListHeader decodes pathListHeader; "" = not sent (nil).
+func parsePathListHeader(name, v string) ([]string, error) {
+	if v == "" {
+		return nil, nil
+	}
+	out := []string{}
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	for _, d := range out {
+		if !filepath.IsAbs(d) {
+			return nil, fmt.Errorf("%s: %q is not an absolute path", name, d)
+		}
+	}
+	return out, nil
 }
 
 // NewClient builds a client for the given socket path with a fresh random
@@ -95,6 +143,7 @@ func (c *Client) retarget(socket string) *Client {
 	}
 	n := NewClient(socket)
 	n.session, n.readOnly, n.validate, n.validateWait = c.session, c.readOnly, c.validate, c.validateWait
+	n.allowPaths, n.excludePaths = c.allowPaths, c.excludePaths
 	return n
 }
 

@@ -131,6 +131,11 @@ type CallOptions struct {
 	// wait for diagnostics of the edited text. Not a tightening policy —
 	// each client picks its own latency; 0 keeps the daemon's.
 	ValidateWait time.Duration
+	// AllowPaths / ExcludePaths are the client's --allow-path and
+	// --exclude-path lists, defaults resolved client-side (its own
+	// $TMPDIR). nil AllowPaths = not sent: the server's own apply.
+	AllowPaths   []string
+	ExcludePaths []string
 }
 
 // CallTool invokes a registered MCP tool in-process — the exported seam
@@ -161,6 +166,7 @@ func (s *Server) CallTool(sess, name string, args json.RawMessage, opts CallOpti
 		args = withValidate(args)
 	}
 	s.setSessionWait(normSession(sess), opts.ValidateWait)
+	s.setSessionPathPolicy(normSession(sess), opts.AllowPaths, opts.ExcludePaths)
 	return tool.Handler(s, normSession(sess), args)
 }
 

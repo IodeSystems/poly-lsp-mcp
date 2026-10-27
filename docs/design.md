@@ -221,7 +221,10 @@ ground; the most verbose variant did worse (more grep scaffolding).
   build settings load at once with a full empty report for a broken file;
   only after its `workspace/diagnostic/refresh` does a pull carry the
   error. No better evidence than a publish. typescript-language-server
-  5.1.3, clangd and pylsp 1.15 reject the request. gopls edit latency unchanged (median 452 ms over 10 warm edits,
+  5.1.3, clangd and pylsp 1.15 reject the request. The client declares
+  `textDocument.publishDiagnostics` (no `versionSupport`):
+  typescript-language-server 5.1.3 publishes nothing to a client that
+  does not, so until 2026-10-27 every TS edit waited out the cap. gopls edit latency unchanged (median 452 ms over 10 warm edits,
   before and after each change). `POLY_LSP_CHILD_TRACE=1` logs what each
   child sends and the notifications sent to it; the Swift edit e2e sets
   it, so a CI failure shows the sequence.

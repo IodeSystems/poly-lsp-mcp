@@ -347,8 +347,16 @@ func (c *Child) Initialize(ctx context.Context, rootURI string) (json.RawMessage
 		"processId": os.Getpid(),
 		"rootUri":   rootURI,
 		// workDoneProgress: the child reports loading and indexing as
-		// $/progress, which Busy reads.
-		"capabilities": map[string]any{"window": map[string]any{"workDoneProgress": true}},
+		// $/progress, which Busy reads. publishDiagnostics:
+		// typescript-language-server publishes no diagnostics to a client
+		// that does not declare it (5.1.3: features.diagnosticsSupport).
+		// No versionSupport: a server that honours it would version its
+		// publishes, and a versioned result validates an edit, which
+		// needs measuring per server first.
+		"capabilities": map[string]any{
+			"window":       map[string]any{"workDoneProgress": true},
+			"textDocument": map[string]any{"publishDiagnostics": map[string]any{}},
+		},
 		"clientInfo": map[string]any{
 			"name":    "poly-lsp-mcp",
 			"version": "0.0.0",

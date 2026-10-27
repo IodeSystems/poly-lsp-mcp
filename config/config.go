@@ -214,6 +214,19 @@ func Default() *Config {
 				TreeSitter: "cpp",
 			},
 			{
+				// Swift. sourcekit-lsp ships with every Swift toolchain:
+				// Xcode puts an xcrun shim at /usr/bin/sourcekit-lsp, a
+				// swift.org toolchain on Linux puts it beside `swift`.
+				// Absent, it fails to spawn like clangd. It resolves a
+				// SwiftPM package (Package.swift) on its own; an Xcode
+				// project needs a buildServer.json (xcode-build-server),
+				// which doctor and the setup notification point at.
+				Name:       "swift",
+				Extensions: []string{"swift"},
+				LSP:        &LSP{Cmd: "sourcekit-lsp"},
+				TreeSitter: "swift",
+			},
+			{
 				// XML: lexical, same rationale as yaml/json — the value
 				// is the string-literal site, not an AST. On Android the
 				// whole cross-language graph is string-keyed: a resource

@@ -228,6 +228,8 @@ func regexLanguage(path string) string {
 		return "kotlin"
 	case "groovy", "gradle", "gvy", "gy":
 		return "groovy"
+	case "swift":
+		return "swift"
 	case "xml":
 		return "xml"
 	case "c":

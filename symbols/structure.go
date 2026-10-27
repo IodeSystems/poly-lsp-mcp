@@ -31,6 +31,8 @@ func LanguageByName(name string) *sitter.Language {
 		return sitter.Kotlin()
 	case "groovy":
 		return sitter.Groovy()
+	case "swift":
+		return sitter.Swift()
 	case "markdown":
 		// The BLOCK grammar. It yields nested `section` nodes whose span
 		// covers a heading AND its body, which is exactly the unit a

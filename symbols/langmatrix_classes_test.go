@@ -58,6 +58,19 @@ func trailingCommentClass() bugClass {
 					"C.d": "val d = 0",
 				},
 			},
+			"swift": {
+				// The enum case pins the enum_entry rule the property rule
+				// shares: one name, so the whole `case` line is the span.
+				src: "struct C {\n  var a = \"\" // doc for a\n  let b = false // doc for b\n  var d = 0\n}\n" +
+					"enum E {\n  case x // doc for x\n  case y\n}\n",
+				want: map[string]string{
+					"C.a": "var a = \"\" // doc for a",
+					"C.b": "let b = false // doc for b",
+					"C.d": "var d = 0",
+					"E.x": "case x // doc for x",
+					"E.y": "case y",
+				},
+			},
 			"groovy": {
 				// Typed groovy fields (`String a`) are not indexed at all —
 				// a separate, pre-existing gap in the speculative groovy arm.
@@ -147,6 +160,18 @@ func docBlockAboveClass() bugClass {
 			"kotlin": {
 				src:  "class C {\n  // doc for m\n  fun m() {}\n}\n",
 				want: map[string]string{"C.m": "// doc for m\n  fun m() {}"},
+			},
+			"swift": {
+				// Both doc spellings, and a property and a case, whose
+				// symbol is the pattern / name INSIDE the declaration the
+				// comment sits above.
+				src: "class C {\n  /// doc for m\n  @objc func m() {}\n\n  /** doc for p */\n  var p = 1\n}\n" +
+					"enum E {\n  /// doc for x\n  case x\n}\n",
+				want: map[string]string{
+					"C.m": "/// doc for m\n  @objc func m() {}",
+					"C.p": "/** doc for p */\n  var p = 1",
+					"E.x": "/// doc for x\n  case x",
+				},
 			},
 			"groovy": {
 				src:  "class C {\n  // doc for m\n  void m() {}\n}\n",

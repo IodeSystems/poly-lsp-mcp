@@ -73,6 +73,17 @@ const kotlinIdentifierQuery = `[
 // binding is the pattern for buying it back where it matters.
 const groovyIdentifierQuery = `(identifier) @name`
 
+// swiftIdentifierQuery covers Swift names. Like Kotlin's grammar (the
+// same lineage), there are two identifier nodes: simple_identifier for
+// every non-type name (functions, properties, parameters and their
+// labels, enum cases, call targets, import segments, names inside a
+// string interpolation) and type_identifier for types. Keywords and
+// operators are distinct node types and never match.
+const swiftIdentifierQuery = `[
+  (simple_identifier)
+  (type_identifier)
+] @name`
+
 // cIdentifierQuery covers C names: variables, functions, parameters,
 // struct/union/enum tags, field names, typedef names and goto labels.
 // Macro BODIES are deliberately invisible — the grammar hands them back
@@ -774,6 +785,17 @@ var defaultExtractors = map[string]Extractor{
 		"String", "Object", "Integer", "Boolean", "Long", "Double",
 		"Float", "Byte", "Short", "Character", "List", "Map", "Set",
 		"true", "false", "null", "it", "this",
+	)),
+
+	// Swift via tree-sitter. The filter subtracts the stdlib types the
+	// grammar reports as type_identifier, the `_` that marks an unlabeled
+	// parameter, and the implicit accessor / closure names, which are
+	// local by construction and among the most frequent names in any
+	// Swift file.
+	"swift": mustTreeSitterExtractor(sitter.Swift(), swiftIdentifierQuery, keywordSet(
+		"String", "Int", "Double", "Float", "Bool", "Character", "Void",
+		"Any", "AnyObject", "Never", "Self", "Array", "Dictionary", "Set",
+		"Optional", "_", "newValue", "oldValue", "$0", "$1", "$2",
 	)),
 
 	"yaml": &LexicalExtractor{},

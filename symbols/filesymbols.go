@@ -99,6 +99,11 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 	defer tree.Close()
 
 	var out []Symbol
+	// Swift extensions are placed by node, not by type: see swiftExtensions.
+	var swiftExt *swiftExtensions
+	if language == "swift" {
+		swiftExt = newSwiftExtensions(tree.RootNode(), content)
+	}
 
 	var visit func(container *sitter.Node, prefix, parentClass string)
 	visit = func(container *sitter.Node, prefix, parentClass string) {
@@ -117,7 +122,11 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 			parentType := nodeType(typeTbl, n)
 			for i := 0; i < cnt; i++ {
 				c := n.NamedChild(i)
-				switch classify(language, nodeType(typeTbl, c), parentType) {
+				role := classify(language, nodeType(typeTbl, c), parentType)
+				if swiftExt != nil {
+					role = swiftExt.role(c, role)
+				}
+				switch role {
 				case roleSymbol:
 					kids = append(kids, c)
 				case roleContainer:
@@ -126,6 +135,16 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 			}
 		}
 		gather(container)
+		if swiftExt != nil {
+			// Extensions of this type declared in the same file: their
+			// members are this type's members.
+			switch container.Type() {
+			case "class_declaration", "protocol_declaration":
+				for _, ext := range swiftExt.merged[prefix] {
+					gather(ext)
+				}
+			}
+		}
 
 		type kidInfo struct {
 			node           *sitter.Node
@@ -149,6 +168,9 @@ func FileSymbols(language string, content []byte) ([]Symbol, error) {
 			}
 			localName, nameNode := symbolLocalName(language, k, content)
 			override := parentOverride(language, k, content)
+			if swiftExt != nil {
+				override = swiftExt.override(k)
+			}
 			infos = append(infos, kidInfo{k, localName, class, override, nameNode, branch})
 			counts[groupKey(override, localName, class)]++
 		}
@@ -321,6 +343,10 @@ func paramListNode(lang string, node *sitter.Node) *sitter.Node {
 		// constructor carries the same node as a function does.
 		return firstNamedChildOfType(node, "function_value_parameters")
 	}
+	if lang == "swift" {
+		// No list node: the parameters are the callable's own children.
+		return node
+	}
 	return node.ChildByFieldName("parameters")
 }
 
@@ -364,6 +390,8 @@ func appendReturnSymbols(lang string, node *sitter.Node, owner, class string, co
 			seg, alias = goTypeSegment(full)
 		} else if lang == "kotlin" || lang == "java" || lang == "typescript" {
 			seg, alias = typeSegment(full)
+		} else if lang == "swift" {
+			seg, alias = swiftTypeSegment(full)
 		} else if i := strings.LastIndex(full, "."); i >= 0 {
 			// A qualified type (io.Writer): the path segment must be
 			// dot-free, so the leaf is the last component and the full
@@ -480,6 +508,12 @@ func returnTypeNodes(lang string, node *sitter.Node, content []byte) []*sitter.N
 			return []*sitter.Node{rt}
 		}
 		return nil
+	case "swift":
+		// The type after `->`; init and deinit have none.
+		if rt := swiftReturnType(node); rt != nil {
+			return []*sitter.Node{rt}
+		}
+		return nil
 	}
 	return nil
 }
@@ -538,6 +572,8 @@ func appendAnnotationSymbols(lang string, node *sitter.Node, owner, class string
 		marks = kotlinAnnotations(node, content)
 	case "groovy":
 		marks = groovyAnnotations(node, content)
+	case "swift":
+		marks = swiftAttributes(node, content)
 	}
 	if len(marks) == 0 {
 		return
@@ -596,6 +632,11 @@ func docCommentAnchor(node *sitter.Node) *sitter.Node {
 			// under one declaration, and neither may claim the whole
 			// thing or they would overlap.
 			if countVariableDeclarators(p) != 1 {
+				return anchor
+			}
+		case "property_declaration", "enum_entry":
+			// Swift's `let a = 1, b = 2` and `case a, b`: the same rule.
+			if _, sole := swiftSoleMember(anchor); !sole {
 				return anchor
 			}
 		default:
@@ -949,6 +990,8 @@ func paramInfos(lang string, p *sitter.Node, content []byte) []paramInfo {
 		return kotlinParamInfos(p, content)
 	case "groovy":
 		return groovyParamInfos(p, content)
+	case "swift":
+		return swiftParamInfos(p, content)
 	}
 	return nil
 }
@@ -1212,6 +1255,8 @@ func classify(lang, t, parent string) symRole {
 		return classifyKotlin(t, parent)
 	case "groovy":
 		return classifyGroovy(t, parent)
+	case "swift":
+		return classifySwift(t, parent)
 	}
 	return roleSkip
 }
@@ -2474,6 +2519,10 @@ func refinedClass(lang string, node *sitter.Node, parentClass string, content []
 		if class, branch, ok := refinedClassGroovy(node, parentClass, content); ok {
 			return class, branch
 		}
+	case "swift":
+		if class, branch, ok := refinedClassSwift(node, content); ok {
+			return class, branch
+		}
 	case "java":
 		switch t {
 		case "package_declaration":
@@ -2647,6 +2696,11 @@ func symbolLocalName(lang string, node *sitter.Node, content []byte) (string, *s
 	}
 	if lang == "groovy" {
 		if name, node, ok := groovyName(node, content); ok {
+			return name, node
+		}
+	}
+	if lang == "swift" {
+		if name, node, ok := swiftName(node, content); ok {
 			return name, node
 		}
 	}
@@ -2865,6 +2919,12 @@ func declRangeNode(node *sitter.Node) *sitter.Node {
 	case "template_declaration":
 		// The template header is part of the declaration it introduces.
 		return p
+	case "property_declaration", "enum_entry":
+		// Swift: `let x = 1` and `case north` are their whole declaration;
+		// `let a = 1, b = 2` and `case a, b` keep per-name ranges.
+		if _, sole := swiftSoleMember(node); sole {
+			return p
+		}
 	case "export_statement":
 		// TypeScript: `export` is part of the declaration, and the doc
 		// comment sits above the EXPORT, not above `function`. Without

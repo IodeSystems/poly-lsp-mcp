@@ -1755,6 +1755,7 @@ var languageClassAliases = map[string]string{
 	"yaml": "yaml", "json": "json", "sql": "sql", "proto": "proto",
 	"graphql": "graphql", "gql": "graphql",
 	"java": "java", "xml": "xml", "kotlin": "kotlin", "kt": "kotlin", "groovy": "groovy", "gradle": "groovy",
+	"swift": "swift",
 	"c": "c", "cpp": "cpp", "c++": "cpp", "cxx": "cpp", "cc": "cpp",
 }
 

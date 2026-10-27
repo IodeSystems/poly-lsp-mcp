@@ -1822,7 +1822,10 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 //
 // SQL, XML and Markdown are absent on purpose: a signature refactor
 // rewrites a callable AND its call sites, and none of the three has a
-// call expression to rewrite.
+// call expression to rewrite. Swift is absent for want of an
+// implementation: its call sites carry argument LABELS (`f(name: x)`),
+// so padding a call with zero values or rendering `name: Type` params
+// would write code that does not compile.
 func signatureSupportedLanguage(lang string) bool {
 	switch lang {
 	case "go", "typescript", "python",

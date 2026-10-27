@@ -16,8 +16,11 @@ Every language below is indexed for cross-language lookup. **Node model** means
 a file resolves into addressable symbols (`file#Type.method`) with declaration,
 name, doc-comment and signature/body ranges; without it a file is still
 readable and editable, just as one whole-file node. **Child LSP** is the
-default server spawned when it is on `PATH` — a missing binary is logged and
-skipped, never fatal.
+default server spawned when it is on `PATH` — or, failing that, in a fixed list
+of user bin dirs (`$PNPM_HOME`, pnpm, `npm prefix -g`, volta, bun, `$GOBIN`/`$GOPATH`,
+cargo, `~/.local/bin`, Homebrew, `/usr/local/bin`), for a client started without
+the shell's `PATH`; `doctor` says when it used one. A missing binary is logged
+and skipped, never fatal.
 
 | Language | Extensions | Node model | Child LSP | Signature refactor |
 |---|---|---|---|---|
@@ -159,7 +162,7 @@ affects the exit status, and `--no-update-check` skips it.
 
 The MCP server says the same after bring-up: `notifications/message` from
 logger `poly-lsp-mcp/setup` (level `warning` when one is missing), data
-`{languages: [{lang, files, lsp: {name, found, path}, adds, install: {cmd,
+`{languages: [{lang, files, lsp: {name, found, path, via}, adds, install: {cmd,
 needs}}], missing}` — the shape `doctor --json` uses for `languages`. In a
 Swift workspace `swift` lists the Xcode build-server and index hints `doctor`
 prints.

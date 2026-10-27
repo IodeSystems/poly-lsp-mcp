@@ -139,6 +139,11 @@ func TestExcludesDropDirectories(t *testing.T) {
 func TestSetupNotificationNamesMissingLSP(t *testing.T) {
 	dir := writeTree(t, map[string]string{"a.go": "package p\n\nfunc A() {}\n"})
 	t.Setenv("PATH", t.TempDir()) // no gopls
+	// The fallback dirs (internal/lspbin) must not find a real gopls either.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PNPM_HOME", "")
+	t.Setenv("GOBIN", "")
+	t.Setenv("GOPATH", "")
 	s := startSessionWith(t, dir, nil, nil, func(srv *Server) { srv.SetAsyncInit(true) })
 	defer s.close()
 	s.request("initialize", map[string]any{})

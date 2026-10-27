@@ -347,6 +347,9 @@ func printDoctor(r doctorReport) {
 		case d.LSP == nil:
 		case d.LSP.Found:
 			state = d.LSP.Name + " " + r.Versions[d.LSP.Name]
+			if d.LSP.Via == "fallback" {
+				state += " (not on PATH; found in " + filepath.Dir(d.LSP.Path) + ")"
+			}
 		default:
 			state = d.LSP.Name + " MISSING"
 		}

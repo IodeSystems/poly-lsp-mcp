@@ -24,6 +24,7 @@ import (
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/jsonrpc"
+	"github.com/iodesystems/poly-lsp-mcp/internal/lspbin"
 )
 
 // Child supervises a single child LSP process. After Spawn returns
@@ -62,10 +63,21 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 	if lsp == nil {
 		return nil, errors.New("multiplex: nil LSP config")
 	}
-	cmd := exec.Command(lsp.Cmd, lsp.Args...)
+	found, err := lspbin.Resolve(lsp.Cmd)
+	if err != nil {
+		return nil, fmt.Errorf("start %s: %w", lsp.Cmd, err)
+	}
+	cmd := exec.Command(found.Path, lsp.Args...)
 	cmd.Dir = cwd
-	if len(lsp.Env) > 0 {
+	switch {
+	case len(lsp.Env) > 0 && found.Env != nil:
+		// found.Env leads PATH with the interpreter's dir; lsp.Env, later,
+		// wins on any variable it names, PATH included.
+		cmd.Env = append(found.Env, lsp.Env...)
+	case len(lsp.Env) > 0:
 		cmd.Env = append(os.Environ(), lsp.Env...)
+	case found.Env != nil:
+		cmd.Env = found.Env
 	}
 
 	stdin, err := cmd.StdinPipe()

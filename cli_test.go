@@ -197,6 +197,11 @@ func TestDoctorFlagsMissingLSP(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", t.TempDir()) // nothing on it: no gopls, no git
+	// The fallback dirs (internal/lspbin) must not find a real gopls either.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PNPM_HOME", "")
+	t.Setenv("GOBIN", "")
+	t.Setenv("GOPATH", "")
 	root := newRoot()
 	var out bytes.Buffer
 	root.SetOut(&out)

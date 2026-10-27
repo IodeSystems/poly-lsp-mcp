@@ -7,7 +7,6 @@ import (
 	"log"
 	"maps"
 	"net/url"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/lspbin"
 )
 
 // Manager owns the set of running Child LSPs and routes incoming
@@ -174,7 +174,7 @@ func (m *Manager) restartPolicy() (initial, max time.Duration, attempts int) {
 //
 // A language with project roots in Roots spawns nothing here: its
 // children start on the first request routed to them. Its binary must be
-// on PATH, or it is skipped like any other missing binary.
+// on PATH or in a well-known user bin dir (internal/lspbin), or it is skipped like any other missing binary.
 //
 // Start may be called only once per Manager; concurrent invocations are
 // not supported.
@@ -187,7 +187,7 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 			continue
 		}
 		if n := len(m.Roots[name]); n > 0 {
-			if _, err := exec.LookPath(lang.LSP.Cmd); err != nil {
+			if _, err := lspbin.Resolve(lang.LSP.Cmd); err != nil {
 				log.Printf("multiplex: spawn %s (%s): %v", name, lang.LSP.Cmd, err)
 				continue
 			}

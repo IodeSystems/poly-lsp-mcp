@@ -9,10 +9,10 @@
 package setup
 
 import (
-	"os/exec"
 	"sort"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/lspbin"
 )
 
 // Adds is what a child LSP adds over tree-sitter, in poly-lsp's terms.
@@ -40,6 +40,7 @@ type LSP struct {
 	Name  string `json:"name"`
 	Found bool   `json:"found"`
 	Path  string `json:"path,omitempty"`
+	Via   string `json:"via,omitempty"` // "fallback": not on PATH, found in a well-known dir
 }
 
 // Lang is one language the workspace holds.
@@ -62,8 +63,11 @@ func Hints(reg *config.Registry, files map[string]int) []Lang {
 		l := Lang{Lang: lang.Name, Files: n}
 		if lang.LSP != nil {
 			l.LSP = &LSP{Name: lang.LSP.Cmd}
-			if p, err := exec.LookPath(lang.LSP.Cmd); err == nil {
-				l.LSP.Found, l.LSP.Path = true, p
+			if f, err := lspbin.Resolve(lang.LSP.Cmd); err == nil {
+				l.LSP.Found, l.LSP.Path = true, f.Path
+				if f.Fallback {
+					l.LSP.Via = "fallback"
+				}
 			} else {
 				l.Adds = Adds
 				if in, ok := installs[lang.LSP.Cmd]; ok {

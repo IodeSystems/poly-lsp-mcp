@@ -297,12 +297,7 @@ const proactiveMaxFileSize = 1 << 20 // 1 MiB, matches symbols.Build
 // don't pour vendor/node_modules/.git into the child LSPs (which
 // would re-parse them anyway, wasting startup time).
 func skipProactiveOpenDir(name string) bool {
-	switch name {
-	case ".git", "node_modules", "vendor", "__pycache__", "dist", "build",
-		".idea", ".vscode", ".poly-lsp-mcp":
-		return true
-	}
-	return false
+	return symbols.IsSkipDir(name) || name == ".poly-lsp-mcp"
 }
 
 // notifyChildOfOpen is a leaner sibling of notifyChildOfEdit: just

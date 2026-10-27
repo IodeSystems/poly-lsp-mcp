@@ -93,7 +93,7 @@ func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, ma
 			return nil
 		}
 		if d.IsDir() {
-			if p != root && (skipDirs[d.Name()] || ign.DirIgnored(root, p) || fixtureDir(root, p)) {
+			if p != root && (IsSkipDir(d.Name()) || ign.DirIgnored(root, p) || fixtureDir(root, p)) {
 				return fs.SkipDir
 			}
 			dirs++

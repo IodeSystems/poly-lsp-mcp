@@ -819,6 +819,37 @@ var skipDirs = map[string]bool{
 	// 2,290 bundled .h files are 1.5M lexical sites — 35x the rest of
 	// the repo put together, none of it the user's code.
 	".gradle": true,
+	// iOS / Swift. CocoaPods and Carthage vendor dependencies (Pods/ is
+	// the iOS node_modules, often committed), SwiftPM checks them out
+	// under .build/ and keeps Xcode state in .swiftpm/, Xcode writes
+	// DerivedData/ (a project-local one when so configured) and per-user
+	// UI state in xcuserdata/.
+	"Pods":        true,
+	"Carthage":    true,
+	".build":      true,
+	".swiftpm":    true,
+	"DerivedData": true,
+	"xcuserdata":  true,
+}
+
+// skipDirSuffixes are directory-name suffixes skipped like skipDirs. An
+// asset catalog (Assets.xcassets) is a tree of Contents.json files, one
+// per image set, each naming "images", "idiom", "scale" and "filename":
+// JSON the index would read as hundreds of identical names.
+var skipDirSuffixes = []string{".xcassets"}
+
+// IsSkipDir reports whether a directory name is one the index skips. The
+// node_query walk and the proactive open skip the same directories.
+func IsSkipDir(name string) bool {
+	if skipDirs[name] {
+		return true
+	}
+	for _, s := range skipDirSuffixes {
+		if len(name) > len(s) && strings.HasSuffix(name, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // maxFileSize caps any single file we'll index, in bytes. A file larger
@@ -1213,7 +1244,7 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 				if name == ".git" {
 					return fs.SkipDir
 				}
-				if skipDirs[name] && !inc.Covers(rel) && !inc.OnWay(rel) {
+				if IsSkipDir(name) && !inc.Covers(rel) && !inc.OnWay(rel) {
 					cfg.cost.skippedDir(rel)
 					return fs.SkipDir
 				}
@@ -1427,7 +1458,7 @@ func skipDirOf(rel string) string {
 			return ""
 		}
 		start := strings.LastIndexByte(rel[:off+i], '/') + 1
-		if skipDirs[rel[start:off+i]] {
+		if IsSkipDir(rel[start : off+i]) {
 			return rel[:off+i]
 		}
 		off += i + 1

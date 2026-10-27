@@ -2372,12 +2372,13 @@ const maxScanSize = 1 << 20 // 1 MiB per file; mirrors the lexical pass
 // Only `_fixture`, not every `_` name: Jekyll's `_posts` is real content a
 // markdown query should still reach.
 func skipScanDir(name string) bool {
+	if symbols.IsSkipDir(name) {
+		return true
+	}
 	switch name {
-	case ".git", "node_modules", "vendor", "__pycache__",
-		"dist", "build", ".idea", ".vscode",
-		".poly-lsp-mcp", // this tool's own index
-		".dun",          // dun's state: sessions AND per-session worktrees
-		"_fixture":      // a bench probe's seed workspace, not source of this repo
+	case ".poly-lsp-mcp", // this tool's own index
+		".dun",     // dun's state: sessions AND per-session worktrees
+		"_fixture": // a bench probe's seed workspace, not source of this repo
 		return true
 	}
 	return false

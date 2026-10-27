@@ -229,7 +229,7 @@ func Search(root string, pattern *regexp.Regexp, opts SearchOptions) ([]SearchHi
 			return nil
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			if IsSkipDir(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil

@@ -489,7 +489,7 @@ func CountLanguages(root string, reg *config.Registry, ign *git.IgnoreSet, limit
 			return fs.SkipAll
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] || ign.DirIgnored(root, p) {
+			if IsSkipDir(d.Name()) || ign.DirIgnored(root, p) {
 				return fs.SkipDir
 			}
 			return nil

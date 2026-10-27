@@ -41,12 +41,18 @@ func findSourceKitLSP(t *testing.T) string {
 }
 
 // With edit validation on, an edit that introduces a NEW sourcekit-lsp
-// error is reverted and a valid one lands: the child is spawned for .swift
-// files, opened, and its diagnostics reach the edit path. A SwiftPM package,
-// which sourcekit-lsp reads without a build server.
+// error is never reported validated, and is reverted when sourcekit-lsp
+// reports the error within the wait; a valid one lands. The child is
+// spawned for .swift files, opened, and its diagnostics reach the edit
+// path. A SwiftPM package, which sourcekit-lsp reads without a build
+// server.
 //
-// Run against swift.org's 6.4.1 toolchain on Linux (2026-10-27). CI's macOS
-// runner has Xcode, and GitHub's Ubuntu image ships a Swift toolchain.
+// sourcekit-lsp publishes no document version, so no result of it
+// validates an edit (validationSkipped: lsp-unconfirmed): it publishes []
+// for a broken file until its build settings load. On Linux (swift.org
+// 6.4.1, 2026-10-27) the broken edit is reverted; on macos-15-intel
+// (Xcode) the error had not arrived 16 s after the edit (CI trace), and
+// the edit is kept, not validated.
 func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 	lsp := findSourceKitLSP(t)
 	// A failure then shows the publish/progress sequence the edit saw.
@@ -118,11 +124,23 @@ func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 		"newText": broken,
 	})
 	m := decode(r)
-	if m["rejected"] != true || m["reverted"] != true {
-		t.Fatalf("an edit calling an undeclared function was not rejected and reverted; response=%+v", m)
+	if m["validated"] == true {
+		t.Fatalf("an edit calling an undeclared function was reported validated; response=%+v", m)
 	}
-	if got, _ := os.ReadFile(mainPath); string(got) != orig {
-		t.Fatalf("file not restored after revert:\n got: %q\nwant: %q", got, orig)
+	got, _ := os.ReadFile(mainPath)
+	switch {
+	case m["rejected"] == true && m["reverted"] == true:
+		if string(got) != orig {
+			t.Fatalf("file not restored after revert:\n got: %q\nwant: %q", got, orig)
+		}
+	case m["validationSkipped"] == "lsp-unconfirmed" || m["validationSkipped"] == "lsp-timeout":
+		// sourcekit-lsp reported no error within the wait.
+		t.Logf("broken edit kept, not validated (%v): %v", m["validationSkipped"], m["validationNote"])
+		if string(got) != broken {
+			t.Fatalf("kept edit not on disk:\n got: %q\nwant: %q", got, broken)
+		}
+	default:
+		t.Fatalf("broken edit neither reverted nor reported unvalidated; response=%+v", m)
 	}
 
 	good := "func greet() -> String {\n    return \"hello\"\n}\n\nprint(greet())\n"
@@ -130,20 +148,16 @@ func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 		"file": "Sources/Demo/main.swift", "startLine": 1, "startCol": 1, "endLine": lines, "endCol": 1,
 		"newText": good,
 	})
-	// A clean result is trusted only once sourcekit-lsp's progress has
-	// ended. Its "Indexing" of this one file ends 2-20 s after start-up
-	// (Linux, unloaded to a 20% CPU quota) but outlasted the 60 s wait at
-	// 5%: there the edit is kept, not validated.
+	// Kept, not validated: unconfirmed, or timed out when sourcekit-lsp
+	// is still loading at the end of the wait.
 	m = decode(r)
-	if m["rejected"] == true {
-		t.Fatalf("valid edit was rejected; response=%+v", m)
+	if m["rejected"] == true || m["validated"] == true {
+		t.Fatalf("valid edit rejected, or validated on an unversioned result; response=%+v", m)
 	}
-	if m["validated"] != true {
-		if m["validationSkipped"] != "lsp-timeout" {
-			t.Fatalf("valid edit neither validated nor timed out; response=%+v", m)
-		}
-		t.Logf("valid edit kept, not validated (child still indexing): %v", m["validationNote"])
+	if s := m["validationSkipped"]; s != "lsp-unconfirmed" && s != "lsp-timeout" {
+		t.Fatalf("valid edit: want validationSkipped lsp-unconfirmed or lsp-timeout; response=%+v", m)
 	}
+	t.Logf("valid edit kept, not validated (%v)", m["validationSkipped"])
 	if got, _ := os.ReadFile(mainPath); string(got) != good {
 		t.Fatalf("valid edit did not land:\n got: %q\nwant: %q", got, good)
 	}

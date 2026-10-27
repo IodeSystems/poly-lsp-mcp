@@ -38,6 +38,9 @@ import (
 //     publish, with none after it).
 //   - stuck: as loading, but the progress never ends and every publish
 //     shows the real result.
+//   - blind: replays Xcode's sourcekit-lsp on macos-15-intel (CI trace,
+//     2026-10-27): as loading-quiet, but every publish is [] whatever the
+//     text, after the progress ends too. Its errors never arrive.
 //   - silent: never publishes.
 const fakeDiagLSPArg = "--fake-diag-lsp"
 
@@ -113,7 +116,7 @@ func runFakeDiagLSP() {
 				}()
 			case "versioned":
 				publish(uri, version, current(uri))
-			case "loading", "loading-quiet", "stuck":
+			case "loading", "loading-quiet", "stuck", "blind":
 				write(&jsonrpc.Message{JSONRPC: "2.0", ID: json.RawMessage(`"create-load"`), Method: "window/workDoneProgress/create", Params: json.RawMessage(`{"token":"load"}`)})
 				progress("begin")
 				go func() {
@@ -149,10 +152,10 @@ func runFakeDiagLSP() {
 						publish(uri, 0, current(uri))
 					}()
 				}
-			case "loading", "loading-quiet", "stuck":
+			case "loading", "loading-quiet", "stuck", "blind":
 				go func() {
 					time.Sleep(100 * time.Millisecond)
-					publish(uri, 0, (isLoaded || mode == "stuck") && current(uri))
+					publish(uri, 0, (isLoaded || mode == "stuck") && mode != "blind" && current(uri))
 				}()
 			case "versioned":
 				publish(uri, version-1, false)
@@ -242,7 +245,8 @@ const brokenMain = "package main\n\n// BROKEN\nfunc main() {}\n"
 // An edit right after bring-up must not take the child's first,
 // incomplete publish for the opened file as its own result. The fake
 // publishes [] 800ms after the open and the real (broken) result at
-// 1500ms, with no version on either: the broken edit is reverted.
+// 1500ms, with no version on either: the broken edit is reverted. A
+// clean result with no version never validates an edit.
 func TestEditSkipsFirstPublishAfterOpen(t *testing.T) {
 	s, path := fakeDiagSession(t, "sourcekit", 5*time.Second)
 	orig, _ := os.ReadFile(path)
@@ -253,10 +257,24 @@ func TestEditSkipsFirstPublishAfterOpen(t *testing.T) {
 	if got, _ := os.ReadFile(path); string(got) != string(orig) {
 		t.Fatalf("file not restored: %q", got)
 	}
-	// Loaded now: a clean edit is answered at +100ms and lands.
+	// Loaded now: a clean edit is answered at +100ms and lands, not
+	// validated.
 	good := "package main\n\nfunc main() { println(1) }\n"
-	if m := editMain(t, s, path, good); m["validated"] != true {
-		t.Fatalf("clean edit after load not validated: %v", m)
+	wantUnconfirmed(t, editMain(t, s, path, good))
+	if got, _ := os.ReadFile(path); string(got) != good {
+		t.Fatalf("clean edit not kept: %q", got)
+	}
+}
+
+// wantUnconfirmed checks an edit answered by an unversioned clean
+// publish: kept, not validated, validationSkipped: lsp-unconfirmed.
+func wantUnconfirmed(t *testing.T, m map[string]any) {
+	t.Helper()
+	if m["validated"] != false || m["rejected"] == true || m["validationSkipped"] != "lsp-unconfirmed" || m["diagnosticsTimedOut"] == true {
+		t.Fatalf("want validated:false validationSkipped:lsp-unconfirmed (not timed out), got %v", m)
+	}
+	if note, _ := m["validationNote"].(string); !strings.Contains(note, "does not version") || !strings.Contains(note, "not validated") {
+		t.Errorf("validationNote = %q", note)
 	}
 }
 
@@ -273,6 +291,14 @@ func TestEditWaitsForEditedVersion(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(path); string(got) != string(orig) {
 		t.Fatalf("file not restored: %q", got)
+	}
+	// A clean result for the edited version validates. Let the revert's
+	// own result (+800ms) land first: the fake would publish it after the
+	// next edit's.
+	time.Sleep(time.Second)
+	good := "package main\n\nfunc main() { println(1) }\n"
+	if m := editMain(t, s, path, good); m["validated"] != true {
+		t.Fatalf("clean edit with a versioned result not validated: %v", m)
 	}
 }
 
@@ -344,11 +370,9 @@ func TestEditDistrustsCleanPublishWhileChildLoads(t *testing.T) {
 	if got, _ := os.ReadFile(path); string(got) != string(orig) {
 		t.Fatalf("file not restored: %q", got)
 	}
-	// Loaded now: a clean edit is answered at +100ms and validated.
+	// Loaded now: a clean edit is answered at +100ms, not validated.
 	good := "package main\n\nfunc main() { println(1) }\n"
-	if m := editMain(t, s, path, good); m["validated"] != true {
-		t.Fatalf("clean edit after load not validated: %v", m)
-	}
+	wantUnconfirmed(t, editMain(t, s, path, good))
 }
 
 // A child whose progress never ends. Its clean result is never trusted:
@@ -360,12 +384,7 @@ func TestEditNotValidatedWhileChildBusy(t *testing.T) {
 	waitFirstPublish(t, s, path)
 	stillBroken := "package main\n\n// BROKEN\nfunc main() { println(1) }\n"
 	m := editMain(t, s, path, stillBroken)
-	if m["validated"] != false || m["rejected"] == true || m["validationSkipped"] != "lsp-timeout" {
-		t.Fatalf("an edit with no new errors from a busy child: want validated:false validationSkipped:lsp-timeout, got %v", m)
-	}
-	if note, _ := m["validationNote"].(string); !strings.Contains(note, "still loading") {
-		t.Errorf("validationNote = %q", note)
-	}
+	wantUnconfirmed(t, m)
 	clean := "package main\n\nfunc main() {}\n"
 	m = editMain(t, s, path, clean)
 	if m["validated"] != false || m["validationSkipped"] != "lsp-timeout" || m["diagnosticsTimedOut"] != true {
@@ -378,13 +397,46 @@ func TestEditNotValidatedWhileChildBusy(t *testing.T) {
 
 // A child that, like sourcekit-lsp ending "Indexing", publishes nothing
 // when its progress ends: the edit's clean publish while it loaded is not
-// trusted, so the text is sent again once it is idle, and the clean
-// answer to that validates the edit.
+// taken, so the text is sent again once it is idle, and the answer to
+// that is the edit's result (without the resend the edit times out).
 func TestEditResendsTextWhenChildGoesIdle(t *testing.T) {
 	s, path := fakeDiagSession(t, "loading-quiet", 5*time.Second)
 	waitFirstPublish(t, s, path)
 	good := "package main\n\nfunc main() { println(1) }\n"
-	if m := editMain(t, s, path, good); m["validated"] != true {
-		t.Fatalf("clean edit made while the child loaded not validated after it went idle: %v", m)
+	wantUnconfirmed(t, editMain(t, s, path, good))
+}
+
+// The macos-15-intel failure of 87d9429: Xcode's sourcekit-lsp answered a
+// broken edit with [] while its package loaded, sent nothing when the
+// load ended, and answered the resent text with [] again. No error ever
+// arrived. The edit is kept and must not be reported validated.
+func TestEditNotValidatedOnBlindChild(t *testing.T) {
+	s, path := fakeDiagSession(t, "blind", 5*time.Second)
+	waitFirstPublish(t, s, path)
+	m := editMain(t, s, path, brokenMain)
+	wantUnconfirmed(t, m)
+	if got, _ := os.ReadFile(path); string(got) != brokenMain {
+		t.Fatalf("edit not kept: %q", got)
+	}
+}
+
+// A batch (commit:false, then commit) whose staged file was answered only
+// by an unversioned clean publish commits, kept and not validated: the
+// union's check is no stronger than the evidence for its files.
+func TestBatchCommitNotValidatedOnUnconfirmedResult(t *testing.T) {
+	s, path := fakeDiagSession(t, "blind", 5*time.Second)
+	waitFirstPublish(t, s, path)
+	cur, _ := os.ReadFile(path)
+	good := "package main\n\nfunc main() { println(1) }\n"
+	r := s.callTool("node_edit", map[string]any{"node": "main.go", "oldText": string(cur), "newText": good, "commit": false})
+	if m := txnDecode(t, r); m["staged"] != true {
+		t.Fatalf("stage: %v", m)
+	}
+	m := txnDecode(t, s.callTool("node_edit", map[string]any{"commit": true}))
+	if m["committed"] != true || m["validated"] != false || m["validationSkipped"] != "lsp-unconfirmed" {
+		t.Fatalf("want committed, validated:false, validationSkipped:lsp-unconfirmed; got %v", m)
+	}
+	if got, _ := os.ReadFile(path); string(got) != good {
+		t.Fatalf("committed edit not kept: %q", got)
 	}
 }

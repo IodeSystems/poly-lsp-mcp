@@ -61,6 +61,8 @@ The project ships from `main` without semver tags today. This section captures t
 - **Tier 3 (schema-anchored)**: `schemas:` section. Auto-binds every named entity in proto / OpenAPI / JSONSchema specs. `auto_schemas: true` opt-in workspace detection.
 - **Universal `@ref` scanner**: language-agnostic regex pass picks up `@see`, `{@link}`, `@ref`, and `x-ref:` markers wherever they appear. Generator-emitted artifacts (gat in gwag) get cross-language linkage for free.
 
+- **Swift**: indexed, with a node model (`file#Type.method`; classes, structs, enums and their cases, actors, protocols, extensions merged into their type, inits/deinit, stored and computed properties, subscripts, typealiases, nested types, `///` and `/** */` docs, attributes as `annotation` children) in both tree-sitter runtimes (the pure-Go one drives smacker's grammar with a port of its scanner). sourcekit-lsp is the default child LSP; Package.swift, `.xcodeproj` and `.xcworkspace` mark project roots; `doctor` and the setup notification name the `xcode-build-server` command for an Xcode project without a `buildServer.json`, and the `swift build` a pre-6.1 sourcekit-lsp needs for references. `Pods`, `Carthage`, `.build`, `.swiftpm`, `DerivedData`, `xcuserdata` and `*.xcassets` are skipped directories (now also in `node_query`'s walk and the proactive open, which share the index's list; `.gradle` joins those two as a result). No Swift signature refactor.
+
 ### Parse cache + stacked branches (Phase 3)
 
 - Content-addressed cache keyed on `(language, sha256(content))`. Files with identical content share one parse across branches, worktrees, and renames.
@@ -70,7 +72,7 @@ The project ships from `main` without semver tags today. This section captures t
 ### Configuration
 
 - `poly-lsp-mcp.yaml` schema: `languages`, `bindings`, `schemas`, `auto_schemas`. All sections optional; defaults cover the supported languages.
-- Default registry: go / typescript / python / java / kotlin / groovy / c / c++ / sql / proto / graphql / yaml / json / xml / markdown. C and C++ default to `clangd` (which works degraded without a `compile_commands.json`); Java, Kotlin and Groovy are tree-sitter only (jdtls / kotlin-language-server / groovy-language-server are opt-in via `languages:`). A Jenkinsfile is Groovy but extensionless, and the registry keys on extension, so it is not routed. `.h` is registered to C++, whose grammar is a superset — a C header still parses correctly, and a C++ header named `.h` doesn't lose its classes.
+- Default registry: go / typescript / python / java / kotlin / groovy / c / c++ / swift / sql / proto / graphql / yaml / json / xml / markdown. C and C++ default to `clangd` (which works degraded without a `compile_commands.json`); Java, Kotlin and Groovy are tree-sitter only (jdtls / kotlin-language-server / groovy-language-server are opt-in via `languages:`). A Jenkinsfile is Groovy but extensionless, and the registry keys on extension, so it is not routed. `.h` is registered to C++, whose grammar is a superset — a C header still parses correctly, and a C++ header named `.h` doesn't lose its classes. Swift defaults to `sourcekit-lsp` (part of every Swift toolchain).
 - Defaults merge: partial configs (e.g., only `schemas:` declared) get the default `languages` registry folded in so the index doesn't silently break.
 
 ### Testing fixtures

@@ -94,6 +94,22 @@ ground; the most verbose variant did worse (more grep scaffolding).
 - Go keeps pointer/slice decoration on return segments (`*Config`,
   `[]Schema`) while java/kotlin/typescript/c strip it (Carl, 2026-07-27;
   documented on `goTypeSegment`).
+- **Swift extensions have no node of their own; their members join the
+  type** (2026-10-27, `symbols/swiftsymbols.go` `swiftExtensions`). An
+  extension of a type declared in the same file is merged into it:
+  `Greeter.wave` is one path whether `wave` is in the class body or an
+  extension, and an overload split across the two reads `greet[1]`,
+  `greet[2]` instead of two colliding `Greeter.greet`. An extension of a type
+  declared elsewhere (`extension String`, `Greeter+Networking.swift`) files
+  its members under the extended type, as a Go method is filed under its
+  receiver; several such extensions in one file share one level, so their
+  overloads disambiguate the same way. Cost: an extension block (with its
+  conformance list and `where` clause) cannot be read or deleted as one
+  node; its members can.
+- Swift `init`, `deinit` and `subscript` are named by their keyword
+  (`Greeter.init[2]`), the way Swift code spells them; their name range is
+  the declaration, so rename does not pin on a keyword. `deinit` is class
+  `ctor` (C++ files its destructors the same way).
 
 ## Budgets
 
@@ -125,6 +141,12 @@ ground; the most verbose variant did worse (more grep scaffolding).
   LFS pointers and skipped dirs are left out per file; symlinks inside the
   root are followed after plain files (dedupe by real path), bounded by
   `--symlink-depth` (4).
+- iOS trees: `Pods`, `Carthage`, `.build`, `.swiftpm`, `DerivedData`,
+  `xcuserdata` and `*.xcassets` are skip dirs (vendored, generated, per-user,
+  or one `Contents.json` per image). `.xcodeproj` contents and
+  `.storyboard` / `.xib` have no registered extension and are not indexed;
+  linking a storyboard's `customClass` / outlets to Swift is an aw4 issue
+  (the XML extractor would read every `key=` attribute as a name).
 - Shadowing: a lesser-typed file beside a stronger one (foo.js/foo.ts,
   foo.py/foo.pyi) is out of the index and broad queries, reachable by path.
 - Markdown is structural: `section` nodes own their body; only headings,

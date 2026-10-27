@@ -25,8 +25,19 @@ entry here.
 - **JVM** languages (java, kotlin, groovy) are tree-sitter only: their
   servers want a build. Groovy has no corpus here; a Jenkinsfile cannot be
   routed (extensionless, the registry keys on extension).
+- **Swift:** the grammar is smacker's pin of tree-sitter-swift, older than
+  Swift 6 syntax: of 150 Swift files on this machine (vendored expo
+  modules), 26 parse with an ERROR (raw identifiers like
+  ``func `does a thing`()``, `#expect` macros). ERROR nodes are walked
+  through, as in kotlin, so members survive and some locals surface as
+  members. `let a = 1, b = 2` and `case a, b` give each name its own
+  node spanned by the name alone. No signature refactor: call sites carry
+  argument labels. sourcekit-lsp's first diagnostics for a file arrive a
+  second or more after it opens, without a document version; an edit made
+  in that window can take the publish for the old text as its own.
 - **Pure-Go runtime** (`CGO_ENABLED=0`): same grammars, about 10x slower to
-  parse; on valid kotlin / tsx / c, some GLR ambiguity picks differ from C.
+  parse; on valid kotlin / tsx / c / swift, some GLR ambiguity picks differ
+  from C (swift: 125 of 126 cleanly-parsing files give the same symbols).
   `doctor` reports `runtime`.
 
 ## Android

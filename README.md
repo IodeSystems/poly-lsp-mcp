@@ -29,6 +29,7 @@ skipped, never fatal.
 | Groovy | `.groovy .gradle .gvy .gy` | ✅ | — (opt-in) | ✅ |
 | C | `.c` | ✅ | clangd | ✅ |
 | C++ | `.cpp .cc .cxx .c++ .h .hpp .hh .hxx .h++ .ipp .tcc .inl` | ✅ | clangd | ✅ |
+| Swift | `.swift` | ✅ | sourcekit-lsp | — |
 | SQL | `.sql .psql` | ✅ | — | — |
 | XML | `.xml` | ✅ | — | ✅ attributes |
 | Markdown | `.md .markdown` | ✅ sections | — | — |
@@ -58,6 +59,28 @@ Notes worth knowing before you rely on them:
   every token is indexed. That is what makes a YAML string match a Go type.
 - A Jenkinsfile is Groovy but has no extension, and the registry keys on
   extension alone, so it is not routed.
+- **Swift extensions merge into their type.** `extension Greeter { func
+  wave() }` is `Greeter.wave`, beside the class's own members when `Greeter`
+  is declared in the same file; `extension String { … }` files its members
+  under `String`. `init` / `deinit` / `subscript` are named by their keyword
+  (`Greeter.init[2]`); attributes (`@objc`, `@MainActor`) are in the
+  declaration's range and are `annotation` children. No signature refactor:
+  Swift call sites carry argument labels.
+- **sourcekit-lsp** ships with Swift: Xcode or its command line tools
+  (`xcode-select --install`) on macOS, a swift.org toolchain or Nix on
+  Linux. The default config starts `sourcekit-lsp` off `PATH`; on macOS that
+  is Xcode's `/usr/bin` shim (`xcrun sourcekit-lsp`), which the macOS CI leg
+  checks rather than this author. It reads a SwiftPM package (`Package.swift`)
+  by itself. An Xcode project needs a build server for cross-file
+  resolution: `brew install xcode-build-server`, then `xcode-build-server
+  config -project X.xcodeproj -scheme S` beside it; `doctor` and the setup
+  notification print that command for a project with no `buildServer.json`.
+  Before Swift 6.1 sourcekit-lsp does not index in the background, so
+  references need a `swift build` (or an Xcode build) first; `doctor` reads
+  the toolchain version and says so.
+- **iOS trees:** `Pods/`, `Carthage/`, `.build/`, `.swiftpm/`, `DerivedData/`,
+  `xcuserdata/` and `*.xcassets/` are skipped like `node_modules`.
+  `.xcodeproj` internals and `.storyboard` / `.xib` are not indexed.
 
 Languages, extensions and child-LSP commands are all overridable in
 `poly-lsp-mcp.yaml`.
@@ -137,7 +160,9 @@ affects the exit status, and `--no-update-check` skips it.
 The MCP server says the same after bring-up: `notifications/message` from
 logger `poly-lsp-mcp/setup` (level `warning` when one is missing), data
 `{languages: [{lang, files, lsp: {name, found, path}, adds, install: {cmd,
-needs}}], missing}` — the shape `doctor --json` uses for `languages`.
+needs}}], missing}` — the shape `doctor --json` uses for `languages`. In a
+Swift workspace `swift` lists the Xcode build-server and index hints `doctor`
+prints.
 
 ### Dev: rebuild on spawn
 
@@ -236,6 +261,7 @@ When a `node_query` leaves something out, its result carries `leftOut`: `pruned`
 | typescript | `tsconfig.json` beside a `package.json`, or one no other `tsconfig.json` encloses |
 | python | `pyproject.toml`, `setup.py`, `setup.cfg` (nested packages are roots of their own) |
 | c, cpp | `compile_commands.json`, or the outermost `CMakeLists.txt` |
+| swift | `Package.swift`, or a directory holding an `.xcodeproj` / `.xcworkspace` |
 
 The search skips what the index skips (`node_modules`, `vendor` and the like, gitignored and excluded directories) and test fixtures (`testdata`, and `fixtures`/`__fixtures__` under a test dir; they stay indexed), and stops after 2 s or 20,000 directories, and says so. Each child starts on the first request for a file under its root; a file goes to the nearest enclosing root, else to a child at the workspace root. At most `--lsp-roots-max` (8) run per language: the least recently used is stopped (reason `lru`) and starts again on demand, and idle and memory stops apply to each child as before. `poly-lsp-mcp status` shows each child's root (`LSP ROOT`).
 
@@ -303,7 +329,7 @@ The prior surface — `structure`, `search`, `node_references`, `node_read`, `no
 | `node_read` | Read whole file, line preview, or byte-precise range. |
 | `node_edit` | Atomic write: whole-file create-or-overwrite, range replace, or unified-diff patch. |
 | `node_delete` | Delete a range OR delete the whole file. |
-| `node_refactor` | Composable cross-language refactor: `refactor:{rename?, params?, return?}`. Signature rewriting supports go / typescript / python / java / kotlin / groovy / c / c++, plus xml (attributes); rename works everywhere. |
+| `node_refactor` | Composable cross-language refactor: `refactor:{rename?, params?, return?}`. Signature rewriting supports go / typescript / python / java / kotlin / groovy / c / c++, plus xml (attributes); rename works everywhere (swift included). |
 
 ### Tool capability matrix
 

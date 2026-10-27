@@ -19,7 +19,9 @@
 // still differs is the runtime: error recovery, and GLR ambiguity resolution
 // in kotlin/tsx/c/swift (see keepRuntimeName for the measured parity). For
 // swift it is most of the gap: `x.y` in an expression is a simple_identifier
-// target in C and a user_type here. Declarations are not affected.
+// target in C and a user_type here. Declarations are rarely affected: of the
+// 126 files of that corpus the C runtime parses cleanly, 125 give the same
+// symbols in both runtimes.
 //
 // Scanners: sql, kotlin, tsx and swift are ports of smacker's C scanners
 // (here, in *_scanner.go); gotreesitter's own scanners for those are for

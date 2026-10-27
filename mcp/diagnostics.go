@@ -93,11 +93,14 @@ type editDiagnostics struct {
 	Items              []diagnosticJSON `json:"diagnostics"`
 	DroppedDiagnostics int              `json:"droppedDiagnostics,omitempty"`
 
-	// Provisional: an edited URI's result was published while its child
-	// was busy (loading or indexing) and is taken only because it has
-	// errors. It may revert an edit but never validates one: with no new
-	// errors the edit is reported not validated.
-	Provisional bool `json:"-"`
+	// Unconfirmed: an edited URI's result came from a publish with no
+	// document version (sourcekit-lsp, typescript-language-server). It
+	// may revert an edit but never validates one: such a server can
+	// publish a clean result for text it has not fully analysed
+	// (sourcekit-lsp before its build settings load), and nothing in the
+	// publish says so. With no new errors the edit is reported not
+	// validated (validationSkipped: lsp-unconfirmed).
+	Unconfirmed bool `json:"-"`
 }
 
 // diagnosticOptions are the per-call enrichment caps. Zero values
@@ -460,35 +463,44 @@ func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.Diagnostic
 // publish arriving after the edit is not enough: it can describe the
 // text before it.
 //
-//   - A publish carrying a document version (gopls, clangd) is the
+//   - A publish carrying a document version (gopls, clangd, pylsp) is the
 //     edited text's when that version is at least `version`; an older
-//     one is skipped.
-//   - A publish without one (sourcekit-lsp) is skipped when it is the
-//     first since the URI's didOpen. Measured with sourcekit-lsp 6.4.1:
-//     a just-opened file is published about 1 s later with no semantic
-//     errors at all (build settings not loaded yet; an undeclared call
-//     reads clean), then again 1-3 s later with them. The second is
-//     taken. A later publish is then taken once no other arrives for the
-//     settle window (diagSettleDuration).
+//     one is skipped. Only such a result can validate an edit.
+//   - A publish without one (sourcekit-lsp, typescript-language-server)
+//     is skipped when it is the first since the URI's didOpen. Measured
+//     with sourcekit-lsp 6.4.1: a just-opened file is published about
+//     1 s later with no semantic errors at all (build settings not
+//     loaded yet; an undeclared call reads clean), then again 1-3 s
+//     later with them. A later publish is taken once no other arrives
+//     for the settle window (diagSettleDuration), flagged unconfirmed:
+//     its errors can revert the edit, but a clean one does not validate
+//     it. sourcekit-lsp computes only syntactic diagnostics while it has
+//     no build settings for a file, and its publish does not say so
+//     (DiagnosticReportManager, swiftlang/sourcekit-lsp); on
+//     macos-15-intel it published [] for a broken edit 2 s after its
+//     package had loaded (CI trace, 2026-10-27).
 //   - An unversioned publish that arrives while the child has a
-//     work-done progress open (Child.Busy) and has no errors is skipped:
-//     sourcekit-lsp publishes a file without its semantic errors for as
-//     long as "SourceKit-LSP: Reloading Package" is open, and does so
-//     again for each change in that time (measured, 6.4.1 under a CPU
-//     quota). One with errors is taken, flagged provisional: it can only
-//     revert the edit (collectDiagnostics, editDiagnostics.Provisional).
+//     work-done progress open (Child.Busy) and has no errors is skipped,
+//     to give the child the chance to report errors: sourcekit-lsp
+//     publishes a file without its semantic errors for as long as
+//     "SourceKit-LSP: Reloading Package" is open, and does so again for
+//     each change in that time (measured, 6.4.1 under a CPU quota).
 //     After a skipped one, if the child's progress ends before it
 //     publishes again, the text is sent again (didChange, same text) so
 //     it publishes from its loaded state: it may not republish on its own
 //     (sourcekit-lsp ends "Indexing" right after publishing a change).
 //
-// Pull diagnostics (textDocument/diagnostic) would be the clean answer
-// but neither gopls 0.24 nor sourcekit-lsp 6.4.1 advertises it to this
-// client, and sourcekit-lsp's answer right after an open is the same
-// empty list (measured, 2026-10-27).
+// Pull diagnostics (textDocument/diagnostic) do not help. sourcekit-lsp
+// 6.4.1 registers it (dynamically) when the client advertises it, then
+// stops publishing, and answers a pull made before its build settings
+// load at once with a full, empty report for a broken file; a pull
+// after its workspace/diagnostic/refresh has the error (measured,
+// 2026-10-27). The answer is no more conclusive than a publish.
+// gopls 0.24 answers pulls but versions its publishes;
+// typescript-language-server 5.1.3, clangd and pylsp 1.15 reject them.
 //
-// provisional reports a result taken from a busy child for its errors.
-func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.DiagnosticStore, child *multiplex.Child, uri string, content []byte, since uint64, version int32) (diags []multiplex.Diagnostic, ok, provisional bool) {
+// unconfirmed reports a result from an unversioned publish.
+func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.DiagnosticStore, child *multiplex.Child, uri string, content []byte, since uint64, version int32) (diags []multiplex.Diagnostic, ok, unconfirmed bool) {
 	s.openDocsMu.Lock()
 	openGen, opened := s.openGen[uri]
 	s.openDocsMu.Unlock()
@@ -522,11 +534,8 @@ func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.Diagnos
 			}
 			p = next
 		}
-		if p.Busy {
-			if anyError(p.Diags) {
-				return p.Diags, true, true
-			}
-			// Clean while loading: not trusted.
+		if p.Busy && !anyError(p.Diags) {
+			// Clean while loading: wait for a later one.
 			after = p.Gen
 			if waitPublishOrIdle(ctx, store, child, uri, after) && resends < maxResends {
 				resends++
@@ -534,7 +543,7 @@ func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.Diagnos
 			}
 			continue
 		}
-		return p.Diags, true, false
+		return p.Diags, true, true
 	}
 }
 
@@ -636,12 +645,12 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 	// store holds for it describes other text.
 	editedDiags := make(map[string][]multiplex.Diagnostic, len(tracked))
 	for _, c := range tracked {
-		diags, ok, provisional := s.waitForEditedText(ctx, store, c.child, c.uri, contents[c.uri], c.since, c.version)
+		diags, ok, unconfirmed := s.waitForEditedText(ctx, store, c.child, c.uri, contents[c.uri], c.since, c.version)
 		if !ok {
 			out.TimedOut = true
 		}
-		if provisional {
-			out.Provisional = true
+		if unconfirmed {
+			out.Unconfirmed = true
 		}
 		editedDiags[c.uri] = diags
 	}

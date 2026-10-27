@@ -206,10 +206,22 @@ ground; the most verbose variant did worse (more grep scaffolding).
   outlasts `--validate-wait`. Versioned publishes (gopls) ignore progress. Capped by `--validate-wait` (2 s; per connection in daemon mode,
   `X-Poly-Validate-Wait`): past it the edit is kept with
   `validationSkipped: lsp-timeout` and a `validationNote`, and the stale
-  diagnostics are not reported. Pull diagnostics (`textDocument/diagnostic`)
-  were measured and rejected: neither gopls 0.24 nor sourcekit-lsp 6.4.1
-  advertises it to this client, and sourcekit-lsp answers [] right after an
-  open. gopls edit latency unchanged (median 452 ms over 10 warm edits,
+  diagnostics are not reported. **Only a versioned result validates**
+  (Carl, 2026-10-27): an unversioned one (sourcekit-lsp,
+  typescript-language-server) can revert an edit, but a clean one keeps it
+  with `validated:false`, `validationSkipped: lsp-unconfirmed`. Xcode's
+  sourcekit-lsp on macos-15-intel answered a broken edit with [] under
+  "Reloading Package", sent nothing when it ended, and answered the resent
+  text with [] again 2 s later (CI, 87d9429): nothing in a publish says it
+  lacks semantic errors (sourcekit-lsp computes syntactic ones only while a
+  file has no build settings). A batch commit follows the same rule for
+  its staged files. Pull diagnostics (`textDocument/diagnostic`) were
+  measured and rejected: sourcekit-lsp 6.4.1 registers it when the client
+  advertises it, then stops publishing, and answers a pull made before its
+  build settings load at once with a full empty report for a broken file;
+  only after its `workspace/diagnostic/refresh` does a pull carry the
+  error. No better evidence than a publish. typescript-language-server
+  5.1.3, clangd and pylsp 1.15 reject the request. gopls edit latency unchanged (median 452 ms over 10 warm edits,
   before and after each change). `POLY_LSP_CHILD_TRACE=1` logs what each
   child sends and the notifications sent to it; the Swift edit e2e sets
   it, so a CI failure shows the sequence.

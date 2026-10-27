@@ -56,7 +56,7 @@ func mcpCmd(l *loader) *cobra.Command {
 	// Safe to default because it degrades rather than blocks: with no child
 	// LSP for the language it is off entirely, and when diagnostics are
 	// unavailable or time out the edit APPLIES and is flagged (fail-open,
-	// Skipped: no-lsp / lsp-timeout). It cannot make an unvalidatable
+	// Skipped: no-lsp / lsp-timeout / lsp-unconfirmed). It cannot make an unvalidatable
 	// workspace uneditable.
 	//
 	// --no-validate is the escape hatch, for when validation itself is the

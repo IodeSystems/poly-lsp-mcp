@@ -38,10 +38,17 @@ entry here.
   first edit of a cold package needs more than the 2 s `--validate-wait`
   default and is kept, reported `validationSkipped: lsp-timeout`. A clean
   result published while sourcekit-lsp reports progress (package loading,
-  background indexing) is not trusted either: a clean edit made while it
+  background indexing) is not taken either: a clean edit made while it
   indexes is reported `lsp-timeout` when indexing outlasts the wait (a
   large package's first index).
-- **Edit validation, servers without document versions:** the first
+- **Edit validation, servers without document versions** (sourcekit-lsp,
+  typescript-language-server 5.1.3): a clean result never validates an
+  edit. It is kept and reported `validated:false`,
+  `validationSkipped: lsp-unconfirmed`; a new error still reverts it. Such
+  a server can publish a clean result for text it has not analysed in full
+  and nothing says so (sourcekit-lsp before its build settings load).
+  gopls, clangd and pylsp version their publishes and validate.
+- **Edit validation, servers without document versions, opens:** the first
   publish after a file's didOpen is never taken as an edit's result (see
   design.md "Editing"). A server that publishes once per open (pylsp,
   untested here) therefore validates no edit that itself opens a file

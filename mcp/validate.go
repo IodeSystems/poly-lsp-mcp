@@ -38,8 +38,8 @@ type editOutcome struct {
 	RevertErr    string   // revert failure detail
 	NewErrors    []string // the error diagnostics THIS edit added (code∷message)
 	Validated    bool     // proven clean: LSP answered, no new errors
-	Skipped      string   // "" | "no-lsp" | "lsp-timeout" — safety not provable
-	SkipNote     string   // why, in words, when Skipped is lsp-timeout
+	Skipped      string   // "" | "no-lsp" | "lsp-timeout" | "lsp-unconfirmed" — safety not provable
+	SkipNote     string   // why, in words, when Skipped is lsp-timeout or lsp-unconfirmed
 
 	// LostWrites names variables this edit stopped ever ASSIGNING while
 	// leaving them referenced — the one breakage class no diagnostic sees.
@@ -79,9 +79,10 @@ type editBatch struct {
 	s         *Server
 	sess      sessionID // owning session (for per-file claims)
 	validate  bool
-	baseline  map[string]int      // workspace error fingerprint at open (if validating)
-	originals map[string][]byte   // uri → pre-batch bytes (first write wins) — for revert
-	staged    map[string][32]byte // uri → hash of the LAST bytes we staged — for commit-time conflict detection
+	baseline  map[string]int             // workspace error fingerprint at open (if validating)
+	originals map[string][]byte          // uri → pre-batch bytes (first write wins) — for revert
+	staged    map[string][32]byte        // uri → hash of the LAST bytes we staged — for commit-time conflict detection
+	diags     map[string]editDiagnostics // uri → the child's result for the LAST bytes we staged (if validating)
 	count     int
 }
 
@@ -92,6 +93,7 @@ func (s *Server) openBatch(opts diagnosticOptions) *editBatch {
 		validate:  (opts.Validate || s.validateEdits) && s.manager != nil,
 		originals: map[string][]byte{},
 		staged:    map[string][32]byte{},
+		diags:     map[string]editDiagnostics{},
 	}
 	if b.validate {
 		b.baseline = s.errorFingerprintAll()
@@ -122,7 +124,7 @@ func (b *editBatch) stage(abs string, orig, out []byte, mode os.FileMode, opts d
 	// validation sees it) only when we're actually validating — no manager
 	// means nothing to feed.
 	if b.validate {
-		b.s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
+		b.diags[uri] = b.s.collectDiagnostics([]string{uri}, map[string][]byte{uri: out}, opts)
 	}
 	return nil
 }
@@ -147,12 +149,34 @@ func (b *editBatch) commit() editOutcome {
 	}
 	introduced := fingerprintMinus(b.s.settleErrorFingerprint(3*time.Second), b.baseline)
 	if len(introduced) == 0 {
-		oc.Validated = true
+		oc.Skipped, oc.SkipNote = b.unproven()
+		oc.Validated = oc.Skipped == ""
 		return oc
 	}
 	oc.Rejected, oc.NewErrors = true, introduced
 	b.revertAll(&oc)
 	return oc
+}
+
+// unproven names why the batch's union cannot be validated: a staged
+// file whose last result had no child LSP, timed out, or was unconfirmed
+// (see skipped, unconfirmed). Empty when every result can validate.
+func (b *editBatch) unproven() (reason, note string) {
+	uris := make([]string, 0, len(b.diags))
+	for uri := range b.diags {
+		uris = append(uris, uri)
+	}
+	sort.Strings(uris)
+	for _, uri := range uris {
+		d := b.diags[uri]
+		switch {
+		case !d.Available || d.TimedOut:
+			return b.s.skipped(d)
+		case d.Unconfirmed:
+			return unconfirmed()
+		}
+	}
+	return "", ""
 }
 
 // externalWrites returns the batch's files whose current on-disk bytes are
@@ -308,8 +332,8 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 	}
 	introduced := fingerprintMinus(s.settleErrorFingerprint(3*time.Second), baseline)
 	if len(introduced) == 0 {
-		if diags.Provisional {
-			oc.Skipped, oc.SkipNote = s.provisional()
+		if diags.Unconfirmed {
+			oc.Skipped, oc.SkipNote = unconfirmed()
 			return oc, nil
 		}
 		oc.Validated = true
@@ -425,8 +449,8 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 	}
 	introduced := fingerprintMinus(t.s.settleErrorFingerprint(3*time.Second), t.baseline)
 	if len(introduced) == 0 {
-		if diags.Provisional {
-			oc.Skipped, oc.SkipNote = t.s.provisional()
+		if diags.Unconfirmed {
+			oc.Skipped, oc.SkipNote = unconfirmed()
 			return oc
 		}
 		oc.Validated = true
@@ -461,11 +485,11 @@ func (s *Server) skipped(d editDiagnostics) (reason, note string) {
 	return "lsp-timeout", fmt.Sprintf("validation timed out after %s: the child LSP published no diagnostics for the edited text, or only while still loading or indexing; edit kept, not validated", s.diagWaitDuration())
 }
 
-// provisional is the skip for an edit whose only result came from a child
-// still loading or indexing (editDiagnostics.Provisional) and showed no
-// new errors: that result may lack errors the child has not computed yet.
-func (s *Server) provisional() (reason, note string) {
-	return "lsp-timeout", "the child LSP was still loading or indexing (work-done progress open) and its result showed no new errors, which it may not have computed yet; edit kept, not validated"
+// unconfirmed is the skip for an edit whose result came from an
+// unversioned publish (editDiagnostics.Unconfirmed) and showed no new
+// errors: that result may lack errors the child has not computed yet.
+func unconfirmed() (reason, note string) {
+	return "lsp-unconfirmed", "the child LSP does not version its diagnostics, so its result (no new errors) cannot be confirmed to be a full analysis of the edited text; edit kept, not validated"
 }
 
 // currentBatch / setBatch / closeBatch are session-keyed — see session.go.

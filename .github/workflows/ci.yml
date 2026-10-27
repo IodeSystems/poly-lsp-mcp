@@ -39,6 +39,11 @@ jobs:
           go vet ./...
           go test -count=1 -timeout 900s ./...
 
+      # Licenses are the same on every platform (tools/notices); check once.
+      - name: Third-party notices are current
+        if: runner.os == 'Linux'
+        run: go run ./tools/notices -check THIRD_PARTY_NOTICES
+
   # The pure-Go tree-sitter runtime is what `go install` builds on a machine
   # with no C compiler. Same job as release.yml's pure-go.
   pure-go:

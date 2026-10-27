@@ -599,3 +599,7 @@ docs/                        design decisions, known limits, evaluation
 Phase 0 through Phase 5 plus the stacked-branch tail of Phase 3 are all shipped. On top of that, the **derivation model** (`@derived` emit→consume→cascading refactor, with the SQL migration-fold) is complete. The roadmap is effectively complete; further work is scope expansion (new refactor kinds, more `@derived` emitters/modes, more language coverage) and ergonomics.
 
 Design decisions and their reasons: `docs/design.md`. Accepted limits: `docs/known-limits.md`. Work items are aw4 issues in project `poly-lsp-mcp`.
+
+## Licenses
+
+poly-lsp-mcp is MIT licensed (`LICENSE`). Release tarballs also carry `THIRD_PARTY_NOTICES`: every Go module and tree-sitter grammar in the binary, with its license text. It is generated (`make notices`, from `tools/notices`); `make notices-check` fails when it is stale. The generator fails on a dependency whose license is not on its allow-list (MIT, BSD, Apache-2.0, ISC and similar). Grammar licenses come from the upstream repositories at the commits smacker/go-tree-sitter vendors, kept in `tools/notices/licenses/`.

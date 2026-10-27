@@ -39,7 +39,7 @@ install:
 
 # Release tarball for the CURRENT os/arch, named as the release workflow names
 # it (no version, so /releases/latest/download/<asset> is stable):
-#   dist/poly-lsp-mcp_<os>_<arch>.tar.gz  holding poly-lsp-mcp (+ LICENSE, README.md if present)
+#   dist/poly-lsp-mcp_<os>_<arch>.tar.gz  holding poly-lsp-mcp (+ LICENSE, THIRD_PARTY_NOTICES, README.md if present)
 # Unstamped, like every other target here; -tags release is a marker, not a stamp
 # (doctor reads it to pick the release update check).
 GOOS_NAME   := $(shell $(GO) env GOOS)
@@ -51,7 +51,7 @@ dist:
 	rm -rf dist/stage
 	mkdir -p dist/stage
 	CGO_ENABLED=1 $(GO) build -trimpath -tags release -o dist/stage/$(BINARY) .
-	for f in LICENSE README.md; do [ -f $$f ] && cp $$f dist/stage/ || true; done
+	for f in LICENSE THIRD_PARTY_NOTICES README.md; do [ -f $$f ] && cp $$f dist/stage/ || true; done
 	tar -czf $(DIST_ASSET) -C dist/stage $$(ls dist/stage)
 	rm -rf dist/stage
 	@echo $(DIST_ASSET)
@@ -129,6 +129,17 @@ smoke-editor:
 smoke-llm:
 	python3 scripts/smoke/llm_e2e.py
 
+# THIRD_PARTY_NOTICES lists every Go module and tree-sitter grammar in the
+# release binary with its license (tools/notices). It fails on a license outside
+# the allow-list. `notices-check` fails when the committed file is stale.
+.PHONY: notices
+notices:
+	$(GO) run ./tools/notices -o THIRD_PARTY_NOTICES
+
+.PHONY: notices-check
+notices-check:
+	$(GO) run ./tools/notices -check THIRD_PARTY_NOTICES
+
 .PHONY: clean
 clean:
 	rm -f $(BINARY)
@@ -155,4 +166,6 @@ help:
 	@echo "  fmt             - go fmt"
 	@echo "  smoke-editor    - real-binary LSP conformance smoke"
 	@echo "  smoke-llm       - live LLM end-to-end smoke"
+	@echo "  notices         - regenerate THIRD_PARTY_NOTICES (also checks licenses)"
+	@echo "  notices-check   - fail when THIRD_PARTY_NOTICES is stale"
 	@echo "  clean           - remove built artifacts + test cache"

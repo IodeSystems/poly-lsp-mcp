@@ -88,7 +88,7 @@ jobs:
           ASSET: poly-lsp-mcp_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
         run: |
           files="poly-lsp-mcp"
-          for f in LICENSE README.md; do
+          for f in LICENSE THIRD_PARTY_NOTICES README.md; do
             if [ -f "$f" ]; then files="$files $f"; fi
           done
           # shellcheck disable=SC2086

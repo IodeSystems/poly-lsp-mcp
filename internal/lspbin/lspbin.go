@@ -42,6 +42,7 @@ type finder struct {
 	home      string // "" reads the user home at lookup time
 	lookPath  func(string) (string, error)
 	npmPrefix func(npm string, env []string) string // `npm prefix -g`, "" on failure
+	noSystem  bool                                  // leave out /opt/homebrew/bin and /usr/local/bin (tests)
 
 	npmOnce sync.Once
 	npmBin  string
@@ -120,10 +121,12 @@ func (f *finder) dirs(withNpm bool) []string {
 	}
 	add(home(".cargo", "bin"))
 	add(home(".local", "bin"))
-	if f.goos == "darwin" {
-		add("/opt/homebrew/bin")
+	if !f.noSystem {
+		if f.goos == "darwin" {
+			add("/opt/homebrew/bin")
+		}
+		add("/usr/local/bin")
 	}
-	add("/usr/local/bin")
 
 	seen := map[string]bool{}
 	out := l[:0]

@@ -20,6 +20,7 @@ func fake(t *testing.T, goos, path string, env map[string]string) (*finder, stri
 		home:      home,
 		lookPath:  exec.LookPath,
 		npmPrefix: func(string, []string) string { return "" },
+		noSystem:  true, // a runner's /usr/local/bin (npm on GitHub's ubuntu) must not leak in
 	}
 	return f, home
 }
@@ -97,6 +98,7 @@ func TestDarwinOnlyDirs(t *testing.T) {
 		want bool
 	}{{"linux", false}, {"darwin", true}} {
 		f, home := fake(t, tc.goos, t.TempDir(), nil)
+		f.noSystem = false // only lists dirs, never resolves
 		lib := filepath.Join(home, "Library/pnpm")
 		has := false
 		for _, d := range f.dirs(false) {
@@ -111,6 +113,7 @@ func TestDarwinOnlyDirs(t *testing.T) {
 func TestDirOrderAndGoPath(t *testing.T) {
 	gp := t.TempDir()
 	f, home := fake(t, "linux", "", map[string]string{"GOPATH": gp + ":/other", "GOBIN": "/gobin", "PNPM_HOME": "/pn"})
+	f.noSystem = false // only lists dirs, never resolves
 	got := f.dirs(true)
 	want := []string{"/pn", filepath.Join(home, ".local/share/pnpm"), npmMarker,
 		filepath.Join(home, ".npm-global/bin"), filepath.Join(home, ".volta/bin"), filepath.Join(home, ".bun/bin"),

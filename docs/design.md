@@ -198,6 +198,23 @@ ground; the most verbose variant did worse (more grep scaffolding).
   open. gopls edit latency unchanged (median 452 ms over 10 warm edits,
   before and after).
 
+- **Files outside the root** (Carl, 2026-10-27; `mcp/outside.go`):
+  `node_read` / `node_edit` take an absolute path under an allowed
+  directory (`--allow-path`, default `os.TempDir()` and `/tmp`, minus
+  `--exclude-path`), not indexed, not watched, parsed on demand; the
+  address is the absolute path as given, cleaned. Validation is a
+  tree-sitter parse (`validation: "parse-only"`): there is no project for a
+  child LSP. `/tmp` is shared, so: no symlink component below the allowed
+  directory (Lstat each; every open goes through `os.Root` with
+  `O_NOFOLLOW`, which also refuses a symlink swapped in later), regular
+  files of our uid only, a create only with `O_EXCL` in a directory of our
+  uid, a rewrite via an `O_EXCL` temp file renamed over the target. The
+  lists are per connection in daemon mode (`X-Poly-Allow-Paths`,
+  `X-Poly-Exclude-Paths`), resolved by the proxy with its own `$TMPDIR`;
+  a connection that sends none reaches nothing outside. The modern surface
+  only (the legacy tools stay inside the root); the tool schemas do not
+  mention it, the refusal names the allowed directories.
+
 ## Merge conflicts
 
 Conflicts are nodes (`::conflict`, `::mine`, `::theirs`, `::base`, sides

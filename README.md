@@ -322,6 +322,15 @@ poly-lsp-mcp mcp --root . --validate
 
 An edit waits for the child's diagnostics **of the edited text**, not just the next publish: a publish for an older document version, or a server's first publish after it opens a file, does not count. `--validate-wait` (default `2s`) caps the wait; past it the edit is kept and flagged `validated:false`, `validationSkipped: "lsp-timeout"`, with a `validationNote`. A cold sourcekit-lsp needs 2-3 s for its first complete result; raise the cap if the first edits after start-up matter.
 
+### Files outside the root — `--allow-path`
+
+`node_read` and `node_edit` take an **absolute path** in an allowed directory outside the workspace root, so a file a command just wrote under `/tmp` can be read or patched with the same tools. Allowed by default: `$TMPDIR` (`os.TempDir()`) and `/tmp`. `--allow-path <dir>` adds one (repeatable); `--exclude-path <dir>` removes one, defaults included (`--exclude-path /tmp` turns `/tmp` off). In `poly-lsp-mcp.yaml`: `allow_paths:` / `exclude_paths:` (in-process only: a config file means in-process). Not to be confused with `--exclude`, which leaves a directory *inside* the root out of the index.
+
+- Such a file is not indexed and not watched, and has no child LSP. It is parsed on demand by extension, so `/tmp/x.go#Name` and `/tmp/x.go@12` address into it; results carry the absolute path. Selectors, `rename`, `params` / `return`, `accept:` and `commit:false` batches stay workspace-only.
+- An edit is checked by a tree-sitter parse only: the result says `validation: "parse-only"` and `parsesCleanly`. Under `--validate` an edit that makes a cleanly parsing file fail to parse is reverted.
+- `/tmp` is shared by every local user, so: no symlink in any path component below the allowed directory; only regular files owned by this user; a new file only in a directory this user owns (`O_EXCL`); an existing file is rewritten via a temp file in its directory, renamed over it, mode kept. `--read-only` blocks edits; the `--hook` sees these paths as it sees any other.
+- Daemon mode: the proxy resolves the defaults with its own `$TMPDIR` (the daemon's may differ, e.g. a per-user `/var/folders/...` on macOS) and sends its lists with every call; they apply to that connection only.
+
 ### Legacy 9-tool surface (`--legacy-tools`)
 
 The prior surface — `structure`, `search`, `node_references`, `node_read`, `node_edit`, `node_delete`, `node_refactor`, `node_rename_file`, and a bare-grammar `node_query` — is still available behind `--legacy-tools` (add `--read-only` to hide every mutating tool). Its tools:
@@ -424,6 +433,12 @@ shadows:
   - {name: ts over d.ts, over: [ts, tsx, mts, cts], hides: [d.ts, d.mts, d.cts]}
   - {name: d.ts over js, over: [d.ts, d.mts, d.cts], hides: [js, mjs, cjs]}
   - {name: pyi over py,  over: [pyi], hides: [py]}
+
+# Directories OUTSIDE the root that node_read / node_edit reach, added to
+# and removed from the defaults ($TMPDIR, /tmp). Joined with --allow-path /
+# --exclude-path. See "Files outside the root".
+allow_paths: [/var/tmp/agent-scratch]
+exclude_paths: [/tmp]
 ```
 
 ## Cross-language linkage — three tiers

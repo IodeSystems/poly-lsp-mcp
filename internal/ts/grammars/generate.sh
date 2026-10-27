@@ -21,4 +21,5 @@ gen proto protobuf
 gen sql sql
 gen kotlin kotlin
 gen groovy groovy
+gen swift swift
 gofmt -w .

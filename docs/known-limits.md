@@ -36,7 +36,11 @@ entry here.
   after the open with no semantic errors (build settings not loaded), then
   again 1-3 s later; an edit skips the first and takes the second, so the
   first edit of a cold package needs more than the 2 s `--validate-wait`
-  default and is kept, reported `validationSkipped: lsp-timeout`.
+  default and is kept, reported `validationSkipped: lsp-timeout`. A clean
+  result published while sourcekit-lsp reports progress (package loading,
+  background indexing) is not trusted either: a clean edit made while it
+  indexes is reported `lsp-timeout` when indexing outlasts the wait (a
+  large package's first index).
 - **Edit validation, servers without document versions:** the first
   publish after a file's didOpen is never taken as an edit's result (see
   design.md "Editing"). A server that publishes once per open (pylsp,

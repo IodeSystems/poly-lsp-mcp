@@ -308,6 +308,10 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 	}
 	introduced := fingerprintMinus(s.settleErrorFingerprint(3*time.Second), baseline)
 	if len(introduced) == 0 {
+		if diags.Provisional {
+			oc.Skipped, oc.SkipNote = s.provisional()
+			return oc, nil
+		}
 		oc.Validated = true
 		return oc, nil
 	}
@@ -421,6 +425,10 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 	}
 	introduced := fingerprintMinus(t.s.settleErrorFingerprint(3*time.Second), t.baseline)
 	if len(introduced) == 0 {
+		if diags.Provisional {
+			oc.Skipped, oc.SkipNote = t.s.provisional()
+			return oc
+		}
 		oc.Validated = true
 		return oc
 	}
@@ -450,7 +458,14 @@ func (s *Server) skipped(d editDiagnostics) (reason, note string) {
 	if !d.TimedOut {
 		return "no-lsp", ""
 	}
-	return "lsp-timeout", fmt.Sprintf("validation timed out after %s: the child LSP published no diagnostics for the edited text; edit kept, not validated", s.diagWaitDuration())
+	return "lsp-timeout", fmt.Sprintf("validation timed out after %s: the child LSP published no diagnostics for the edited text, or only while still loading or indexing; edit kept, not validated", s.diagWaitDuration())
+}
+
+// provisional is the skip for an edit whose only result came from a child
+// still loading or indexing (editDiagnostics.Provisional) and showed no
+// new errors: that result may lack errors the child has not computed yet.
+func (s *Server) provisional() (reason, note string) {
+	return "lsp-timeout", "the child LSP was still loading or indexing (work-done progress open) and its result showed no new errors, which it may not have computed yet; edit kept, not validated"
 }
 
 // currentBatch / setBatch / closeBatch are session-keyed — see session.go.

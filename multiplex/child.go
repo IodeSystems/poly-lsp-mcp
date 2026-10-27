@@ -46,6 +46,15 @@ type Child struct {
 	notifyMu sync.Mutex
 	notifyFn func(method string, params json.RawMessage)
 
+	// progress holds the work-done progress tokens the child has begun
+	// and not yet ended ($/progress). A child with one open is still
+	// loading or indexing: sourcekit-lsp publishes a file's diagnostics
+	// without its semantic errors while "SourceKit-LSP: Reloading
+	// Package" is open. See Busy.
+	progressMu sync.Mutex
+	progress   map[string]struct{}
+	idle       chan struct{} // closed while progress is empty; see Idle
+
 	done chan struct{}
 	err  atomic.Value // error
 
@@ -154,7 +163,11 @@ func (c *Child) handle(msg *jsonrpc.Message) {
 	if msg.Method == "" {
 		return
 	}
+	traceChild(c.name, "<-", msg.Method, msg.Params)
 	if msg.IsNotification() {
+		if msg.Method == "$/progress" {
+			c.trackProgress(msg.Params)
+		}
 		c.notifyMu.Lock()
 		fn := c.notifyFn
 		c.notifyMu.Unlock()
@@ -163,13 +176,78 @@ func (c *Child) handle(msg *jsonrpc.Message) {
 		}
 		return
 	}
-	// Server→client request. Not supported yet; method-not-found keeps
+	if msg.Method == "window/workDoneProgress/create" {
+		// Accepted so the child reports progress (Busy).
+		_ = c.send(&jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("null")})
+		return
+	}
+	// Any other server→client request: not supported; method-not-found keeps
 	// the child happy without blocking it on a response we'll never give.
 	_ = c.send(&jsonrpc.Message{
 		JSONRPC: "2.0",
 		ID:      msg.ID,
 		Error:   &jsonrpc.Error{Code: -32601, Message: "client does not implement " + msg.Method},
 	})
+}
+
+// trackProgress records a $/progress begin or end. Report and
+// partial-result values carry no begin/end and change nothing.
+func (c *Child) trackProgress(params json.RawMessage) {
+	var p struct {
+		Token json.RawMessage `json:"token"`
+		Value struct {
+			Kind string `json:"kind"`
+		} `json:"value"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return
+	}
+	token := string(p.Token)
+	c.progressMu.Lock()
+	defer c.progressMu.Unlock()
+	switch p.Value.Kind {
+	case "begin":
+		if c.progress == nil {
+			c.progress = map[string]struct{}{}
+		}
+		if len(c.progress) == 0 {
+			c.idle = make(chan struct{})
+		}
+		c.progress[token] = struct{}{}
+	case "end":
+		if _, open := c.progress[token]; !open {
+			return
+		}
+		delete(c.progress, token)
+		if len(c.progress) == 0 && c.idle != nil {
+			close(c.idle)
+		}
+	}
+}
+
+// closedChan is returned by Idle for a child with no progress open.
+var closedChan = func() chan struct{} { ch := make(chan struct{}); close(ch); return ch }()
+
+// Idle returns a channel closed once the child has no work-done progress
+// open: already closed when it has none now.
+func (c *Child) Idle() <-chan struct{} {
+	c.progressMu.Lock()
+	defer c.progressMu.Unlock()
+	if len(c.progress) == 0 {
+		return closedChan
+	}
+	return c.idle
+}
+
+// Busy reports whether the child has a work-done progress open: it is
+// loading its workspace or indexing, and what it publishes now may lack
+// results it will publish later. Messages are handled in order, so a
+// publish's notification handler sees the progress state as of that
+// publish.
+func (c *Child) Busy() bool {
+	c.progressMu.Lock()
+	defer c.progressMu.Unlock()
+	return len(c.progress) > 0
 }
 
 // SetNotificationHandler registers a callback for server-initiated
@@ -252,6 +330,7 @@ func (c *Child) Notify(method string, params any) error {
 		}
 		rawParams = b
 	}
+	traceChild(c.name, "->", method, rawParams)
 	return c.send(&jsonrpc.Message{
 		JSONRPC: "2.0",
 		Method:  method,
@@ -265,9 +344,11 @@ func (c *Child) Notify(method string, params any) error {
 // layer can union them across children without losing fields.
 func (c *Child) Initialize(ctx context.Context, rootURI string) (json.RawMessage, error) {
 	params := map[string]any{
-		"processId":    os.Getpid(),
-		"rootUri":      rootURI,
-		"capabilities": map[string]any{},
+		"processId": os.Getpid(),
+		"rootUri":   rootURI,
+		// workDoneProgress: the child reports loading and indexing as
+		// $/progress, which Busy reads.
+		"capabilities": map[string]any{"window": map[string]any{"workDoneProgress": true}},
 		"clientInfo": map[string]any{
 			"name":    "poly-lsp-mcp",
 			"version": "0.0.0",
@@ -350,4 +431,21 @@ func (c *Child) Kill() error {
 		return nil
 	}
 	return c.cmd.Process.Kill()
+}
+
+// TraceEnv, set to 1, logs each notification and request a child sends
+// and each notification sent to it, params cut to traceMax bytes: the
+// publish/progress sequence an edit's validation saw.
+const TraceEnv = "POLY_LSP_CHILD_TRACE"
+
+const traceMax = 300
+
+func traceChild(name, dir, method string, params json.RawMessage) {
+	if os.Getenv(TraceEnv) != "1" {
+		return
+	}
+	if len(params) > traceMax {
+		params = params[:traceMax]
+	}
+	log.Printf("[%s trace] %s %s %s", name, dir, method, params)
 }

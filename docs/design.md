@@ -189,14 +189,30 @@ ground; the most verbose variant did worse (more grep scaffolding).
   and kept. A publish carrying a document version counts when the version
   is the edit's or later; an unversioned one counts unless it is the first
   since the file's didOpen, and then the last of a burst (150 ms quiet) is
-  taken. Capped by `--validate-wait` (2 s; per connection in daemon mode,
+  taken. An unversioned publish that arrives while the child has a
+  work-done progress open (the client advertises `window.workDoneProgress`)
+  is not trusted when it has no errors: sourcekit-lsp 6.4.1, while
+  "SourceKit-LSP: Reloading Package" is open, publishes [] for the open and
+  for every change, and an edit made after the first of those was
+  validated broken (v0.3.0 release, macos-15-intel; reproduced on Linux
+  under a 5-20% CPU quota). One with errors is taken but can only revert:
+  with no new errors the edit is not validated. When the child's last
+  progress ends with no publish after the untrusted one, the text is sent
+  again (didChange, same text, next version) and the answer to that is
+  taken: sourcekit-lsp ends "Indexing" right after publishing a change and
+  publishes nothing more (traced; without the resend 2 of 5 Linux e2e
+  runs waited out the cap). The cost: a clean edit made while an
+  unversioned server indexes is reported `lsp-timeout` when indexing
+  outlasts `--validate-wait`. Versioned publishes (gopls) ignore progress. Capped by `--validate-wait` (2 s; per connection in daemon mode,
   `X-Poly-Validate-Wait`): past it the edit is kept with
   `validationSkipped: lsp-timeout` and a `validationNote`, and the stale
   diagnostics are not reported. Pull diagnostics (`textDocument/diagnostic`)
   were measured and rejected: neither gopls 0.24 nor sourcekit-lsp 6.4.1
   advertises it to this client, and sourcekit-lsp answers [] right after an
   open. gopls edit latency unchanged (median 452 ms over 10 warm edits,
-  before and after).
+  before and after each change). `POLY_LSP_CHILD_TRACE=1` logs what each
+  child sends and the notifications sent to it; the Swift edit e2e sets
+  it, so a CI failure shows the sequence.
 
 - **Files outside the root** (Carl, 2026-10-27; `mcp/outside.go`):
   `node_read` / `node_edit` take an absolute path under an allowed

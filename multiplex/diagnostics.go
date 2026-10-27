@@ -53,6 +53,10 @@ type DiagnosticStore struct {
 	// for the text before it.
 	version map[string]int
 
+	// busy marks a URI whose latest publish arrived while its child had a
+	// work-done progress open (Child.Busy).
+	busy map[string]bool
+
 	// total counts publishes across ALL URIs, with anyChans waking on
 	// each one. A per-URI gen cannot answer "has the server stopped
 	// talking yet?", which is the question a caller must ask before
@@ -68,6 +72,7 @@ func NewDiagnosticStore() *DiagnosticStore {
 		gen:     map[string]uint64{},
 		chans:   map[string][]chan struct{}{},
 		version: map[string]int{},
+		busy:    map[string]bool{},
 	}
 }
 
@@ -90,13 +95,14 @@ func (s *DiagnosticStore) Attach(c *Child) {
 		if p.Diagnostics == nil {
 			p.Diagnostics = []Diagnostic{}
 		}
-		s.put(p.URI, p.Diagnostics, p.Version)
+		s.put(p.URI, p.Diagnostics, p.Version, c.Busy())
 	})
 }
 
-func (s *DiagnosticStore) put(uri string, diags []Diagnostic, version *int) {
+func (s *DiagnosticStore) put(uri string, diags []Diagnostic, version *int, busy bool) {
 	s.mu.Lock()
 	s.latest[uri] = diags
+	s.busy[uri] = busy
 	if version != nil {
 		s.version[uri] = *version
 	} else {
@@ -176,14 +182,21 @@ func (s *DiagnosticStore) Get(uri string) []Diagnostic {
 	return s.latest[uri]
 }
 
-// Latest returns uri's latest published diagnostics with the generation
-// they arrived at and the document version they carried; versioned is
-// false when that publish carried no version.
-func (s *DiagnosticStore) Latest(uri string) (diags []Diagnostic, gen uint64, version int, versioned bool) {
+// Publish is a URI's latest publish as the store holds it.
+type Publish struct {
+	Diags     []Diagnostic
+	Gen       uint64 // the generation it arrived at
+	Version   int    // the document version it carried, when Versioned
+	Versioned bool
+	Busy      bool // the child had a work-done progress open (Child.Busy)
+}
+
+// Latest returns uri's latest publish.
+func (s *DiagnosticStore) Latest(uri string) Publish {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	version, versioned = s.version[uri]
-	return s.latest[uri], s.gen[uri], version, versioned
+	version, versioned := s.version[uri]
+	return Publish{Diags: s.latest[uri], Gen: s.gen[uri], Version: version, Versioned: versioned, Busy: s.busy[uri]}
 }
 
 // Snapshot returns a copy of the entire store as URI → []Diagnostic.

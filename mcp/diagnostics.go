@@ -92,6 +92,12 @@ type editDiagnostics struct {
 	TimedOut           bool             `json:"diagnosticsTimedOut,omitempty"`
 	Items              []diagnosticJSON `json:"diagnostics"`
 	DroppedDiagnostics int              `json:"droppedDiagnostics,omitempty"`
+
+	// Provisional: an edited URI's result was published while its child
+	// was busy (loading or indexing) and is taken only because it has
+	// errors. It may revert an edit but never validates one: with no new
+	// errors the edit is reported not validated.
+	Provisional bool `json:"-"`
 }
 
 // diagnosticOptions are the per-call enrichment caps. Zero values
@@ -464,46 +470,117 @@ func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.Diagnostic
 //     reads clean), then again 1-3 s later with them. The second is
 //     taken. A later publish is then taken once no other arrives for the
 //     settle window (diagSettleDuration).
+//   - An unversioned publish that arrives while the child has a
+//     work-done progress open (Child.Busy) and has no errors is skipped:
+//     sourcekit-lsp publishes a file without its semantic errors for as
+//     long as "SourceKit-LSP: Reloading Package" is open, and does so
+//     again for each change in that time (measured, 6.4.1 under a CPU
+//     quota). One with errors is taken, flagged provisional: it can only
+//     revert the edit (collectDiagnostics, editDiagnostics.Provisional).
+//     After a skipped one, if the child's progress ends before it
+//     publishes again, the text is sent again (didChange, same text) so
+//     it publishes from its loaded state: it may not republish on its own
+//     (sourcekit-lsp ends "Indexing" right after publishing a change).
 //
 // Pull diagnostics (textDocument/diagnostic) would be the clean answer
 // but neither gopls 0.24 nor sourcekit-lsp 6.4.1 advertises it to this
 // client, and sourcekit-lsp's answer right after an open is the same
 // empty list (measured, 2026-10-27).
-func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.DiagnosticStore, uri string, since uint64, version int32) ([]multiplex.Diagnostic, bool) {
+//
+// provisional reports a result taken from a busy child for its errors.
+func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.DiagnosticStore, child *multiplex.Child, uri string, content []byte, since uint64, version int32) (diags []multiplex.Diagnostic, ok, provisional bool) {
 	s.openDocsMu.Lock()
 	openGen, opened := s.openGen[uri]
 	s.openDocsMu.Unlock()
 	after := since
+	resends := 0
 	for {
 		store.WaitAfter(ctx, uri, after)
 		if ctx.Err() != nil {
-			return nil, false
+			return nil, false, false
 		}
-		diags, gen, v, versioned := store.Latest(uri)
+		p := store.Latest(uri)
 		switch {
-		case versioned && v >= int(version):
-			return diags, true
-		case versioned:
-			after = gen // for an earlier version of the text
+		case p.Versioned && p.Version >= int(version):
+			return p.Diags, true, false
+		case p.Versioned:
+			after = p.Gen // for an earlier version of the text
 			continue
-		case opened && gen == openGen+1:
-			after = gen // the first publish since didOpen
+		case opened && p.Gen == openGen+1:
+			after = p.Gen // the first publish since didOpen
 			continue
 		}
 		// Unversioned: take the last of a burst.
 		quiet := s.diagSettleDuration()
 		for quiet > 0 {
 			qctx, cancel := context.WithTimeout(ctx, quiet)
-			store.WaitAfter(qctx, uri, gen)
+			store.WaitAfter(qctx, uri, p.Gen)
 			cancel()
-			next, g, _, _ := store.Latest(uri)
-			if g == gen {
+			next := store.Latest(uri)
+			if next.Gen == p.Gen {
 				break
 			}
-			diags, gen = next, g
+			p = next
 		}
-		return diags, true
+		if p.Busy {
+			if anyError(p.Diags) {
+				return p.Diags, true, true
+			}
+			// Clean while loading: not trusted.
+			after = p.Gen
+			if waitPublishOrIdle(ctx, store, child, uri, after) && resends < maxResends {
+				resends++
+				s.resendText(child, uri, content)
+			}
+			continue
+		}
+		return p.Diags, true, false
 	}
+}
+
+// maxResends caps the didChange resends of one edit's wait.
+const maxResends = 3
+
+// waitPublishOrIdle waits for a publish for uri past gen `after`, or for
+// child to have no work-done progress open, or ctx. It reports true when
+// the child went idle with no new publish.
+func waitPublishOrIdle(ctx context.Context, store *multiplex.DiagnosticStore, child *multiplex.Child, uri string, after uint64) bool {
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	idle := child.Idle()
+	go func() {
+		select {
+		case <-idle:
+			cancel()
+		case <-wctx.Done():
+		}
+	}()
+	store.WaitAfter(wctx, uri, after)
+	return store.Gen(uri) == after && ctx.Err() == nil
+}
+
+// resendText sends uri's text to child again as a didChange at the next
+// version, so the child publishes it again.
+func (s *Server) resendText(child *multiplex.Child, uri string, content []byte) {
+	s.openDocsMu.Lock()
+	version := s.openDocs[uri] + 1
+	s.openDocs[uri] = version
+	s.openDocsMu.Unlock()
+	if err := child.Notify("textDocument/didChange", map[string]any{
+		"textDocument":   map[string]any{"uri": uri, "version": version},
+		"contentChanges": []map[string]any{{"text": string(content)}},
+	}); err != nil {
+		log.Printf("mcp didChange %s: %v", uri, err)
+	}
+}
+
+func anyError(diags []multiplex.Diagnostic) bool {
+	for _, d := range diags {
+		if d.Severity == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, opts diagnosticOptions) editDiagnostics {
@@ -559,9 +636,12 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 	// store holds for it describes other text.
 	editedDiags := make(map[string][]multiplex.Diagnostic, len(tracked))
 	for _, c := range tracked {
-		diags, ok := s.waitForEditedText(ctx, store, c.uri, c.since, c.version)
+		diags, ok, provisional := s.waitForEditedText(ctx, store, c.child, c.uri, contents[c.uri], c.since, c.version)
 		if !ok {
 			out.TimedOut = true
+		}
+		if provisional {
+			out.Provisional = true
 		}
 		editedDiags[c.uri] = diags
 	}

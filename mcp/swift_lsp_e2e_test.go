@@ -49,6 +49,8 @@ func findSourceKitLSP(t *testing.T) string {
 // runner has Xcode, and GitHub's Ubuntu image ships a Swift toolchain.
 func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 	lsp := findSourceKitLSP(t)
+	// A failure then shows the publish/progress sequence the edit saw.
+	t.Setenv(multiplex.TraceEnv, "1")
 
 	dir := t.TempDir()
 	write := func(rel, body string) {
@@ -104,7 +106,10 @@ func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 	// No settle wait: the edit goes in right after bring-up, while
 	// sourcekit-lsp's first publish for the file (unversioned, computed
 	// before its build settings load) is still due. The edit must not take
-	// that publish as its own result (waitForEditedText).
+	// that publish as its own result (waitForEditedText). On a slow
+	// machine (macos-15-intel) the edit can land after it, while the
+	// package still loads: sourcekit-lsp then answers the edit with [] under
+	// an open work-done progress, which must not validate it either.
 	lines := strings.Count(orig, "\n") + 1
 
 	broken := "func greet() -> String {\n    return doesNotExist()\n}\n\nprint(greet())\n"
@@ -125,8 +130,19 @@ func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 		"file": "Sources/Demo/main.swift", "startLine": 1, "startCol": 1, "endLine": lines, "endCol": 1,
 		"newText": good,
 	})
-	if m = decode(r); m["rejected"] == true {
+	// A clean result is trusted only once sourcekit-lsp's progress has
+	// ended. Its "Indexing" of this one file ends 2-20 s after start-up
+	// (Linux, unloaded to a 20% CPU quota) but outlasted the 60 s wait at
+	// 5%: there the edit is kept, not validated.
+	m = decode(r)
+	if m["rejected"] == true {
 		t.Fatalf("valid edit was rejected; response=%+v", m)
+	}
+	if m["validated"] != true {
+		if m["validationSkipped"] != "lsp-timeout" {
+			t.Fatalf("valid edit neither validated nor timed out; response=%+v", m)
+		}
+		t.Logf("valid edit kept, not validated (child still indexing): %v", m["validationNote"])
 	}
 	if got, _ := os.ReadFile(mainPath); string(got) != good {
 		t.Fatalf("valid edit did not land:\n got: %q\nwant: %q", got, good)

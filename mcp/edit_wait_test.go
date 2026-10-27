@@ -27,6 +27,17 @@ import (
 //   - versioned: every publish carries a version. A change is first
 //     answered at once with the PREVIOUS version's (clean) result, then
 //     with its own at +800ms (past the validation settle window).
+//   - loading: replays sourcekit-lsp 6.4.1 loading a package under a CPU
+//     quota (traced 2026-10-27). A didOpen begins a work-done progress
+//     ("SourceKit-LSP: Reloading Package"), and until it ends 1500ms
+//     later every publish, unversioned, is [] whatever the text: the
+//     open's at +100ms and one per change at +100ms. At the end the real
+//     result follows at +100ms; later changes are answered at +100ms.
+//   - loading-quiet: as loading, but nothing is published when the
+//     progress ends (sourcekit-lsp's "Indexing" ends right after a
+//     publish, with none after it).
+//   - stuck: as loading, but the progress never ends and every publish
+//     shows the real result.
 //   - silent: never publishes.
 const fakeDiagLSPArg = "--fake-diag-lsp"
 
@@ -59,11 +70,18 @@ func runFakeDiagLSP() {
 		defer mu.Unlock()
 		return strings.Contains(texts[uri], "BROKEN")
 	}
+	progress := func(kind string) {
+		raw, _ := json.Marshal(map[string]any{"token": "load", "value": map[string]any{"kind": kind, "title": "SourceKit-LSP: Reloading Package"}})
+		write(&jsonrpc.Message{JSONRPC: "2.0", Method: "$/progress", Params: raw})
+	}
 	r := bufio.NewReader(os.Stdin)
 	for {
 		msg, err := jsonrpc.Read(r)
 		if err != nil || msg.Method == "exit" {
 			return
+		}
+		if msg.IsResponse() {
+			continue // to window/workDoneProgress/create
 		}
 		var p struct {
 			TextDocument struct {
@@ -95,6 +113,25 @@ func runFakeDiagLSP() {
 				}()
 			case "versioned":
 				publish(uri, version, current(uri))
+			case "loading", "loading-quiet", "stuck":
+				write(&jsonrpc.Message{JSONRPC: "2.0", ID: json.RawMessage(`"create-load"`), Method: "window/workDoneProgress/create", Params: json.RawMessage(`{"token":"load"}`)})
+				progress("begin")
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					publish(uri, 0, mode == "stuck" && current(uri))
+					if mode == "stuck" {
+						return
+					}
+					time.Sleep(1400 * time.Millisecond)
+					mu.Lock()
+					loaded[uri] = true
+					mu.Unlock()
+					progress("end")
+					if mode == "loading" {
+						time.Sleep(100 * time.Millisecond)
+						publish(uri, 0, current(uri))
+					}
+				}()
 			}
 			continue
 		case "textDocument/didChange":
@@ -112,6 +149,11 @@ func runFakeDiagLSP() {
 						publish(uri, 0, current(uri))
 					}()
 				}
+			case "loading", "loading-quiet", "stuck":
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					publish(uri, 0, (isLoaded || mode == "stuck") && current(uri))
+				}()
 			case "versioned":
 				publish(uri, version-1, false)
 				go func() {
@@ -141,13 +183,19 @@ func runFakeDiagLSP() {
 // LSP is the fake above, with validation on.
 func fakeDiagSession(t *testing.T, mode string, wait time.Duration) (*mcpSession, string) {
 	t.Helper()
+	return fakeDiagSessionWith(t, mode, wait, "package main\n\nfunc main() {}\n")
+}
+
+// fakeDiagSessionWith is fakeDiagSession with main.go holding text.
+func fakeDiagSessionWith(t *testing.T, mode string, wait time.Duration, text string) (*mcpSession, string) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "main.go")
-	if err := os.WriteFile(path, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
@@ -264,5 +312,79 @@ func TestCallToolValidateWaitIsPerSession(t *testing.T) {
 	}
 	if !strings.Contains(content[0].Text, "timed out after 300ms") {
 		t.Fatalf("want a 300ms timeout note, got %s", content[0].Text)
+	}
+}
+
+// waitFirstPublish blocks until the child has published path once.
+func waitFirstPublish(t *testing.T, s *mcpSession, path string) {
+	t.Helper()
+	uri := pathToURI(path)
+	deadline := time.Now().Add(5 * time.Second)
+	for s.srv.manager.Diagnostics().Gen(uri) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no publish for the opened file within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The macos-15-intel failure of the v0.3.0 release: an edit made after a
+// loading sourcekit-lsp's first publish, while its package still loads.
+// The child answers the edit with [] (no semantic errors yet) under an
+// open work-done progress; that must not validate it. The real result
+// after the progress ends reverts it.
+func TestEditDistrustsCleanPublishWhileChildLoads(t *testing.T) {
+	s, path := fakeDiagSession(t, "loading", 5*time.Second)
+	waitFirstPublish(t, s, path)
+	orig, _ := os.ReadFile(path)
+	m := editMain(t, s, path, brokenMain)
+	if m["rejected"] != true || m["reverted"] != true {
+		t.Fatalf("a broken edit was validated on a publish made while the child was loading: %v", m)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(orig) {
+		t.Fatalf("file not restored: %q", got)
+	}
+	// Loaded now: a clean edit is answered at +100ms and validated.
+	good := "package main\n\nfunc main() { println(1) }\n"
+	if m := editMain(t, s, path, good); m["validated"] != true {
+		t.Fatalf("clean edit after load not validated: %v", m)
+	}
+}
+
+// A child whose progress never ends. Its clean result is never trusted:
+// the edit times out, kept and not validated. A result with errors is
+// taken, but one with no NEW errors (the file was already broken) does
+// not validate the edit either.
+func TestEditNotValidatedWhileChildBusy(t *testing.T) {
+	s, path := fakeDiagSessionWith(t, "stuck", 600*time.Millisecond, brokenMain)
+	waitFirstPublish(t, s, path)
+	stillBroken := "package main\n\n// BROKEN\nfunc main() { println(1) }\n"
+	m := editMain(t, s, path, stillBroken)
+	if m["validated"] != false || m["rejected"] == true || m["validationSkipped"] != "lsp-timeout" {
+		t.Fatalf("an edit with no new errors from a busy child: want validated:false validationSkipped:lsp-timeout, got %v", m)
+	}
+	if note, _ := m["validationNote"].(string); !strings.Contains(note, "still loading") {
+		t.Errorf("validationNote = %q", note)
+	}
+	clean := "package main\n\nfunc main() {}\n"
+	m = editMain(t, s, path, clean)
+	if m["validated"] != false || m["validationSkipped"] != "lsp-timeout" || m["diagnosticsTimedOut"] != true {
+		t.Fatalf("a clean result from a busy child was trusted: %v", m)
+	}
+	if got, _ := os.ReadFile(path); string(got) != clean {
+		t.Fatalf("timed-out edit not kept: %q", got)
+	}
+}
+
+// A child that, like sourcekit-lsp ending "Indexing", publishes nothing
+// when its progress ends: the edit's clean publish while it loaded is not
+// trusted, so the text is sent again once it is idle, and the clean
+// answer to that validates the edit.
+func TestEditResendsTextWhenChildGoesIdle(t *testing.T) {
+	s, path := fakeDiagSession(t, "loading-quiet", 5*time.Second)
+	waitFirstPublish(t, s, path)
+	good := "package main\n\nfunc main() { println(1) }\n"
+	if m := editMain(t, s, path, good); m["validated"] != true {
+		t.Fatalf("clean edit made while the child loaded not validated after it went idle: %v", m)
 	}
 }

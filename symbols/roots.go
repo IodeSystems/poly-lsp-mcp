@@ -31,6 +31,20 @@ var rootMarkers = map[string][]string{
 	"setup.cfg":             {"python"},
 	"compile_commands.json": {"c", "cpp"},
 	"CMakeLists.txt":        {"c", "cpp"},
+	"Package.swift":         {"swift"},
+}
+
+// xcodeBundles are the directory suffixes that mark a Swift root: an Xcode
+// project or workspace is a directory, not a file.
+var xcodeBundles = []string{".xcodeproj", ".xcworkspace"}
+
+func xcodeBundle(name string) bool {
+	for _, s := range xcodeBundles {
+		if strings.HasSuffix(name, s) && len(name) > len(s) {
+			return true
+		}
+	}
+	return false
 }
 
 // ProjectRoots is what DetectProjectRoots found.
@@ -43,6 +57,10 @@ type ProjectRoots struct {
 	// Bounded says why the search stopped early ("" = it finished). The
 	// roots found so far are kept; there may be more.
 	Bounded string `json:"bounded,omitempty"`
+	// Xcode maps a swift root to the Xcode projects and workspaces in it
+	// (base names). sourcekit-lsp resolves those only through a build
+	// server; see setup.XcodeHints.
+	Xcode map[string][]string `json:"xcode,omitempty"`
 }
 
 // RelRoot renders a project root relative to the workspace root, "." for
@@ -75,6 +93,8 @@ const (
 //     roots of their own.
 //   - c, cpp: compile_commands.json, or the outermost CMakeLists.txt
 //     (every add_subdirectory has one of its own).
+//   - swift: Package.swift, or a directory holding an .xcodeproj or
+//     .xcworkspace (an app's local packages are roots of their own).
 //
 // The walk skips what the index skips: skipDirs and ign's ignored
 // directories are never entered, and an ignored marker file does not
@@ -94,6 +114,16 @@ func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, ma
 		}
 		if d.IsDir() {
 			if p != root && (IsSkipDir(d.Name()) || ign.DirIgnored(root, p) || fixtureDir(root, p)) {
+				return fs.SkipDir
+			}
+			// An Xcode bundle marks its parent; nothing inside it is a
+			// root (project.xcworkspace sits inside every .xcodeproj).
+			if p != root && xcodeBundle(d.Name()) {
+				dir := filepath.Dir(p)
+				if out.Xcode == nil {
+					out.Xcode = map[string][]string{}
+				}
+				out.Xcode[dir] = append(out.Xcode[dir], d.Name())
 				return fs.SkipDir
 			}
 			dirs++
@@ -162,6 +192,17 @@ func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, ma
 	for dir := range cc {
 		add("c", dir)
 		add("cpp", dir)
+	}
+	// swift
+	sw := map[string]bool{}
+	for dir := range found["Package.swift"] {
+		sw[dir] = true
+	}
+	for dir := range out.Xcode {
+		sw[dir] = true
+	}
+	for dir := range sw {
+		add("swift", dir)
 	}
 	for lang := range out.Roots {
 		sort.Strings(out.Roots[lang])

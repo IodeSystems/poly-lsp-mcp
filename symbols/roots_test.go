@@ -132,3 +132,27 @@ func TestProjectRootsBoundedSaysSo(t *testing.T) {
 		t.Fatalf("a search stopped at 2 directories should say so: %+v", got)
 	}
 }
+
+// Swift: Package.swift, or a directory holding an Xcode project or
+// workspace. A bundle is a directory, so it marks its parent; the
+// project.xcworkspace inside every .xcodeproj is not a root of its own, and
+// Pods/ (CocoaPods' own Pods.xcodeproj) is skipped like node_modules.
+func TestProjectRootsSwift(t *testing.T) {
+	root := rootsTree(t,
+		"App/Demo.xcodeproj/project.pbxproj",
+		"App/Demo.xcodeproj/project.xcworkspace/contents.xcworkspacedata",
+		"App/Demo.xcworkspace/contents.xcworkspacedata",
+		"App/Pods/Pods.xcodeproj/project.pbxproj",
+		"App/Sources/AppDelegate.swift",
+		"Packages/Core/Package.swift",
+		"Packages/Core/Sources/Core/Core.swift",
+	)
+	got := detect(root)
+	if want := []string{"App", "Packages/Core"}; !reflect.DeepEqual(relRoots(root, got.Roots["swift"]), want) {
+		t.Errorf("swift roots = %v, want %v", relRoots(root, got.Roots["swift"]), want)
+	}
+	app := filepath.Join(root, "App")
+	if want := map[string][]string{app: {"Demo.xcodeproj", "Demo.xcworkspace"}}; !reflect.DeepEqual(got.Xcode, want) {
+		t.Errorf("xcode = %v, want %v", got.Xcode, want)
+	}
+}

@@ -182,6 +182,22 @@ func (s *Server) setupData(err error) map[string]any {
 		data["hints"] = hints
 		data["roots"] = roots
 	}
+	// Info, not a warning: sourcekit-lsp runs without a build server, it
+	// only resolves less.
+	if s.IndexCost().Languages["swift"] > 0 {
+		root := s.getRoot()
+		xh := setup.XcodeHints(s.projectRoots().Xcode, func(d string) string { return symbols.RelRoot(root, d) })
+		for _, l := range langs {
+			if l.Lang == "swift" && l.LSP != nil && l.LSP.Found {
+				if h := setup.SourceKitIndexHint(setup.SwiftVersion(l.LSP.Path)); h != "" {
+					xh = append(xh, h)
+				}
+			}
+		}
+		if len(xh) > 0 {
+			data["swift"] = xh
+		}
+	}
 	return data
 }
 

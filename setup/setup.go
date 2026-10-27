@@ -31,6 +31,8 @@ var installs = map[string]Install{
 	"typescript-language-server": {Cmd: "npm install -g typescript-language-server typescript", Needs: []string{"node"}},
 	"pylsp":                      {Cmd: "pipx install python-lsp-server", Needs: []string{"python"}},
 	"clangd":                     {Cmd: "apt install clangd  |  brew install llvm", Needs: []string{"system"}},
+	// Part of every Swift toolchain; there is no separate package.
+	"sourcekit-lsp": {Cmd: "macOS: xcode-select --install (or Xcode)  |  Linux: a swift.org toolchain (https://www.swift.org/install) or Nix (nix-shell -p swift sourcekit-lsp)", Needs: []string{"system"}},
 }
 
 // LSP is one child LSP's state on this machine.

@@ -93,7 +93,9 @@ func doctorCmd(l *loader) *cobra.Command {
 		Short: "Check the install: binary on PATH, child LSPs for this workspace's languages, git, daemon",
 		Long: `Check what poly-lsp needs to run well here and say how to fix what is missing:
 the binary PATH resolves to, the child LSP for each language the workspace
-holds (gopls, typescript-language-server, pylsp, clangd), git, the daemon.
+holds (gopls, typescript-language-server, pylsp, clangd, sourcekit-lsp), git,
+the daemon. An Xcode project without a buildServer.json gets the
+xcode-build-server command sourcekit-lsp needs to resolve across files.
 
 A language without its child LSP still works, from tree-sitter alone, but
 its ::in/::out edges are not resolved and edits to it are not validated.
@@ -190,6 +192,13 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 			for _, l := range rep.Languages {
 				switch {
 				case l.LSP == nil:
+				case l.LSP.Found && l.LSP.Name == "sourcekit-lsp":
+					// No --version: the toolchain's swift beside it says.
+					v := setup.SwiftVersion(l.LSP.Path)
+					rep.Versions[l.LSP.Name] = v
+					if h := setup.SourceKitIndexHint(v); h != "" {
+						rep.Advisories = append(rep.Advisories, h)
+					}
 				case l.LSP.Found:
 					rep.Versions[l.LSP.Name] = probeVersion(l.LSP.Path, lspVersionArgs[l.LSP.Name])
 				default:
@@ -222,6 +231,11 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 				if len(dirs) > 1 {
 					rep.Advisories = append(rep.Advisories, setup.RootsRefine(l.Lang, l.LSP.Name, len(dirs), 8))
 				}
+			}
+			// An Xcode project without a build server: a hint, never a
+			// problem — sourcekit-lsp still runs, file by file.
+			if counts["swift"] > 0 {
+				rep.Advisories = append(rep.Advisories, setup.XcodeHints(pr.Xcode, func(d string) string { return symbols.RelRoot(root, d) })...)
 			}
 
 			if p, err := exec.LookPath("git"); err != nil {

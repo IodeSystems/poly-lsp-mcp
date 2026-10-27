@@ -581,7 +581,7 @@ func storeGenSnapshot(store *multiplex.DiagnosticStore) map[string]uint64 {
 // any one enrichment step degrade gracefully — the diagnostic itself
 // is always emitted with its LSP coordinates.
 func (s *Server) enrichDiagnostic(uri string, d multiplex.Diagnostic, content []byte, opts diagnosticOptions) diagnosticJSON {
-	abs := uriToPath(uri)
+	abs := s.rootSpelling(uriToPath(uri))
 	rel := abs
 	if root := s.getRoot(); root != "" {
 		if r, err := filepath.Rel(root, abs); err == nil {

@@ -250,7 +250,7 @@ func (s *Server) resolveDefinitionUncached(abs string, line, col int) defEntry {
 		return defEntry{}
 	}
 	da, dl, ok := firstDefinition(raw)
-	return defEntry{defAbs: da, defLine: dl, found: ok}
+	return defEntry{defAbs: s.rootSpelling(da), defLine: dl, found: ok}
 }
 
 // implLoc is one resolved implementation target — a declaration's file and
@@ -325,7 +325,11 @@ func (s *Server) resolveImplementationsUncached(abs string, line, col int) []imp
 	if err != nil {
 		return nil
 	}
-	return allLocations(raw)
+	locs := allLocations(raw)
+	for i := range locs {
+		locs[i].abs = s.rootSpelling(locs[i].abs)
+	}
+	return locs
 }
 
 // allLocations decodes every target from a Location / []Location /

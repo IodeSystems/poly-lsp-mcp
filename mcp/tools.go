@@ -2886,6 +2886,37 @@ func (s *Server) resolveFileArg(file string) (string, error) {
 	return "", fmt.Errorf("path escapes the workspace root: %q (paths must resolve inside %s)", file, root)
 }
 
+// rootSpelling maps an absolute path a child LSP returned onto the root's
+// spelling. A child may answer with the resolved path of a file it was
+// given by another spelling: sourcekit-lsp reports /private/var/... for a
+// root opened as /var/... on macOS. Without this mapping the file reads as
+// outside the root (an external stub, a "../../private/..." relative
+// path). A path outside the root by every spelling is returned unchanged.
+func (s *Server) rootSpelling(abs string) string {
+	root := s.getRoot()
+	if abs == "" || root == "" {
+		return abs
+	}
+	abs = filepath.Clean(abs)
+	if relInside(root, abs) {
+		return abs
+	}
+	rr, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return abs
+	}
+	ra := abs
+	if !relInside(rr, ra) {
+		r, ok := resolveExisting(abs)
+		if !ok || !relInside(rr, r) {
+			return abs
+		}
+		ra = r
+	}
+	rel, _ := filepath.Rel(rr, ra)
+	return filepath.Join(root, rel)
+}
+
 // relInside reports whether the cleaned absolute path abs is root or under
 // it, lexically.
 func relInside(root, abs string) bool {

@@ -120,7 +120,7 @@ func (s *Server) workspaceEditToResolved(raw json.RawMessage, _ string) ([]resol
 	root := s.getRoot()
 	var out []resolvedEdit
 	for uri, edits := range byURI {
-		abs := uriToPath(uri)
+		abs := s.rootSpelling(uriToPath(uri))
 		if abs == "" {
 			continue
 		}

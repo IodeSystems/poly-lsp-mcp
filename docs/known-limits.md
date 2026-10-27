@@ -32,9 +32,17 @@ entry here.
   through, as in kotlin, so members survive and some locals surface as
   members. `let a = 1, b = 2` and `case a, b` give each name its own
   node spanned by the name alone. No signature refactor: call sites carry
-  argument labels. sourcekit-lsp's first diagnostics for a file arrive a
-  second or more after it opens, without a document version; an edit made
-  in that window can take the publish for the old text as its own.
+  argument labels. sourcekit-lsp publishes a just-opened file about 1 s
+  after the open with no semantic errors (build settings not loaded), then
+  again 1-3 s later; an edit skips the first and takes the second, so the
+  first edit of a cold package needs more than the 2 s `--validate-wait`
+  default and is kept, reported `validationSkipped: lsp-timeout`.
+- **Edit validation, servers without document versions:** the first
+  publish after a file's didOpen is never taken as an edit's result (see
+  design.md "Editing"). A server that publishes once per open (pylsp,
+  untested here) therefore validates no edit that itself opens a file
+  (a new file, or one the proactive open skipped): it waits the full
+  `--validate-wait` and reports `lsp-timeout`.
 - **Pure-Go runtime** (`CGO_ENABLED=0`): same grammars, about 10x slower to
   parse; on valid kotlin / tsx / c / swift, some GLR ambiguity picks differ
   from C (swift: 125 of 126 cleanly-parsing files give the same symbols).

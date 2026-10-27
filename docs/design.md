@@ -181,6 +181,22 @@ ground; the most verbose variant did worse (more grep scaffolding).
 - A ref-site address (`file@N`, `file@a-b`) is never the whole file
   (`modernNode.wholeFile`): the old predicate made `delete:true` on `@N`
   delete the file.
+- **An edit waits for diagnostics of the edited text** (Carl, 2026-10-27;
+  `waitForEditedText`). A publish that merely arrives after the didChange
+  can describe the text before it: sourcekit-lsp publishes a just-opened
+  file ~1 s later computed without build settings (a call to an undeclared
+  function reads clean), and a broken edit made at bring-up was validated
+  and kept. A publish carrying a document version counts when the version
+  is the edit's or later; an unversioned one counts unless it is the first
+  since the file's didOpen, and then the last of a burst (150 ms quiet) is
+  taken. Capped by `--validate-wait` (2 s; per connection in daemon mode,
+  `X-Poly-Validate-Wait`): past it the edit is kept with
+  `validationSkipped: lsp-timeout` and a `validationNote`, and the stale
+  diagnostics are not reported. Pull diagnostics (`textDocument/diagnostic`)
+  were measured and rejected: neither gopls 0.24 nor sourcekit-lsp 6.4.1
+  advertises it to this client, and sourcekit-lsp answers [] right after an
+  open. gopls edit latency unchanged (median 452 ms over 10 warm edits,
+  before and after).
 
 ## Merge conflicts
 

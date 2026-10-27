@@ -320,6 +320,8 @@ poly-lsp-mcp mcp --root . --validate
 
 `node_edit` runs the child LSP after each write and **reverts any edit that introduces a NEW error** — same-file *or* cross-file (a rename that breaks a caller is caught workspace-wide, once gopls's package re-check settles). The edit is reported `rejected` with the offending `newErrors` instead of landing; a multi-file rename/signature reverts as one all-or-nothing unit. Without a child LSP the edit is applied but flagged `validated:false` — never a silent pass. This keeps the agent's grep→read→edit loop but makes it unable to leave the workspace in a broken state.
 
+An edit waits for the child's diagnostics **of the edited text**, not just the next publish: a publish for an older document version, or a server's first publish after it opens a file, does not count. `--validate-wait` (default `2s`) caps the wait; past it the edit is kept and flagged `validated:false`, `validationSkipped: "lsp-timeout"`, with a `validationNote`. A cold sourcekit-lsp needs 2-3 s for its first complete result; raise the cap if the first edits after start-up matter.
+
 ### Legacy 9-tool surface (`--legacy-tools`)
 
 The prior surface — `structure`, `search`, `node_references`, `node_read`, `node_edit`, `node_delete`, `node_refactor`, `node_rename_file`, and a bare-grammar `node_query` — is still available behind `--legacy-tools` (add `--read-only` to hide every mutating tool). Its tools:

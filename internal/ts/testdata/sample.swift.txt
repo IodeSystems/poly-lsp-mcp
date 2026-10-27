@@ -1,0 +1,99 @@
+import Foundation
+import UIKit
+
+/// A greeter.
+/* block /* nested */ comment */
+@MainActor
+public final class Greeter: NSObject, Greeting {
+    @objc dynamic var name: String = "world"
+    private(set) var count = 0
+    static let shared = Greeter(name: "x")
+
+    var greeting: String {
+        get { "Hello, \(name)!" }
+        set { name = newValue }
+    }
+
+    init(name: String) {
+        self.name = name
+        super.init()
+    }
+
+    deinit {
+        print("bye")
+    }
+
+    func greet(_ who: String? = nil, times: Int = 1) async throws -> String {
+        let target = who ?? name
+        let raw = #"raw \#(target) "quoted" \n"#
+        let multi = """
+            line one
+            line \(times)
+            """
+        guard times > 0 else { return "" }
+        let total = count
+            + times
+            - 1
+        let ok = total == 2
+            && times != 3
+            || false
+        if let x = who as? String, !ok {
+            return x
+        }
+        let forced = try! String(contentsOfFile: raw)
+        _ = (multi, ok, forced)
+        return target
+    }
+
+    subscript(index: Int) -> Character {
+        return Array(self.name)[index]
+    }
+}
+
+protocol Greeting {
+    associatedtype Output
+    func greet(_ who: String?, times: Int) async throws -> String
+}
+
+struct Point: Equatable {
+    var x: Double; var y: Double
+    static func + (lhs: Point, rhs: Point) -> Point { Point(x: 1, y: 2) }
+}
+
+infix operator <*>: AdditionPrecedence
+func <*> (a: Int, b: Int) -> Int { a * b }
+
+enum Direction: String, CaseIterable {
+    case north, south
+    case east = "E"
+    indirect case other(Direction)
+
+    var opposite: Direction {
+        switch self {
+        case .north: return .south
+        case .south: return .north
+        default: return self
+        }
+    }
+}
+
+extension Greeter {
+    func wave() -> some View where Output == Int {
+        do {
+            try something()
+        } catch is NSError {
+            print(1)
+        } catch {
+            print("other")
+        }
+        return EmptyView()
+    }
+
+    struct Nested<T: Hashable> {
+        typealias Key = T
+        let key: Key
+    }
+}
+
+typealias Callback = (Int) -> Void
+let x = 3 <*> 4

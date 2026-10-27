@@ -26,6 +26,7 @@ var samples = map[string]func() *Language{
 	"sample.groovy.txt": Groovy,
 	"sample.md.txt":     Markdown,
 	"sample.proto.txt":  Protobuf,
+	"sample.swift.txt":  Swift,
 }
 
 func parse(t *testing.T, lang *Language, src []byte) *Tree {
@@ -65,8 +66,9 @@ func dump(n *Node, src []byte, depth int, sb *strings.Builder) {
 // The pure-Go runtime parses with smacker's own grammars (package grammars),
 // so on valid source it must build the C runtime's tree exactly. The golden
 // trees are the cgo runtime's; the samples exercise every external scanner
-// (sql dollar quotes, kotlin strings and semicolons, tsx templates and
-// ternaries, python indentation, cpp raw strings, markdown blocks).
+// (sql dollar quotes, kotlin strings and semicolons, swift newlines,
+// operators and raw strings, tsx templates and ternaries, python
+// indentation, cpp raw strings, markdown blocks).
 func TestTreesMatchTheCRuntime(t *testing.T) {
 	for name, lang := range samples {
 		t.Run(name, func(t *testing.T) {

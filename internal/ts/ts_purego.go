@@ -46,6 +46,7 @@ var (
 	Groovy   = lang(grammars.GroovyLanguage)
 	Markdown = lang(grammars.MarkdownLanguage)
 	Protobuf = lang(grammars.ProtoLanguage)
+	Swift    = lang(grammars.SwiftLanguage)
 )
 
 // SymbolCount is the size of the grammar's symbol table.

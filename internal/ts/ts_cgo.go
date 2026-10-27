@@ -14,6 +14,7 @@ import (
 	"github.com/smacker/go-tree-sitter/protobuf"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/sql"
+	"github.com/smacker/go-tree-sitter/swift"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
 )
 
@@ -50,3 +51,4 @@ func Kotlin() *Language   { return kotlin.GetLanguage() }
 func Groovy() *Language   { return groovy.GetLanguage() }
 func Markdown() *Language { return markdown.GetLanguage() }
 func Protobuf() *Language { return protobuf.GetLanguage() }
+func Swift() *Language    { return swift.GetLanguage() }

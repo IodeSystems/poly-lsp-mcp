@@ -278,6 +278,7 @@ func TestMCPChooseDaemon(t *testing.T) {
 		{args: []string{"--daemon=false"}, want: false},
 		{args: []string{"--daemon", "--no-daemon"}, wantErr: true},
 		{args: []string{"--read-only", "--exclude", "x", "--lsp-roots", "auto", "--hook", "/h"}, want: true},
+		{args: []string{"--lsp-off", "go,python", "--lsp-on", "zig"}, want: true},
 		{args: []string{"--legacy-tools"}, want: false},
 		{args: []string{"--read-char-budget", "9000"}, want: false},
 		{args: []string{"--config", "c.yaml"}, want: false},
@@ -320,5 +321,75 @@ func TestMCPChooseDaemon(t *testing.T) {
 	_ = cmd.ParseFlags(nil)
 	if got, err := chooseDaemon(cmd, false, false); err != nil || got {
 		t.Errorf("with ./poly-lsp-mcp.yaml: daemon=%v err=%v, want in-process", got, err)
+	}
+}
+
+// lsp add / list / remove round-trip servers.yaml in the daemon home:
+// add validates before it writes, list shows the merged registry with
+// sources, remove restores a built-in.
+func TestLSPAddListRemove(t *testing.T) {
+	t.Chdir(t.TempDir()) // no poly-lsp-mcp.yaml here
+	home := t.TempDir()
+	t.Setenv(daemon.HomeEnv, home)
+	run := func(args ...string) (string, error) {
+		t.Helper()
+		root := newRoot()
+		root.SetArgs(args)
+		stdout := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		err := root.Execute()
+		w.Close()
+		os.Stdout = stdout
+		out, _ := io.ReadAll(r)
+		return string(out), err
+	}
+	if _, err := run("lsp", "add", "zig", "--ext", ".zig,zon", "--cmd", "zls", "--arg", "--x", "--env", "A=b", "--root-marker", "build.zig", "--trust-clean-diagnostics"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run("lsp", "add", "go", "--off-by-default"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run("lsp", "add", "bad", "--ext", ".go", "--cmd", "x"); err == nil || !strings.Contains(err.Error(), "claimed by both go and bad") {
+		t.Fatalf("an extension go claims: %v", err)
+	}
+	if _, err := run("lsp", "add", "nocmd", "--ext", "q"); err == nil || !strings.Contains(err.Error(), "cmd is required") {
+		t.Fatalf("no cmd: %v", err)
+	}
+	out, err := run("lsp", "list", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep lspListReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if rep.Servers != filepath.Join(home, "servers.yaml") {
+		t.Errorf("servers path %q", rep.Servers)
+	}
+	byName := map[string]lspEntry{}
+	for _, e := range rep.Langs {
+		byName[e.Name] = e
+	}
+	zig, g, py := byName["zig"], byName["go"], byName["python"]
+	if zig.Source != "user" || zig.Overrides || zig.LSP == nil || zig.LSP.Name != "zls" || !slices.Equal(zig.Extensions, []string{"zig", "zon"}) ||
+		!slices.Equal(zig.LSP.Args, []string{"--x"}) || !slices.Equal(zig.RootMarkers, []string{"build.zig"}) {
+		t.Errorf("zig: %+v", zig)
+	}
+	if g.Source != "user" || !g.Overrides || !g.OffByDefault || g.LSP == nil || g.LSP.Name != "gopls" {
+		t.Errorf("go: %+v", g)
+	}
+	if py.Source != "builtin" || py.OffByDefault {
+		t.Errorf("python: %+v", py)
+	}
+	if out, err := run("lsp", "remove", "go"); err != nil || !strings.Contains(out, "built-in go is restored") {
+		t.Fatalf("remove go: %v %q", err, out)
+	}
+	if _, err := run("lsp", "remove", "go"); err == nil {
+		t.Fatal("removing a missing entry succeeded")
+	}
+	out, _ = run("lsp", "list")
+	if !strings.Contains(out, "zig") || strings.Contains(out, "overrides builtin") {
+		t.Errorf("lsp list after remove:\n%s", out)
 	}
 }

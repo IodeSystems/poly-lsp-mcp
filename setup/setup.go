@@ -62,24 +62,43 @@ func Hints(reg *config.Registry, files map[string]int) []Lang {
 		}
 		l := Lang{Lang: lang.Name, Files: n}
 		if lang.LSP != nil {
-			l.LSP = &LSP{Name: lang.LSP.Cmd}
-			if f, err := lspbin.Resolve(lang.LSP.Cmd); err == nil {
-				l.LSP.Found, l.LSP.Path = true, f.Path
-				if f.Fallback {
-					l.LSP.Via = "fallback"
-				}
-			} else {
+			l.LSP, l.Install = Resolve(lang.LSP.Cmd)
+			if !l.LSP.Found {
 				l.Adds = Adds
-				if in, ok := installs[lang.LSP.Cmd]; ok {
-					in := in
-					l.Install = &in
-				}
 			}
 		}
 		out = append(out, l)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Files > out[j].Files })
 	return out
+}
+
+// Resolve finds one child LSP command on this machine (PATH, then the
+// well-known user bin dirs), with its install hint when it is missing and
+// one is known.
+func Resolve(cmd string) (*LSP, *Install) {
+	l := &LSP{Name: cmd}
+	f, err := lspbin.Resolve(cmd)
+	if err == nil {
+		l.Found, l.Path = true, f.Path
+		if f.Fallback {
+			l.Via = "fallback"
+		}
+		return l, nil
+	}
+	if in, ok := installs[cmd]; ok {
+		return l, &in
+	}
+	return l, nil
+}
+
+// InstallHint is the install hint for a known child LSP command, nil for
+// another.
+func InstallHint(cmd string) *Install {
+	if in, ok := installs[cmd]; ok {
+		return &in
+	}
+	return nil
 }
 
 // Missing counts the languages whose child LSP is configured but not found.

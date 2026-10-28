@@ -141,14 +141,20 @@ starts). Run a subcommand for anything else.`,
 }
 
 func lspCmd(l *loader) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "lsp",
-		Short: "Run the LSP server on stdin/stdout (the default with no subcommand)",
-		Args:  cobra.NoArgs,
+		Short: "Run the LSP server on stdin/stdout (the default with no subcommand); list, add or remove child language servers",
+		Long: `With no subcommand: run the LSP server on stdin/stdout.
+
+lsp list, lsp add and lsp remove manage the user's child language servers in
+<daemon home>/servers.yaml, merged over the built-in languages by name.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runLSP(l)
 		},
 	}
+	cmd.AddCommand(lspRegistryCmds(l)...)
+	return cmd
 }
 
 func runLSP(l *loader) error {

@@ -217,3 +217,55 @@ func TestRegistryLSPOff(t *testing.T) {
 		t.Errorf("on zig, off go: %v", got)
 	}
 }
+
+// format_on_edit: off by default; servers.yaml turns it on (or writes an
+// explicit false); a client's on/off lists override it, off winning.
+func TestFormatOnEdit(t *testing.T) {
+	on, off := true, false
+	langs, err := MergeServers(Default().Languages, []UserServer{
+		{Name: "go", FormatOnEdit: &on},
+		{Name: "python", FormatOnEdit: &off},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := (&Config{Languages: langs}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		lang    string
+		on, off []string
+		want    bool
+	}{
+		{"go", nil, nil, true},
+		{"python", nil, nil, false},
+		{"typescript", nil, nil, false},
+		{"typescript", []string{"typescript"}, nil, true},
+		{"go", nil, []string{"go"}, false},
+		{"go", []string{"go"}, []string{"go"}, false},
+		{"nosuch", []string{"nosuch"}, nil, false},
+	}
+	for _, c := range cases {
+		if got := reg.FormatOnEdit(c.lang, c.on, c.off); got != c.want {
+			t.Errorf("FormatOnEdit(%s, on %v, off %v) = %v, want %v", c.lang, c.on, c.off, got, c.want)
+		}
+	}
+	if b := langByName(t, Default().Languages, "go"); b.FormatOnEdit {
+		t.Error("format_on_edit is on by default")
+	}
+	// Round trip keeps an explicit false.
+	path := filepath.Join(t.TempDir(), ServersFile)
+	s := &Servers{Servers: []UserServer{{Name: "go", FormatOnEdit: &off}}}
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "format_on_edit: false") {
+		t.Errorf("explicit false not written:\n%s", data)
+	}
+	back, err := LoadServers(path)
+	if err != nil || !reflect.DeepEqual(back, s) {
+		t.Errorf("round trip: %v %+v", err, back)
+	}
+}

@@ -43,6 +43,9 @@ type UserServer struct {
 	RootMarkers           []string `yaml:"root_markers,omitempty"`
 	OffByDefault          bool     `yaml:"off_by_default,omitempty"`
 	TrustCleanDiagnostics *bool    `yaml:"trust_clean_diagnostics,omitempty"`
+	// FormatOnEdit sets Language.FormatOnEdit; nil keeps the built-in's
+	// (off). false is written by lsp add --format-on-edit=false.
+	FormatOnEdit *bool `yaml:"format_on_edit,omitempty"`
 }
 
 // LoadServers reads a servers.yaml. A missing file is an empty registry.
@@ -251,6 +254,9 @@ func (u UserServer) apply(l *Language) error {
 	if u.OffByDefault {
 		l.OffByDefault = true
 	}
+	if u.FormatOnEdit != nil {
+		l.FormatOnEdit = *u.FormatOnEdit
+	}
 	return nil
 }
 
@@ -308,4 +314,26 @@ func (r *Registry) LSPOff(on, off []string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// FormatOnEdit reports whether a kept edit to a file of lang is formatted
+// for a client whose switch names on (--format-on-edit) and off
+// (--no-format-on-edit): off names it → no; on names it → yes; else the
+// language's format_on_edit. An unknown language is never formatted.
+func (r *Registry) FormatOnEdit(lang string, on, off []string) bool {
+	l := r.byName[lang]
+	if l == nil {
+		return false
+	}
+	for _, n := range off {
+		if n == lang {
+			return false
+		}
+	}
+	for _, n := range on {
+		if n == lang {
+			return true
+		}
+	}
+	return l.FormatOnEdit
 }

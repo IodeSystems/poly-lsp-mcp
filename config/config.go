@@ -66,6 +66,12 @@ type Language struct {
 	// language. Stored, NOT YET USED: --lsp-roots auto reads the built-in
 	// marker table in symbols/roots.go only.
 	RootMarkers []string `yaml:"root_markers,omitempty"`
+	// FormatOnEdit: an edit to this language's files that is kept is
+	// formatted by its child LSP (range formatting over the changed
+	// lines, else the whole file). Off unless set; a client overrides it
+	// (mcp --format-on-edit / --no-format-on-edit). See FormatOnEdit and
+	// mcp/format.go.
+	FormatOnEdit bool `yaml:"format_on_edit,omitempty"`
 }
 
 // Binding declares that several physical sites (in files of any language)

@@ -225,6 +225,14 @@ type Server struct {
 	// meaningful under editMu; the zero value is localSession.
 	activeSession sessionID
 
+	// staleBaseline, when set, is the error fingerprint before an edit
+	// whose revert got no diagnostics of the reverted text within the wait
+	// (awaitRevert): the store may still hold the reverted error. The next
+	// edit's baseline counts an error only as often as both hold it
+	// (editBaseline). Under staleMu: a legacy edit path is not under editMu.
+	staleMu       sync.Mutex
+	staleBaseline map[string]int
+
 	// diagnosticSettle is how long the sibling rollup waits for the
 	// publish stream to go quiet before sampling; see
 	// waitForDiagnosticsToSettle. diagnosticSettleSet distinguishes

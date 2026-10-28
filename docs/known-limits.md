@@ -69,16 +69,16 @@ entry here.
     later. The skipped first publish after an open covers it; when the
     server is fast it sends one complete publish instead, so an edit made
     before the open's publish waits out the cap (`lsp-timeout`, kept).
-  - It coalesces a revert's publish with the next change. The next
-    edit's error baseline then still holds the reverted error, and the
-    same broken edit sent again at once was reported `validated:true`
-    with trust on. gopls does the same (next item), so trusting it would
-    add a false `validated` path, not the only one.
-- **Edit validation, an edit retried right after its revert:** the error
-  baseline is read from the diagnostics store when the edit starts; the
-  reverted text's publish may not have arrived yet, so the reverted
-  error counts as pre-existing and the identical broken edit is kept and
-  reported `validated:true`. gopls 0.24: 5 of 5 retries (2026-10-27).
+  - A revert of an edit that broke only another file gets no publish
+    for the edited file (its diagnostics stay empty): the rejection
+    waits out `--validate-wait`, and the next edit's baseline is unknown
+    (design.md "Editing").
+- **Edit validation, a revert with no result in time:** the rejected
+  edit's call waits for the reverted text's diagnostics up to
+  `--validate-wait`. Without them, the next edit counts an error as
+  pre-existing only if the reverted edit's baseline held it too: an
+  error present before the reverted edit, fixed outside poly-lsp-mcp
+  before the next edit and brought back by it, reverts that edit.
 - **Edit validation, servers without document versions, opens:** the first
   publish after a file's didOpen is never taken as an edit's result (see
   design.md "Editing"). A server that publishes once per open (pylsp,

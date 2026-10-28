@@ -79,7 +79,7 @@ type editBatch struct {
 	s         *Server
 	sess      sessionID // owning session (for per-file claims)
 	validate  bool
-	baseline  map[string]int             // workspace error fingerprint at open (if validating)
+	baseline  map[string]int             // workspace error fingerprint at open (with a child LSP)
 	originals map[string][]byte          // uri → pre-batch bytes (first write wins) — for revert
 	staged    map[string][32]byte        // uri → hash of the LAST bytes we staged — for commit-time conflict detection
 	diags     map[string]editDiagnostics // uri → the child's result for the LAST bytes we staged (if validating)
@@ -95,8 +95,10 @@ func (s *Server) openBatch(opts diagnosticOptions) *editBatch {
 		staged:    map[string][32]byte{},
 		diags:     map[string]editDiagnostics{},
 	}
-	if b.validate {
-		b.baseline = s.errorFingerprintAll()
+	if s.manager != nil {
+		// Taken without validation too: a rollback whose revert gets no
+		// diagnostics in time hands it on (awaitRevert).
+		b.baseline = s.editBaseline()
 	}
 	return b
 }
@@ -211,26 +213,116 @@ func (b *editBatch) externalWrites() []string {
 	return out
 }
 
-// revertAll restores every touched file to its pre-batch bytes.
+// revertAll restores every touched file to its pre-batch bytes, and
+// waits for the child's diagnostics of them (awaitRevert).
 func (b *editBatch) revertAll(oc *editOutcome) {
-	for uri, orig := range b.originals {
+	b.s.revertFiles(b.originals, b.baseline, oc)
+}
+
+// revertFiles writes each uri's original bytes back, tells the child LSP,
+// and waits for its diagnostics of them (awaitRevert, base the error
+// fingerprint before the reverted edit).
+func (s *Server) revertFiles(originals map[string][]byte, base map[string]int, oc *editOutcome) {
+	sent := make(map[string][]byte, len(originals))
+	for uri, orig := range originals {
 		abs := uriToPath(uri)
 		mode := os.FileMode(0o644)
 		if info, err := os.Stat(abs); err == nil {
 			mode = info.Mode().Perm()
 		}
-		if err := b.s.atomicWrite(abs, orig, mode); err != nil {
+		if err := s.atomicWrite(abs, orig, mode); err != nil {
 			oc.RevertFailed, oc.RevertErr = true, err.Error()
 			continue
 		}
-		b.s.refreshFileInIndex(abs, orig)
-		if b.s.manager != nil {
-			if child := b.s.manager.RouteByURI(uri); child != nil {
-				b.s.notifyChildOfEdit(child, uri, orig)
-			}
-		}
+		s.refreshFileInIndex(abs, orig)
+		sent[uri] = orig
 	}
 	oc.Reverted = !oc.RevertFailed
+	if oc.RevertFailed {
+		s.markBaselineUnknown(base) // the child holds text that is not on disk
+	}
+	s.awaitRevert(sent, base)
+}
+
+// awaitRevert sends the reverted contents to the child LSP and waits for
+// its diagnostics of them by an edit's rules (collectDiagnostics: the
+// reverted text's version or later; unversioned, waitForEditedText's
+// rules; then the sibling settle), capped by --validate-wait. The next
+// edit's error baseline is read from the store: without the wait it held
+// the reverted error, and the same broken edit sent again at once was
+// kept, validated (gopls 0.24: 5 of 5 retries, 2026-10-27).
+//
+// When the wait ends without them, the store may still hold the reverted
+// error: markBaselineUnknown(base), base the fingerprint the reverted
+// edit was judged against.
+func (s *Server) awaitRevert(contents map[string][]byte, base map[string]int) {
+	if s.manager == nil || len(contents) == 0 {
+		return
+	}
+	uris := make([]string, 0, len(contents))
+	for uri := range contents {
+		uris = append(uris, uri)
+	}
+	sort.Strings(uris)
+	if d := s.collectDiagnostics(uris, contents, diagnosticOptions{}); d.TimedOut {
+		s.markBaselineUnknown(base)
+	}
+}
+
+// markBaselineUnknown records that the store may hold errors of text no
+// longer on disk (a revert got no diagnostics of the reverted text in
+// time), base the error fingerprint taken before the reverted edit. The
+// next edit's baseline is then the minimum of the store's and base's
+// count per error (editBaseline): an error counts as pre-existing only if
+// it was there before the reverted edit too. An error the reverted edit
+// added is new again, so the same broken edit is not validated. The cost
+// is a false revert: an error present before the reverted edit, fixed
+// outside poly-lsp-mcp (an editor, git) before the next edit, counts as
+// new if that edit brings it back. A false revert is reported and can be
+// retried; a false validated:true is the failure validation exists to
+// prevent.
+// A nil base (no baseline was taken: no child LSP) does nothing.
+func (s *Server) markBaselineUnknown(base map[string]int) {
+	if base == nil {
+		return
+	}
+	s.staleMu.Lock()
+	defer s.staleMu.Unlock()
+	if s.staleBaseline != nil {
+		base = fingerprintMin(base, s.staleBaseline)
+	}
+	s.staleBaseline = base
+}
+
+// editBaseline is the error fingerprint an edit (or a batch, or a
+// refactor) is judged against: errorFingerprintAll, and after a revert
+// whose diagnostics did not arrive (markBaselineUnknown), its minimum
+// with the fingerprint before the reverted edit. It takes that state:
+// the edit's own revert, if any, records it again.
+func (s *Server) editBaseline() map[string]int {
+	cur := s.errorFingerprintAll()
+	s.staleMu.Lock()
+	stale := s.staleBaseline
+	s.staleBaseline = nil
+	s.staleMu.Unlock()
+	if stale == nil {
+		return cur
+	}
+	return fingerprintMin(cur, stale)
+}
+
+// fingerprintMin is the multiset intersection of a and b.
+func fingerprintMin(a, b map[string]int) map[string]int {
+	out := make(map[string]int, len(a))
+	for k, n := range a {
+		if m := b[k]; m < n {
+			n = m
+		}
+		if n > 0 {
+			out[k] = n
+		}
+	}
+	return out
 }
 
 // applyBytes writes `out` to abs (atomic temp+rename), refreshes the index, and
@@ -318,7 +410,7 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 	// first edit could false-revert; a pre-touch analysis would fix it.
 	var baseline map[string]int
 	if validate {
-		baseline = s.errorFingerprintAll()
+		baseline = s.editBaseline()
 	}
 
 	if err := s.atomicWrite(abs, out, mode); err != nil {
@@ -356,13 +448,20 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 	}
 	if rerr != nil {
 		oc.RevertFailed, oc.RevertErr = true, rerr.Error()
+		s.markBaselineUnknown(baseline) // the child holds text that is not on disk
 		return oc, nil
 	}
 	oc.Reverted = true
 	s.refreshFileInIndex(abs, orig)
-	if child := s.manager.RouteByURI(uri); child != nil {
-		s.notifyChildOfEdit(child, uri, orig) // tell the LSP we rolled back
+	if orig == nil {
+		// A create undone: the child is not told, and still holds the
+		// removed file's text and errors.
+		s.markBaselineUnknown(baseline)
+		return oc, nil
 	}
+	// Tell the LSP we rolled back, and wait for its result for the
+	// reverted text: the next edit's baseline is read from the store.
+	s.awaitRevert(map[string][]byte{uri: orig}, baseline)
 	return oc, nil
 }
 
@@ -419,7 +518,7 @@ func (t *validationTxn) record(uri string, orig []byte) {
 	if t.baseline == nil {
 		// Workspace-wide baseline, captured ONCE before the first write — so a
 		// cross-file break introduced by ANY of the refactor's edits is caught.
-		t.baseline = t.s.errorFingerprintAll()
+		t.baseline = t.s.editBaseline()
 	}
 	if _, seen := t.originals[uri]; seen {
 		return
@@ -463,22 +562,7 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 		return oc
 	}
 	oc.Rejected, oc.NewErrors = true, introduced
-	for uri, orig := range t.originals {
-		abs := uriToPath(uri)
-		mode := os.FileMode(0o644)
-		if info, err := os.Stat(abs); err == nil {
-			mode = info.Mode().Perm()
-		}
-		if err := t.s.atomicWrite(abs, orig, mode); err != nil {
-			oc.RevertFailed, oc.RevertErr = true, err.Error()
-			continue
-		}
-		t.s.refreshFileInIndex(abs, orig)
-		if child := t.s.manager.RouteByURI(uri); child != nil {
-			t.s.notifyChildOfEdit(child, uri, orig)
-		}
-	}
-	oc.Reverted = !oc.RevertFailed
+	t.s.revertFiles(t.originals, t.baseline, &oc)
 	return oc
 }
 

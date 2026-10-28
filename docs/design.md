@@ -245,6 +245,29 @@ ground; the most verbose variant did worse (more grep scaffolding).
   before and after each change). `POLY_LSP_CHILD_TRACE=1` logs what each
   child sends and the notifications sent to it; the Swift edit e2e sets
   it, so a CI failure shows the sequence.
+- **A revert waits for diagnostics of the reverted text** (Carl,
+  2026-10-27; `awaitRevert`). An edit's error baseline is read from the
+  diagnostics store; a revert that returned at once left the reverted
+  error there (gopls and typescript-language-server 5.1.3 coalesce the
+  revert's change with the next one), and the same broken edit sent again
+  was kept and reported `validated:true` (gopls 0.24: 5 of 5 retries). A
+  revert (single edit, refactor, batch commit, `rollback:true`, a dropped
+  session's rollback) sends the original text and waits for its result by
+  an edit's rules (`collectDiagnostics`: its version or later, the
+  unversioned rules, the sibling settle), capped by `--validate-wait`. When
+  that wait ends without a result (or a create was undone by deleting the
+  file, or the revert write failed), the next edit's baseline is unknown:
+  it is the per-error minimum of the store's fingerprint and the one the
+  reverted edit was judged against (`markBaselineUnknown`,
+  `editBaseline`). An error the reverted edit added then counts as new
+  again; an error there before it does not. The minimum, not "every error
+  in the file is new": that would revert every edit to a file with a
+  pre-existing error. Its cost is a false revert, when an error present
+  before the reverted edit is fixed outside poly-lsp-mcp before the next
+  edit and that edit brings it back. A false revert is reported and can
+  be retried; a false `validated:true` is reported as proof. gopls, median of 10 warm edits: a rejected
+  edit 454 ms before, 606 ms after (the revert's result and the 150 ms
+  sibling settle); an accepted edit 453 ms both.
 
 - **Files outside the root** (Carl, 2026-10-27; `mcp/outside.go`):
   `node_read` / `node_edit` take an absolute path under an allowed

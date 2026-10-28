@@ -279,6 +279,7 @@ func TestMCPChooseDaemon(t *testing.T) {
 		{args: []string{"--daemon", "--no-daemon"}, wantErr: true},
 		{args: []string{"--read-only", "--exclude", "x", "--lsp-roots", "auto", "--hook", "/h"}, want: true},
 		{args: []string{"--lsp-off", "go,python", "--lsp-on", "zig"}, want: true},
+		{args: []string{"--format-on-edit", "go,typescript", "--no-format-on-edit", "python"}, want: true},
 		{args: []string{"--legacy-tools"}, want: false},
 		{args: []string{"--read-char-budget", "9000"}, want: false},
 		{args: []string{"--config", "c.yaml"}, want: false},

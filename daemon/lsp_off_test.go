@@ -16,8 +16,9 @@ import (
 
 // fakeLSPArg makes the test binary a child LSP: it answers initialize and
 // shutdown, and publishes each didOpen / didChange at once with its
-// version and one error when the text holds BROKEN. No language server on
-// PATH is needed.
+// version and one error when the text holds BROKEN. With $FAKE_FMT=file
+// it declares documentFormattingProvider and formats each UGLY to pretty.
+// No language server on PATH is needed.
 const fakeLSPArg = "--fake-daemon-lsp"
 
 func TestMain(m *testing.M) {
@@ -44,6 +45,23 @@ func runFakeLSP() {
 			switch msg.Method {
 			case "initialize":
 				resp.Result = json.RawMessage(`{"capabilities":{"textDocumentSync":1}}`)
+				if os.Getenv("FAKE_FMT") == "file" {
+					resp.Result = json.RawMessage(`{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true}}`)
+				}
+			case "textDocument/formatting":
+				var fp struct {
+					TextDocument struct {
+						URI string `json:"uri"`
+					} `json:"textDocument"`
+				}
+				_ = json.Unmarshal(msg.Params, &fp)
+				text := texts[fp.TextDocument.URI]
+				lines := strings.Count(text, "\n")
+				raw, _ := json.Marshal([]any{map[string]any{
+					"range":   map[string]any{"start": map[string]any{"line": 0, "character": 0}, "end": map[string]any{"line": lines + 1, "character": 0}},
+					"newText": strings.ReplaceAll(text, "UGLY", "pretty"),
+				}})
+				resp.Result = raw
 			case "shutdown":
 				resp.Result = json.RawMessage(`null`)
 			default:
@@ -277,5 +295,69 @@ func TestServersFileChangeIsPickedUpOnNextOpen(t *testing.T) {
 	}
 	if again, _ := r.Get(root); again != third {
 		t.Fatal("an open with servers.yaml unchanged rebuilt the root")
+	}
+}
+
+// The per-client format-on-edit switch travels in the open: one client
+// with formatOnEdit go gets its kept edits formatted, another on the same
+// root does not, and neither switch rebuilds the root.
+func TestFormatOnEditPerClientThroughDaemon(t *testing.T) {
+	_, root := goWorkspace(t)
+	cfg := config.Default()
+	for i := range cfg.Languages {
+		if cfg.Languages[i].Name == "go" {
+			cfg.Languages[i].LSP = fakeLSP(t)
+			cfg.Languages[i].LSP.Env = []string{"FAKE_FMT=file"}
+		}
+	}
+	reg, err := cfg.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry(cfg, reg, false, true)
+	r.cachePath = ""
+	socket := serveRegistry(t, root, r)
+
+	plain := NewClient(socket)
+	plain.SetValidateWait(5 * time.Second)
+	if res, err := plain.OpenWith(root, OpenOptions{}); err != nil || res.Error != "" {
+		t.Fatalf("open: %v %s", err, res.Error)
+	}
+	srv, err := r.Get(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmtc := NewClient(socket)
+	fmtc.SetValidateWait(5 * time.Second)
+	if res, err := fmtc.OpenWith(root, OpenOptions{FormatOnEdit: []string{"go"}}); err != nil || res.Error != "" {
+		t.Fatalf("open: %v %s", err, res.Error)
+	}
+	if again, _ := r.Get(root); again != srv {
+		t.Fatal("a client's format switch rebuilt the root")
+	}
+
+	text := "package main\n\nvar X = UGLY\n\nfunc F0() int { return 0 }\n"
+	m := editFile(t, plain, root, "f0.go", text)
+	if m["formatted"] != nil || m["formatSkipped"] != nil {
+		t.Fatalf("the client without the switch: %v", m)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "f0.go")); string(got) != text {
+		t.Fatalf("f0.go formatted for the client without the switch: %q", got)
+	}
+	m = editFile(t, fmtc, root, "f1.go", text)
+	if m["rejected"] == true || m["formatted"] != "file" {
+		t.Fatalf("the client with formatOnEdit go: %v", m)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "f1.go")); !strings.Contains(string(got), "var X = pretty") {
+		t.Fatalf("f1.go not formatted: %q", got)
+	}
+	// Its no-format switch wins over the language's format_on_edit.
+	off := NewClient(socket)
+	off.SetValidateWait(5 * time.Second)
+	if res, err := off.OpenWith(root, OpenOptions{FormatOnEdit: []string{"go"}, NoFormatOnEdit: []string{"go"}}); err != nil || res.Error != "" {
+		t.Fatalf("open: %v %s", err, res.Error)
+	}
+	if m := editFile(t, off, root, "f2.go", text); m["formatted"] != nil {
+		t.Fatalf("noFormatOnEdit go: %v", m)
 	}
 }

@@ -108,15 +108,23 @@ type OpenOptions struct {
 	// not change the build, so a different switch never rebuilds.
 	LSPOff []string `json:"lspOff,omitempty"`
 	LSPOn  []string `json:"lspOn,omitempty"`
+	// FormatOnEdit / NoFormatOnEdit are this client's format-on-edit
+	// switch over each language's format_on_edit (mcp --format-on-edit,
+	// --no-format-on-edit; see mcp/format.go). Per session, as LSPOff.
+	FormatOnEdit   []string `json:"formatOnEdit,omitempty"`
+	NoFormatOnEdit []string `json:"noFormatOnEdit,omitempty"`
 }
 
-// lspPrefs is o's child-LSP switch.
-func (o OpenOptions) lspPrefs() mcp.LSPPrefs { return mcp.LSPPrefs{On: o.LSPOn, Off: o.LSPOff} }
+// lspPrefs is o's child-LSP and format-on-edit switch.
+func (o OpenOptions) lspPrefs() mcp.LSPPrefs {
+	return mcp.LSPPrefs{On: o.LSPOn, Off: o.LSPOff, FormatOn: o.FormatOnEdit, FormatOff: o.NoFormatOnEdit}
+}
 
 // buildOptions is o without the per-session switch: what a root is built
 // with.
 func (o OpenOptions) buildOptions() OpenOptions {
 	o.LSPOff, o.LSPOn = nil, nil
+	o.FormatOnEdit, o.NoFormatOnEdit = nil, nil
 	return o
 }
 

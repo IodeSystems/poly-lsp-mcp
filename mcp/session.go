@@ -87,6 +87,7 @@ func (s *Server) RollbackSession(sess string) (discarded int, ok bool) {
 	s.sessionWaitsMu.Lock()
 	delete(s.sessionWaits, sid)
 	delete(s.sessionPaths, sid)
+	delete(s.sessionLSP, sid)
 	s.sessionWaitsMu.Unlock()
 	b := s.batches[sid]
 	if b == nil {

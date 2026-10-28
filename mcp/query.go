@@ -339,6 +339,10 @@ type engine struct {
 	lspLeft     int
 	lspAsked    int
 	lspResolved int
+	// lspOff: the languages whose child this query's client does not use
+	// (lsp_off; see lsp_off.go). Set by buildTreeFor for the stdio
+	// client; a daemon session's query sets its own (forSession).
+	lspOff map[string]bool
 
 	// The LSP cap is set LAZILY on the first round-trip (ensureLSPCap): an
 	// explicit server cap, else one TUNED from the workspace collision rate
@@ -703,7 +707,7 @@ func (s *Server) buildTreeFor(selector string, include ...string) (*engine, erro
 		abs:   root,
 	}
 	e := &engine{s: s, project: project, fileByRel: map[string]*treeNode{},
-		elemCost: map[*selElem]int{}, startedAt: time.Now()}
+		elemCost: map[*selElem]int{}, startedAt: time.Now(), lspOff: s.lspOff(localSession)}
 	if s.queryWorkBudget > 0 {
 		// An explicit server-level ops budget (tests, --legacy paths):
 		// deterministic, no wall clock.
@@ -4972,7 +4976,7 @@ func (e *engine) implementsRefs(h *treeNode, dir string) []*treeNode {
 	var refs []*treeNode
 	defer func() { e.implRefCache[h][dir] = refs }()
 
-	if h.nameAt[0] == 0 || !e.s.lspAvailable(h.abs) {
+	if h.nameAt[0] == 0 || !e.lspAvailable(h.abs) {
 		e.implementsUnavailable = true
 		return refs
 	}

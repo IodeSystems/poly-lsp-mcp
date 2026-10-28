@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -111,6 +112,10 @@ type editDiagnostics struct {
 	// never from whatever the store last holds for that URI: that can be
 	// a publish for other text.
 	edited map[string]editedResult
+
+	// lspOff: no URI had a child LSP for this client because its
+	// language is off for the client (lsp_off; see lsp_off.go).
+	lspOff bool
 }
 
 // editedResult is the publish an edit's wait took as an edited URI's
@@ -226,10 +231,23 @@ func (s *Server) startManagerIfPresent(idx *symbols.Index) {
 		return
 	}
 	langs := idx.Languages()
+	// A language with a child LSP and no tree-sitter grammar (one added in
+	// servers.yaml) has no sites in the index, so the index cannot say the
+	// workspace holds it: its child starts on the first request for one
+	// of its files.
+	lazy := map[string]bool{}
+	for _, l := range s.registry.Languages() {
+		if l.LSP != nil && l.TreeSitter == "" && !slices.Contains(langs, l.Name) {
+			langs = append(langs, l.Name)
+			lazy[l.Name] = true
+		}
+	}
 	if len(langs) == 0 {
 		return
 	}
 	s.manager.StatusIndex = func() any { return s.IndexCost() }
+	// A child no client wants is left stopped until one does.
+	s.manager.Defer = func(lang string) bool { return lazy[lang] || !s.lspWanted(lang) }
 	if s.lspRootsAuto {
 		s.manager.Roots = s.lspRoots(langs)
 		s.manager.RootsMax = s.lspRootsLimit()
@@ -310,9 +328,10 @@ func (s *Server) runProactiveOpen() {
 		}
 		uri := pathToURI(path)
 		var child *multiplex.Child
-		if s.lspRootsAuto {
+		if s.lspRootsAuto || !s.lspWanted(s.langOfPath(path)) {
 			// RouteByURI would start every project root's child, and past
-			// --lsp-roots-max stop them again: they start on first use.
+			// --lsp-roots-max stop them again: they start on first use. A
+			// child no client wants (lsp_off) is not started for this walk.
 			child = s.manager.Running(uri)
 		} else {
 			child = s.manager.RouteByURI(uri)
@@ -660,7 +679,15 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 
 	tracked := make([]captured, 0, len(uris))
 	editedURIs := make(map[string]struct{}, len(uris))
+	// A language off for this client: no child, not even woken; the file
+	// watcher still pushes the new text to a running one.
+	off := s.lspOff(s.activeSession)
+	skippedOff := false
 	for _, uri := range uris {
+		if s.lspOffURI(off, uri) {
+			skippedOff = true
+			continue
+		}
 		child := s.manager.RouteByURI(uri)
 		if child == nil {
 			continue
@@ -674,7 +701,7 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 	}
 
 	if len(tracked) == 0 {
-		return editDiagnostics{Available: false, Items: []diagnosticJSON{}}
+		return editDiagnostics{Available: false, Items: []diagnosticJSON{}, lspOff: skippedOff}
 	}
 
 	deadline := s.diagWaitDuration()
@@ -756,7 +783,7 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 		snapshot := store.Snapshot()
 		siblingURIs := make([]string, 0, len(snapshot))
 		for uri := range snapshot {
-			if _, edited := editedURIs[uri]; edited {
+			if _, edited := editedURIs[uri]; edited || s.lspOffURI(off, uri) {
 				continue
 			}
 			if store.Gen(uri) > preEditGens[uri] {

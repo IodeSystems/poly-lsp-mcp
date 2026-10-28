@@ -423,6 +423,36 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 	if !validate {
 		return oc, nil
 	}
+	if diags.lspOff {
+		// The client turned this language's child off: a parse check only.
+		lang := s.languageForFile(abs)
+		if !parseBroke(lang, orig, out) {
+			oc.Skipped, oc.SkipNote = "lsp-off", lspOffNote
+			if symbols.LanguageByName(lang) == nil {
+				oc.SkipNote = lspOffSkipNote // no grammar: no parse check either
+			}
+			return oc, nil
+		}
+		oc.Rejected = true
+		oc.NewErrors = []string{uri + "\x00\x00the edit does not parse (tree-sitter, " + lang + "); this client has the child LSP off (lsp-off)"}
+		var rerr error
+		if orig == nil {
+			rerr = os.Remove(abs)
+		} else {
+			rerr = s.atomicWrite(abs, orig, mode)
+		}
+		if rerr != nil {
+			oc.RevertFailed, oc.RevertErr = true, rerr.Error()
+			return oc, nil
+		}
+		oc.Reverted = true
+		if orig != nil {
+			s.refreshFileInIndex(abs, orig)
+		} else {
+			s.removeFileFromIndex(abs)
+		}
+		return oc, nil
+	}
 	if !diags.Available || diags.TimedOut {
 		// Cannot PROVE safety — apply, but flag it loudly (fail-open).
 		oc.Skipped, oc.SkipNote = s.skipped(diags)
@@ -569,6 +599,9 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 // skipped names why an edit could not be validated: no child LSP, or no
 // diagnostics of the edited text within the wait (--validate-wait).
 func (s *Server) skipped(d editDiagnostics) (reason, note string) {
+	if d.lspOff && !d.TimedOut {
+		return "lsp-off", lspOffSkipNote
+	}
 	if !d.TimedOut {
 		return "no-lsp", ""
 	}
@@ -686,7 +719,12 @@ func (s *Server) errorFingerprint(edited map[string]editedResult) map[string]int
 	for uri, r := range edited {
 		snap[uri] = r.current(store, uri)
 	}
+	// A language off for the editing client is not its to judge.
+	off := s.lspOff(s.activeSession)
 	for uri, diags := range snap {
+		if s.lspOffURI(off, uri) {
+			continue
+		}
 		for _, d := range diags {
 			if d.Severity != 1 { // 1 = Error
 				continue

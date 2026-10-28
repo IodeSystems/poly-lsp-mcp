@@ -32,6 +32,9 @@ func (s *Server) goplsRenameEdits(a rangeArgs, newName string) (edits []resolved
 		return nil, false, nil
 	}
 	uri := pathToURI(abs)
+	if s.lspOffURI(s.lspOff(s.activeSession), uri) {
+		return nil, false, nil // off for this client: as with no server
+	}
 	child := s.manager.RouteByURI(uri)
 	if child == nil {
 		return nil, false, nil // tree-sitter-only language: no server to ask

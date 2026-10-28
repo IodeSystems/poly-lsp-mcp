@@ -156,7 +156,11 @@ func readDiagnostics(s *Server) (string, error) {
 	// defaults (25 / 15 / 3). Sorted by file then position so
 	// repeated reads are stable.
 	uris := make([]string, 0, len(snapshot))
+	off := s.lspOff(localSession) // the resource is a stdio server's
 	for uri := range snapshot {
+		if s.lspOffURI(off, uri) {
+			continue
+		}
 		uris = append(uris, uri)
 	}
 	sort.Strings(uris)

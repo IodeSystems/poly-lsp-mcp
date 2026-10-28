@@ -255,6 +255,11 @@ type Server struct {
 	pathPolicy   *pathPolicy
 	sessionPaths map[sessionID]*pathPolicy
 
+	// sessionLSP: each client's lsp_on / lsp_off, under sessionWaitsMu.
+	// A stdio server's client is localSession (SetLSPPrefs). See
+	// lsp_off.go.
+	sessionLSP map[sessionID]LSPPrefs
+
 	// proactiveOpen controls whether handleInitialize, after spawning
 	// the manager, walks the workspace and sends didOpen for every
 	// file with a child LSP. This is how the poly-lsp-mcp://diagnostics

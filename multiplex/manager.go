@@ -76,6 +76,12 @@ type Manager struct {
 	// RootsMax caps the running children of one Roots language. Zero = 8.
 	RootsMax int
 
+	// Defer, if set, names the languages Start does not spawn: no client
+	// wants their child yet (lsp_off, off_by_default). Each is left
+	// stopped, to start on its first RouteByURI, as a lifecycle-stopped
+	// child does. Set before Start.
+	Defer func(lang string) bool
+
 	// StatusDir, if set, gets a StatusFile from this manager every
 	// Lifecycle interval and after each stop or start, removed at
 	// Shutdown. See ReadStatusFiles.
@@ -195,6 +201,19 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 			m.perRoot[name] = true
 			m.mu.Unlock()
 			log.Printf("multiplex: %s: %d project root(s), a child each on first use (at most %d running)", name, n, m.rootsMax())
+			continue
+		}
+		if m.Defer != nil && m.Defer(name) {
+			if _, err := lspbin.Resolve(lang.LSP.Cmd); err != nil {
+				log.Printf("multiplex: spawn %s (%s): %v", name, lang.LSP.Cmd, err)
+				continue
+			}
+			sl := newSlot()
+			sl.stopped = true
+			m.mu.Lock()
+			m.slots[childKey{name, cwd}] = sl
+			m.mu.Unlock()
+			log.Printf("multiplex: %s: no client wants its child LSP; it starts on first use", name)
 			continue
 		}
 		child, err := Spawn(name, lang.LSP, cwd)

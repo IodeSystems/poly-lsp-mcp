@@ -161,6 +161,18 @@ func (s *Server) lspAvailable(abs string) bool {
 	return s.manager.Serves(pathToURI(abs))
 }
 
+// lspAvailable is the server's, for the query's client: false for a
+// language the client turned off.
+func (e *engine) lspAvailable(abs string) bool {
+	if e.lspOff[e.s.langOfPath(abs)] {
+		return false
+	}
+	return e.s.lspAvailable(abs)
+}
+
+// forSession makes e answer for sess's child-LSP switch.
+func (e *engine) forSession(sess sessionID) { e.lspOff = e.s.lspOff(sess) }
+
 // resolveDefinition asks the child LSP owning `abs` where the symbol at
 // (line, col) — 1-BASED, as everything in this package is — is declared.
 // Returns the declaration's absolute path and 1-based line.
@@ -392,7 +404,7 @@ func (e *engine) refineFar(far []*treeNode, siteAbs string, line, col int) ([]*t
 		return far, refLexical // one candidate — name-unique, certain
 	}
 	e.ensureLSPCap()
-	if e.lspLeft <= 0 || !e.s.lspAvailable(siteAbs) {
+	if e.lspLeft <= 0 || !e.lspAvailable(siteAbs) {
 		e.probeBlocked()         // a hint probe must not report an unsettled far end
 		return far, refUnsettled // ambiguous, nothing to settle it — a guess
 	}
@@ -543,7 +555,7 @@ func (e *engine) refineIn(target *treeNode, siteAbs string, line, col int, ambig
 		return true, refLexical // only one decl answers to this name — certain
 	}
 	e.ensureLSPCap()
-	if e.lspLeft <= 0 || !e.s.lspAvailable(siteAbs) {
+	if e.lspLeft <= 0 || !e.lspAvailable(siteAbs) {
 		e.probeBlocked()          // an existence CLAIM that flips under a probe is a lie
 		return true, refUnsettled // ambiguous, nothing to settle it — a guess
 	}
@@ -582,7 +594,7 @@ func (e *engine) confirmSelfCall(n *treeNode, line, col int) bool {
 	// QUALIFIER, so there is no cheap way to tell `Write(x)` from `w.Write(x)`
 	// — see docs/design.md, "Selector language" (`:recursive`).
 	e.ensureLSPCap()
-	if e.lspLeft <= 0 || !e.s.lspAvailable(n.abs) {
+	if e.lspLeft <= 0 || !e.lspAvailable(n.abs) {
 		e.probeBlocked() // :recursive degrades to false — not an answer a hint may use
 		e.recursiveUnconfirmed = true
 		return false

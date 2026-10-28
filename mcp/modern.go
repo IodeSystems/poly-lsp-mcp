@@ -310,6 +310,7 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 	if err != nil {
 		return nil, true, err
 	}
+	e.forSession(sess)
 	if v, unit, ok := parseBudget(string(p.Budget)); ok {
 		e.setBudget(v, unit) // Nms wall-clock (bare=ms) or Nops deterministic
 	}

@@ -30,10 +30,15 @@ import (
 // is off_by_default (servers.yaml) and the client does not name it in
 // lsp_on. See config.Registry.LSPOff.
 
-// LSPPrefs are a client's lsp_on / lsp_off language names.
+// LSPPrefs are a client's lsp_on / lsp_off language names, and its
+// format-on-edit switch (FormatOn / FormatOff: mcp --format-on-edit /
+// --no-format-on-edit, over each language's format_on_edit; see
+// format.go).
 type LSPPrefs struct {
-	On  []string `json:"lspOn,omitempty"`
-	Off []string `json:"lspOff,omitempty"`
+	On        []string `json:"lspOn,omitempty"`
+	Off       []string `json:"lspOff,omitempty"`
+	FormatOn  []string `json:"formatOnEdit,omitempty"`
+	FormatOff []string `json:"noFormatOnEdit,omitempty"`
 }
 
 // SetLSPPrefs sets this server's own client's switch (a stdio server:
@@ -45,9 +50,9 @@ func (s *Server) SetLSPPrefs(p LSPPrefs) { s.SetSessionLSP("", p) }
 // Names the registry does not hold are logged and ignored.
 func (s *Server) SetSessionLSP(sess string, p LSPPrefs) {
 	if s.registry != nil {
-		for _, n := range append(append([]string{}, p.On...), p.Off...) {
+		for _, n := range append(append(append(append([]string{}, p.On...), p.Off...), p.FormatOn...), p.FormatOff...) {
 			if s.registry.LookupByName(n) == nil {
-				log.Printf("mcp: lsp_on/lsp_off: no language %q; ignored", n)
+				log.Printf("mcp: lsp_on/lsp_off/format-on-edit: no language %q; ignored", n)
 			}
 		}
 	}

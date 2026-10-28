@@ -1420,7 +1420,7 @@ func (s *Server) applyWholeFileWrite(file, newText string, opts diagnosticOption
 		"bytesAdded":   len(out),
 	}
 	if !created {
-		s.attachEditAmplification(payload, file, abs, orig, out)
+		s.attachEditAmplification(payload, file, abs, orig, oc.final(out))
 	}
 	oc.attach(payload)
 	return jsonContent(payload), false, nil
@@ -1800,18 +1800,19 @@ func (s *Server) refactorSignature(a rangeArgs, ops refactorOps, includeComments
 		rej["kind"], rej["oldName"], rej["newName"], rej["results"] = "signature", oldName, ops.Rename, results
 		return jsonContent(rej), true, nil
 	}
+	// oc.Diags: collected again when formatting changed a file.
 	payload := map[string]any{
 		"kind":                 "signature",
 		"oldName":              oldName,
 		"newName":              ops.Rename,
 		"filesChanged":         len(results),
 		"results":              results,
-		"diagnosticsAvailable": diags.Available,
-		"diagnosticsTimedOut":  diags.TimedOut,
-		"diagnostics":          diags.Items,
+		"diagnosticsAvailable": oc.Diags.Available,
+		"diagnosticsTimedOut":  oc.Diags.TimedOut,
+		"diagnostics":          oc.Diags.Items,
 	}
-	if diags.DroppedDiagnostics > 0 {
-		payload["droppedDiagnostics"] = diags.DroppedDiagnostics
+	if oc.Diags.DroppedDiagnostics > 0 {
+		payload["droppedDiagnostics"] = oc.Diags.DroppedDiagnostics
 	}
 	oc.annotate(payload)
 	return jsonContent(payload), false, nil
@@ -2123,10 +2124,10 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bo
 	for _, abs := range order {
 		edits := byFile[abs]
 		rel := edits[0].RelFile
-		if txn.active {
-			if orig, rerr := os.ReadFile(abs); rerr == nil {
-				txn.record(pathToURI(abs), orig)
-			}
+		// Recorded without validation too: a kept rename is formatted
+		// from the originals (format.go).
+		if orig, rerr := os.ReadFile(abs); rerr == nil {
+			txn.record(pathToURI(abs), orig)
 		}
 		n, err := applyFileEdits(abs, edits)
 		if err != nil {
@@ -2156,6 +2157,8 @@ func (s *Server) refactorRename(a rangeArgs, newName string, includeComments *bo
 	var oc editOutcome
 	if ownTxn {
 		oc = txn.verify(diags)
+		diags = oc.Diags // collected again when formatting changed a file
+		mapFormattedLines(results, oc.FormatFiles)
 		if c, isErr, handled := batchResponse(oc); handled {
 			return c, isErr, nil
 		}
@@ -2447,6 +2450,20 @@ type applyResult struct {
 	// them a count and nothing to check it against.
 	Lines          []int `json:"lines,omitempty"`
 	LinesTruncated int   `json:"linesTruncated,omitempty"`
+}
+
+// mapFormattedLines moves each result's touched lines to where they are
+// after formatting changed its file (format.go).
+func mapFormattedLines(results []applyResult, formats map[string]formatOutcome) {
+	for i := range results {
+		fo, ok := formats[results[i].File]
+		if !ok || !fo.Changed {
+			continue
+		}
+		for j, line := range results[i].Lines {
+			results[i].Lines[j] = mapLine(fo.before, fo.edits, line)
+		}
+	}
 }
 
 // maxReportedLines caps the per-file line list. A rename across a huge

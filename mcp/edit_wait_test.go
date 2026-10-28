@@ -64,6 +64,18 @@ import (
 //     answers).
 //
 // In debounce and skip-open-text a document has one error per BROKEN.
+//
+// $FAKE_FMT adds formatting, whatever the mode; its formatter replaces
+// each UGLY with pretty (fakeFormatEdits):
+//
+//   - range: declares documentRangeFormattingProvider and
+//     documentFormattingProvider; rangeFormatting formats the UGLYs inside
+//     the range.
+//   - file: declares documentFormattingProvider only.
+//   - error: declares both and answers every format request with an
+//     error.
+//   - slow: declares both and never answers a format request.
+//   - unset: declares neither.
 const fakeDiagLSPArg = "--fake-diag-lsp"
 
 func runFakeDiagLSP() {
@@ -273,11 +285,44 @@ func runFakeDiagLSP() {
 			continue
 		}
 		resp := &jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID}
+		fmtMode := os.Getenv("FAKE_FMT")
 		switch msg.Method {
 		case "initialize":
-			resp.Result = json.RawMessage(`{"capabilities":{"textDocumentSync":1}}`)
+			switch fmtMode {
+			case "range", "error", "slow":
+				resp.Result = json.RawMessage(`{"capabilities":{"textDocumentSync":1,"documentRangeFormattingProvider":true,"documentFormattingProvider":{}}}`)
+			case "file":
+				resp.Result = json.RawMessage(`{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true}}`)
+			default:
+				resp.Result = json.RawMessage(`{"capabilities":{"textDocumentSync":1}}`)
+			}
 		case "shutdown":
 			resp.Result = json.RawMessage(`null`)
+		case "textDocument/formatting", "textDocument/rangeFormatting":
+			if fmtMode == "slow" {
+				continue
+			}
+			if fmtMode == "error" {
+				resp.Error = &jsonrpc.Error{Code: -32603, Message: "formatter crashed"}
+				break
+			}
+			var fp struct {
+				Range *struct {
+					Start lspPos `json:"start"`
+					End   lspPos `json:"end"`
+				} `json:"range"`
+			}
+			_ = json.Unmarshal(msg.Params, &fp)
+			mu.Lock()
+			text := texts[uri]
+			mu.Unlock()
+			from, to := 0, len(text)
+			if fp.Range != nil {
+				from, _ = lspOffset([]byte(text), fp.Range.Start)
+				to, _ = lspOffset([]byte(text), fp.Range.End)
+			}
+			raw, _ := json.Marshal(fakeFormatEdits(text, from, to))
+			resp.Result = raw
 		default:
 			resp.Error = &jsonrpc.Error{Code: -32601, Message: "method not found: " + msg.Method}
 		}
@@ -733,4 +778,32 @@ func TestEditRepeatAfterUnansweredRevert(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeFormatEdits are the fake formatter's TextEdits on text: each UGLY
+// wholly inside [from, to) becomes pretty. ASCII text: a byte column is
+// a UTF-16 one.
+func fakeFormatEdits(text string, from, to int) []map[string]any {
+	edits := []map[string]any{}
+	for i := 0; ; {
+		j := strings.Index(text[i:], "UGLY")
+		if j < 0 {
+			break
+		}
+		off := i + j
+		i = off + 4
+		if off < from || off+4 > to {
+			continue
+		}
+		line := strings.Count(text[:off], "\n")
+		col := off - (strings.LastIndex(text[:off], "\n") + 1)
+		edits = append(edits, map[string]any{
+			"range": map[string]any{
+				"start": map[string]any{"line": line, "character": col},
+				"end":   map[string]any{"line": line, "character": col + 4},
+			},
+			"newText": "pretty",
+		})
+	}
+	return edits
 }

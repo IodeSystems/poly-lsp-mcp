@@ -59,6 +59,26 @@ type editOutcome struct {
 	// outside change, never silently revert it away. Conflicts names them.
 	Conflict  bool
 	Conflicts []string
+
+	// Format is what formatting the kept file did (format.go); Final is
+	// the file's text after it when it changed the text (nil: the edit's
+	// own text stands). formatOrig / formatCur are the texts before the
+	// edit and before the format, for the result's formattedText.
+	Format                formatOutcome
+	Final                 []byte
+	formatOrig, formatCur []byte
+	// FormatFiles is a multi-file edit's (batch commit, refactor) format
+	// outcome per workspace-relative file it was on for.
+	FormatFiles map[string]formatOutcome
+}
+
+// final is the file's text after the edit: the formatted text when
+// formatting changed it, else out.
+func (oc editOutcome) final(out []byte) []byte {
+	if oc.Final != nil {
+		return oc.Final
+	}
+	return out
 }
 
 // editBatch is the commit:false transaction: staged edits accumulate on
@@ -147,6 +167,7 @@ func (b *editBatch) commit() editOutcome {
 		return oc
 	}
 	if !b.validate {
+		b.format(&oc)
 		return oc // nothing to prove; staged bytes stand
 	}
 	edited := map[string]editedResult{}
@@ -159,11 +180,25 @@ func (b *editBatch) commit() editOutcome {
 	if len(introduced) == 0 {
 		oc.Skipped, oc.SkipNote = b.unproven()
 		oc.Validated = oc.Skipped == ""
+		b.format(&oc)
 		return oc
 	}
 	oc.Rejected, oc.NewErrors = true, introduced
 	b.revertAll(&oc)
 	return oc
+}
+
+// format formats each file of a committed batch once (format.go), and
+// tells the child the formatted text without waiting for diagnostics:
+// the commit's result carries none.
+func (b *editBatch) format(oc *editOutcome) {
+	var changed map[string][]byte
+	oc.FormatFiles, changed = b.s.formatFiles(b.originals)
+	for uri, text := range changed {
+		if child := b.s.manager.RouteByURI(uri); child != nil {
+			b.s.notifyChildOfEdit(child, uri, text)
+		}
+	}
 }
 
 // unproven names why the batch's union cannot be validated: a staged
@@ -380,6 +415,25 @@ func (s *Server) lostWrites(abs string, orig, out []byte) []string {
 }
 
 func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts diagnosticOptions) (editOutcome, error) {
+	oc, err := s.applyBytesValidated(abs, orig, out, mode, opts)
+	if err != nil || oc.Rejected || oc.Staged || oc.BatchCommitted || !s.formatOnEditFor(abs) {
+		return oc, err
+	}
+	// Kept: format it (format.go). Not a new edit for validation.
+	final, fo := s.formatKept(abs, orig, out)
+	oc.Format = fo
+	if fo.Changed {
+		oc.Final, oc.formatOrig, oc.formatCur = final, orig, out
+		// Tell the child, and report diagnostics whose positions are the
+		// formatted file's. Reported, not judged.
+		uri := pathToURI(abs)
+		oc.Diags = s.collectDiagnostics([]string{uri}, map[string][]byte{uri: final}, opts)
+	}
+	return oc, nil
+}
+
+// applyBytesValidated is applyBytes before the format.
+func (s *Server) applyBytesValidated(abs string, orig, out []byte, mode os.FileMode, opts diagnosticOptions) (editOutcome, error) {
 	uri := pathToURI(abs)
 
 	// A commit:false batch is open — stage into it instead of validating
@@ -513,6 +567,8 @@ type validationTxn struct {
 	// commit. committing marks the edit that closes the batch.
 	batch      *editBatch
 	committing bool
+
+	opts diagnosticOptions // the refactor's, for the post-format diagnostics
 }
 
 func (s *Server) beginValidationTxn(opts diagnosticOptions) *validationTxn {
@@ -523,6 +579,7 @@ func (s *Server) beginValidationTxn(opts diagnosticOptions) *validationTxn {
 	}
 	return &validationTxn{
 		s:      s,
+		opts:   opts,
 		active: (opts.Validate || s.validateEdits) && s.manager != nil,
 		// baseline is captured lazily on the first record() — workspace-wide,
 		// before any file is written.
@@ -542,14 +599,13 @@ func (t *validationTxn) record(uri string, orig []byte) {
 		}
 		return
 	}
-	if !t.active {
-		return
-	}
-	if t.baseline == nil {
+	if t.active && t.baseline == nil {
 		// Workspace-wide baseline, captured ONCE before the first write — so a
 		// cross-file break introduced by ANY of the refactor's edits is caught.
 		t.baseline = t.s.editBaseline()
 	}
+	// Kept without validation too: a kept refactor's files are formatted
+	// (format.go) from them.
 	if _, seen := t.originals[uri]; seen {
 		return
 	}
@@ -575,6 +631,38 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 		}
 		return bc
 	}
+	oc = t.check(diags)
+	if !oc.Rejected {
+		t.format(&oc)
+	}
+	return oc
+}
+
+// format formats each file of a kept refactor once (format.go). When it
+// changed one, oc.Diags is collected again over the refactor's files, so
+// its positions are the formatted files'; reported, not judged.
+func (t *validationTxn) format(oc *editOutcome) {
+	var changed map[string][]byte
+	oc.FormatFiles, changed = t.s.formatFiles(t.originals)
+	if len(changed) == 0 {
+		return
+	}
+	uris := make([]string, 0, len(t.originals))
+	contents := map[string][]byte{}
+	for uri := range t.originals {
+		if text, err := os.ReadFile(uriToPath(uri)); err == nil {
+			uris = append(uris, uri)
+			contents[uri] = text
+		}
+	}
+	sort.Strings(uris)
+	oc.Diags = t.s.collectDiagnostics(uris, contents, t.opts)
+}
+
+// check is verify outside a batch: validate, or revert all on a new
+// error.
+func (t *validationTxn) check(diags editDiagnostics) editOutcome {
+	oc := editOutcome{Diags: diags}
 	if !t.active {
 		return oc
 	}
@@ -811,6 +899,7 @@ func (oc editOutcome) attach(p map[string]any) {
 			p["validationNote"] = oc.SkipNote
 		}
 	}
+	oc.Format.attach(p, oc.formatOrig, oc.formatCur, oc.Final)
 	if len(oc.LostWrites) > 0 {
 		// `alert` sorts before `diagnostics`, for the reason the rejection's
 		// `action` field does: a note behind the evidence is a note unread.
@@ -846,6 +935,7 @@ func (oc editOutcome) annotate(p map[string]any) {
 			p["validationNote"] = oc.SkipNote
 		}
 	}
+	attachFormatFiles(p, oc.FormatFiles)
 }
 
 // rejection builds the REJECTED payload after a revert. label names the edit

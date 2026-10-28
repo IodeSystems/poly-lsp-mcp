@@ -105,7 +105,8 @@ oldText+newText — replace a snippet inside the node. oldText must occur exactl
 newText alone — REPLACES a span address (@start-end: ::body/::signature/::grep/a conflict); CREATES a file at a new path; refused on a symbol (use oldText) and never inserts one.
 delete:true — excise the node.
 accept:"mine"|"theirs" — resolve merge conflicts (whole file, or one block by its @start-end span); markers go too. A conflicted file indexes both sides as PEERS; ::conflict/::mine/::theirs/::base read them apart (sides carry their ref).
-params [{name,type}] / return — rebuild the parameter list / return type (go/typescript/python).`
+params [{name,type}] / return — rebuild the parameter list / return type (go/typescript/python).
+formattedText in a result: the file holds that now, not your newText.`
 
 var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"node":{"type":"string","description":"Address or selector."},` +

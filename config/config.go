@@ -9,6 +9,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -20,16 +21,36 @@ type LSP struct {
 	Cmd  string   `yaml:"cmd"`
 	Args []string `yaml:"args,omitempty"`
 	Env  []string `yaml:"env,omitempty"`
-	// TrustUnversionedDiagnostics: a clean diagnostics result from this
-	// server that carries no document version may validate an edit. Off
-	// (the default for every server), such a result can only revert one
-	// (validationSkipped: lsp-unconfirmed). Turn it on only for a server
-	// that never publishes a clean result for text it has not fully
-	// analysed. sourcekit-lsp does (before its build settings load);
-	// typescript-language-server 5.1.3 is off too, see
-	// docs/known-limits.md. A server that versions its publishes does not
-	// need it.
-	TrustUnversionedDiagnostics bool `yaml:"trust_unversioned_diagnostics,omitempty"`
+	// TrustCleanDiagnostics: a clean diagnostics result from this server
+	// (no new errors), versioned or not, may validate an edit. Off, a
+	// result can only revert an edit; a clean one keeps it with
+	// validationSkipped: lsp-unconfirmed. Unset, it is on for the servers
+	// in trustedCleanByDefault (by the command's base name) and off for
+	// any other. See TrustsCleanDiagnostics.
+	TrustCleanDiagnostics *bool `yaml:"trust_clean_diagnostics,omitempty"`
+}
+
+// trustedCleanByDefault are the servers whose clean result validates an
+// edit unless their lsp block sets trust_clean_diagnostics. Each versions
+// its publishes, and a publish for a version is its analysis of that text
+// (measured: gopls 0.24, clangd, pylsp 1.15). Not here:
+//   - sourcekit-lsp: Xcode's on macos-14 published [] and the same
+//     version's error 20 ms apart while its package loaded, and a stale
+//     error stamped with a later version (CI, 9b7385f, 2026-10-27); a
+//     version from it does not prove the text was analysed. Unversioned,
+//     it publishes [] for a broken file before its build settings load.
+//   - typescript-language-server 5.1.3: see docs/known-limits.md.
+var trustedCleanByDefault = map[string]bool{"gopls": true, "clangd": true, "pylsp": true}
+
+// TrustsCleanDiagnostics reports whether a clean result from this server
+// may validate an edit: trust_clean_diagnostics when set, else whether
+// the command's base name is in trustedCleanByDefault.
+func (l *LSP) TrustsCleanDiagnostics() bool {
+	if l.TrustCleanDiagnostics != nil {
+		return *l.TrustCleanDiagnostics
+	}
+	name := strings.TrimSuffix(filepath.Base(l.Cmd), ".exe")
+	return trustedCleanByDefault[name]
 }
 
 // Language is one entry in the registry.

@@ -73,6 +73,7 @@ The project ships from `main` without semver tags today. This section captures t
 
 - `poly-lsp-mcp.yaml` schema: `languages`, `bindings`, `schemas`, `auto_schemas`. All sections optional; defaults cover the supported languages.
 - Default registry: go / typescript / python / java / kotlin / groovy / c / c++ / swift / sql / proto / graphql / yaml / json / xml / markdown. C and C++ default to `clangd` (which works degraded without a `compile_commands.json`); Java, Kotlin and Groovy are tree-sitter only (jdtls / kotlin-language-server / groovy-language-server are opt-in via `languages:`). A Jenkinsfile is Groovy but extensionless, and the registry keys on extension, so it is not routed. `.h` is registered to C++, whose grammar is a superset — a C header still parses correctly, and a C++ header named `.h` doesn't lose its classes. Swift defaults to `sourcekit-lsp` (part of every Swift toolchain).
+- `trust_clean_diagnostics` in a language's `lsp` block: whether a clean result from that server validates an edit (`--validate`). Unset, on for gopls, clangd and pylsp, off for any other server (sourcekit-lsp, typescript-language-server): a clean result from it keeps the edit with `validationSkipped: lsp-unconfirmed`; a new error still reverts.
 - Defaults merge: partial configs (e.g., only `schemas:` declared) get the default `languages` registry folded in so the index doesn't silently break.
 
 ### Testing fixtures

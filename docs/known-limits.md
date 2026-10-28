@@ -41,15 +41,22 @@ entry here.
   background indexing) is not taken either: a clean edit made while it
   indexes is reported `lsp-timeout` when indexing outlasts the wait (a
   large package's first index).
-- **Edit validation, servers without document versions** (sourcekit-lsp,
-  typescript-language-server 5.1.3): a clean result never validates an
-  edit. It is kept and reported `validated:false`,
+- **Edit validation, untrusted servers** (`trust_clean_diagnostics`
+  off; unset, off for every server but gopls, clangd and pylsp, so for
+  sourcekit-lsp and typescript-language-server 5.1.3): a clean result
+  never validates an edit. It is kept and reported `validated:false`,
   `validationSkipped: lsp-unconfirmed`; a new error still reverts it. Such
   a server can publish a clean result for text it has not analysed in full
-  and nothing says so (sourcekit-lsp before its build settings load).
-  gopls, clangd and pylsp version their publishes and validate.
-  `trust_unversioned_diagnostics: true` in a language's `lsp` block lets
-  that server's clean result validate; it is off for every default server.
+  and nothing says so: sourcekit-lsp before its build settings load
+  (unversioned), and Xcode's on macos-14 with the edit's version ([] then
+  the error 20 ms later). An error a later publish for the edit's version
+  reports reverts the edit only if it arrives within the new-error check's
+  settle (up to 3 s, until 250 ms without change), not for the rest of
+  `--validate-wait`. A stale error stamped with the edit's version (seen
+  from Xcode's sourcekit-lsp, followed by [] within milliseconds) reverts
+  a valid edit if the [] comes more than 250 ms later; not observed.
+  A server named by another command (a wrapper script, `clangd-17`) is
+  untrusted until its `lsp` block sets `trust_clean_diagnostics: true`.
 - **typescript-language-server 5.1.3 is not trusted** (measured
   2026-10-27, Linux, normal and with the child under a 5% CPU quota):
   - It publishes nothing for a file whose diagnostics stay empty (it keeps

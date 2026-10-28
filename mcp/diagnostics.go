@@ -93,15 +93,48 @@ type editDiagnostics struct {
 	Items              []diagnosticJSON `json:"diagnostics"`
 	DroppedDiagnostics int              `json:"droppedDiagnostics,omitempty"`
 
-	// Unconfirmed: an edited URI's result came from a publish with no
-	// document version, from a child not configured to be trusted for
-	// one (config.LSP.TrustUnversionedDiagnostics; sourcekit-lsp, any
-	// server not configured so). It may revert an edit but never
-	// validates one: such a server can publish a clean result for text it
-	// has not fully analysed (sourcekit-lsp before its build settings
-	// load), and nothing in the publish says so. With no new errors the
-	// edit is reported not validated (validationSkipped: lsp-unconfirmed).
+	// Unconfirmed: an edited URI's result came from a child not trusted
+	// for a clean result (config.LSP.TrustsCleanDiagnostics; on for
+	// gopls, clangd, pylsp, off for sourcekit-lsp,
+	// typescript-language-server and any other server). It may revert an
+	// edit but never validates one: such a server can publish a clean
+	// result for text it has not fully analysed, versioned (Xcode's
+	// sourcekit-lsp on macos-14) or not (sourcekit-lsp before its build
+	// settings load), and nothing in the publish says so. With no new
+	// errors the edit is reported not validated (validationSkipped:
+	// lsp-unconfirmed).
 	Unconfirmed bool `json:"-"`
+
+	// edited holds, per edited URI with a result, the publish the wait
+	// took (waitForEditedText). Items and the edit's new-error check
+	// read an edited URI's diagnostics through it (editedResult.current),
+	// never from whatever the store last holds for that URI: that can be
+	// a publish for other text.
+	edited map[string]editedResult
+}
+
+// editedResult is the publish an edit's wait took as an edited URI's
+// result (waitForEditedText): its diagnostics, its store generation, and
+// the document version the edit sent.
+type editedResult struct {
+	diags   []multiplex.Diagnostic
+	gen     uint64
+	version int32
+}
+
+// current returns r's diagnostics, or those of a later publish for uri
+// that carries the edited version or a later one: a server can publish a
+// version again with a different result (Xcode's sourcekit-lsp on
+// macos-14: [] for a broken edit's version, then its error 20 ms later; a
+// stale error for a valid edit's version, then [] for it). A later
+// publish without a version, or for an earlier one, may describe other
+// text and is not taken.
+func (r editedResult) current(store *multiplex.DiagnosticStore, uri string) []multiplex.Diagnostic {
+	p := store.Latest(uri)
+	if p.Gen > r.gen && p.Versioned && p.Version >= int(r.version) {
+		return p.Diags
+	}
+	return r.diags
 }
 
 // diagnosticOptions are the per-call enrichment caps. Zero values
@@ -464,24 +497,22 @@ func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.Diagnostic
 // publish arriving after the edit is not enough: it can describe the
 // text before it.
 //
-//   - A publish carrying a document version (gopls, clangd, pylsp) is the
-//     edited text's when that version is at least `version`; an older
-//     one is skipped. Only such a result can validate an edit.
+//   - A publish carrying a document version (gopls, clangd, pylsp,
+//     sometimes sourcekit-lsp) is the edited text's when that version is
+//     at least `version`; an older one is skipped. A later publish for
+//     that version can still replace it (editedResult.current).
 //   - A publish without one (sourcekit-lsp, typescript-language-server)
 //     is skipped when it is the first since the URI's didOpen. Measured
 //     with sourcekit-lsp 6.4.1: a just-opened file is published about
 //     1 s later with no semantic errors at all (build settings not
 //     loaded yet; an undeclared call reads clean), then again 1-3 s
 //     later with them. A later publish is taken once no other arrives
-//     for the settle window (diagSettleDuration), flagged unconfirmed
-//     unless the child is configured to trust it
-//     (config.LSP.TrustUnversionedDiagnostics; off for every default
-//     server): its errors can revert the edit, but
-//     a clean one does not validate it. sourcekit-lsp computes only syntactic diagnostics while it has
-//     no build settings for a file, and its publish does not say so
-//     (DiagnosticReportManager, swiftlang/sourcekit-lsp); on
-//     macos-15-intel it published [] for a broken edit 2 s after its
-//     package had loaded (CI trace, 2026-10-27).
+//     for the settle window (diagSettleDuration). sourcekit-lsp computes
+//     only syntactic diagnostics while it has no build settings for a
+//     file, and its publish does not say so (DiagnosticReportManager,
+//     swiftlang/sourcekit-lsp); on macos-15-intel it published [] for a
+//     broken edit 2 s after its package had loaded (CI trace,
+//     2026-10-27).
 //   - An unversioned publish that arrives while the child has a
 //     work-done progress open (Child.Busy) and has no errors is skipped,
 //     to give the child the chance to report errors: sourcekit-lsp
@@ -493,6 +524,13 @@ func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.Diagnostic
 //     it publishes from its loaded state: it may not republish on its own
 //     (sourcekit-lsp ends "Indexing" right after publishing a change).
 //
+// The result is unconfirmed unless the child is trusted for a clean
+// result (config.LSP.TrustsCleanDiagnostics): its errors can revert the
+// edit, but a clean one does not validate it. A version does not prove
+// the text was analysed: Xcode's sourcekit-lsp on macos-14 published []
+// for a broken edit's version while its package loaded and the error for
+// the same version 20 ms later (CI trace of 9b7385f, 2026-10-27).
+//
 // Pull diagnostics (textDocument/diagnostic) do not help. sourcekit-lsp
 // 6.4.1 registers it (dynamically) when the client advertises it, then
 // stops publishing, and answers a pull made before its build settings
@@ -501,10 +539,7 @@ func waitForDiagnosticsToSettle(ctx context.Context, store *multiplex.Diagnostic
 // 2026-10-27). The answer is no more conclusive than a publish.
 // gopls 0.24 answers pulls but versions its publishes;
 // typescript-language-server 5.1.3, clangd and pylsp 1.15 reject them.
-//
-// unconfirmed reports a result from an unversioned publish of a child
-// not trusted for one.
-func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.DiagnosticStore, child *multiplex.Child, uri string, content []byte, since uint64, version int32) (diags []multiplex.Diagnostic, ok, unconfirmed bool) {
+func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.DiagnosticStore, child *multiplex.Child, uri string, content []byte, since uint64, version int32) (r editedResult, ok, unconfirmed bool) {
 	s.openDocsMu.Lock()
 	openGen, opened := s.openGen[uri]
 	s.openDocsMu.Unlock()
@@ -513,32 +548,23 @@ func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.Diagnos
 	for {
 		store.WaitAfter(ctx, uri, after)
 		if ctx.Err() != nil {
-			return nil, false, false
+			return editedResult{}, false, false
 		}
 		p := store.Latest(uri)
+		first := opened && p.Gen == openGen+1
+		if !p.Versioned && !first {
+			// Unversioned: take the last of a burst.
+			p = s.lastOfBurst(ctx, store, uri, p)
+		}
 		switch {
 		case p.Versioned && p.Version >= int(version):
-			return p.Diags, true, false
 		case p.Versioned:
 			after = p.Gen // for an earlier version of the text
 			continue
-		case opened && p.Gen == openGen+1:
+		case first:
 			after = p.Gen // the first publish since didOpen
 			continue
-		}
-		// Unversioned: take the last of a burst.
-		quiet := s.diagSettleDuration()
-		for quiet > 0 {
-			qctx, cancel := context.WithTimeout(ctx, quiet)
-			store.WaitAfter(qctx, uri, p.Gen)
-			cancel()
-			next := store.Latest(uri)
-			if next.Gen == p.Gen {
-				break
-			}
-			p = next
-		}
-		if p.Busy && !anyError(p.Diags) {
+		case p.Busy && !anyError(p.Diags):
 			// Clean while loading: wait for a later one.
 			after = p.Gen
 			if waitPublishOrIdle(ctx, store, child, uri, after) && resends < maxResends {
@@ -547,8 +573,25 @@ func (s *Server) waitForEditedText(ctx context.Context, store *multiplex.Diagnos
 			}
 			continue
 		}
-		return p.Diags, true, !child.TrustsUnversionedDiagnostics()
+		return editedResult{diags: p.Diags, gen: p.Gen, version: version}, true, !child.TrustsCleanDiagnostics()
 	}
+}
+
+// lastOfBurst returns the latest publish for uri once none has followed p
+// for the settle window (diagSettleDuration), or when ctx ends.
+func (s *Server) lastOfBurst(ctx context.Context, store *multiplex.DiagnosticStore, uri string, p multiplex.Publish) multiplex.Publish {
+	quiet := s.diagSettleDuration()
+	for quiet > 0 {
+		qctx, cancel := context.WithTimeout(ctx, quiet)
+		store.WaitAfter(qctx, uri, p.Gen)
+		cancel()
+		next := store.Latest(uri)
+		if next.Gen == p.Gen {
+			break
+		}
+		p = next
+	}
+	return p
 }
 
 // maxResends caps the didChange resends of one edit's wait.
@@ -647,16 +690,17 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 	// ordering then favors the agent's direct edit over sibling fallout.
 	// A URI that got none within the deadline reports none: what the
 	// store holds for it describes other text.
-	editedDiags := make(map[string][]multiplex.Diagnostic, len(tracked))
+	out.edited = make(map[string]editedResult, len(tracked))
 	for _, c := range tracked {
-		diags, ok, unconfirmed := s.waitForEditedText(ctx, store, c.child, c.uri, contents[c.uri], c.since, c.version)
+		r, ok, unconfirmed := s.waitForEditedText(ctx, store, c.child, c.uri, contents[c.uri], c.since, c.version)
 		if !ok {
 			out.TimedOut = true
+			continue
 		}
 		if unconfirmed {
 			out.Unconfirmed = true
 		}
-		editedDiags[c.uri] = diags
+		out.edited[c.uri] = r
 	}
 
 	// Build the response in two passes — edited URIs first (favored
@@ -677,9 +721,6 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 		editedSorted = append(editedSorted, c.uri)
 	}
 	sort.Strings(editedSorted)
-	for _, uri := range editedSorted {
-		addDiagnostics(uri, editedDiags[uri])
-	}
 
 	// Phase 2: sibling rollup. Snapshot the store and add any URI
 	// whose gen advanced past pre-edit baseline AND wasn't part of
@@ -701,6 +742,17 @@ func (s *Server) collectDiagnostics(uris []string, contents map[string][]byte, o
 		if !waitForDiagnosticsToSettle(ctx, store, s.diagSettleDuration()) {
 			out.TimedOut = true
 		}
+	}
+	// An edited URI's diagnostics are its result's (read after the
+	// settle, so a later publish for the edited version counts); a URI
+	// without one (timed out) reports none: what the store holds for it
+	// describes other text.
+	for _, uri := range editedSorted {
+		if r, ok := out.edited[uri]; ok {
+			addDiagnostics(uri, r.current(store, uri))
+		}
+	}
+	if opts.siblingDiagnostics() {
 		snapshot := store.Snapshot()
 		siblingURIs := make([]string, 0, len(snapshot))
 		for uri := range snapshot {

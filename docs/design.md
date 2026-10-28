@@ -206,15 +206,27 @@ ground; the most verbose variant did worse (more grep scaffolding).
   outlasts `--validate-wait`. Versioned publishes (gopls) ignore progress. Capped by `--validate-wait` (2 s; per connection in daemon mode,
   `X-Poly-Validate-Wait`): past it the edit is kept with
   `validationSkipped: lsp-timeout` and a `validationNote`, and the stale
-  diagnostics are not reported. **Only a versioned result validates**
-  (Carl, 2026-10-27): an unversioned one (sourcekit-lsp,
-  typescript-language-server) can revert an edit, but a clean one keeps it
-  with `validated:false`, `validationSkipped: lsp-unconfirmed`, unless the
-  language's `lsp` sets `trust_unversioned_diagnostics: true`
-  (`config.LSP`, `Child.TrustsUnversionedDiagnostics`): then the result
-  the same rules pick validates. Off for every default server; Carl
-  wanted it on for typescript-language-server, and measuring 5.1.3 kept
-  it off (known-limits.md). Xcode's
+  diagnostics are not reported. **A clean result validates only from a
+  trusted server** (Carl, 2026-10-27; `trust_clean_diagnostics` in a
+  language's `lsp` block, `config.LSP.TrustsCleanDiagnostics`,
+  `Child.TrustsCleanDiagnostics`). Unset, gopls, clangd and pylsp are
+  trusted (by the command's base name) and every other server is not,
+  sourcekit-lsp and typescript-language-server included. An untrusted
+  server's result can revert an edit, but a clean one keeps it with
+  `validated:false`, `validationSkipped: lsp-unconfirmed`, versioned or
+  not; a trusted server's result, picked by the same rules, validates. A
+  version does not prove the text was analysed: Xcode's sourcekit-lsp on
+  macos-14 published [] for a broken edit's version while its package
+  loaded and the error for the same version 20 ms later, and for the next
+  (valid) edit a stale error stamped with that edit's version, then []
+  for it (CI trace of 9b7385f; the trace cut the version off, the fake
+  replay `xcode14` reproduces the failure with it). The edit's response
+  and its new-error check read an edited file through the publish the
+  wait took (`editedResult`), replaced by a later publish for the edited
+  version or a later one, never by an unversioned or older publish the
+  wait did not take: the stale error had been listed in a response
+  reported validated. Measuring typescript-language-server 5.1.3 kept it
+  untrusted (known-limits.md). Xcode's
   sourcekit-lsp on macos-15-intel answered a broken edit with [] under
   "Reloading Package", sent nothing when it ended, and answered the resent
   text with [] again 2 s later (CI, 87d9429): nothing in a publish says it

@@ -16,7 +16,7 @@ import (
 // typescript-language-server publishes no document version. With edit
 // validation on, a broken edit whose error needs the project (a type from
 // another file, through tsconfig.json) is reverted. A valid edit is kept:
-// lsp-unconfirmed by default, validated with trust_unversioned_diagnostics.
+// lsp-unconfirmed by default, validated with trust_clean_diagnostics.
 //
 // The default does not trust it (docs/known-limits.md). main.ts keeps an
 // unused function so every publish has a hint: typescript-language-server
@@ -31,8 +31,8 @@ func TestTSEditValidateWithTypeScriptLanguageServer(t *testing.T) {
 	// A failure then shows the publish/progress sequence the edit saw.
 	t.Setenv(multiplex.TraceEnv, "1")
 	for _, l := range config.Default().Languages {
-		if l.Name == "typescript" && l.LSP.TrustUnversionedDiagnostics {
-			t.Fatal("default typescript LSP config trusts unversioned diagnostics")
+		if l.Name == "typescript" && l.LSP.TrustsCleanDiagnostics() {
+			t.Fatal("default typescript LSP config trusts clean diagnostics")
 		}
 	}
 	for _, trust := range []bool{false, true} {
@@ -66,7 +66,7 @@ func tsEditValidate(t *testing.T, trust bool) {
 	cfg := config.Default()
 	for i := range cfg.Languages {
 		if cfg.Languages[i].Name == "typescript" {
-			cfg.Languages[i].LSP.TrustUnversionedDiagnostics = trust
+			cfg.Languages[i].LSP.TrustCleanDiagnostics = &trust
 		}
 	}
 	reg, err := cfg.Build()

@@ -34,10 +34,10 @@ import (
 // the cause if non-clean.
 type Child struct {
 	name string // display name (the language registry's Name)
-	// trustUnversioned: config.LSP.TrustUnversionedDiagnostics.
-	trustUnversioned bool
-	cmd              *exec.Cmd
-	in               io.WriteCloser
+	// trustClean: config.LSP.TrustsCleanDiagnostics.
+	trustClean bool
+	cmd        *exec.Cmd
+	in         io.WriteCloser
 
 	writeMu sync.Mutex
 
@@ -109,12 +109,12 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 	}
 
 	c := &Child{
-		name:             name,
-		trustUnversioned: lsp.TrustUnversionedDiagnostics,
-		cmd:              cmd,
-		in:               stdin,
-		pending:          make(map[string]chan *jsonrpc.Message),
-		done:             make(chan struct{}),
+		name:       name,
+		trustClean: lsp.TrustsCleanDiagnostics(),
+		cmd:        cmd,
+		in:         stdin,
+		pending:    make(map[string]chan *jsonrpc.Message),
+		done:       make(chan struct{}),
 	}
 
 	go c.readLoop(bufio.NewReader(stdout))
@@ -253,10 +253,9 @@ func (c *Child) Busy() bool {
 	return len(c.progress) > 0
 }
 
-// TrustsUnversionedDiagnostics reports whether a clean publish with no
-// document version may validate an edit (config.LSP.
-// TrustUnversionedDiagnostics).
-func (c *Child) TrustsUnversionedDiagnostics() bool { return c.trustUnversioned }
+// TrustsCleanDiagnostics reports whether a clean result from this child
+// may validate an edit (config.LSP.TrustsCleanDiagnostics).
+func (c *Child) TrustsCleanDiagnostics() bool { return c.trustClean }
 
 // SetNotificationHandler registers a callback for server-initiated
 // notifications (publishDiagnostics, etc.). Call once during setup.
@@ -359,8 +358,8 @@ func (c *Child) Initialize(ctx context.Context, rootURI string) (json.RawMessage
 		// typescript-language-server publishes no diagnostics to a client
 		// that does not declare it (5.1.3: features.diagnosticsSupport).
 		// No versionSupport: a server that honours it would version its
-		// publishes, and a versioned result validates an edit, which
-		// needs measuring per server first.
+		// publishes, and what a version proves differs per server
+		// (config.LSP.TrustsCleanDiagnostics); that needs measuring first.
 		"capabilities": map[string]any{
 			"window":       map[string]any{"workDoneProgress": true},
 			"textDocument": map[string]any{"publishDiagnostics": map[string]any{}},

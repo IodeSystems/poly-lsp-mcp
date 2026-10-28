@@ -320,7 +320,7 @@ poly-lsp-mcp mcp --root . --validate
 
 `node_edit` runs the child LSP after each write and **reverts any edit that introduces a NEW error** — same-file *or* cross-file (a rename that breaks a caller is caught workspace-wide, once gopls's package re-check settles). The edit is reported `rejected` with the offending `newErrors` instead of landing; a multi-file rename/signature reverts as one all-or-nothing unit. Without a child LSP the edit is applied but flagged `validated:false` — never a silent pass. This keeps the agent's grep→read→edit loop but makes it unable to leave the workspace in a broken state.
 
-An edit waits for the child's diagnostics **of the edited text**, not just the next publish: a publish for an older document version, a server's first publish after it opens a file, or a clean publish while the server still reports loading or indexing progress does not count. `--validate-wait` (default `2s`) caps the wait; past it the edit is kept and flagged `validated:false`, `validationSkipped: "lsp-timeout"`, with a `validationNote`. Only a result that carries a document version (gopls, clangd, pylsp) validates an edit: from a server whose publishes carry none (sourcekit-lsp, typescript-language-server) a new error still reverts the edit, but a clean result keeps it with `validated:false`, `validationSkipped: "lsp-unconfirmed"` — such a server can publish a clean result before it has analysed the text in full. `trust_unversioned_diagnostics: true` in a language's `lsp` block lets that server's clean result validate; it is off for every default server ([known limits](docs/known-limits.md)). A cold sourcekit-lsp needs 2-3 s for its first complete result; raise the cap if the first edits after start-up matter.
+An edit waits for the child's diagnostics **of the edited text**, not just the next publish: a publish for an older document version, a server's first publish after it opens a file, or a clean publish while the server still reports loading or indexing progress does not count. `--validate-wait` (default `2s`) caps the wait; past it the edit is kept and flagged `validated:false`, `validationSkipped: "lsp-timeout"`, with a `validationNote`. A clean result validates an edit only from a server trusted for one, set per language by `trust_clean_diagnostics` in its `lsp` block: unset, gopls, clangd and pylsp are trusted and every other server is not (sourcekit-lsp, typescript-language-server included). From an untrusted server a new error still reverts the edit, but a clean result keeps it with `validated:false`, `validationSkipped: "lsp-unconfirmed"` — such a server can publish a clean result, versioned or not, before it has analysed the text in full ([known limits](docs/known-limits.md)). The response lists only diagnostics of the edited text. A cold sourcekit-lsp needs 2-3 s for its first complete result; raise the cap if the first edits after start-up matter.
 
 ### Files outside the root — `--allow-path`
 
@@ -400,8 +400,8 @@ languages:
   - name: typescript
     extensions: [ts, tsx, js, jsx, mjs, cjs]
     lsp: {cmd: typescript-language-server, args: ["--stdio"]}
-    # lsp: {..., trust_unversioned_diagnostics: true} lets a clean result
-    # from a server that does not version its diagnostics validate an edit.
+    # lsp: {..., trust_clean_diagnostics: true} lets this server's clean
+    # result validate an edit (unset: on for gopls, clangd, pylsp only).
     treesitter: typescript
 
 # Tier 2: hand-declared cross-language bindings. Three site forms:

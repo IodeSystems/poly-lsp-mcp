@@ -41,6 +41,20 @@ import (
 //   - blind: replays Xcode's sourcekit-lsp on macos-15-intel (CI trace,
 //     2026-10-27): as loading-quiet, but every publish is [] whatever the
 //     text, after the progress ends too. Its errors never arrive.
+//   - xcode14: replays Xcode's sourcekit-lsp on macos-14 (CI trace of
+//     9b7385f, 2026-10-27). Publishes carry a version, but one does not
+//     prove the text was analysed. Nothing is published for 1500ms after
+//     the open (the package loads); then the open's version [], and, if a
+//     change came meanwhile, its version [] and 20ms later its version
+//     with the real result. A later change is answered after 200ms
+//     without another change: twice with the result last published
+//     (stale) and the latest change's version, then with that version and
+//     its real result. The CI trace cut those two publishes off before
+//     any version (multiplex trace limit): with the version is the reading
+//     that reproduces the failure (the stale error reported for a valid
+//     edit validated by the next publish).
+//   - xcode14-unversioned: as xcode14, the two stale publishes without a
+//     version.
 //   - silent: never publishes.
 const fakeDiagLSPArg = "--fake-diag-lsp"
 
@@ -49,6 +63,9 @@ func runFakeDiagLSP() {
 	var mu sync.Mutex
 	texts := map[string]string{}
 	loaded := map[string]bool{}
+	lastBroken := map[string]bool{} // xcode14: the result last published
+	lastChange := map[string]int{}  // xcode14: the latest change's version
+	changeSeq := map[string]int{}   // xcode14: debounces changes
 	write := func(m *jsonrpc.Message) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -66,6 +83,9 @@ func runFakeDiagLSP() {
 			}}
 		}
 		raw, _ := json.Marshal(p)
+		mu.Lock()
+		lastBroken[uri] = broken
+		mu.Unlock()
 		write(&jsonrpc.Message{JSONRPC: "2.0", Method: "textDocument/publishDiagnostics", Params: raw})
 	}
 	current := func(uri string) bool {
@@ -116,6 +136,20 @@ func runFakeDiagLSP() {
 				}()
 			case "versioned":
 				publish(uri, version, current(uri))
+			case "xcode14", "xcode14-unversioned":
+				go func() {
+					time.Sleep(1500 * time.Millisecond)
+					mu.Lock()
+					loaded[uri] = true
+					changed := lastChange[uri]
+					mu.Unlock()
+					publish(uri, version, false)
+					if changed > version {
+						publish(uri, changed, false)
+						time.Sleep(20 * time.Millisecond)
+						publish(uri, changed, current(uri))
+					}
+				}()
 			case "loading", "loading-quiet", "stuck", "blind":
 				write(&jsonrpc.Message{JSONRPC: "2.0", ID: json.RawMessage(`"create-load"`), Method: "window/workDoneProgress/create", Params: json.RawMessage(`{"token":"load"}`)})
 				progress("begin")
@@ -143,8 +177,32 @@ func runFakeDiagLSP() {
 				texts[uri] = p.ContentChanges[0].Text
 			}
 			isLoaded := loaded[uri]
+			lastChange[uri] = version
+			changeSeq[uri]++
+			seq := changeSeq[uri]
 			mu.Unlock()
 			switch mode {
+			case "xcode14", "xcode14-unversioned":
+				if isLoaded {
+					go func() {
+						time.Sleep(200 * time.Millisecond)
+						mu.Lock()
+						latest, stale := changeSeq[uri] == seq, lastBroken[uri]
+						mu.Unlock()
+						if !latest {
+							return // a later change answers
+						}
+						staleVersion := version
+						if mode == "xcode14-unversioned" {
+							staleVersion = 0
+						}
+						publish(uri, staleVersion, stale)
+						time.Sleep(5 * time.Millisecond)
+						publish(uri, staleVersion, stale)
+						time.Sleep(5 * time.Millisecond)
+						publish(uri, version, current(uri))
+					}()
+				}
 			case "sourcekit":
 				if isLoaded {
 					go func() {
@@ -196,7 +254,8 @@ func fakeDiagSessionWith(t *testing.T, mode string, wait time.Duration, text str
 }
 
 // fakeDiagSessionTrust is fakeDiagSessionWith with the child's
-// trust_unversioned_diagnostics set to trust.
+// trust_clean_diagnostics set to trust (unset, the fake is not trusted:
+// its command is not a server trusted by default).
 func fakeDiagSessionTrust(t *testing.T, mode string, wait time.Duration, text string, trust bool) (*mcpSession, string) {
 	t.Helper()
 	exe, err := os.Executable()
@@ -211,7 +270,7 @@ func fakeDiagSessionTrust(t *testing.T, mode string, wait time.Duration, text st
 	cfg := config.Default()
 	for i := range cfg.Languages {
 		if cfg.Languages[i].Name == "go" {
-			cfg.Languages[i].LSP = &config.LSP{Cmd: exe, Args: []string{fakeDiagLSPArg}, Env: []string{"FAKE_DIAG_MODE=" + mode}, TrustUnversionedDiagnostics: trust}
+			cfg.Languages[i].LSP = &config.LSP{Cmd: exe, Args: []string{fakeDiagLSPArg}, Env: []string{"FAKE_DIAG_MODE=" + mode}, TrustCleanDiagnostics: &trust}
 		}
 	}
 	reg, err := cfg.Build()
@@ -273,22 +332,24 @@ func TestEditSkipsFirstPublishAfterOpen(t *testing.T) {
 	}
 }
 
-// wantUnconfirmed checks an edit answered by an unversioned clean
-// publish: kept, not validated, validationSkipped: lsp-unconfirmed.
+// wantUnconfirmed checks an edit answered by a clean result from a child
+// not trusted for one: kept, not validated, validationSkipped:
+// lsp-unconfirmed.
 func wantUnconfirmed(t *testing.T, m map[string]any) {
 	t.Helper()
 	if m["validated"] != false || m["rejected"] == true || m["validationSkipped"] != "lsp-unconfirmed" || m["diagnosticsTimedOut"] == true {
 		t.Fatalf("want validated:false validationSkipped:lsp-unconfirmed (not timed out), got %v", m)
 	}
-	if note, _ := m["validationNote"].(string); !strings.Contains(note, "does not version") || !strings.Contains(note, "not validated") {
+	if note, _ := m["validationNote"].(string); !strings.Contains(note, "trust_clean_diagnostics") || !strings.Contains(note, "not validated") {
 		t.Errorf("validationNote = %q", note)
 	}
 }
 
 // A child that sends a stale publish for the previous version before the
 // edited one: the version tells them apart, and the broken edit reverts.
+// Trusted (as gopls is), a clean result for the edited version validates.
 func TestEditWaitsForEditedVersion(t *testing.T) {
-	s, path := fakeDiagSession(t, "versioned", 5*time.Second)
+	s, path := fakeDiagSessionTrust(t, "versioned", 5*time.Second, "package main\n\nfunc main() {}\n", true)
 	// Let the open's publish land so the edit is a didChange.
 	time.Sleep(300 * time.Millisecond)
 	orig, _ := os.ReadFile(path)
@@ -448,18 +509,74 @@ func TestBatchCommitNotValidatedOnUnconfirmedResult(t *testing.T) {
 	}
 }
 
-// trust_unversioned_diagnostics: a clean unversioned result validates the
-// edit, under the same rules that pick it (the first publish after the
-// open is skipped, a clean one while the child loads is skipped). Off,
-// the same result is lsp-unconfirmed.
-func TestEditTrustUnversionedDiagnostics(t *testing.T) {
+// trust_clean_diagnostics: a clean result validates the edit, under the
+// same rules that pick it (an older version is skipped; unversioned, the
+// first publish after the open is skipped, a clean one while the child
+// loads is skipped). Off, the same result is lsp-unconfirmed, versioned
+// or not, and a broken edit still reverts.
+func TestEditTrustCleanDiagnostics(t *testing.T) {
 	good := "package main\n\nfunc main() { println(1) }\n"
-	for _, mode := range []string{"sourcekit", "loading"} {
-		t.Run(mode, func(t *testing.T) {
-			s, path := fakeDiagSessionTrust(t, mode, 5*time.Second, "package main\n\nfunc main() {}\n", true)
-			if mode == "loading" {
-				waitFirstPublish(t, s, path)
+	for _, mode := range []string{"sourcekit", "loading", "versioned"} {
+		for _, trust := range []bool{true, false} {
+			name := mode + "/untrusted"
+			if trust {
+				name = mode + "/trusted"
 			}
+			t.Run(name, func(t *testing.T) {
+				s, path := fakeDiagSessionTrust(t, mode, 5*time.Second, "package main\n\nfunc main() {}\n", trust)
+				switch mode {
+				case "loading":
+					waitFirstPublish(t, s, path)
+				case "versioned":
+					time.Sleep(300 * time.Millisecond) // the edit is a didChange
+				}
+				orig, _ := os.ReadFile(path)
+				m := editMain(t, s, path, brokenMain)
+				if m["rejected"] != true || m["reverted"] != true {
+					t.Fatalf("broken edit not reverted: %v", m)
+				}
+				if got, _ := os.ReadFile(path); string(got) != string(orig) {
+					t.Fatalf("file not restored: %q", got)
+				}
+				if mode == "versioned" {
+					time.Sleep(time.Second) // the revert's own result first
+				}
+				m = editMain(t, s, path, good)
+				if !trust {
+					wantUnconfirmed(t, m)
+					return
+				}
+				if m["validated"] != true || m["rejected"] == true || m["validationSkipped"] != nil {
+					t.Fatalf("trusted clean result: want validated:true, got %v", m)
+				}
+			})
+		}
+	}
+}
+
+// The macos-14 failure of 9b7385f: Xcode's sourcekit-lsp versions its
+// publishes, and a version does not prove the text was analysed. A broken
+// edit made while the package loads gets [] for its version, then the
+// error for the same version 20ms later: reverted. The valid edit after
+// the revert gets two unversioned publishes with the reverted text's
+// error (stale), then [] for its version. sourcekit-lsp is not trusted:
+// the valid edit is kept, lsp-unconfirmed; trusted, it validates. Either
+// way its response lists no stale diagnostic.
+func TestEditXcode14Replay(t *testing.T) {
+	good := "package main\n\nfunc main() { println(1) }\n"
+	for _, c := range []struct {
+		mode  string
+		trust bool
+	}{{"xcode14", false}, {"xcode14", true}, {"xcode14-unversioned", false}, {"xcode14-unversioned", true}} {
+		mode, trust := c.mode, c.trust
+		name := mode + "/untrusted"
+		if trust {
+			name = mode + "/trusted"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, path := fakeDiagSessionTrust(t, mode, 5*time.Second, "package main\n\nfunc main() {}\n", trust)
+			// The open's publish waits for the load: the edit is a didChange.
+			time.Sleep(200 * time.Millisecond)
 			orig, _ := os.ReadFile(path)
 			m := editMain(t, s, path, brokenMain)
 			if m["rejected"] != true || m["reverted"] != true {
@@ -469,16 +586,19 @@ func TestEditTrustUnversionedDiagnostics(t *testing.T) {
 				t.Fatalf("file not restored: %q", got)
 			}
 			m = editMain(t, s, path, good)
-			if m["validated"] != true || m["rejected"] == true || m["validationSkipped"] != nil {
-				t.Fatalf("trusted clean unversioned result: want validated:true, got %v", m)
+			if trust {
+				if m["validated"] != true || m["rejected"] == true || m["validationSkipped"] != nil {
+					t.Fatalf("trusted: want validated:true, got %v", m)
+				}
+			} else {
+				wantUnconfirmed(t, m)
+			}
+			if d, _ := m["diagnostics"].([]any); len(d) != 0 {
+				t.Fatalf("valid edit's response lists diagnostics not of its text: %v", d)
+			}
+			if got, _ := os.ReadFile(path); string(got) != good {
+				t.Fatalf("valid edit not kept: %q", got)
 			}
 		})
 	}
-	t.Run("untrusted", func(t *testing.T) {
-		s, path := fakeDiagSessionTrust(t, "sourcekit", 5*time.Second, "package main\n\nfunc main() {}\n", false)
-		if m := editMain(t, s, path, brokenMain); m["reverted"] != true {
-			t.Fatalf("broken edit not reverted: %v", m)
-		}
-		wantUnconfirmed(t, editMain(t, s, path, good))
-	})
 }

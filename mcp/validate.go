@@ -147,7 +147,13 @@ func (b *editBatch) commit() editOutcome {
 	if !b.validate {
 		return oc // nothing to prove; staged bytes stand
 	}
-	introduced := fingerprintMinus(b.s.settleErrorFingerprint(3*time.Second), b.baseline)
+	edited := map[string]editedResult{}
+	for _, d := range b.diags {
+		for uri, r := range d.edited {
+			edited[uri] = r
+		}
+	}
+	introduced := fingerprintMinus(b.s.settleErrorFingerprint(3*time.Second, edited), b.baseline)
 	if len(introduced) == 0 {
 		oc.Skipped, oc.SkipNote = b.unproven()
 		oc.Validated = oc.Skipped == ""
@@ -330,7 +336,7 @@ func (s *Server) applyBytes(abs string, orig, out []byte, mode os.FileMode, opts
 		oc.Skipped, oc.SkipNote = s.skipped(diags)
 		return oc, nil
 	}
-	introduced := fingerprintMinus(s.settleErrorFingerprint(3*time.Second), baseline)
+	introduced := fingerprintMinus(s.settleErrorFingerprint(3*time.Second, diags.edited), baseline)
 	if len(introduced) == 0 {
 		if diags.Unconfirmed {
 			oc.Skipped, oc.SkipNote = unconfirmed()
@@ -447,7 +453,7 @@ func (t *validationTxn) verify(diags editDiagnostics) editOutcome {
 		oc.Skipped, oc.SkipNote = t.s.skipped(diags)
 		return oc
 	}
-	introduced := fingerprintMinus(t.s.settleErrorFingerprint(3*time.Second), t.baseline)
+	introduced := fingerprintMinus(t.s.settleErrorFingerprint(3*time.Second, diags.edited), t.baseline)
 	if len(introduced) == 0 {
 		if diags.Unconfirmed {
 			oc.Skipped, oc.SkipNote = unconfirmed()
@@ -485,12 +491,11 @@ func (s *Server) skipped(d editDiagnostics) (reason, note string) {
 	return "lsp-timeout", fmt.Sprintf("validation timed out after %s: the child LSP published no diagnostics for the edited text, or only while still loading or indexing; edit kept, not validated", s.diagWaitDuration())
 }
 
-// unconfirmed is the skip for an edit whose result came from an
-// unversioned publish of a child not trusted for one
-// (editDiagnostics.Unconfirmed) and showed no new errors: that result may
-// lack errors the child has not computed yet.
+// unconfirmed is the skip for an edit whose result came from a child not
+// trusted for a clean result (editDiagnostics.Unconfirmed) and showed no
+// new errors: that result may lack errors the child has not computed yet.
 func unconfirmed() (reason, note string) {
-	return "lsp-unconfirmed", "the child LSP does not version its diagnostics, so its result (no new errors) cannot be confirmed to be a full analysis of the edited text; edit kept, not validated (lsp: trust_unversioned_diagnostics: true in the language's config lets this server's clean results validate)"
+	return "lsp-unconfirmed", "the child LSP is not trusted to publish a clean result only after a full analysis of the edited text, so its result (no new errors) does not validate the edit; edit kept, not validated (lsp: trust_clean_diagnostics: true in the language's config lets this server's clean results validate)"
 }
 
 // currentBatch / setBatch / closeBatch are session-keyed — see session.go.
@@ -579,11 +584,25 @@ func (s *Server) atomicWrite(abs string, data []byte, mode os.FileMode) error {
 // the package level, so those sibling errors are already in the store after the
 // edit's collectDiagnostics (siblings default-on) settled. Empty with no LSP.
 func (s *Server) errorFingerprintAll() map[string]int {
+	return s.errorFingerprint(nil)
+}
+
+// errorFingerprint is errorFingerprintAll with each URI in edited read
+// through its result (editedResult.current), not the store's last
+// publish for it: that can be for other text (an earlier version, or an
+// unversioned publish the edit's wait did not take). The edit's error
+// check judges the edited text only.
+func (s *Server) errorFingerprint(edited map[string]editedResult) map[string]int {
 	m := map[string]int{}
 	if s.manager == nil {
 		return m
 	}
-	for uri, diags := range s.manager.Diagnostics().Snapshot() {
+	store := s.manager.Diagnostics()
+	snap := store.Snapshot()
+	for uri, r := range edited {
+		snap[uri] = r.current(store, uri)
+	}
+	for uri, diags := range snap {
 		for _, d := range diags {
 			if d.Severity != 1 { // 1 = Error
 				continue
@@ -595,20 +614,23 @@ func (s *Server) errorFingerprintAll() map[string]int {
 }
 
 // settleErrorFingerprint returns the workspace error fingerprint AFTER the
-// diagnostic store quiesces. gopls republishes a whole package on a change, but
-// per-file publishes can lag the edited file — so a cross-file (sibling) error
-// may not be in the store the instant collectDiagnostics returns (which only
-// waits on the EDITED file). This polls until the error set is unchanged for a
-// short window, bounded by max. Fast for a clean edit (stable immediately);
-// waits only while errors are still arriving.
-func (s *Server) settleErrorFingerprint(max time.Duration) map[string]int {
+// diagnostic store quiesces, the edited URIs read through edited (see
+// errorFingerprint). gopls republishes a whole package on a change, but
+// per-file publishes can lag the edited file — so a cross-file (sibling)
+// error may not be in the store the instant collectDiagnostics returns
+// (which only waits on the EDITED file). This polls until the error set is
+// unchanged for a short window, bounded by max. Fast for a clean edit
+// (stable immediately); waits only while errors are still arriving. An
+// error a later publish for the edited version reports in that window
+// counts (Xcode's sourcekit-lsp: [] for the version, then its error).
+func (s *Server) settleErrorFingerprint(max time.Duration, edited map[string]editedResult) map[string]int {
 	const step = 100 * time.Millisecond
 	const stableNeeded = 250 * time.Millisecond
-	prev := s.errorFingerprintAll()
+	prev := s.errorFingerprint(edited)
 	var stable time.Duration
 	for waited := time.Duration(0); waited < max; waited += step {
 		time.Sleep(step)
-		cur := s.errorFingerprintAll()
+		cur := s.errorFingerprint(edited)
 		if fingerprintEqual(prev, cur) {
 			if stable += step; stable >= stableNeeded {
 				return cur

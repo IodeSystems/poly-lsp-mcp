@@ -47,12 +47,14 @@ func findSourceKitLSP(t *testing.T) string {
 // path. A SwiftPM package, which sourcekit-lsp reads without a build
 // server.
 //
-// sourcekit-lsp publishes no document version, so no result of it
-// validates an edit (validationSkipped: lsp-unconfirmed): it publishes []
-// for a broken file until its build settings load. On Linux (swift.org
-// 6.4.1, 2026-10-27) the broken edit is reverted; on macos-15-intel
-// (Xcode) the error had not arrived 16 s after the edit (CI trace), and
-// the edit is kept, not validated.
+// sourcekit-lsp is not trusted for a clean result
+// (trust_clean_diagnostics off by default), so no result of it validates
+// an edit (validationSkipped: lsp-unconfirmed): it publishes [] for a
+// broken file until its build settings load, unversioned (swift.org
+// 6.4.1, macos-15-intel) or with the edit's version (macos-14). On Linux
+// (swift.org 6.4.1, 2026-10-27) the broken edit is reverted; on
+// macos-15-intel (Xcode) the error had not arrived 16 s after the edit
+// (CI trace), and the edit is kept, not validated.
 func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 	lsp := findSourceKitLSP(t)
 	// A failure then shows the publish/progress sequence the edit saw.
@@ -152,7 +154,7 @@ func TestSwiftEditValidateRevertsWithSourceKitLSP(t *testing.T) {
 	// is still loading at the end of the wait.
 	m = decode(r)
 	if m["rejected"] == true || m["validated"] == true {
-		t.Fatalf("valid edit rejected, or validated on an unversioned result; response=%+v", m)
+		t.Fatalf("valid edit rejected, or validated though sourcekit-lsp is not trusted; response=%+v", m)
 	}
 	if s := m["validationSkipped"]; s != "lsp-unconfirmed" && s != "lsp-timeout" {
 		t.Fatalf("valid edit: want validationSkipped lsp-unconfirmed or lsp-timeout; response=%+v", m)

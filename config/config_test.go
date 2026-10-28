@@ -204,23 +204,51 @@ func TestBuildRejectsUnknownYAMLFields(t *testing.T) {
 	}
 }
 
-// trust_unversioned_diagnostics is off for every default child LSP and
-// for a server that does not set it; a language's lsp block turns it on.
-func TestTrustUnversionedDiagnostics(t *testing.T) {
+// trust_clean_diagnostics: on by default for gopls, clangd and pylsp (by
+// the command's base name), off for sourcekit-lsp,
+// typescript-language-server and any other server; a language's lsp
+// block sets it either way.
+func TestTrustCleanDiagnostics(t *testing.T) {
+	want := map[string]bool{"go": true, "c": true, "cpp": true, "python": true, "typescript": false, "swift": false}
+	seen := 0
 	for _, l := range Default().Languages {
-		if l.LSP != nil && l.LSP.TrustUnversionedDiagnostics {
-			t.Errorf("default %s LSP (%s) trusts unversioned diagnostics", l.Name, l.LSP.Cmd)
+		if l.LSP == nil {
+			continue
+		}
+		w, ok := want[l.Name]
+		if !ok {
+			t.Errorf("default %s LSP (%s): no expected trust_clean_diagnostics in this test", l.Name, l.LSP.Cmd)
+			continue
+		}
+		seen++
+		if got := l.LSP.TrustsCleanDiagnostics(); got != w {
+			t.Errorf("default %s LSP (%s): trusts clean diagnostics = %v, want %v", l.Name, l.LSP.Cmd, got, w)
 		}
 	}
+	if seen != len(want) {
+		t.Errorf("checked %d default LSPs, want %d", seen, len(want))
+	}
+	for cmd, w := range map[string]bool{"/usr/local/bin/gopls": true, "clangd.exe": true, "clangd-17": false, "jdtls": false, "": false} {
+		if got := (&LSP{Cmd: cmd}).TrustsCleanDiagnostics(); got != w {
+			t.Errorf("cmd %q: trusts clean diagnostics = %v, want %v", cmd, got, w)
+		}
+	}
+
 	path := filepath.Join(t.TempDir(), "poly-lsp-mcp.yaml")
 	yaml := `
 languages:
+  - name: go
+    extensions: [go]
+    lsp: {cmd: gopls}
+  - name: python
+    extensions: [py]
+    lsp: {cmd: pylsp, trust_clean_diagnostics: false}
   - name: typescript
     extensions: [ts]
     lsp:
       cmd: typescript-language-server
       args: [--stdio]
-      trust_unversioned_diagnostics: true
+      trust_clean_diagnostics: true
   - name: swift
     extensions: [swift]
     lsp:
@@ -237,10 +265,9 @@ languages:
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if !r.LookupByName("typescript").LSP.TrustUnversionedDiagnostics {
-		t.Error("typescript: trust_unversioned_diagnostics: true not read")
-	}
-	if r.LookupByName("swift").LSP.TrustUnversionedDiagnostics {
-		t.Error("swift: trusted without the key")
+	for name, w := range map[string]bool{"go": true, "python": false, "typescript": true, "swift": false} {
+		if got := r.LookupByName(name).LSP.TrustsCleanDiagnostics(); got != w {
+			t.Errorf("%s from yaml: trusts clean diagnostics = %v, want %v", name, got, w)
+		}
 	}
 }

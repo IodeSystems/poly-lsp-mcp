@@ -59,6 +59,13 @@ type Language struct {
 	Extensions []string `yaml:"extensions"`
 	LSP        *LSP     `yaml:"lsp,omitempty"`
 	TreeSitter string   `yaml:"treesitter,omitempty"`
+	// OffByDefault: no client gets this language's child LSP unless it
+	// turns it on (mcp --lsp-on, open option lspOn). See LSPOff.
+	OffByDefault bool `yaml:"off_by_default,omitempty"`
+	// RootMarkers are file names that mark a project root for this
+	// language. Stored, NOT YET USED: --lsp-roots auto reads the built-in
+	// marker table in symbols/roots.go only.
+	RootMarkers []string `yaml:"root_markers,omitempty"`
 }
 
 // Binding declares that several physical sites (in files of any language)
@@ -115,6 +122,10 @@ type Config struct {
 	// (os.TempDir(), /tmp). Joined with --allow-path / --exclude-path.
 	AllowPaths   []string `yaml:"allow_paths,omitempty"`
 	ExcludePaths []string `yaml:"exclude_paths,omitempty"`
+
+	// ProjectLanguages: the file declared languages:, which replace the
+	// registry; the user's servers.yaml is then not merged. Not YAML.
+	ProjectLanguages bool `yaml:"-"`
 }
 
 // Registry is the in-memory lookup view: extension → language. Built from a
@@ -303,7 +314,8 @@ func Load(path string) (*Config, error) {
 func LoadOrDefault(path string) (*Config, bool, error) {
 	c, err := Load(path)
 	if err == nil {
-		if len(c.Languages) == 0 {
+		c.ProjectLanguages = len(c.Languages) > 0
+		if !c.ProjectLanguages {
 			c.Languages = Default().Languages
 		}
 		return c, true, nil

@@ -164,3 +164,20 @@ entry here.
   the client's.
 - The LSP server (`poly-lsp-mcp` / `poly-lsp-mcp lsp` on stdio) has no
   `--lsp-off`; it runs in-process and is not a daemon client.
+
+## Format on edit
+
+- clangd, pylsp and sourcekit-lsp were not installed on the machine the
+  capability probe ran on (2026-10-28); which formatting they declare is
+  not measured. The code reads each server's capabilities at run time.
+- A batch commit's result does not return formatted text: it names the
+  files the format changed (`formattedFiles`, `formatNote`); re-read them
+  before the next edit.
+- The formatted text is not validated: a formatter that adds an error is
+  not caught at the edit (the error shows in the re-collected diagnostics
+  and in the next edit's baseline).
+- `FormattingOptions` (tab size, spaces) are guessed from the file, not
+  read from editorconfig or the project's formatter config; a server that
+  honours them (typescript-language-server) can re-indent with the guess.
+- A rename's range format covers the span from its first to its last
+  change in a file, not each changed site alone.

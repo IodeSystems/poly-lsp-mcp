@@ -369,6 +369,66 @@ in daemon mode.
   grammar has no sites in the index, so its child also starts on first
   use.
 
+## Format on edit
+
+Carl decided, 2026-10-28: off by default; on per language
+(`format_on_edit` in servers.yaml, `lsp add <name> --format-on-edit`) and
+per client (`mcp --format-on-edit` / `--no-format-on-edit`, carried on
+`/open` like `lsp_off`, never rebuilding a root). Code: `mcp/format.go`.
+
+- **What the servers declare** (measured 2026-10-28 on the dev box, an
+  `initialize` probe; static capabilities, no dynamic registration within
+  3 s of `initialized`):
+
+  | server | documentRangeFormattingProvider | documentFormattingProvider |
+  |---|---|---|
+  | gopls 0.24.0 | no | yes |
+  | typescript-language-server 5.1.3 | yes | yes |
+  | clangd, pylsp, sourcekit-lsp | not installed here; not measured | |
+
+  So Go is always formatted whole-file. The request is sent without the
+  client declaring `formatting` / `rangeFormatting`: both servers above
+  answer either way.
+- **Range first, whole file second.** rangeFormatting over the whole lines
+  the edit changed (common prefix / suffix of the text before and after),
+  when declared; else formatting of the file. Whole-file formatting can
+  change lines the edit did not touch; that is the server's choice of
+  capability, reported as `formatted: "file"`.
+- **Only a kept edit.** The format runs after validation keeps the edit
+  (validated, or kept unvalidated: validation off, `lsp-timeout`,
+  `lsp-unconfirmed`), never after a revert, and never on a staged
+  (`commit:false`) edit: a batch formats each touched file once, after its
+  commit. A refactor (rename, params/return) formats each file it changed
+  once, after its own validation.
+- **Never fails the edit.** An error, unreadable edits, or no answer
+  within `--validate-wait` keep the unformatted edit and report
+  `formatSkipped` (`error`, `timeout`) with `formatNote`. Other skips:
+  `lsp-off` (the client has the child off), `no-lsp`, `no-capability`,
+  `changed-on-disk` (the file is no longer the kept text). Off for the
+  language and client: no field at all, so the default costs no tokens.
+- **Post-format diagnostics: re-collected, not judged.** The format's
+  TextEdits are not a new edit for validation: they are not compared with
+  the error baseline and cannot revert anything. The language's own
+  formatter is trusted not to add errors. But a single edit's result
+  carries diagnostics with positions, and those must be the formatted
+  file's, so when the format changed the text the diagnostics are
+  collected again (`collectDiagnostics`, which is also the didChange to
+  the child) and reported in place of the pre-format ones. If that wait
+  times out the result says `diagnosticsTimedOut: true` while `validated`
+  keeps the verdict on the edit itself. A batch commit's result carries no
+  diagnostics: the child is sent didChange without a wait. A refactor's
+  result collects again over its files.
+- **The result describes the formatted file.** When the format changed the
+  text, `formattedText` / `formattedLines` are the lines the edit changed
+  as the file now holds them, so the next `oldText` is not stale;
+  `editedNode` is computed from the formatted text; a rename's
+  `results[].lines` are mapped through the format's edits. `replacedFrom` /
+  `replacedTo` stay the span replaced in the file before the edit. Multi-
+  file results report `formattedFiles` / `formatSkippedFiles` by file and
+  say to re-read changed files.
+- **FormattingOptions** are guessed from the file: tabs when a line is
+  tab-indented, else spaces at the smallest indent found (4 when none).
+
 ## Build, install, self-update
 
 - `go install` needs only Go. With a C compiler the binary links smacker's C

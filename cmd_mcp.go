@@ -38,6 +38,8 @@ func mcpCmd(l *loader) *cobra.Command {
 		validateWait   time.Duration
 		allowPaths     []string
 		excludePaths   []string
+		lspOff         []string
+		lspOn          []string
 	)
 	cmd := &cobra.Command{
 		Use:   "mcp",
@@ -66,6 +68,8 @@ func mcpCmd(l *loader) *cobra.Command {
 	f.DurationVar(&validateWait, "validate-wait", 2*time.Second, "how long an edit waits for the child LSP's diagnostics of the edited text; past it the edit is kept and reported not validated (validationSkipped: lsp-timeout). A cold child (sourcekit-lsp loading a package) can need longer")
 	f.StringArrayVar(&allowPaths, "allow-path", nil, "access outside the root: node_read / node_edit take an absolute path in this directory (not indexed, not watched; edits checked by a parse only); repeatable. Defaults: $TMPDIR and /tmp. Only the user's own regular files, no symlinks below the directory. Not --exclude, which leaves a directory out of the index")
 	f.StringArrayVar(&excludePaths, "exclude-path", nil, "remove a directory from access outside the root (see --allow-path), defaults included: --exclude-path /tmp turns /tmp off; repeatable. Not --exclude, which leaves a directory out of the index")
+	f.StringSliceVar(&lspOff, "lsp-off", nil, "languages whose child LSP THIS client does not use (comma list or repeated; names as poly-lsp-mcp lsp list prints them): their references and definitions come from the tree-sitter index only, their edits get no diagnostics and are checked by a tree-sitter parse only (validationSkipped: lsp-off). A child is shared by every client of the root: this does not stop one another client wants, and a child starts only when some client wants its language. Works through the daemon")
+	f.StringSliceVar(&lspOn, "lsp-on", nil, "languages off by default (servers.yaml off_by_default) whose child LSP this client does use; comma list or repeated. See --lsp-off")
 	f.BoolVar(&noValidate, "no-validate", false, "turn OFF revert-on-new-diagnostics (see --validate); for when validation itself misfires, e.g. a never-analyzed file with pre-existing errors")
 	// Daemon mode is the default. --daemon stays accepted: client configs
 	// written when it was opt-in pass it, and dun detects the proxy by the
@@ -121,7 +125,8 @@ func mcpCmd(l *loader) *cobra.Command {
 			// The client's index choices travel with its /open: they shape
 			// the root when this open builds it. Only flags given on this
 			// command line; the rest are the daemon's own.
-			opts := daemon.OpenOptions{Excludes: idx.excludes, Includes: idx.includes, IndexAnyway: idx.anyway}
+			opts := daemon.OpenOptions{Excludes: idx.excludes, Includes: idx.includes, IndexAnyway: idx.anyway,
+				LSPOff: lspOff, LSPOn: lspOn}
 			for _, d := range idx.excludes {
 				if git.CleanExclude(d) == "" {
 					return fmt.Errorf("--exclude %q: want a directory inside the root, relative to it", d)
@@ -209,6 +214,7 @@ func mcpCmd(l *loader) *cobra.Command {
 		}
 
 		srv := mcp.New(reg, root, cfg.Bindings, cfg.Schemas)
+		srv.SetLSPPrefs(mcp.LSPPrefs{On: lspOn, Off: lspOff})
 		if err := idx.apply(srv, cfg); err != nil {
 			return err
 		}

@@ -67,8 +67,27 @@ type Registry struct {
 	catalogOnce sync.Once
 	catalog     []mcp.ToolDescriptor
 
+	// The user's servers.yaml, re-read on each client open (see
+	// SetServersFile, checkServers). gen counts the registries cfg/reg
+	// have been: a root built under an older one is rebuilt on its next
+	// open. cfg, reg and gen are guarded by mu.
+	serversMu   sync.Mutex
+	serversPath string
+	serversBase []config.Language // nil: not watched
+	serversSeen serversStamp
+	gen         uint64
+
 	mu      sync.Mutex
 	servers map[string]*entry
+}
+
+// serversStamp is what checkServers compares: the file's mtime and size,
+// then its hash.
+type serversStamp struct {
+	mod  time.Time
+	size int64
+	sum  [32]byte
+	ok   bool // the file existed
 }
 
 // OpenOptions are what a client chooses about the index of a root it
@@ -84,6 +103,21 @@ type OpenOptions struct {
 	IndexAnyway  bool     `json:"indexAnyway,omitempty"`  // or the daemon's
 	SymlinkDepth *int     `json:"symlinkDepth,omitempty"` // nil = the daemon's
 	LSPRoots     string   `json:"lspRoots,omitempty"`     // "", single or auto; "" = the daemon's
+	// LSPOff / LSPOn are this client's child-LSP switch (mcp --lsp-off,
+	// --lsp-on; see mcp/lsp_off.go). Per session, not per root: they do
+	// not change the build, so a different switch never rebuilds.
+	LSPOff []string `json:"lspOff,omitempty"`
+	LSPOn  []string `json:"lspOn,omitempty"`
+}
+
+// lspPrefs is o's child-LSP switch.
+func (o OpenOptions) lspPrefs() mcp.LSPPrefs { return mcp.LSPPrefs{On: o.LSPOn, Off: o.LSPOff} }
+
+// buildOptions is o without the per-session switch: what a root is built
+// with.
+func (o OpenOptions) buildOptions() OpenOptions {
+	o.LSPOff, o.LSPOn = nil, nil
+	return o
 }
 
 // IndexDefaults are the daemon's own index flags, for every root it hosts:
@@ -115,6 +149,11 @@ type entry struct {
 	lspsStopped bool
 	// size is rootResident once the bring-up ended, 0 before.
 	size int64
+	// lsp is each holder's child-LSP switch, from its open; carried to a
+	// rebuild. gen is the registry generation the root was built with.
+	// Guarded by Registry.mu.
+	lsp map[string]mcp.LSPPrefs
+	gen uint64
 }
 
 // NewRegistry builds the host registry. cfg/reg come from the daemon's
@@ -265,9 +304,17 @@ func (r *Registry) Open(holder, root string, opts OpenOptions) (*mcp.Server, err
 // without starting child LSPs (a takeover's warm); a later get with lsps
 // starts them.
 func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.Server, error) {
+	if opts != nil {
+		r.checkServers()
+	}
+	// The client's switch is the session's; set it when the open names a
+	// session.
+	setPrefs := holder != "" && opts != nil
 	r.mu.Lock()
 	var carried map[string]struct{}
+	var carriedLSP map[string]mcp.LSPPrefs
 	var replaced *entry
+	serversChanged := false
 	if e, ok := r.servers[root]; ok {
 		failed, changed := false, false
 		if opts != nil {
@@ -276,11 +323,18 @@ func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.
 				failed = e.err != nil
 			default:
 			}
-			changed = !failed && !r.sameBuild(e.opts, *opts)
+			serversChanged = !failed && e.gen != r.gen
+			changed = !failed && (!r.sameBuild(e.opts, *opts) || serversChanged)
 		}
 		if !failed && !changed {
 			if holder != "" {
 				r.holdLocked(e, holder)
+			}
+			if setPrefs {
+				if e.lsp == nil {
+					e.lsp = map[string]mcp.LSPPrefs{}
+				}
+				e.lsp[holder] = opts.lspPrefs()
 			}
 			e.lastUsed = time.Now()
 			r.mu.Unlock()
@@ -288,6 +342,9 @@ func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.
 				r.hub.replay(holder, root)
 			}
 			<-e.ready
+			if e.err == nil && setPrefs {
+				e.srv.SetSessionLSP(holder, opts.lspPrefs())
+			}
 			if e.err == nil && lsps {
 				e.srv.StartLSPs()
 			}
@@ -300,33 +357,50 @@ func (r *Registry) get(root, holder string, opts *OpenOptions, lsps bool) (*mcp.
 			e.lspTimer.Stop()
 		}
 		carried = e.holders
+		carriedLSP = e.lsp
 		delete(r.servers, root)
 		r.hub.forget(root)
 		if changed {
 			replaced = e
 		}
 	}
-	e := &entry{ready: make(chan struct{}), holders: map[string]struct{}{}, lastUsed: time.Now()}
+	e := &entry{ready: make(chan struct{}), holders: map[string]struct{}{}, lastUsed: time.Now(),
+		lsp: map[string]mcp.LSPPrefs{}, gen: r.gen}
 	for h := range carried {
 		e.holders[h] = struct{}{}
 	}
+	for h, p := range carriedLSP {
+		e.lsp[h] = p
+	}
 	if opts != nil {
-		e.opts = *opts
+		e.opts = opts.buildOptions()
 	}
 	if holder != "" {
 		e.holders[holder] = struct{}{}
+	}
+	if setPrefs {
+		e.lsp[holder] = opts.lspPrefs()
 	}
 	r.servers[root] = e
 	var to []string
 	for h := range e.holders {
 		to = append(to, h)
 	}
+	prefs := make(map[string]mcp.LSPPrefs, len(e.lsp))
+	for h, p := range e.lsp {
+		prefs[h] = p
+	}
+	cfg, reg := r.cfg, r.reg
 	r.mu.Unlock()
 	if replaced != nil {
-		r.retire(root, replaced, e.opts, to)
+		r.retire(root, replaced, e.opts, to, serversChanged)
 	}
 
-	srv := r.build(root, e, e.opts)
+	srv := r.build(root, e, e.opts, cfg, reg)
+	// Before the bring-up: it starts only the children a client wants.
+	for h, p := range prefs {
+		srv.SetSessionLSP(h, p)
+	}
 	err := srv.BringUp(lsps)
 	e.srv, e.err = srv, err
 	close(e.ready)
@@ -383,6 +457,7 @@ func (r *Registry) Release(holder string) {
 			continue
 		}
 		delete(e.holders, holder)
+		delete(e.lsp, holder)
 		if len(e.holders) == 0 {
 			victims = append(victims, r.unheldLocked(root, e)...)
 		}
@@ -564,14 +639,18 @@ func (r *Registry) heldBy(holder string) []string {
 // retire tells the sessions on root (to) that its index options changed
 // and it is rebuilding, then rolls back their open batches on the old
 // server and shuts it down once its own bring-up has ended.
-func (r *Registry) retire(root string, old *entry, now OpenOptions, to []string) {
+func (r *Registry) retire(root string, old *entry, now OpenOptions, to []string, serversChanged bool) {
 	from, next := old.opts.String(), now.String()
-	params, err := json.Marshal(map[string]any{"level": "info", "logger": daemonLogger, "data": map[string]any{
-		"state": "rebuilding", "root": root, "from": from, "to": next,
-		"message": fmt.Sprintf("poly-lsp: the index options of %s changed (%s → %s), by a client's open; rebuilding the index", root, from, next),
-	}})
+	msg := fmt.Sprintf("poly-lsp: the index options of %s changed (%s → %s), by a client's open; rebuilding the index", root, from, next)
+	data := map[string]any{"state": "rebuilding", "root": root, "from": from, "to": next}
+	if serversChanged && r.sameBuild(old.opts, now) {
+		msg = fmt.Sprintf("poly-lsp: the language servers changed (%s); rebuilding the index of %s and restarting its child LSPs", r.serversPath, root)
+		data["reason"] = "servers"
+	}
+	data["message"] = msg
+	params, err := json.Marshal(map[string]any{"level": "info", "logger": daemonLogger, "data": data})
 	if err == nil {
-		log.Printf("daemon: root %s: index options %s → %s; rebuilding", root, from, next)
+		log.Printf("daemon: root %s: %s", root, strings.TrimPrefix(msg, "poly-lsp: "))
 		r.hub.publish(root, daemonLogger, "notifications/message", params, to)
 	}
 	go func() {
@@ -657,14 +736,14 @@ func (o OpenOptions) String() string {
 // with the shared cache, daemon-wide policy and the client's index
 // options. Schemas are detected per root when auto-schemas is on, since
 // detection is workspace-specific.
-func (r *Registry) build(root string, e *entry, opts OpenOptions) *mcp.Server {
-	schemas := r.cfg.Schemas
-	if r.cfg.AutoSchemas {
-		if detected := config.DetectSchemas(root, r.cfg.Schemas); len(detected) > 0 {
-			schemas = append(append([]config.Schema{}, r.cfg.Schemas...), detected...)
+func (r *Registry) build(root string, e *entry, opts OpenOptions, cfg *config.Config, reg *config.Registry) *mcp.Server {
+	schemas := cfg.Schemas
+	if cfg.AutoSchemas {
+		if detected := config.DetectSchemas(root, cfg.Schemas); len(detected) > 0 {
+			schemas = append(append([]config.Schema{}, cfg.Schemas...), detected...)
 		}
 	}
-	srv := mcp.New(r.reg, root, r.cfg.Bindings, schemas)
+	srv := mcp.New(reg, root, cfg.Bindings, schemas)
 	srv.SetQuiet(true) // one daemon log for every root: the notifications carry the report
 	srv.SetReadOnly(r.readOnly)
 	srv.SetValidateEdits(r.validate)
@@ -672,7 +751,7 @@ func (r *Registry) build(root string, e *entry, opts OpenOptions) *mcp.Server {
 	srv.SetUsageLog(r.usageLog)
 	srv.SetNotifier(func(method string, params map[string]any) { r.notify(root, e, method, params) })
 	srv.SetExcludes(append(append([]string{}, r.idx.Excludes...), opts.Excludes...))
-	srv.SetIncludes(append(append(append([]string{}, r.cfg.Include...), r.idx.Includes...), opts.Includes...))
+	srv.SetIncludes(append(append(append([]string{}, cfg.Include...), r.idx.Includes...), opts.Includes...))
 	srv.SetIndexAnyway(r.idx.Anyway || opts.IndexAnyway)
 	depth := r.idx.SymlinkDepth
 	if opts.SymlinkDepth != nil {
@@ -689,7 +768,7 @@ func (r *Registry) build(root string, e *entry, opts OpenOptions) *mcp.Server {
 	}
 	// One Manager per root: child LSPs bind to the module root and can't
 	// be shared across roots.
-	mgr := multiplex.NewManager(r.reg)
+	mgr := multiplex.NewManager(reg)
 	mgr.Lifecycle = r.lifecycle
 	mgr.StatusDir = r.statusDir
 	srv.SetManager(mgr)
@@ -755,7 +834,7 @@ func (r *Registry) notify(root string, e *entry, method string, params map[strin
 // wait for a bring-up that a tool call has not asked for yet.
 func (r *Registry) Tools() []mcp.ToolDescriptor {
 	r.catalogOnce.Do(func() {
-		srv := mcp.New(r.reg, "", nil, nil)
+		srv := mcp.New(r.registry(), "", nil, nil)
 		srv.SetReadOnly(r.readOnly)
 		r.catalog = srv.Tools()
 	})
@@ -794,11 +873,18 @@ func (r *Registry) LanguageForPath(path string) string {
 	if ext == "" {
 		return ""
 	}
-	lang := r.reg.LookupByExt(ext)
+	lang := r.registry().LookupByExt(ext)
 	if lang == nil {
 		return ""
 	}
 	return lang.Name
+}
+
+// registry is the language registry roots are built with now.
+func (r *Registry) registry() *config.Registry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reg
 }
 
 // Roots lists the currently-open canonical roots (for /health).

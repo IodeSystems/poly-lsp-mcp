@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/daemon"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
@@ -141,6 +142,11 @@ exit.`,
 		}
 
 		dreg := daemon.NewRegistry(cfg, reg, readOnly, validate)
+		// servers.yaml is re-read on each client open, unless the config
+		// file's languages: replace the registry.
+		if !cfg.ProjectLanguages {
+			dreg.SetServersFile(daemon.ServersPath(), config.Default().Languages)
+		}
 		dreg.SetLifecycle(lifecycle())
 		dreg.SetLSPRoots(roots.auto, roots.max)
 		dreg.SetStatusDir(daemon.StatusDir())

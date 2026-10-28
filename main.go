@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/daemon"
 	"github.com/iodesystems/poly-lsp-mcp/mcp"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/server"
@@ -78,6 +79,11 @@ func (l *loader) load(announce bool) (*config.Config, *config.Registry, error) {
 	cfg, used, err := config.LoadOrDefault(l.configPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("config: %w", err)
+	}
+	// The user's servers.yaml (lsp add), unless the config file's
+	// languages: replace the registry.
+	if err := config.MergeServersFile(cfg, daemon.ServersPath()); err != nil {
+		return nil, nil, fmt.Errorf("servers: %w", err)
 	}
 	reg, err := cfg.Build()
 	if err != nil {

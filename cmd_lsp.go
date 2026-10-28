@@ -34,6 +34,7 @@ type lspEntry struct {
 	LSP          *lspListLSP    `json:"lsp,omitempty"` // nil: tree-sitter only
 	Install      *setup.Install `json:"install,omitempty"`
 	OffByDefault bool           `json:"offByDefault"`
+	FormatOnEdit bool           `json:"formatOnEdit"`
 	RootMarkers  []string       `json:"rootMarkers,omitempty"`
 	// Child is the state of this language's child LSP for --root, from
 	// the status files of running poly-lsp processes (running, stopped,
@@ -70,7 +71,8 @@ func lspListCmd(l *loader) *cobra.Command {
 		Long: `List every language poly-lsp-mcp knows: its extensions, where it comes from
 (builtin, user: servers.yaml in the daemon home, or project: a config file's
 languages:), its child LSP command and whether it is found on this machine,
-an install hint for a known missing one, and whether it is off by default.
+an install hint for a known missing one, whether it is off by default, and
+whether its kept edits are formatted by the child LSP (format_on_edit).
 
 With --root, also the state of that root's child for each language, as
 running poly-lsp processes (the daemon, in-process servers) report it.`,
@@ -112,7 +114,7 @@ running poly-lsp processes (the daemon, in-process servers) report it.`,
 		}
 		for _, lang := range reg.Languages() {
 			e := lspEntry{Name: lang.Name, Extensions: lang.Extensions, Source: "builtin", TreeSitter: lang.TreeSitter,
-				OffByDefault: lang.OffByDefault, RootMarkers: lang.RootMarkers, Child: states[lang.Name]}
+				OffByDefault: lang.OffByDefault, FormatOnEdit: lang.FormatOnEdit, RootMarkers: lang.RootMarkers, Child: states[lang.Name]}
 			switch {
 			case cfg.ProjectLanguages:
 				e.Source = "project"
@@ -132,7 +134,7 @@ running poly-lsp processes (the daemon, in-process servers) report it.`,
 			return nil
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		head := "NAME\tEXTENSIONS\tSOURCE\tLSP\tFOUND\tOFF BY DEFAULT"
+		head := "NAME\tEXTENSIONS\tSOURCE\tLSP\tFOUND\tOFF BY DEFAULT\tFORMAT ON EDIT"
 		if root != "" {
 			head += "\tCHILD"
 		}
@@ -157,7 +159,11 @@ running poly-lsp processes (the daemon, in-process servers) report it.`,
 			if e.OffByDefault {
 				off = "yes"
 			}
-			row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", e.Name, "."+strings.Join(e.Extensions, " ."), src, lsp, found, off)
+			format := "no"
+			if e.FormatOnEdit {
+				format = "yes"
+			}
+			row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s", e.Name, "."+strings.Join(e.Extensions, " ."), src, lsp, found, off, format)
 			if root != "" {
 				child := e.Child
 				if child == "" {
@@ -214,6 +220,7 @@ func lspAddCmd() *cobra.Command {
 		exts, args, env, markers []string
 		cmdName                  string
 		offByDefault, trust      bool
+		formatOnEdit             bool
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name>",
@@ -233,12 +240,21 @@ To turn a built-in's child off for every client by default, override it
 with --off-by-default (` + "`lsp add go --off-by-default`" + `); a client turns it back
 on with mcp --lsp-on go.
 
+--format-on-edit has an edit to the language's files that is kept formatted
+by its child LSP (range formatting over the changed lines when the server
+declares it, else the whole file); --format-on-edit=false, or lsp remove,
+turns it back off. A client overrides it with mcp --format-on-edit /
+--no-format-on-edit. Like every field, it goes in this entry: an entry of
+the same name replaces the earlier one, so give the other flags again.
+
 The running daemon re-reads the file on each client open and rebuilds the
 opened root (index and child LSPs) when it changed. --root-marker is stored
 but not yet used: --lsp-roots auto reads the built-in markers only.`,
 		Example: `  poly-lsp-mcp lsp add zig --ext .zig,.zon --cmd zls
   poly-lsp-mcp lsp add java --cmd jdtls --off-by-default
   poly-lsp-mcp lsp add go --off-by-default
+  poly-lsp-mcp lsp add go --format-on-edit
+  poly-lsp-mcp lsp add go --format-on-edit=false
   poly-lsp-mcp lsp add python --cmd pyright-langserver --arg --stdio`,
 		Args: cobra.ExactArgs(1),
 	}
@@ -249,6 +265,7 @@ but not yet used: --lsp-roots auto reads the built-in markers only.`,
 	f.StringArrayVar(&env, "env", nil, "KEY=VALUE added to the command's environment (repeatable)")
 	f.StringArrayVar(&markers, "root-marker", nil, "file name that marks a project root for this language (repeatable). Stored, not yet used")
 	f.BoolVar(&offByDefault, "off-by-default", false, "no client gets this child LSP unless it turns it on (mcp --lsp-on <name>)")
+	f.BoolVar(&formatOnEdit, "format-on-edit", false, "format a kept edit to this language's files through its child LSP (format_on_edit); =false writes an explicit off")
 	f.BoolVar(&trust, "trust-clean-diagnostics", false, "a clean diagnostics result from this server may validate an edit (see trust_clean_diagnostics)")
 	daemonHome := daemonHomeFlag(f)
 	cmd.RunE = func(c *cobra.Command, pos []string) error {
@@ -258,6 +275,9 @@ but not yet used: --lsp-roots auto reads the built-in markers only.`,
 		u := config.UserServer{Name: pos[0], Extensions: exts, Cmd: cmdName, Args: args, Env: env, RootMarkers: markers, OffByDefault: offByDefault}
 		if c.Flags().Changed("trust-clean-diagnostics") {
 			u.TrustCleanDiagnostics = &trust
+		}
+		if c.Flags().Changed("format-on-edit") {
+			u.FormatOnEdit = &formatOnEdit
 		}
 		sp := daemon.ServersPath()
 		s, err := config.LoadServers(sp)

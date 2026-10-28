@@ -348,7 +348,7 @@ func TestLSPAddListRemove(t *testing.T) {
 	if _, err := run("lsp", "add", "zig", "--ext", ".zig,zon", "--cmd", "zls", "--arg", "--x", "--env", "A=b", "--root-marker", "build.zig", "--trust-clean-diagnostics"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run("lsp", "add", "go", "--off-by-default"); err != nil {
+	if _, err := run("lsp", "add", "go", "--off-by-default", "--format-on-edit"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := run("lsp", "add", "bad", "--ext", ".go", "--cmd", "x"); err == nil || !strings.Contains(err.Error(), "claimed by both go and bad") {
@@ -377,11 +377,28 @@ func TestLSPAddListRemove(t *testing.T) {
 		!slices.Equal(zig.LSP.Args, []string{"--x"}) || !slices.Equal(zig.RootMarkers, []string{"build.zig"}) {
 		t.Errorf("zig: %+v", zig)
 	}
-	if g.Source != "user" || !g.Overrides || !g.OffByDefault || g.LSP == nil || g.LSP.Name != "gopls" {
+	if g.Source != "user" || !g.Overrides || !g.OffByDefault || !g.FormatOnEdit || g.LSP == nil || g.LSP.Name != "gopls" {
 		t.Errorf("go: %+v", g)
 	}
-	if py.Source != "builtin" || py.OffByDefault {
+	if py.Source != "builtin" || py.OffByDefault || py.FormatOnEdit {
 		t.Errorf("python: %+v", py)
+	}
+	if out, _ := run("lsp", "list"); !strings.Contains(out, "FORMAT ON EDIT") {
+		t.Errorf("lsp list has no FORMAT ON EDIT column:\n%s", out)
+	}
+	// Back off: an explicit false.
+	if _, err := run("lsp", "add", "go", "--off-by-default", "--format-on-edit=false"); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = run("lsp", "list", "--json")
+	var off lspListReport
+	if err := json.Unmarshal([]byte(out), &off); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range off.Langs {
+		if e.Name == "go" && (e.FormatOnEdit || !e.OffByDefault) {
+			t.Errorf("go after --format-on-edit=false: %+v", e)
+		}
 	}
 	if out, err := run("lsp", "remove", "go"); err != nil || !strings.Contains(out, "built-in go is restored") {
 		t.Fatalf("remove go: %v %q", err, out)

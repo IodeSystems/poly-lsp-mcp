@@ -144,3 +144,23 @@ entry here.
   demand.
 - Each git worktree of one repository gets its own child LSP in the daemon
   (measured 0.8-2 GB RSS per gopls).
+
+## User child LSPs (servers.yaml) and lsp_off
+
+- A language added in servers.yaml with no tree-sitter grammar gets child
+  LSP features only (diagnostics, edit validation, rename): node_query does
+  not cover its files, and with its child off for a client its edits get
+  no parse check either.
+- `lsp_off` for one client does not stop a child another client of the
+  root wants; the switch filters what that client sees.
+- A servers.yaml change rebuilds a root's whole index and restarts all its
+  child LSPs, not only the changed language's, and only when a client next
+  opens that root.
+- `root_markers` (`lsp add --root-marker`) is stored and not yet used:
+  `--lsp-roots auto` reads the built-in marker table only.
+- In daemon mode, node_read / node_edit address resolution (a selector in
+  `node`) and the daemon's `/query` use the daemon's defaults
+  (off-by-default languages off), not the client's switch; node_query uses
+  the client's.
+- The LSP server (`poly-lsp-mcp` / `poly-lsp-mcp lsp` on stdio) has no
+  `--lsp-off`; it runs in-process and is not a daemon client.

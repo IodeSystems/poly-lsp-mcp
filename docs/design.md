@@ -328,6 +328,47 @@ warm index, one child-LSP fleet, one parse cache for every client. README
 - Build identity is `<rev12>[+dirty]/<sha256(exe)[:8]>` from build info and
   the executable; nothing is stamped at link time.
 
+## User child LSPs and the per-client switch
+
+Carl approved, 2026-10-28. Users add child language servers; dun drives it
+in daemon mode.
+
+- **A user-level file, not a project file.** `<daemon home>/servers.yaml`.
+  The shared daemon runs the commands the registry names; a file inside a
+  repository must not make it run one, so a project `poly-lsp-mcp.yaml`
+  still implies in-process, and its `languages:` replace the registry
+  (servers.yaml is then not merged, in-process or in the daemon).
+- **The CLI owns the format.** `lsp add` / `lsp remove` write it (temp
+  file + rename) after `config.MergeServers` validates the result; every
+  reader runs the same merge, so a hand edit is held to the same rules
+  (the daemon logs a bad file and keeps the registry it has).
+- **Merge by language name.** A new name adds a language; an existing name
+  overrides the fields given and keeps the rest; removing the entry
+  restores the built-in. Turning a built-in off globally is an override
+  with `off_by_default`, not a second mechanism (`off: true`): one field
+  covers "off for everyone unless a client asks", and a client can still
+  turn it on.
+- **Reload on open, through the rebuild path.** The daemon re-reads the
+  file (mtime and size, then hash) on each `/open`. A change bumps a
+  registry generation; a root built under an older one is rebuilt by the
+  same path an open with other index options takes (`rebuilding` notice,
+  reason `servers`). It rebuilds the whole root, so every child of that
+  root restarts, not only the changed language's; the parse cache keeps
+  the re-index cheap. Roots no client opens keep the old registry until
+  one does.
+- **Per-client filtering on a shared child.** A child stays one per
+  (root, language[, project root]); `lsp_off` / `lsp_on` are per session,
+  carried on `/open` like excludes but kept out of the build options, so
+  they never rebuild a root. The server filters per call: precision
+  round-trips, edit diagnostics, the error fingerprint, sibling rollup and
+  the rename round-trip skip an off language; an off edit is checked by a
+  tree-sitter parse (`validationSkipped: lsp-off`). A child starts only
+  when some session wants its language (`Manager.Defer` leaves it stopped,
+  to wake on first use); it stops under the existing lifecycle, not when
+  the session that wanted it leaves. A language with a child and no
+  grammar has no sites in the index, so its child also starts on first
+  use.
+
 ## Build, install, self-update
 
 - `go install` needs only Go. With a C compiler the binary links smacker's C

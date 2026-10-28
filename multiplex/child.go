@@ -451,7 +451,9 @@ func (c *Child) Kill() error {
 
 // TraceEnv, set to 1, logs each notification and request a child sends
 // and each notification sent to it, params cut to traceMax bytes: the
-// publish/progress sequence an edit's validation saw.
+// publish/progress sequence an edit's validation saw. A publish cut short
+// is logged with its version and diagnostic count after the cut: the key
+// order is the server's, and the version can come last (sourcekit-lsp).
 const TraceEnv = "POLY_LSP_CHILD_TRACE"
 
 const traceMax = 300
@@ -460,8 +462,22 @@ func traceChild(name, dir, method string, params json.RawMessage) {
 	if os.Getenv(TraceEnv) != "1" {
 		return
 	}
+	tail := ""
 	if len(params) > traceMax {
+		if method == "textDocument/publishDiagnostics" {
+			var p struct {
+				Version     *int              `json:"version"`
+				Diagnostics []json.RawMessage `json:"diagnostics"`
+			}
+			if json.Unmarshal(params, &p) == nil {
+				v := "none"
+				if p.Version != nil {
+					v = strconv.Itoa(*p.Version)
+				}
+				tail = fmt.Sprintf(" ... (version %s, %d diagnostics)", v, len(p.Diagnostics))
+			}
+		}
 		params = params[:traceMax]
 	}
-	log.Printf("[%s trace] %s %s %s", name, dir, method, params)
+	log.Printf("[%s trace] %s %s %s%s", name, dir, method, params, tail)
 }

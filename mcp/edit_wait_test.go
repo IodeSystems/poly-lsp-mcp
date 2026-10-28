@@ -56,6 +56,14 @@ import (
 //   - xcode14-unversioned: as xcode14, the two stale publishes without a
 //     version.
 //   - silent: never publishes.
+//   - debounce: replays gopls coalescing changes (versioned). The open
+//     is published at once; a change 300ms later, unless another change
+//     came meanwhile: then only the later one is published.
+//   - skip-open-text: versioned, each publish at once, except a change
+//     back to the open's text, which gets none (a revert the server never
+//     answers).
+//
+// In debounce and skip-open-text a document has one error per BROKEN.
 const fakeDiagLSPArg = "--fake-diag-lsp"
 
 func runFakeDiagLSP() {
@@ -71,22 +79,37 @@ func runFakeDiagLSP() {
 		defer mu.Unlock()
 		_ = jsonrpc.Write(os.Stdout, m)
 	}
-	publish := func(uri string, version int, broken bool) {
+	openText := map[string]string{} // skip-open-text
+	publishN := func(uri string, version, errors int) {
 		p := map[string]any{"uri": uri, "diagnostics": []any{}}
 		if version > 0 {
 			p["version"] = version
 		}
-		if broken {
-			p["diagnostics"] = []any{map[string]any{
+		diags := []any{}
+		for i := 0; i < errors; i++ {
+			diags = append(diags, map[string]any{
 				"range":    map[string]any{"start": map[string]any{"line": 0, "character": 0}, "end": map[string]any{"line": 0, "character": 1}},
 				"severity": 1, "message": "broken here",
-			}}
+			})
 		}
+		p["diagnostics"] = diags
 		raw, _ := json.Marshal(p)
 		mu.Lock()
-		lastBroken[uri] = broken
+		lastBroken[uri] = errors > 0
 		mu.Unlock()
 		write(&jsonrpc.Message{JSONRPC: "2.0", Method: "textDocument/publishDiagnostics", Params: raw})
+	}
+	publish := func(uri string, version int, broken bool) {
+		n := 0
+		if broken {
+			n = 1
+		}
+		publishN(uri, version, n)
+	}
+	count := func(uri string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Count(texts[uri], "BROKEN")
 	}
 	current := func(uri string) bool {
 		mu.Lock()
@@ -136,6 +159,11 @@ func runFakeDiagLSP() {
 				}()
 			case "versioned":
 				publish(uri, version, current(uri))
+			case "debounce", "skip-open-text":
+				mu.Lock()
+				openText[uri] = p.TextDocument.Text
+				mu.Unlock()
+				publishN(uri, version, count(uri))
 			case "xcode14", "xcode14-unversioned":
 				go func() {
 					time.Sleep(1500 * time.Millisecond)
@@ -221,6 +249,23 @@ func runFakeDiagLSP() {
 					time.Sleep(800 * time.Millisecond)
 					publish(uri, version, current(uri))
 				}()
+			case "debounce":
+				go func() {
+					time.Sleep(300 * time.Millisecond)
+					mu.Lock()
+					latest := changeSeq[uri] == seq
+					mu.Unlock()
+					if latest {
+						publishN(uri, version, count(uri))
+					}
+				}()
+			case "skip-open-text":
+				mu.Lock()
+				reverted := texts[uri] == openText[uri]
+				mu.Unlock()
+				if !reverted {
+					publishN(uri, version, count(uri))
+				}
 			}
 			continue
 		}
@@ -598,6 +643,93 @@ func TestEditXcode14Replay(t *testing.T) {
 			}
 			if got, _ := os.ReadFile(path); string(got) != good {
 				t.Fatalf("valid edit not kept: %q", got)
+			}
+		})
+	}
+}
+
+// A broken edit sent again right after its revert is reverted again. The
+// fake, like gopls, publishes a change only if no later change follows
+// within 300ms: without a wait for the revert's own result, the retry's
+// baseline held the reverted error, and the retry was validated.
+func TestEditRepeatAfterRevert(t *testing.T) {
+	s, path := fakeDiagSessionTrust(t, "debounce", 5*time.Second, "package main\n\nfunc main() {}\n", true)
+	waitFirstPublish(t, s, path)
+	orig, _ := os.ReadFile(path)
+	for i := 0; i < 3; i++ {
+		m := editMain(t, s, path, brokenMain)
+		if m["rejected"] != true || m["reverted"] != true {
+			t.Fatalf("broken edit %d not reverted: %v", i+1, m)
+		}
+		if got, _ := os.ReadFile(path); string(got) != string(orig) {
+			t.Fatalf("broken edit %d: file not restored: %q", i+1, got)
+		}
+	}
+	good := "package main\n\nfunc main() { println(1) }\n"
+	if m := editMain(t, s, path, good); m["validated"] != true {
+		t.Fatalf("valid edit not validated: %v", m)
+	}
+}
+
+// The same after a batch commit's revert, and after a rollback.
+func TestBatchRepeatAfterRevert(t *testing.T) {
+	s, path := fakeDiagSessionTrust(t, "debounce", 5*time.Second, "package main\n\nfunc main() {}\n", true)
+	waitFirstPublish(t, s, path)
+	orig, _ := os.ReadFile(path)
+	stage := func() {
+		t.Helper()
+		cur, _ := os.ReadFile(path)
+		r := s.callTool("node_edit", map[string]any{"node": "main.go", "oldText": string(cur), "newText": brokenMain, "commit": false})
+		if m := txnDecode(t, r); m["staged"] != true {
+			t.Fatalf("stage: %v", m)
+		}
+	}
+	stage()
+	if m := txnDecode(t, s.callTool("node_edit", map[string]any{"commit": true})); m["committed"] != false || m["reverted"] != true {
+		t.Fatalf("broken batch not reverted: %v", m)
+	}
+	if m := editMain(t, s, path, brokenMain); m["rejected"] != true || m["reverted"] != true {
+		t.Fatalf("broken edit after a batch revert not reverted: %v", m)
+	}
+	stage()
+	if m := txnDecode(t, s.callTool("node_edit", map[string]any{"rollback": true})); m["rolledBack"] != true {
+		t.Fatalf("rollback: %v", m)
+	}
+	if m := editMain(t, s, path, brokenMain); m["rejected"] != true || m["reverted"] != true {
+		t.Fatalf("broken edit after a rollback not reverted: %v", m)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(orig) {
+		t.Fatalf("file not restored: %q", got)
+	}
+}
+
+// A revert the child never answers: the wait times out and the next
+// edit's baseline is unknown. An error the reverted edit added counts as
+// new again (the retry is reverted); one there before it (main.go starts
+// with one BROKEN) does not (a valid edit that keeps it validates).
+func TestEditRepeatAfterUnansweredRevert(t *testing.T) {
+	for _, c := range []struct{ name, orig, broken, good string }{
+		{"clean", "package main\n\nfunc main() {}\n", brokenMain, "package main\n\nfunc main() { println(1) }\n"},
+		{"pre-existing", brokenMain, "package main\n\n// BROKEN BROKEN\nfunc main() {}\n", "package main\n\n// BROKEN\nfunc main() { println(1) }\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, path := fakeDiagSessionTrust(t, "skip-open-text", 600*time.Millisecond, c.orig, true)
+			waitFirstPublish(t, s, path)
+			for i := 0; i < 2; i++ {
+				start := time.Now()
+				m := editMain(t, s, path, c.broken)
+				if m["rejected"] != true || m["reverted"] != true {
+					t.Fatalf("broken edit %d not reverted: %v", i+1, m)
+				}
+				if el := time.Since(start); el < 600*time.Millisecond {
+					t.Errorf("broken edit %d returned in %s: the revert's wait did not run to the cap", i+1, el)
+				}
+				if got, _ := os.ReadFile(path); string(got) != c.orig {
+					t.Fatalf("broken edit %d: file not restored: %q", i+1, got)
+				}
+			}
+			if m := editMain(t, s, path, c.good); m["validated"] != true {
+				t.Fatalf("valid edit not validated: %v", m)
 			}
 		})
 	}

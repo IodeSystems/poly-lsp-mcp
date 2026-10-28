@@ -113,9 +113,15 @@ func tsEditValidate(t *testing.T, trust bool) {
 	if got, _ := os.ReadFile(mainPath); string(got) != orig {
 		t.Fatalf("file not restored after revert:\n got: %q\nwant: %q", got, orig)
 	}
-	// Let the reverted text's publish land: the next edit's error
-	// baseline is read from the store.
-	waitPublished(t, srv, mainPath)
+	// The same broken edit again at once is reverted too: the revert
+	// waited for the reverted text's publish, so the retry's error
+	// baseline does not hold the reverted error.
+	if m := edit(broken); m["rejected"] != true || m["reverted"] != true {
+		t.Fatalf("the broken edit sent again after its revert was not reverted: %v", m)
+	}
+	if got, _ := os.ReadFile(mainPath); string(got) != orig {
+		t.Fatalf("file not restored after the second revert:\n got: %q\nwant: %q", got, orig)
+	}
 
 	good := head + "export const who: string = load().name.trim();\n"
 	m = edit(good)

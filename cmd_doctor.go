@@ -55,6 +55,10 @@ type doctorReport struct {
 	DaemonHomeSource string `json:"daemonHomeSource"`
 	// DaemonBuild is the running daemon's build identity; DaemonMatches
 	// whether it is this binary's (daemon.BuildID). Absent with no daemon.
+	// DaemonConfig is the config the running daemon loaded: its absolute
+	// --config, or the built-in languages and servers.yaml. Never Config,
+	// which is this directory's file and applies in-process only.
+	DaemonConfig  string `json:"daemonConfig,omitempty"`
 	DaemonBuild   string `json:"daemonBuild,omitempty"`
 	DaemonMatches *bool  `json:"daemonMatches,omitempty"`
 	// DaemonRoots are the running daemon's roots: clients, resident
@@ -255,6 +259,7 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 				if build == "" {
 					build = "unknown (a daemon from before build identities)"
 				}
+				rep.DaemonConfig = daemonConfigOf(st.Args)
 				match := st.Build == daemon.BuildID()
 				rep.DaemonBuild, rep.DaemonMatches = build, &match
 				if match {
@@ -318,6 +323,9 @@ func printDoctor(r doctorReport) {
 	fmt.Printf("git       %s\n", r.Git)
 	fmt.Printf("daemon    %s\n", r.Daemon)
 	fmt.Printf("          home %s (%s); socket %s\n", r.DaemonHome, r.DaemonHomeSource, daemon.SocketPath())
+	if r.DaemonConfig != "" {
+		fmt.Printf("          config %s\n", r.DaemonConfig)
+	}
 	var idle int64
 	for _, d := range r.DaemonRoots {
 		who := fmt.Sprintf("%d client(s)", d.Clients)
@@ -461,4 +469,20 @@ func probeVersion(path string, args []string) string {
 	}
 	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
 	return line
+}
+
+// daemonConfigOf says which config a daemon started with args loaded (see
+// daemonConfigPath): its --config, else the built-in languages and the
+// user's servers.yaml. A daemon from before that rule, started with no
+// --config, may have read its start directory's file; args do not show it.
+func daemonConfigOf(args []string) string {
+	for _, a := range args {
+		if p, ok := strings.CutPrefix(a, "--config="); ok {
+			if !filepath.IsAbs(p) {
+				return p + ", relative to the directory it started in (a daemon from before configs had to be absolute; restart it)"
+			}
+			return p
+		}
+	}
+	return "defaults + " + daemon.ServersPath()
 }

@@ -76,9 +76,20 @@ type loader struct {
 // skip the line that is always there is being trained to skip stderr, which is
 // also where the selector errors land.
 func (l *loader) load(announce bool) (*config.Config, *config.Registry, error) {
-	cfg, used, err := config.LoadOrDefault(l.configPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("config: %w", err)
+	return loadConfig(l.configPath, announce)
+}
+
+// loadConfig is load for a given config path; "" reads no config file
+// (the built-in languages and servers.yaml only), which is what a daemon
+// started without an absolute --config uses.
+func loadConfig(path string, announce bool) (*config.Config, *config.Registry, error) {
+	cfg, used := config.Default(), false
+	if path != "" {
+		var err error
+		cfg, used, err = config.LoadOrDefault(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("config: %w", err)
+		}
 	}
 	// The user's servers.yaml (lsp add), unless the config file's
 	// languages: replace the registry.
@@ -92,10 +103,13 @@ func (l *loader) load(announce bool) (*config.Config, *config.Registry, error) {
 	if !announce {
 		return cfg, reg, nil
 	}
-	if used {
-		log.Printf("config: loaded %s", l.configPath)
-	} else {
-		log.Printf("config: using defaults (no %s)", l.configPath)
+	switch {
+	case used:
+		log.Printf("config: loaded %s", path)
+	case path == "":
+		log.Printf("config: using defaults (no config file)")
+	default:
+		log.Printf("config: using defaults (no %s)", path)
 	}
 	return cfg, reg, nil
 }

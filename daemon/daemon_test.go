@@ -592,3 +592,17 @@ func TestPidAliveFalseForZombie(t *testing.T) {
 		t.Fatal("PidAlive false for self")
 	}
 }
+
+// An auto-started daemon runs in the daemon home, not the caller's
+// directory: a repository's poly-lsp-mcp.yaml must not configure it.
+func TestDetachedDaemonRunsInItsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(HomeEnv, home)
+	cmd := detachedCmd("/bin/true", []string{"--allow=/x"})
+	if cmd.Dir != home {
+		t.Fatalf("Dir = %q, want the daemon home %q", cmd.Dir, home)
+	}
+	if want := []string{"/bin/true", "daemon", "--allow=/x"}; strings.Join(cmd.Args, " ") != strings.Join(want, " ") {
+		t.Fatalf("Args = %q, want %q", cmd.Args, want)
+	}
+}

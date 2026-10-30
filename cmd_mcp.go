@@ -292,8 +292,8 @@ func inProcessOnlyList() string {
 
 // inProcessOnly names the in-process-only settings this invocation gives:
 // the flags set on its command line, $POLY_LSP_READ_CHAR_BUDGET, and a
-// config file at the default --config path (the daemon reads the config
-// of the directory it was started in, not this client's).
+// config file at the default --config path (the daemon never reads a
+// client's config file; see daemonConfigPath).
 func inProcessOnly(cmd *cobra.Command) []string {
 	var given []string
 	for _, name := range inProcessOnlyFlags {

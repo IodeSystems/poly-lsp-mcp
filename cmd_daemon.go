@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -36,7 +37,11 @@ func daemonCmd(l *loader) *cobra.Command {
 		Long: `Run the shared per-user daemon: one process hosting many workspace roots
 over a unix socket. 'poly-lsp-mcp mcp' (daemon mode is its default) starts it
 on demand and proxies to it. --stop and --restart control a running daemon and
-exit.`,
+exit.
+
+The daemon reads no poly-lsp-mcp.yaml from the directory it runs in (an
+auto-started one runs in the daemon home): its languages are the built-in ones
+and <daemon home>/servers.yaml (lsp add). --config takes an absolute path only.`,
 		Args: cobra.NoArgs,
 	}
 	f := cmd.Flags()
@@ -84,6 +89,10 @@ exit.`,
 		if stop {
 			return daemon.Stop()
 		}
+		cfgPath, err := daemonConfigPath(cmd)
+		if err != nil {
+			return err
+		}
 		roots, err := rootsFlag()
 		if err != nil {
 			return err
@@ -122,7 +131,7 @@ exit.`,
 			return err
 		}
 
-		cfg, reg, err := l.load(true)
+		cfg, reg, err := loadConfig(cfgPath, true)
 		if err != nil {
 			return err
 		}
@@ -162,6 +171,24 @@ exit.`,
 			TakeoverFrom: *takeoverFrom, Warm: warm, WarmRecent: *warmRecent, IdleExit: *idleExit})
 	}
 	return cmd
+}
+
+// daemonConfigPath is the config file a daemon loads: none unless --config
+// was given, and then only an absolute path. The daemon is shared by every
+// client, so a file in the directory it was started from (a repository's
+// poly-lsp-mcp.yaml, which can set child LSP commands) must not configure
+// it; a relative --config would name such a file. The user's servers.yaml
+// in the daemon home applies either way.
+func daemonConfigPath(cmd *cobra.Command) (string, error) {
+	f := cmd.Flag("config")
+	if f == nil || !f.Changed {
+		return "", nil
+	}
+	p := f.Value.String()
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("daemon: --config %q is a relative path; give an absolute path. The daemon reads no config file from its working directory, and without --config it uses the built-in languages and %s", p, daemon.ServersPath())
+	}
+	return p, nil
 }
 
 // daemonHomeUsage is --daemon-home's help (the backquoted `dir` names the

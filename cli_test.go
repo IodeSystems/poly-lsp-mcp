@@ -411,3 +411,35 @@ func TestLSPAddListRemove(t *testing.T) {
 		t.Errorf("lsp list after remove:\n%s", out)
 	}
 }
+
+// The shared daemon takes --config as an absolute path only: a relative one
+// would name a file in whatever directory it was started from.
+func TestDaemonRefusesARelativeConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(daemon.HomeEnv, t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	root := newRoot()
+	root.SetArgs([]string{"daemon", "--config", "poly-lsp-mcp.yaml"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "relative path") || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("daemon --config poly-lsp-mcp.yaml: want a refusal of the relative path, got %v", err)
+	}
+	if _, ok := daemon.ReadState(); ok {
+		t.Fatal("a daemon started with a relative --config")
+	}
+}
+
+// doctor says which config the running daemon loaded, from its recorded
+// flags: an absolute --config, else the defaults and servers.yaml.
+func TestDaemonConfigOf(t *testing.T) {
+	t.Setenv(daemon.HomeEnv, t.TempDir())
+	if got := daemonConfigOf([]string{"--allow=/x", "--config=/etc/p.yaml"}); got != "/etc/p.yaml" {
+		t.Errorf("absolute --config: %q", got)
+	}
+	if got := daemonConfigOf(nil); got != "defaults + "+daemon.ServersPath() {
+		t.Errorf("no --config: %q", got)
+	}
+	if got := daemonConfigOf([]string{"--config=p.yaml"}); !strings.Contains(got, "restart it") {
+		t.Errorf("relative --config from an old daemon: %q", got)
+	}
+}

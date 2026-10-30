@@ -153,6 +153,7 @@ func (h *host) blueGreen(req UpgradeRequest) (err error) {
 		return err
 	}
 	cmd := exec.Command(req.Exe, args...)
+	cmd.Dir = ConfigHome() // as StartDetached: not this daemon's start directory
 	cmd.Env = childEnv()
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

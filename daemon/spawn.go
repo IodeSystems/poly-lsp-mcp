@@ -27,7 +27,7 @@ func StartDetached(args []string) error {
 	}
 	defer logf.Close()
 
-	cmd := exec.Command(exe, append([]string{"daemon"}, args...)...)
+	cmd := detachedCmd(exe, args)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = logf, logf, nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // new session — survives our exit
 	if err := cmd.Start(); err != nil {
@@ -40,6 +40,17 @@ func StartDetached(args []string) error {
 	// and init reaps instead.
 	go func() { _ = cmd.Wait() }()
 	return nil
+}
+
+// detachedCmd is the daemon command StartDetached runs. Its working
+// directory is the daemon home, not the caller's: a daemon is shared by
+// every client, so the directory one client happened to start it from
+// must not shape it (a repo's poly-lsp-mcp.yaml, a relative path). The
+// caller makes the home first (0700).
+func detachedCmd(exe string, args []string) *exec.Cmd {
+	cmd := exec.Command(exe, append([]string{"daemon"}, args...)...)
+	cmd.Dir = ConfigHome()
+	return cmd
 }
 
 // Start polling, as dun's attach: every 50 ms, up to 10 s. A daemon binds

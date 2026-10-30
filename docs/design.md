@@ -338,6 +338,15 @@ in daemon mode.
   repository must not make it run one, so a project `poly-lsp-mcp.yaml`
   still implies in-process, and its `languages:` replace the registry
   (servers.yaml is then not merged, in-process or in the daemon).
+- **The daemon reads no file from its start directory.** An auto-started
+  daemon inherited the client's working directory, and the default
+  `--config` is the relative `poly-lsp-mcp.yaml`: an explicit `mcp
+  --daemon` run in a repository made the shared daemon load that
+  repository's file, so the file set child LSP commands for every client.
+  Now the auto-started daemon (and an upgrade's new one) runs in the daemon
+  home, and `daemon` loads a config file only from an explicit absolute
+  `--config`; a relative one is refused. Both, because a person can also
+  run `daemon` by hand from a repository.
 - **The CLI owns the format.** `lsp add` / `lsp remove` write it (temp
   file + rename) after `config.MergeServers` validates the result; every
   reader runs the same merge, so a hand edit is held to the same rules

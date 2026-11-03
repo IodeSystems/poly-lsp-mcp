@@ -144,6 +144,8 @@ Child LSPs are optional, one per language: `gopls`, `typescript-language-server`
 `pylsp`, `clangd`. Without one, that language is served from tree-sitter alone:
 its `::in`/`::out` edges are not resolved and edits to it are not validated.
 
+Every child runs at nice +10. clangd also gets `-j=<n>`, half the cores rounded up, at most 8, unless its arguments already set `-j`.
+
 ```sh
 poly-lsp-mcp doctor            # in the workspace
 ```

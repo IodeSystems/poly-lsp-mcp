@@ -438,6 +438,25 @@ per client (`mcp --format-on-edit` / `--no-format-on-edit`, carried on
 - **FormattingOptions** are guessed from the file: tabs when a line is
   tab-indented, else spaces at the smallest indent found (4 when none).
 
+## Child LSP CPU limits
+
+A user added clangd as a child LSP; it used every core and the machine
+crashed. clangd's worker count (`-j`) defaults to every hardware thread,
+and it indexes in the background. The built-in `c` and `cpp` languages are
+separate children that both run clangd, and the daemon serves several roots.
+
+- Every child LSP runs at nice +10 (`syscall.Setpriority` after `Start`;
+  Linux and macOS, a no-op elsewhere). A failure is logged, not fatal. On
+  Linux this sets the main thread; threads created later inherit it, and
+  `Start` returns before the child creates workers.
+- A child whose resolved command is `clangd`, `clangd-<N>` or `clangd.exe`
+  gets `-j=<j>` appended, `j = min(max(ceil(NumCPU/2), 1), 8)`. This is in
+  `Spawn`, so a user `lsp add ... --cmd clangd` override is covered. An
+  argument that already sets `-j` (`-j=N`, `-jN`, `-j N`, `--j...`) wins.
+- The cap 8 is an assumption, not a measurement. Change `maxClangdJobs`
+  (`multiplex/limits.go`) to move it.
+- Not changed: proactive open, and the `c`/`cpp` children stay separate.
+
 ## Build, install, self-update
 
 - `go install` needs only Go. With a C compiler the binary links smacker's C

@@ -17,6 +17,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -78,7 +79,7 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", lsp.Cmd, err)
 	}
-	cmd := exec.Command(found.Path, lsp.Args...)
+	cmd := exec.Command(found.Path, withLimits(found.Path, lsp.Args, runtime.NumCPU())...)
 	cmd.Dir = cwd
 	switch {
 	case len(lsp.Env) > 0 && found.Env != nil:
@@ -106,6 +107,9 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", lsp.Cmd, err)
+	}
+	if err := lowerPriority(cmd.Process.Pid); err != nil {
+		log.Printf("[%s] lower priority: %v", name, err)
 	}
 
 	c := &Child{

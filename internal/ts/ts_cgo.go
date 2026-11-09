@@ -1,4 +1,4 @@
-//go:build cgo
+//go:build cgo && treesitter_cgo
 
 package ts
 
@@ -35,6 +35,10 @@ type (
 
 // Runtime names the tree-sitter runtime compiled into this binary.
 func Runtime() string { return "cgo" }
+
+// RuntimeID names the runtime and, when build info has it, the version of
+// the module that provides it: "smacker-cgo@<version>".
+func RuntimeID() string { return runtimeID("smacker-cgo", "github.com/smacker/go-tree-sitter") }
 
 func NewParser() *Parser                                      { return sitter.NewParser() }
 func NewQuery(pattern []byte, lang *Language) (*Query, error) { return sitter.NewQuery(pattern, lang) }

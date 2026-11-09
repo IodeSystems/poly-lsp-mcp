@@ -85,7 +85,8 @@ entry here.
   untested here) therefore validates no edit that itself opens a file
   (a new file, or one the proactive open skipped): it waits the full
   `--validate-wait` and reports `lsp-timeout`.
-- **Pure-Go runtime** (`CGO_ENABLED=0`): same grammars, about 10x slower to
+- **Pure-Go runtime** (the default; the cgo runtime needs `-tags
+  treesitter_cgo` and a C compiler): same grammars, about 10x slower to
   parse; on valid kotlin / tsx / c / swift, some GLR ambiguity picks differ
   from C (swift: 125 of 126 cleanly-parsing files give the same symbols).
   `doctor` reports `runtime`.

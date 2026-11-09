@@ -1,4 +1,4 @@
-//go:build !cgo
+//go:build !(cgo && treesitter_cgo)
 
 package ts
 
@@ -20,6 +20,10 @@ type (
 
 // Runtime names the tree-sitter runtime compiled into this binary.
 func Runtime() string { return "pure-go" }
+
+// RuntimeID names the runtime and, when build info has it, the version of
+// the module that provides it: "gotreesitter@<version>".
+func RuntimeID() string { return runtimeID("gotreesitter", "github.com/odvcencio/gotreesitter") }
 
 // Language is one grammar. The grammars are smacker's own, converted for
 // gotreesitter (see package grammars), so a tree here has the shape the cgo

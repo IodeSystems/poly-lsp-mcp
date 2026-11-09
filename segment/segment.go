@@ -11,7 +11,11 @@
 // segment_test.go enforces this.
 package segment
 
-import "fmt"
+import (
+	"fmt"
+
+	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
+)
 
 // Span is one cut of a source file. Lines are 1-based and EndLine is
 // exclusive. Spans come in source order and are flat; nesting shows only in
@@ -79,3 +83,9 @@ func spans(syms []Symbol) []Span {
 	}
 	return out
 }
+
+// Runtime names the tree-sitter runtime this binary parses with:
+// "gotreesitter" or "smacker-cgo", followed by "@version" when build info
+// has it. The two runtimes can build different trees from source with
+// syntax errors, so a consumer that caches spans should key on this value.
+func Runtime() string { return sitter.RuntimeID() }

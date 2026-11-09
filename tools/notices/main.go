@@ -206,7 +206,11 @@ func goModules() ([]pkg, []string, error) {
 // listModules lists path, version and directory of each non-main module the
 // build links, with the release tag.
 func listModules(cgo string) ([]string, error) {
-	cmd := exec.Command("go", "list", "-deps", "-tags", "release", "-f",
+	tags := "release"
+	if cgo == "1" {
+		tags += ",treesitter_cgo"
+	}
+	cmd := exec.Command("go", "list", "-deps", "-tags", tags, "-f",
 		"{{with .Module}}{{if not .Main}}{{.Path}}\t{{.Version}}\t{{.Dir}}{{end}}{{end}}", ".")
 	cmd.Env = append(os.Environ(), "GOWORK=off", "CGO_ENABLED="+cgo)
 	cmd.Stderr = os.Stderr

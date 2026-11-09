@@ -480,10 +480,12 @@ separate children that both run clangd, and the daemon serves several roots.
 
 ## Build, install, self-update
 
-- `go install` needs only Go. With a C compiler the binary links smacker's C
-  tree-sitter runtime; without one (`CGO_ENABLED=0`) it uses gotreesitter
+- `go install` needs only Go and builds the pure-Go runtime: gotreesitter
   with smacker's grammars converted by ts2go
-  (`internal/ts/grammars/generate.sh`), about 10x slower to parse. gotreesitter's
+  (`internal/ts/grammars/generate.sh`), about 10x slower to parse. The C
+  runtime (smacker) is opt-in: `-tags treesitter_cgo` with `CGO_ENABLED=1`;
+  the tag without cgo falls back to pure Go. Release builds, `make dist`
+  and CI set the tag. `make build` / `make install` do not. gotreesitter's
   bundled sql is a different grammar and its go/kotlin are newer revisions,
   hence the conversion.
 - **No `-X` stamp** (diverges from the canon CLI-12). Self-rebuild reads

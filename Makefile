@@ -50,7 +50,7 @@ DIST_ASSET  := dist/$(BINARY)_$(GOOS_NAME)_$(GOARCH_NAME).tar.gz
 dist:
 	rm -rf dist/stage
 	mkdir -p dist/stage
-	CGO_ENABLED=1 $(GO) build -trimpath -tags release -o dist/stage/$(BINARY) .
+	CGO_ENABLED=1 $(GO) build -trimpath -tags release,treesitter_cgo -o dist/stage/$(BINARY) .
 	for f in LICENSE THIRD_PARTY_NOTICES README.md; do [ -f $$f ] && cp $$f dist/stage/ || true; done
 	tar -czf $(DIST_ASSET) -C dist/stage $$(ls dist/stage)
 	rm -rf dist/stage

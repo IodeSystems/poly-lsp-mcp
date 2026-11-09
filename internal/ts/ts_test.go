@@ -86,7 +86,7 @@ func TestTreesMatchTheCRuntime(t *testing.T) {
 			golden := filepath.Join("testdata", name+".tree")
 			if *update {
 				if Runtime() != "cgo" {
-					t.Fatal("-update writes the C runtime's trees; run it with CGO_ENABLED=1")
+					t.Fatal("-update writes the C runtime's trees; run it with CGO_ENABLED=1 -tags treesitter_cgo")
 				}
 				if err := os.WriteFile(golden, []byte(sb.String()), 0o644); err != nil {
 					t.Fatal(err)

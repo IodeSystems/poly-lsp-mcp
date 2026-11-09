@@ -61,15 +61,15 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: |
-          go vet ./...
-          go test -count=1 -timeout 900s ./...
+          go vet -tags treesitter_cgo ./...
+          go test -tags treesitter_cgo -count=1 -timeout 900s ./...
 
       - name: Build
         env:
           CGO_ENABLED: "1"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -tags release -o poly-lsp-mcp .
+        run: go build -trimpath -tags release,treesitter_cgo -o poly-lsp-mcp .
 
       - name: Smoke
         run: |

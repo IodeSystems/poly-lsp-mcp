@@ -49,7 +49,7 @@ jobs:
           - { goos: linux, goarch: amd64, runner: ubuntu-24.04 }
           - { goos: linux, goarch: arm64, runner: ubuntu-24.04-arm }
           - { goos: darwin, goarch: amd64, runner: macos-15-intel }
-          - { goos: darwin, goarch: arm64, runner: macos-14 }
+          - { goos: darwin, goarch: arm64, runner: macos-15 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

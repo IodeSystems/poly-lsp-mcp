@@ -44,38 +44,45 @@ func LanguageByName(name string) *sitter.Language {
 	return nil
 }
 
-// extLang maps a lowercase file extension (no dot) to a language name. It
-// mirrors the default extension table of package config for the languages
-// that have a grammar; segment may not import config.
-var extLang = map[string]string{
-	"go": "go",
-	"ts": "typescript", "tsx": "typescript", "js": "typescript",
-	"jsx": "typescript", "mjs": "typescript", "cjs": "typescript",
-	"py": "python", "pyi": "python",
-	"md": "markdown", "markdown": "markdown",
-	"sql": "sql", "psql": "sql",
-	"java": "java",
-	"kt":   "kotlin", "kts": "kotlin",
-	"groovy": "groovy", "gradle": "groovy", "gvy": "groovy", "gy": "groovy",
-	"c":   "c",
-	"cpp": "cpp", "cc": "cpp", "cxx": "cpp", "c++": "cpp", "h": "cpp",
-	"hpp": "cpp", "hh": "cpp", "hxx": "cpp", "h++": "cpp", "ipp": "cpp",
-	"tcc": "cpp", "inl": "cpp",
-	"swift": "swift",
+// langExts is the single owner of the default extension -> language table
+// (lowercase, no dot, in registry order). Package config builds its default
+// registry from it through Extensions.
+var langExts = []struct {
+	lang string
+	exts []string
+}{
+	{"go", []string{"go"}},
+	{"typescript", []string{"ts", "tsx", "js", "jsx", "mjs", "cjs"}},
+	{"python", []string{"py", "pyi"}},
+	{"markdown", []string{"md", "markdown"}},
+	{"sql", []string{"sql", "psql"}},
+	{"java", []string{"java"}},
+	{"kotlin", []string{"kt", "kts"}},
+	{"groovy", []string{"groovy", "gradle", "gvy", "gy"}},
+	{"c", []string{"c"}},
+	{"cpp", []string{"cpp", "cc", "cxx", "c++", "h", "hpp", "hh", "hxx", "h++", "ipp", "tcc", "inl"}},
+	{"swift", []string{"swift"}},
 }
 
 // Languages lists, sorted, the languages Symbols can parse.
 func Languages() []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, l := range extLang {
-		if !seen[l] {
-			seen[l] = true
-			out = append(out, l)
-		}
+	out := make([]string, 0, len(langExts))
+	for _, e := range langExts {
+		out = append(out, e.lang)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Extensions returns the default file extensions of lang (lowercase, no
+// dot), or nil for a language without a grammar. The slice is a copy.
+func Extensions(lang string) []string {
+	for _, e := range langExts {
+		if e.lang == lang {
+			return append([]string(nil), e.exts...)
+		}
+	}
+	return nil
 }
 
 // ForPath returns the language for a file path by its extension
@@ -85,6 +92,12 @@ func ForPath(p string) (lang string, ok bool) {
 	if ext == "" {
 		return "", false
 	}
-	lang, ok = extLang[ext[1:]]
-	return lang, ok
+	for _, e := range langExts {
+		for _, x := range e.exts {
+			if x == ext[1:] {
+				return e.lang, true
+			}
+		}
+	}
+	return "", false
 }

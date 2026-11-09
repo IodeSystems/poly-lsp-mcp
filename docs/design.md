@@ -472,8 +472,11 @@ separate children that both run clangd, and the daemon serves several roots.
   helpers in `segment`, never import `symbols` back.
 - `segment.Symbols` omits `argument`, `return` and `annotation` entries: they
   are slices of a declaration, not declarations a chunker cuts at.
-- The extension table in `segment/languages.go` copies the defaults of
-  `config`. A change to one needs the same change in the other.
+- `segment/languages.go` owns the default extension -> language table for
+  the languages with a grammar. `config.Default` builds those entries from
+  `segment.Extensions`; config may import segment, never the reverse.
+  Languages without a grammar (yaml, json, proto, graphql, xml) stay in
+  config.
 
 ## Build, install, self-update
 

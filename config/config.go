@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/iodesystems/poly-lsp-mcp/segment"
 )
 
 // LSP describes how to launch a child language server. A nil *LSP means
@@ -151,25 +153,25 @@ func Default() *Config {
 		Languages: []Language{
 			{
 				Name:       "go",
-				Extensions: []string{"go"},
+				Extensions: segment.Extensions("go"),
 				LSP:        &LSP{Cmd: "gopls"},
 				TreeSitter: "go",
 			},
 			{
 				Name:       "typescript",
-				Extensions: []string{"ts", "tsx", "js", "jsx", "mjs", "cjs"},
+				Extensions: segment.Extensions("typescript"),
 				LSP:        &LSP{Cmd: "typescript-language-server", Args: []string{"--stdio"}},
 				TreeSitter: "typescript",
 			},
 			{
 				Name:       "python",
-				Extensions: []string{"py", "pyi"},
+				Extensions: segment.Extensions("python"),
 				LSP:        &LSP{Cmd: "pylsp"},
 				TreeSitter: "python",
 			},
 			{
 				Name:       "markdown",
-				Extensions: []string{"md", "markdown"},
+				Extensions: segment.Extensions("markdown"),
 				TreeSitter: "markdown",
 			},
 			{
@@ -189,7 +191,7 @@ func Default() *Config {
 				// can wire postgrestools / sqls / sql-language-server via
 				// poly-lsp-mcp.yaml if they want one.
 				Name:       "sql",
-				Extensions: []string{"sql", "psql"},
+				Extensions: segment.Extensions("sql"),
 				TreeSitter: "sql",
 			},
 			{
@@ -218,7 +220,7 @@ func Default() *Config {
 				// want LSP-resolved edges wire it via poly-lsp-mcp.yaml;
 				// the lexical + tree-sitter tiers work without it.
 				Name:       "java",
-				Extensions: []string{"java"},
+				Extensions: segment.Extensions("java"),
 				TreeSitter: "java",
 			},
 			{
@@ -229,7 +231,7 @@ func Default() *Config {
 				// Android repo those scripts are where module names and
 				// dependency coordinates live.
 				Name:       "kotlin",
-				Extensions: []string{"kt", "kts"},
+				Extensions: segment.Extensions("kotlin"),
 				TreeSitter: "kotlin",
 			},
 			{
@@ -241,7 +243,7 @@ func Default() *Config {
 				// alone — claiming "" would claim every LICENSE and
 				// Makefile in the tree, so Jenkinsfiles stay unrouted.
 				Name:       "groovy",
-				Extensions: []string{"groovy", "gradle", "gvy", "gy"},
+				Extensions: segment.Extensions("groovy"),
 				TreeSitter: "groovy",
 			},
 			{
@@ -249,7 +251,7 @@ func Default() *Config {
 				// without a compile_commands.json and simply fails to
 				// spawn when absent, exactly like gopls.
 				Name:       "c",
-				Extensions: []string{"c"},
+				Extensions: segment.Extensions("c"),
 				LSP:        &LSP{Cmd: "clangd"},
 				TreeSitter: "c",
 			},
@@ -262,7 +264,7 @@ func Default() *Config {
 				// The cost is cosmetic: a pure-C repo labels its headers
 				// "cpp".
 				Name:       "cpp",
-				Extensions: []string{"cpp", "cc", "cxx", "c++", "h", "hpp", "hh", "hxx", "h++", "ipp", "tcc", "inl"},
+				Extensions: segment.Extensions("cpp"),
 				LSP:        &LSP{Cmd: "clangd"},
 				TreeSitter: "cpp",
 			},
@@ -275,7 +277,7 @@ func Default() *Config {
 				// project needs a buildServer.json (xcode-build-server),
 				// which doctor and the setup notification point at.
 				Name:       "swift",
-				Extensions: []string{"swift"},
+				Extensions: segment.Extensions("swift"),
 				LSP:        &LSP{Cmd: "sourcekit-lsp"},
 				TreeSitter: "swift",
 			},

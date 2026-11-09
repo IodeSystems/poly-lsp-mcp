@@ -187,7 +187,7 @@ func declaresModule(dir, want string) bool {
 // dodges ETXTBSY when a copy of exe is already running.
 func rebuildSelf(dir, exe string) error {
 	tmp := fmt.Sprintf("%s.new.%d", exe, os.Getpid())
-	build := exec.Command("go", "build", "-o", tmp, ".")
+	build := exec.Command("go", "build", "-tags", "treesitter_cgo", "-o", tmp, ".")
 	build.Dir = dir
 	build.Stdout, build.Stderr = os.Stderr, os.Stderr
 	if err := build.Run(); err != nil {

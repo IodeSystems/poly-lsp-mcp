@@ -484,8 +484,9 @@ separate children that both run clangd, and the daemon serves several roots.
   with smacker's grammars converted by ts2go
   (`internal/ts/grammars/generate.sh`), about 10x slower to parse. The C
   runtime (smacker) is opt-in: `-tags treesitter_cgo` with `CGO_ENABLED=1`;
-  the tag without cgo falls back to pure Go. Release builds, `make dist`
-  and CI set the tag. `make build` / `make install` do not. gotreesitter's
+  the tag without cgo falls back to pure Go. Release builds, `make dist`,
+  `make build`, `make install`, the self-rebuild and CI set the tag; only a
+  bare `go install` gets pure Go. gotreesitter's
   bundled sql is a different grammar and its go/kotlin are newer revisions,
   hence the conversion.
 - **No `-X` stamp** (diverges from the canon CLI-12). Self-rebuild reads

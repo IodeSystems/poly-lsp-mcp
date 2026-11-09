@@ -26,14 +26,14 @@ default: build
 
 .PHONY: build
 build:
-	$(GO) build -o $(BINARY) .
+	$(GO) build -tags treesitter_cgo -o $(BINARY) .
 
 # Per-user bin dir on Linux and macOS. Built to a temp name and renamed
 # over the old binary, so a running copy is never half-written.
 .PHONY: install
 install:
 	@mkdir -p $(BINDIR)
-	$(GO) build -o $(BINDIR)/.$(BINARY).tmp .
+	$(GO) build -tags treesitter_cgo -o $(BINDIR)/.$(BINARY).tmp .
 	mv -f $(BINDIR)/.$(BINARY).tmp $(BINDIR)/$(BINARY)
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "warning: $(BINDIR) is not on PATH" >&2 ;; esac
 

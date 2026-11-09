@@ -130,9 +130,11 @@ From source, the binary lands at `~/.local/bin/poly-lsp-mcp` (`make install BIND
 change), on Linux and macOS. Without a checkout:
 `go install github.com/iodesystems/poly-lsp-mcp@latest` (to `~/go/bin`).
 
-Building from source needs only Go. The default build, `go install`
-included, parses with a pure-Go tree-sitter runtime. The C runtime is opt-in:
-with a C compiler, build with `-tags treesitter_cgo`. The pure-Go runtime has the same
+Building from source needs only Go. `make build` and `make install` use the
+C tree-sitter runtime (`-tags treesitter_cgo`; with no C compiler Go falls
+back to pure Go). A bare `go install github.com/iodesystems/poly-lsp-mcp@...`
+from outside a checkout gets the pure-Go runtime unless you pass
+`-tags treesitter_cgo`. The pure-Go runtime has the same
 grammars, but about 10x slower to parse and 6x slower to index, and source
 with syntax errors can recover into a different tree. A plain `go install` gets this runtime;
 `poly-lsp-mcp doctor` says which runtime a binary has. For the fast build,

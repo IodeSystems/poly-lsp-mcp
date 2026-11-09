@@ -1,4 +1,4 @@
-package symbols
+package segment
 
 import (
 	"strings"
@@ -126,7 +126,7 @@ func refinedClassSwift(node *sitter.Node, content []byte) (class string, branch,
 		// File scope: `let` is an immutable binding, the distinction
 		// kotlin's val and TypeScript's const draw.
 		if decl := node.Parent(); decl != nil {
-			if vb := firstNamedChildOfType(decl, "value_binding_pattern"); vb != nil && strings.HasPrefix(vb.Content(content), "let") {
+			if vb := FirstNamedChildOfType(decl, "value_binding_pattern"); vb != nil && strings.HasPrefix(vb.Content(content), "let") {
 				return "const", false, true
 			}
 		}
@@ -143,8 +143,8 @@ func swiftName(node *sitter.Node, content []byte) (string, *sitter.Node, bool) {
 	switch node.Type() {
 	case "import_declaration":
 		// `import Foundation`, `import struct Foo.Bar`: the last segment.
-		if id := firstNamedChildOfType(node, "identifier"); id != nil {
-			if leaf := lastNamedChildOfType(id, "simple_identifier"); leaf != nil {
+		if id := FirstNamedChildOfType(node, "identifier"); id != nil {
+			if leaf := LastNamedChildOfType(id, "simple_identifier"); leaf != nil {
 				return leaf.Content(content), leaf, true
 			}
 		}
@@ -176,7 +176,7 @@ func swiftName(node *sitter.Node, content []byte) (string, *sitter.Node, bool) {
 	case "pattern", "protocol_property_declaration":
 		pat := node
 		if node.Type() == "protocol_property_declaration" {
-			if pat = firstNamedChildOfType(node, "pattern"); pat == nil {
+			if pat = FirstNamedChildOfType(node, "pattern"); pat == nil {
 				return "", nil, true
 			}
 		}
@@ -273,10 +273,10 @@ func swiftTypeSegment(full string) (seg, alias string) {
 // pattern symbol. The attribute's type name is the leaf; the type as
 // written (Foo.Wrapper) is the alias.
 func swiftAttributes(node *sitter.Node, content []byte) []annMark {
-	mods := firstNamedChildOfType(node, "modifiers")
+	mods := FirstNamedChildOfType(node, "modifiers")
 	if mods == nil && node.Type() == "pattern" {
 		if p := node.Parent(); p != nil && p.Type() == "property_declaration" && countNamedOfType(p, "pattern") == 1 {
-			mods = firstNamedChildOfType(p, "modifiers")
+			mods = FirstNamedChildOfType(p, "modifiers")
 		}
 	}
 	if mods == nil {
@@ -288,11 +288,11 @@ func swiftAttributes(node *sitter.Node, content []byte) []annMark {
 		if attr.Type() != "attribute" {
 			continue
 		}
-		ut := firstNamedChildOfType(attr, "user_type")
+		ut := FirstNamedChildOfType(attr, "user_type")
 		if ut == nil {
 			continue
 		}
-		leaf := lastNamedChildOfType(ut, "type_identifier")
+		leaf := LastNamedChildOfType(ut, "type_identifier")
 		if leaf == nil {
 			continue
 		}

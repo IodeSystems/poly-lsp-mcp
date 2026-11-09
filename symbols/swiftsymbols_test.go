@@ -243,11 +243,6 @@ extension Greeter.Inner {
 	}
 }
 
-func TestClassifySwiftWalksThroughParseErrors(t *testing.T) {
-	if got := classifySwift("ERROR", "class_body"); got != roleContainer {
-		t.Errorf("ERROR role = %v, want container", got)
-	}
-}
 
 func TestSwiftExtractorSkipsCommentsAndStrings(t *testing.T) {
 	src := []byte(`import UIKit

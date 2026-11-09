@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
+	"github.com/iodesystems/poly-lsp-mcp/segment"
 )
 
 // Signature-refactor support for the languages added after the original
@@ -123,13 +124,13 @@ var kotlinLangOps = &langOps{
 
 func extractKotlinSignature(decl *sitter.Node, _ []byte) (*FunctionSignature, error) {
 	// This grammar exposes no field names, so the three pieces are told
-	// apart by position — see kotlinFuncParts.
-	_, name, result := kotlinFuncParts(decl)
+	// apart by position — see segment.KotlinFuncParts.
+	_, name, result := segment.KotlinFuncParts(decl)
 	if name == nil {
 		return nil, fmt.Errorf("kotlin function_declaration missing name")
 	}
 	sig := &FunctionSignature{Type: decl.Type(), Name: nodeRange(name)}
-	params := firstNamedChildOfType(decl, "function_value_parameters")
+	params := segment.FirstNamedChildOfType(decl, "function_value_parameters")
 	if params == nil {
 		return nil, fmt.Errorf("kotlin function_declaration missing parameter list")
 	}
@@ -137,7 +138,7 @@ func extractKotlinSignature(decl *sitter.Node, _ []byte) (*FunctionSignature, er
 	if result != nil {
 		sig.Result = nodeRange(result)
 	}
-	if body := firstNamedChildOfType(decl, "function_body"); body != nil {
+	if body := segment.FirstNamedChildOfType(decl, "function_body"); body != nil {
 		sig.BodyStart = int(body.StartByte())
 	} else {
 		sig.BodyStart = int(decl.EndByte())
@@ -157,22 +158,22 @@ func extractKotlinCallSite(call *sitter.Node, content []byte, name string) (Call
 		}
 	case "navigation_expression":
 		// obj.method(...) — the called name is the navigation suffix.
-		suffix := lastNamedChildOfType(callee, "navigation_suffix")
+		suffix := segment.LastNamedChildOfType(callee, "navigation_suffix")
 		if suffix == nil {
 			return CallSite{}, false
 		}
-		id := firstNamedChildOfType(suffix, "simple_identifier")
+		id := segment.FirstNamedChildOfType(suffix, "simple_identifier")
 		if id == nil || id.Content(content) != name {
 			return CallSite{}, false
 		}
 	default:
 		return CallSite{}, false
 	}
-	suffix := firstNamedChildOfType(call, "call_suffix")
+	suffix := segment.FirstNamedChildOfType(call, "call_suffix")
 	if suffix == nil {
 		return CallSite{}, false
 	}
-	args := firstNamedChildOfType(suffix, "value_arguments")
+	args := segment.FirstNamedChildOfType(suffix, "value_arguments")
 	if args == nil {
 		// A trailing-lambda call (`items.map { … }`) has no parenthesised
 		// argument list to rewrite.
@@ -282,7 +283,7 @@ var cLangOps = &langOps{
 		case "declaration", "field_declaration":
 			// A prototype or an in-class method declaration: only a
 			// declarator that is a FUNCTION qualifies.
-			return cFunctionDeclarator(n) != nil
+			return segment.CFunctionDeclarator(n) != nil
 		}
 		return false
 	},
@@ -301,11 +302,11 @@ var cLangOps = &langOps{
 }
 
 func extractCSignature(decl *sitter.Node, content []byte) (*FunctionSignature, error) {
-	fd := cFunctionDeclarator(decl)
+	fd := segment.CFunctionDeclarator(decl)
 	if fd == nil {
 		return nil, fmt.Errorf("%s has no function declarator", decl.Type())
 	}
-	name := cInnermostDeclarator(fd)
+	name := segment.CInnermostDeclarator(fd)
 	if name == nil {
 		return nil, fmt.Errorf("%s has no declared name", decl.Type())
 	}
@@ -313,7 +314,7 @@ func extractCSignature(decl *sitter.Node, content []byte) (*FunctionSignature, e
 	// target is the LEAF only — spanning the qualified name would delete
 	// the scope and silently detach the definition from its class.
 	if name.Type() == "qualified_identifier" {
-		if _, leaf := cQualifiedParts(name, content); leaf != nil {
+		if _, leaf := segment.CQualifiedParts(name, content); leaf != nil {
 			name = leaf
 		}
 	}

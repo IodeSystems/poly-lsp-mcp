@@ -5,44 +5,14 @@ import (
 	"fmt"
 
 	sitter "github.com/iodesystems/poly-lsp-mcp/internal/ts"
+	"github.com/iodesystems/poly-lsp-mcp/segment"
 )
 
 // LanguageByName returns the tree-sitter language object for one of our
 // supported code languages, or nil for languages we only handle via the
 // lexical extractor (markdown, yaml, json). Used by document_structure
 // and any future caller that needs to parse a file's syntax tree.
-func LanguageByName(name string) *sitter.Language {
-	switch name {
-	case "go":
-		return sitter.Go()
-	case "typescript":
-		return sitter.TSX()
-	case "python":
-		return sitter.Python()
-	case "sql":
-		return sitter.SQL()
-	case "java":
-		return sitter.Java()
-	case "c":
-		return sitter.C()
-	case "cpp":
-		return sitter.Cpp()
-	case "kotlin":
-		return sitter.Kotlin()
-	case "groovy":
-		return sitter.Groovy()
-	case "swift":
-		return sitter.Swift()
-	case "markdown":
-		// The BLOCK grammar. It yields nested `section` nodes whose span
-		// covers a heading AND its body, which is exactly the unit a
-		// document is navigated by. The companion inline grammar (emphasis,
-		// links, code spans) is a separate tree and is not needed for
-		// structure.
-		return sitter.Markdown()
-	}
-	return nil
-}
+func LanguageByName(name string) *sitter.Language { return segment.LanguageByName(name) }
 
 // StructureNode describes one top-level construct in a file. Two
 // ranges live on the same node by design:
@@ -106,7 +76,7 @@ func StructureNodes(language string, content []byte) ([]StructureNode, error) {
 			EndLine:   int(ep.Row) + 1,
 			EndCol:    int(ep.Column) + 1,
 		}
-		if nameNode := findStructureNameNode(child); nameNode != nil {
+		if nameNode := segment.FindStructureNameNode(child); nameNode != nil {
 			entry.Name = nameNode.Content(content)
 			nsp := nameNode.StartPoint()
 			nep := nameNode.EndPoint()
@@ -133,7 +103,7 @@ func StructureNodes(language string, content []byte) ([]StructureNode, error) {
 // the language has no grammar.
 //
 // The returned StructureNode has both ranges populated using the same
-// findStructureNameNode logic as the top-level structure traversal.
+// segment.FindStructureNameNode logic as the top-level structure traversal.
 func EnclosingStructureNode(language string, content []byte, line, col int) (*StructureNode, error) {
 	lang := LanguageByName(language)
 	if lang == nil {
@@ -174,7 +144,7 @@ func EnclosingStructureNode(language string, content []byte, line, col int) (*St
 			EndLine:   int(ep.Row) + 1,
 			EndCol:    int(ep.Column) + 1,
 		}
-		if nameNode := findStructureNameNode(child); nameNode != nil {
+		if nameNode := segment.FindStructureNameNode(child); nameNode != nil {
 			out.Name = nameNode.Content(content)
 			nsp := nameNode.StartPoint()
 			nep := nameNode.EndPoint()
@@ -199,49 +169,4 @@ func pointInRange(row, column uint32, sp, ep sitter.Point) bool {
 		return false
 	}
 	return true
-}
-
-// findStructureNameNode returns the identifier node that names a
-// top-level declaration, or nil if the grammar doesn't expose one.
-// Preferences in order:
-//
-//  1. A direct `name` field (most function_declaration etc. have one).
-//  2. A direct *_identifier child.
-//  3. The same lookups one level deeper, for declarations that wrap
-//     the name an extra layer — type_declaration → type_spec →
-//     type_identifier in Go, or export_statement →
-//     {function,class,type_alias}_declaration →
-//     {identifier,type_identifier} in TypeScript.
-//
-// Depth is bounded so we don't descend into function bodies and pick
-// up some random local identifier.
-func findStructureNameNode(node *sitter.Node) *sitter.Node {
-	return findNameNodeDepth(node, 3)
-}
-
-func findNameNodeDepth(node *sitter.Node, depth int) *sitter.Node {
-	if depth <= 0 || node == nil {
-		return nil
-	}
-	if name := node.ChildByFieldName("name"); name != nil {
-		return name
-	}
-	count := int(node.NamedChildCount())
-	for i := range count {
-		c := node.NamedChild(i)
-		switch c.Type() {
-		case "identifier", "type_identifier", "field_identifier",
-			"package_identifier", "property_identifier",
-			// Kotlin spells every non-type name simple_identifier.
-			"simple_identifier":
-			return c
-		}
-	}
-	for i := range count {
-		c := node.NamedChild(i)
-		if found := findNameNodeDepth(c, depth-1); found != nil {
-			return found
-		}
-	}
-	return nil
 }

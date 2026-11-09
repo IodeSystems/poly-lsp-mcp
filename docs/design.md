@@ -457,6 +457,24 @@ separate children that both run clangd, and the daemon serves several roots.
   (`multiplex/limits.go`) to move it.
 - Not changed: proactive open, and the `c`/`cpp` children stay separate.
 
+## Segmenter package
+
+- `segment` exists so other modules (raglit, dun) can cut source files into
+  declaration spans and Markdown sections without linking the rest of this
+  module. `symbols` imports `config`, `internal/git` and `yaml.v3`; a
+  consumer that only wants spans would pay for all of them.
+- The symbol walk lives in `segment`. `symbols.FileSymbols` calls it, so the
+  span list and the symbol list cannot drift. The tree-sitter walk was moved,
+  not copied.
+- Import rule: `segment` imports only `internal/ts` (the tree-sitter adapter)
+  and the stdlib. No `config`, `internal/git`, yaml, LSP or MCP package.
+  `TestDepsExcludeHeavyPackages` fails on a violation. Keep new shared walk
+  helpers in `segment`, never import `symbols` back.
+- `segment.Symbols` omits `argument`, `return` and `annotation` entries: they
+  are slices of a declaration, not declarations a chunker cuts at.
+- The extension table in `segment/languages.go` copies the defaults of
+  `config`. A change to one needs the same change in the other.
+
 ## Build, install, self-update
 
 - `go install` needs only Go. With a C compiler the binary links smacker's C

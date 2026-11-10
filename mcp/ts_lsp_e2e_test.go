@@ -74,6 +74,7 @@ func tsEditValidate(t *testing.T, trust bool) {
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetProactiveOpen(true)
 	srv.SetManager(multiplex.NewManager(reg))
 	srv.SetValidateEdits(true)
 	srv.SetDiagnosticWait(60 * time.Second)

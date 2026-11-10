@@ -83,7 +83,7 @@ func main() {
 	// Step 7 (optional): tweak background-goroutine policy. Defaults
 	// are usually right; override when embedding for a constrained
 	// environment.
-	//   srv.SetProactiveOpen(false)   // skip didOpen-on-init walk
+	//   srv.SetProactiveOpen(true)    // opt in: didOpen-on-init walk
 	//   srv.SetGitPrewarm(false)      // skip ancestor-branch cache prewarm
 	//   srv.SetDiagnosticWait(2 * time.Second)
 

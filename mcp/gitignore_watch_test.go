@@ -120,6 +120,7 @@ func TestProactiveOpenSkipsGitignored(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetProactiveOpen(true)
 	srv.SetManager(multiplex.NewManager(reg))
 	sIn, cOut := io.Pipe()
 	cIn, sOut := io.Pipe()

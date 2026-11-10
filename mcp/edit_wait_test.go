@@ -499,9 +499,33 @@ func TestCallToolValidateWaitIsPerSession(t *testing.T) {
 	}
 }
 
-// waitFirstPublish blocks until the child has published path once.
+// openOnChild sends didOpen for path, as an earlier tool call would
+// (proactive open is off by default). It waits for the child to start.
+func openOnChild(t *testing.T, s *mcpSession, path string) {
+	t.Helper()
+	uri := pathToURI(path)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if child := s.srv.manager.RouteByURI(uri); child != nil {
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.srv.notifyChildOfOpen(child, uri, content)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child did not start within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitFirstPublish opens path on the child and blocks until the child
+// has published it once.
 func waitFirstPublish(t *testing.T, s *mcpSession, path string) {
 	t.Helper()
+	openOnChild(t, s, path)
 	uri := pathToURI(path)
 	deadline := time.Now().Add(5 * time.Second)
 	for s.srv.manager.Diagnostics().Gen(uri) == 0 {
@@ -666,6 +690,7 @@ func TestEditXcode14Replay(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, path := fakeDiagSessionTrust(t, mode, 5*time.Second, "package main\n\nfunc main() {}\n", trust)
 			// The open's publish waits for the load: the edit is a didChange.
+			openOnChild(t, s, path)
 			time.Sleep(200 * time.Millisecond)
 			orig, _ := os.ReadFile(path)
 			m := editMain(t, s, path, brokenMain)

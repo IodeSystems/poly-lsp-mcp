@@ -799,11 +799,17 @@ func (s *Server) buildIndex() error {
 	}
 	idx, err := symbols.Build(root, s.registry, symbols.WithCache(s.parseCache), symbols.WithCost(cost),
 		symbols.WithIgnores(ign), symbols.WithBudget(s.indexBudget), symbols.WithManifest(manifest),
-		symbols.WithInclude(s.includes), symbols.WithSymlinkDepth(s.symlinkDep))
+		symbols.WithInclude(s.includes), symbols.WithSymlinkDepth(s.symlinkDep),
+		symbols.WithMaxFiles(s.maxFiles))
 	if err != nil {
 		var be *symbols.BudgetError
 		if errors.As(err, &be) {
 			s.setIndexCost(be.Report) // the trace
+		}
+		var tm *symbols.TooManyFilesError
+		if errors.As(err, &tm) {
+			s.setIndexCost(symbols.CostReport{})
+			return tm
 		}
 		return fmt.Errorf("index build failed for %s: %w", root, err)
 	}

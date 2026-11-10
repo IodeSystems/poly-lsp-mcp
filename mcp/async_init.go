@@ -129,6 +129,12 @@ func (s *Server) notifyIndexState(err error, took time.Duration) {
 			data["repos"] = np.Repos
 			data["reposTotal"] = np.Total
 		}
+		var tm *symbols.TooManyFilesError
+		if errors.As(err, &tm) {
+			data["reason"] = symbols.LeftTooManyFiles
+			data["maxFiles"] = tm.Cap
+			data["repos"] = tm.Repos
+		}
 	}
 	s.sendNotification("notifications/message", map[string]any{
 		"level":  level,
@@ -224,6 +230,10 @@ func (s *Server) indexRemedy(err error) string {
 	if errors.As(err, &np) {
 		return np.Remedy()
 	}
+	var tm *symbols.TooManyFilesError
+	if errors.As(err, &tm) {
+		return tm.Remedy()
+	}
 	return "fix the cause above and restart the server"
 }
 
@@ -251,6 +261,10 @@ func (s *Server) indexFailure(err error) string {
 	if errors.As(err, &np) {
 		// Detail carries the repositories found and the remedy.
 		return "poly-lsp: the workspace index was not built: " + np.Detail()
+	}
+	var tm *symbols.TooManyFilesError
+	if errors.As(err, &tm) {
+		return "poly-lsp: the workspace index was not built: " + tm.Detail()
 	}
 	return msg + "remedy: " + s.indexRemedy(err)
 }

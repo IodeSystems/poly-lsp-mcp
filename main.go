@@ -56,6 +56,11 @@ func main() {
 		fmt.Fprint(os.Stderr, "poly-lsp-mcp: "+np.Detail())
 		os.Exit(1)
 	}
+	var tm *symbols.TooManyFilesError
+	if errors.As(err, &tm) {
+		fmt.Fprint(os.Stderr, "poly-lsp-mcp: "+tm.Detail())
+		os.Exit(1)
+	}
 	fmt.Fprintln(os.Stderr, "poly-lsp-mcp:", err)
 	os.Exit(1)
 }

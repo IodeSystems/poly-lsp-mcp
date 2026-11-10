@@ -925,6 +925,19 @@ type buildConfig struct {
 	// else DefaultSymlinkDepth.
 	symlinkDepth    int
 	symlinkDepthSet bool
+	// maxFiles is the per-root file-count cap, 0 = none. See WithMaxFiles.
+	maxFiles int
+	// counting makes this build a count pass: the same selection as the real
+	// one, nothing read or indexed, ending at maxFiles+1.
+	counting bool
+}
+
+// WithMaxFiles refuses a root whose selected file set is over n with a
+// *TooManyFilesError, before anything is read. The count runs the build's own
+// selection (include, exclude, skipped dirs, ignores, nested repositories,
+// the manifest or the walk), so it cannot disagree with it. 0 = no cap.
+func WithMaxFiles(n int) BuildOption {
+	return func(cfg *buildConfig) { cfg.maxFiles = n }
 }
 
 // WithManifest indexes the files git lists instead of walking root. nil
@@ -1026,6 +1039,16 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 	for _, o := range opts {
 		o(&cfg)
 	}
+	if cfg.maxFiles > 0 && !cfg.counting {
+		// Count pass first: same options, then counting on, a throwaway cost,
+		// no budget, no cache.
+		count := append(append([]BuildOption{}, opts...), func(c *buildConfig) {
+			c.counting, c.cost, c.budget, c.cache = true, NewBuildCost(), Budget{}, nil
+		})
+		if _, err := Build(root, reg, count...); err != nil {
+			return nil, err
+		}
+	}
 	idx := NewIndex()
 	// Resolved once: one git invocation per build, not per entry. nil
 	// when root is not a repo or git is unavailable, in which case the
@@ -1055,7 +1078,8 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		defer cfg.cost.end()
 	}
 	read, counted, over, stopped := 0, 0, false, false
-	dupes := 0 // files a link led back to, already indexed
+	dupes := 0    // files a link led back to, already indexed
+	selected := 0 // count pass: files the build would index
 	shadow := reg.NewShadowChecker()
 
 	// realRoot is root with its symlinks resolved, so a link's target can be
@@ -1146,6 +1170,14 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		}
 		if indexed[key] {
 			dupes++ // reached once already, through a link
+			return nil
+		}
+		if cfg.counting {
+			indexed[key] = true
+			selected++
+			if selected > cfg.maxFiles {
+				return fs.SkipAll
+			}
 			return nil
 		}
 		if cfg.cost != nil {
@@ -1422,6 +1454,23 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 		if follow(l.path, l.phys, 1, open) == fs.SkipAll {
 			break
 		}
+	}
+	if cfg.counting {
+		if selected <= cfg.maxFiles {
+			return nil, nil
+		}
+		e := &TooManyFilesError{Root: root, Files: selected, Cap: cfg.maxFiles}
+		if cfg.manifest != nil {
+			for _, n := range cfg.manifest.Nested {
+				if n.Reason == git.NestedRepo && !(inc.Covers(n.Dir) || inc.OnWay(n.Dir)) {
+					e.Repos++
+					if len(e.Dirs) < 3 {
+						e.Dirs = append(e.Dirs, n.Dir)
+					}
+				}
+			}
+		}
+		return nil, e
 	}
 	if over {
 		cfg.cost.end()

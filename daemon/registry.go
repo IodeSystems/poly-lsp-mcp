@@ -66,6 +66,7 @@ type Registry struct {
 	// across roots. Scaffold: nothing reads either yet.
 	proactiveOpen    bool
 	indexConcurrency int
+	buildSem         mcp.BuildSlots
 
 	// hub fans each root's notifications out to the sessions holding it.
 	hub *hub
@@ -177,17 +178,19 @@ type entry struct {
 // every hosted server (per-connection policy overrides are a later slice).
 func NewRegistry(cfg *config.Config, reg *config.Registry, readOnly, validate bool) *Registry {
 	return &Registry{
-		cfg:       cfg,
-		reg:       reg,
-		cache:     symbols.NewParseCache(),
-		cachePath: filepath.Join(ConfigHome(), "cache.gob"),
-		readOnly:  readOnly,
-		validate:  validate,
-		lspGrace:  DefaultRootLSPGrace,
-		idleCap:   DefaultIdleRootsMB << 20,
-		idx:       IndexDefaults{SymlinkDepth: symbols.DefaultSymlinkDepth},
-		hub:       newHub(),
-		servers:   map[string]*entry{},
+		cfg:              cfg,
+		reg:              reg,
+		cache:            symbols.NewParseCache(),
+		cachePath:        filepath.Join(ConfigHome(), "cache.gob"),
+		readOnly:         readOnly,
+		validate:         validate,
+		lspGrace:         DefaultRootLSPGrace,
+		idleCap:          DefaultIdleRootsMB << 20,
+		idx:              IndexDefaults{SymlinkDepth: symbols.DefaultSymlinkDepth},
+		hub:              newHub(),
+		indexConcurrency: 1,
+		buildSem:         mcp.NewBuildSlots(1),
+		servers:          map[string]*entry{},
 	}
 }
 
@@ -775,6 +778,7 @@ func (r *Registry) build(root string, e *entry, opts OpenOptions, cfg *config.Co
 	}
 	srv.SetSymlinkDepth(depth)
 	srv.SetMaxFiles(r.idx.MaxFiles)
+	srv.SetBuildSlots(r.buildSem)
 	budget := r.idx.Budget
 	if opts.Budget != "" {
 		budget = opts.Budget
@@ -869,7 +873,10 @@ func (r *Registry) SetProactiveOpen(on bool) { r.proactiveOpen = on }
 
 // SetIndexConcurrency sets --index-concurrency: how many index builds run
 // at once across roots. Call before Serve.
-func (r *Registry) SetIndexConcurrency(n int) { r.indexConcurrency = n }
+func (r *Registry) SetIndexConcurrency(n int) {
+	r.indexConcurrency = n
+	r.buildSem = mcp.NewBuildSlots(n)
+}
 
 // SetLSPRoots sets --lsp-roots for roots built after the call: auto = a
 // child LSP per project root, at most max running per language. Call

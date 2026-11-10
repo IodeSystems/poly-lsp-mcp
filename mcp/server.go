@@ -268,6 +268,8 @@ type Server struct {
 	proactiveOpen bool
 	// maxFiles is --max-files: the index's per-root file-count cap, 0 = none.
 	maxFiles int
+	// buildSem bounds concurrent index builds across roots; nil = unbounded.
+	buildSem BuildSlots
 
 	// legacyTools / readOnly are remembered so SetLegacyTools and SetReadOnly
 	// compose in either call order: each re-registers the base surface, then
@@ -727,6 +729,17 @@ func (s *Server) SetQuiet(q bool) { s.quiet = q }
 // containment queries normally and silently reports no references at
 // all — the failure looks like an empty result, not an error.
 func (s *Server) BuildIndex() error {
+	// A refusal is instant: it neither waits for a build slot nor takes one.
+	if root := s.getRoot(); root != "" && !s.indexAnyway {
+		if np := symbols.CheckProjectRoot(root); np != nil {
+			s.setIndexCost(symbols.CostReport{})
+			return np
+		}
+	}
+	return s.runBuild(s.buildIndex)
+}
+
+func (s *Server) buildIndex() error {
 	root := s.getRoot()
 	if root == "" {
 		return errors.New("no workspace root configured")

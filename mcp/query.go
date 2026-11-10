@@ -107,7 +107,7 @@ type treeNode struct {
 	// on one line, and collapsing them would drop a real edge. Only the
 	// dedupe in dedupGenerated reads it.
 	refCol  int
-	refKind string // "call" | "type" | "import" | ""  (the KIND axis)
+	refKind string      // "call" | "type" | "import" | ""  (the KIND axis)
 	refPos  string      // "return" | "param" | "field" | "var" | ""  (the POSITION axis)
 	refConf string      // refLexical (name-unique) | refLSP (child LSP settled it) | refUnsettled (ambiguous guess)
 	refFar  []*treeNode // the far end(s) — >1 only under name collisions
@@ -1760,7 +1760,7 @@ var languageClassAliases = map[string]string{
 	"graphql": "graphql", "gql": "graphql",
 	"java": "java", "xml": "xml", "kotlin": "kotlin", "kt": "kotlin", "groovy": "groovy", "gradle": "groovy",
 	"swift": "swift",
-	"c": "c", "cpp": "cpp", "c++": "cpp", "cxx": "cpp", "cc": "cpp",
+	"c":     "c", "cpp": "cpp", "c++": "cpp", "cxx": "cpp", "cc": "cpp",
 }
 
 func knownLanguageClass(c string) bool { _, ok := languageClassAliases[c]; return ok }
@@ -5726,7 +5726,7 @@ func unsupportedFlagErr(c byte) error {
 	// CLI flag name is the common case that lands here — so answer that
 	// reading first rather than listing flags at someone who wanted none.
 	if c == '-' {
-		return fmt.Errorf("%s", "a pattern beginning with `-` is read as flags — end the flags with `--` first, " +
+		return fmt.Errorf("%s", "a pattern beginning with `-` is read as flags — end the flags with `--` first, "+
 			"as in ::grep('-E -- --docker'). Supported flags: -i -w -E -F -v -n -r, and -A<n>/-B<n>/-C<n> in ::grep")
 	}
 	return fmt.Errorf("unsupported flag %q — supported: -i -w -E -F -v -n -r, and -A<n>/-B<n>/-C<n> in ::grep. "+

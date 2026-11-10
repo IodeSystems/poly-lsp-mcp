@@ -10,11 +10,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 )
 
 // Config parameterizes the daemon server.
@@ -39,7 +42,7 @@ type Config struct {
 	IdleExit time.Duration
 	// MemoryLimitMB is --memory-limit-mb: the daemon's GOMEMLIMIT in MiB,
 	// applied only when $GOMEMLIMIT is unset. 0 = auto (min(2 GiB, 10% of
-	// RAM)). Scaffold: nothing applies it yet.
+	// RAM).
 	MemoryLimitMB int64
 
 	// stop ends the daemon as SIGTERM does (tests, which serve in-process).
@@ -111,6 +114,7 @@ var (
 // SIGINT/SIGTERM or a takeover by a new build, then tears down hosted
 // servers gracefully. It is the process `poly-lsp-mcp daemon` becomes.
 func Serve(cfg Config) error {
+	applyMemoryLimit(cfg.MemoryLimitMB)
 	h := &host{
 		allow: cfg.Allow, reg: cfg.Reg, args: cfg.Args,
 		takeoverFrom: cfg.TakeoverFrom,
@@ -398,4 +402,31 @@ func listenUnix(socket string) (*credListener, error) {
 	// 0600 in the normal case, which is the point: it still holds if the
 	// mode bits are ever wrong.
 	return &credListener{Listener: ln, selfUID: os.Getuid(), bound: fi}, nil
+}
+
+// autoMemoryLimit is min(2 GiB, 10% of RAM); 0 when RAM is unknown.
+func autoMemoryLimit(totalRAM int64) int64 {
+	if totalRAM <= 0 {
+		return 0
+	}
+	return min(int64(2)<<30, totalRAM/10)
+}
+
+// applyMemoryLimit sets the daemon's GOMEMLIMIT unless $GOMEMLIMIT is set,
+// in which case the runtime has already applied it and it is left alone.
+func applyMemoryLimit(mb int64) {
+	if v := os.Getenv("GOMEMLIMIT"); v != "" {
+		log.Printf("daemon: memory limit from $GOMEMLIMIT=%s (%d bytes)", v, debug.SetMemoryLimit(-1))
+		return
+	}
+	limit := mb << 20
+	if mb <= 0 {
+		limit = autoMemoryLimit(multiplex.TotalRAM())
+	}
+	if limit <= 0 {
+		log.Printf("daemon: memory limit not set (RAM unknown)")
+		return
+	}
+	debug.SetMemoryLimit(limit)
+	log.Printf("daemon: memory limit %d MiB (GOMEMLIMIT)", limit>>20)
 }

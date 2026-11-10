@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
@@ -65,6 +66,14 @@ type Child struct {
 	// and Shutdown reap, so the result is memoized.
 	waitOnce sync.Once
 	waitErr  error
+
+	// ident is the process's identity at start, for the orphan record
+	// (child_orphans.go). The child leads its own process group (pgid =
+	// pid); killMu and reaped keep Kill from signalling that group id
+	// once the pid is reaped and may be reused.
+	ident  procIdent
+	killMu sync.Mutex
+	reaped bool
 }
 
 // Spawn starts the child process and begins draining its stdout/stderr.
@@ -105,7 +114,8 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 		return nil, err
 	}
 
-	if err := cmd.Start(); err != nil {
+	// Own process group; on Linux also killed when this process dies.
+	if err := startChild(cmd); err != nil {
 		return nil, fmt.Errorf("start %s: %w", lsp.Cmd, err)
 	}
 	if err := lowerPriority(cmd.Process.Pid); err != nil {
@@ -120,6 +130,8 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 		pending:    make(map[string]chan *jsonrpc.Message),
 		done:       make(chan struct{}),
 	}
+	c.ident, _ = readProcIdent(cmd.Process.Pid)
+	trackChild(c)
 
 	go c.readLoop(bufio.NewReader(stdout))
 	go c.drainStderr(stderr)
@@ -399,11 +411,22 @@ func (c *Child) Shutdown(ctx context.Context) error {
 }
 
 // Wait blocks until the read loop has terminated and the process has
-// exited, reaping it. Returns the process's exit error if any. Safe to
-// call more than once and from several goroutines.
+// exited, reaping it. Where the exit can be seen before the reap (Linux),
+// what is left of its process group (gopls telemetry, tsserver) is
+// killed. Returns the process's exit error if any. Safe to call more than
+// once and from several goroutines.
 func (c *Child) Wait() error {
 	<-c.done
-	c.waitOnce.Do(func() { c.waitErr = c.cmd.Wait() })
+	c.waitOnce.Do(func() {
+		if awaitExit(c.cmd.Process.Pid) == nil {
+			_ = c.Kill() // the leader is a zombie: its group id is still ours
+		}
+		c.killMu.Lock()
+		c.reaped = true
+		c.killMu.Unlock()
+		c.waitErr = c.cmd.Wait()
+		untrackChild(c)
+	})
 	return c.waitErr
 }
 
@@ -442,12 +465,20 @@ func (c *Child) Err() error {
 	return nil
 }
 
-// Kill forcibly terminates the child process. Safe to call multiple
-// times; the second call returns the underlying os error and is
-// usually ignored.
+// Kill forcibly terminates the child process and its process group. Safe
+// to call multiple times; a later call returns the underlying os error
+// and is usually ignored. Once Wait has begun reaping, only the process
+// is signalled (os.Process guards its own pid).
 func (c *Child) Kill() error {
 	if c.cmd.Process == nil {
 		return nil
+	}
+	c.killMu.Lock()
+	defer c.killMu.Unlock()
+	if !c.reaped {
+		if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL); err == nil {
+			return nil
+		}
 	}
 	return c.cmd.Process.Kill()
 }

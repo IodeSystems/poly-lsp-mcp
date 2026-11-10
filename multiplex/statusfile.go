@@ -19,6 +19,9 @@ type StatusFile struct {
 	Root      string        `json:"root"`
 	UpdatedAt string        `json:"updatedAt"` // RFC 3339
 	Children  []ChildStatus `json:"children"`
+	// Fleet is the process-wide child count, cap and summed RSS: the
+	// same for every root of one daemon.
+	Fleet *FleetStatus `json:"fleet,omitempty"`
 	// Index is what the owning server's last index build cost, by
 	// directory (symbols.CostReport), when the owner supplies it.
 	Index json.RawMessage `json:"index,omitempty"`
@@ -49,6 +52,10 @@ func (m *Manager) writeStatus() {
 		Root:      m.startCwd,
 		UpdatedAt: time.Now().Format(time.RFC3339),
 		Children:  m.Status(),
+	}
+	if m.Fleet != nil {
+		fs := m.Fleet.Status()
+		sf.Fleet = &fs
 	}
 	if m.StatusIndex != nil {
 		if raw, err := json.Marshal(m.StatusIndex()); err == nil {

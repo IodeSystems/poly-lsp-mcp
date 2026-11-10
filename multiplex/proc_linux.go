@@ -5,6 +5,7 @@ package multiplex
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -43,4 +44,9 @@ func readMemoryPSI() (float64, error) {
 		return 0, err
 	}
 	return parsePSISomeAvg10(string(b))
+}
+
+// readMacPressure: the macOS memory-pressure level does not exist here.
+func readMacPressure() (int, error) {
+	return 0, errors.New("memory pressure level: macOS only")
 }

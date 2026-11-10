@@ -12,3 +12,7 @@ func readVmRSS(int) (int64, error) {
 func readMemoryPSI() (float64, error) {
 	return 0, errors.New("memory PSI: unsupported on this platform")
 }
+
+func readMacPressure() (int, error) {
+	return 0, errors.New("memory pressure level: macOS only")
+}

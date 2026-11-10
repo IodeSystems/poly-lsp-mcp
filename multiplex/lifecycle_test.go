@@ -112,14 +112,14 @@ func TestMemoryStopIsNotACrash(t *testing.T) {
 func TestPressureStopsIdleLongestFirst(t *testing.T) {
 	m := startStub(t, Lifecycle{PSIThreshold: 20})
 	psi := 5.0
-	m.readPSI = func() (float64, error) { return psi, nil }
+	m.Fleet.readPSI = func() (float64, error) { return psi, nil }
 
-	m.checkLifecycle()
+	m.Fleet.check()
 	if st := status(t, m); st.State != "running" {
 		t.Fatalf("below threshold: %+v", st)
 	}
 	psi = 30
-	m.checkLifecycle()
+	m.Fleet.check()
 	if st := status(t, m); st.State != "stopped" || st.PressureStops != 1 {
 		t.Fatalf("above threshold: %+v", st)
 	}

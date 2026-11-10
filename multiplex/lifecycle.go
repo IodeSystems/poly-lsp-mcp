@@ -24,28 +24,29 @@ type Lifecycle struct {
 	// MaxRSS stops a child whose VmRSS is above this many bytes.
 	MaxRSS int64
 	// PSIThreshold: when /proc/pressure/memory "some avg10" is at or
-	// above this, stop one child per Interval — the one idle longest,
-	// then the largest. systemd-oomd acts at 50 by default; act first.
+	// above this, stop one child per Interval for the whole Fleet — the
+	// one idle longest, then the largest. systemd-oomd acts at 50 by default; act first.
 	// Linux only: elsewhere there is no PSI and this rule does nothing.
 	PSIThreshold float64
 	// MaxChildren caps concurrently running child LSPs across the whole
-	// process (the daemon: across every root). 0 = no cap. Per-language
-	// Manager.RootsMax stays. Scaffold: nothing reads it yet.
+	// process (the daemon: across every root); see Fleet. 0 = no cap.
+	// Per-language Manager.RootsMax stays.
 	MaxChildren int
 	// RSSBudgetPct bounds the summed RSS of all children, as a percentage
-	// of physical RAM. 0 = off. Scaffold: nothing reads it yet.
+	// of physical RAM; see Fleet. 0 = off.
 	RSSBudgetPct int
 	// MacPressureLevel: on macOS, the memory-pressure level (kern.memorystatus
 	// vm_pressure_level: 1 normal, 2 warn, 4 critical) at or above which one
-	// child is stopped, like PSIThreshold. 0 = off. Scaffold: nothing reads
-	// it yet.
+	// child is stopped per Interval, like PSIThreshold. 0 = off.
 	MacPressureLevel int
 	// Interval between checks. Zero = 10s.
 	Interval time.Duration
 }
 
+// enabled reports whether a per-Manager rule is on. The process-wide
+// rules run in the Fleet.
 func (l Lifecycle) enabled() bool {
-	return l.IdleStop > 0 || l.MaxRSS > 0 || l.PSIThreshold > 0
+	return l.IdleStop > 0 || l.MaxRSS > 0
 }
 
 func (l Lifecycle) interval() time.Duration {
@@ -66,6 +67,12 @@ const (
 	// StopNoClient: the daemon stopped a root's children a grace period
 	// after the root's last client left (daemon --root-lsp-grace).
 	StopNoClient = "no-client"
+	// StopCap: stopped, least recently used, to start another child under
+	// Lifecycle.MaxChildren (any root, any language).
+	StopCap = "cap"
+	// StopBudget: stopped, largest first, while the children's summed RSS
+	// was above Lifecycle.RSSBudgetPct of RAM.
+	StopBudget = "budget"
 )
 
 // ChildStats counts lifecycle events for one child. Crash restarts and
@@ -78,6 +85,8 @@ type ChildStats struct {
 	PressureStops int    `json:"pressureStops"`
 	LRUStops      int    `json:"lruStops,omitempty"`
 	ClientStops   int    `json:"clientStops,omitempty"` // StopNoClient
+	CapStops      int    `json:"capStops,omitempty"`    // StopCap
+	BudgetStops   int    `json:"budgetStops,omitempty"` // StopBudget
 	LastStop      string `json:"lastStop,omitempty"`
 	LastStopAt    string `json:"lastStopAt,omitempty"`  // RFC 3339
 	LastStopRSS   int64  `json:"lastStopRSS,omitempty"` // bytes, at stop time
@@ -144,6 +153,8 @@ func (m *Manager) wake(k childKey, sl *slot) *Child {
 	if perRoot {
 		m.makeRoom(k)
 	}
+	release := m.Fleet.admit(m, k)
+	defer release()
 
 	start := time.Now()
 	child, err := Spawn(name, lang.LSP, k.dir)
@@ -174,6 +185,7 @@ func (m *Manager) wake(k childKey, sl *slot) *Child {
 	sl.stopped = false
 	sl.stats.Starts++
 	m.mu.Unlock()
+	release() // counted in m.children now
 	go m.watch(k, child)
 
 	if m.OnStart != nil {
@@ -258,6 +270,10 @@ func (m *Manager) stopChild(k childKey, reason string, rss int64) bool {
 		sl.stats.LRUStops++
 	case StopNoClient:
 		sl.stats.ClientStops++
+	case StopCap:
+		sl.stats.CapStops++
+	case StopBudget:
+		sl.stats.BudgetStops++
 	}
 	sl.stats.LastStop = reason
 	sl.stats.LastStopAt = time.Now().Format(time.RFC3339)
@@ -322,7 +338,8 @@ type candidate struct {
 	rss  int64
 }
 
-// checkLifecycle runs one pass of the policy. Exposed to tests through
+// checkLifecycle runs one pass of the per-Manager policy (idle, MaxRSS);
+// pressure and the process-wide rules run in Fleet.check. Exposed to tests through
 // the package; the monitor calls it on a ticker.
 func (m *Manager) checkLifecycle() {
 	lc := m.Lifecycle
@@ -341,7 +358,6 @@ func (m *Manager) checkLifecycle() {
 	}
 	m.mu.RUnlock()
 
-	var left []candidate
 	for _, c := range cands {
 		c.rss, _ = m.rssOf(pids[c.key])
 		switch {
@@ -349,34 +365,8 @@ func (m *Manager) checkLifecycle() {
 			m.stopChild(c.key, StopIdle, c.rss)
 		case lc.MaxRSS > 0 && c.rss > lc.MaxRSS:
 			m.stopChild(c.key, StopMemory, c.rss)
-		default:
-			left = append(left, c)
 		}
 	}
-
-	if lc.PSIThreshold <= 0 || len(left) == 0 {
-		return
-	}
-	read := m.readPSI
-	if read == nil {
-		read = readMemoryPSI
-	}
-	avg10, err := read()
-	if err != nil || avg10 < lc.PSIThreshold {
-		return
-	}
-	// Idle longest first (minute resolution, so near-ties fall to
-	// size), then largest.
-	sort.Slice(left, func(i, j int) bool {
-		mi, mj := left[i].idle/time.Minute, left[j].idle/time.Minute
-		if mi != mj {
-			return mi > mj
-		}
-		return left[i].rss > left[j].rss
-	})
-	v := left[0]
-	log.Printf("multiplex: memory pressure some avg10=%.2f >= %.2f", avg10, lc.PSIThreshold)
-	m.stopChild(v.key, StopPressure, v.rss)
 }
 
 func (m *Manager) rssOf(pid int) (int64, error) {

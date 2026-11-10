@@ -55,6 +55,12 @@ type Manager struct {
 	// behavior). Set before Start.
 	Lifecycle Lifecycle
 
+	// Fleet applies the process-wide rules (MaxChildren, RSSBudgetPct,
+	// memory pressure) across every Manager that shares it. nil = Start
+	// makes one from Lifecycle for this Manager alone. Set before Start.
+	Fleet    *Fleet
+	ownFleet bool
+
 	// OnStart, if set, is called after a child for lang is (re)started
 	// by a crash restart or a lazy wake — not by the initial Start. The
 	// new child knows no documents; the callback replays didOpen for the
@@ -91,9 +97,8 @@ type Manager struct {
 	// before Start.
 	StatusIndex func() any
 
-	// Test seams; nil = read /proc.
+	// Test seam; nil = read /proc.
 	readRSS func(pid int) (int64, error)
-	readPSI func() (float64, error)
 
 	// Captured at Start so the watchdog can respawn with the same
 	// shape it was originally given.
@@ -187,6 +192,10 @@ func (m *Manager) restartPolicy() (initial, max time.Duration, attempts int) {
 func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []string) error {
 	m.startCwd = cwd
 	m.startRootURI = rootURI
+	if m.Fleet == nil {
+		m.Fleet, m.ownFleet = NewFleet(m.Lifecycle), true
+	}
+	m.Fleet.add(m)
 	for _, name := range languages {
 		lang := m.registry.LookupByName(name)
 		if lang == nil || lang.LSP == nil {
@@ -216,35 +225,44 @@ func (m *Manager) Start(ctx context.Context, cwd, rootURI string, languages []st
 			log.Printf("multiplex: %s: no client wants its child LSP; it starts on first use", name)
 			continue
 		}
-		child, err := Spawn(name, lang.LSP, cwd)
-		if err != nil {
-			log.Printf("multiplex: spawn %s (%s): %v", name, lang.LSP.Cmd, err)
-			continue
-		}
-		// Subscribe to publishDiagnostics BEFORE Initialize so any
-		// startup diagnostics aren't lost.
-		m.diagnostics.Attach(child)
-		caps, err := child.Initialize(ctx, rootURI)
-		if err != nil {
-			log.Printf("multiplex: initialize %s: %v", name, err)
-			_ = child.Kill()
-			_ = child.Wait()
-			continue
-		}
-		k := childKey{name, cwd}
-		m.mu.Lock()
-		m.children[k] = child
-		m.caps[name] = caps
-		m.slots[k] = newSlot()
-		m.mu.Unlock()
-		log.Printf("multiplex: %s ready (pid %d)", name, child.Pid())
-		go m.watch(k, child)
+		m.startEager(ctx, name, lang.LSP, cwd, rootURI)
 	}
 	if m.Lifecycle.enabled() || m.StatusDir != "" {
 		m.writeStatus()
 		go m.monitor()
 	}
 	return nil
+}
+
+// startEager spawns and initializes name's child at cwd for Start, after
+// the Fleet admits it. A failure is logged; the language is skipped.
+func (m *Manager) startEager(ctx context.Context, name string, lsp *config.LSP, cwd, rootURI string) {
+	k := childKey{name, cwd}
+	release := m.Fleet.admit(m, k)
+	defer release()
+	child, err := Spawn(name, lsp, cwd)
+	if err != nil {
+		log.Printf("multiplex: spawn %s (%s): %v", name, lsp.Cmd, err)
+		return
+	}
+	// Subscribe to publishDiagnostics BEFORE Initialize so any
+	// startup diagnostics aren't lost.
+	m.diagnostics.Attach(child)
+	caps, err := child.Initialize(ctx, rootURI)
+	if err != nil {
+		log.Printf("multiplex: initialize %s: %v", name, err)
+		_ = child.Kill()
+		_ = child.Wait()
+		return
+	}
+	m.mu.Lock()
+	m.children[k] = child
+	m.caps[name] = caps
+	m.slots[k] = newSlot()
+	m.mu.Unlock()
+	release()
+	log.Printf("multiplex: %s ready (pid %d)", name, child.Pid())
+	go m.watch(k, child)
 }
 
 // watch blocks on child.Done. If the child exits while the manager
@@ -584,6 +602,12 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	m.shutdownCalled = true
 	m.shutdownMu.Unlock()
 	m.removeStatus()
+	if m.Fleet != nil {
+		m.Fleet.remove(m)
+		if m.ownFleet {
+			m.Fleet.Close()
+		}
+	}
 
 	m.mu.Lock()
 	children := m.children

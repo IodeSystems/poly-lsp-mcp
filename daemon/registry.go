@@ -51,6 +51,7 @@ type Registry struct {
 	// lifecycle and statusDir are applied to every root's child-LSP
 	// manager.
 	lifecycle multiplex.Lifecycle
+	fleet     *multiplex.Fleet // lifecycle's process-wide rules, shared by every root
 	statusDir string
 	// lspRootsAuto / lspRootsMax: --lsp-roots for every root's server.
 	lspRootsAuto bool
@@ -786,6 +787,7 @@ func (r *Registry) build(root string, e *entry, opts OpenOptions, cfg *config.Co
 	// be shared across roots.
 	mgr := multiplex.NewManager(reg)
 	mgr.Lifecycle = r.lifecycle
+	mgr.Fleet = r.fleet
 	mgr.StatusDir = r.statusDir
 	srv.SetManager(mgr)
 	auto := r.lspRootsAuto
@@ -878,7 +880,10 @@ func (r *Registry) SetLSPRoots(auto bool, max int) {
 
 // SetLifecycle sets the child-LSP lifecycle policy for roots built after
 // the call. Call before Serve.
-func (r *Registry) SetLifecycle(lc multiplex.Lifecycle) { r.lifecycle = lc }
+func (r *Registry) SetLifecycle(lc multiplex.Lifecycle) {
+	r.fleet.Close()
+	r.lifecycle, r.fleet = lc, multiplex.NewFleet(lc)
+}
 
 // SetStatusDir makes roots built after the call write child-LSP status
 // files there. Call before Serve.
@@ -1027,4 +1032,5 @@ func (r *Registry) Close() {
 			e.srv.Shutdown()
 		}
 	}
+	r.fleet.Close()
 }

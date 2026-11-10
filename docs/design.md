@@ -457,6 +457,30 @@ separate children that both run clangd, and the daemon serves several roots.
   (`multiplex/limits.go`) to move it.
 - Not changed: proactive open, and the `c`/`cpp` children stay separate.
 
+## Child LSP fleet caps
+
+Per-root limits do not bound the daemon: N roots each stopped one child per
+pressure interval, and nothing capped the child count across roots. One
+`multiplex.Fleet` per daemon (the registry makes it; a stdio server's
+Manager makes its own) is shared by every root's Manager.
+
+- `--lsp-max-children` (default 4): checked before a child starts (Start,
+  wake). Over the cap, the least recently used child of any root and any
+  language is stopped (reason `cap`). `--lsp-roots-max` still applies per
+  language, first.
+- `--lsp-rss-budget-pct` (default 25): every interval, while the summed
+  child RSS is above that share of RAM, the largest child is stopped
+  (reason `budget`).
+- Memory pressure (PSI on Linux, `kern.memorystatus_vm_pressure_level` on
+  macOS) stops at most one child per interval for the whole daemon.
+- A child with a request in flight is never chosen. If every child is
+  busy, the new child starts over the cap and the daemon logs it: a
+  refused start would fail the request instead of degrading it.
+- Crash restarts are not admission-checked: the crashed child already held
+  its place.
+- `status --json` has a `fleet` object per status file (cap, running
+  count, summed RSS at the last check, budget bytes).
+
 ## Segmenter package
 
 - `segment` exists so other modules (raglit, dun) can cut source files into
@@ -499,7 +523,7 @@ separate children that both run clangd, and the daemon serves several roots.
   `@latest` (a proxy can cache an old `@latest`).
 - OS calls live in per-OS files (`multiplex/proc_*`, `daemon/zombie_*`,
   `daemon/peercred_*`). macOS RSS and zombie checks use `ps`; PSI is Linux
-  only; other OSes refuse peer creds. darwin is type-checked with
+  only, macOS reads the pressure level by sysctl; other OSes refuse peer creds. darwin is type-checked with
   `GOOS=darwin gopls check` (cgo blocks `go vet` cross-OS).
 - CLI: cobra, one file per command; the bare binary is the LSP server
   (editors start it with no args); an unknown first word is an error, not

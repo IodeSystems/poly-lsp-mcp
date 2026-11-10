@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // readVmRSS returns the resident set size of pid, in bytes, from ps.
@@ -26,4 +28,14 @@ func readVmRSS(pid int) (int64, error) {
 // readMemoryPSI: macOS has no PSI, so the pressure rule never fires.
 func readMemoryPSI() (float64, error) {
 	return 0, errors.New("memory PSI: not available on macOS")
+}
+
+// readMacPressure returns kern.memorystatus_vm_pressure_level: 1 normal,
+// 2 warn, 4 critical.
+func readMacPressure() (int, error) {
+	n, err := unix.SysctlUint32("kern.memorystatus_vm_pressure_level")
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }

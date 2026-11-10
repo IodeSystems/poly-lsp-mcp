@@ -208,7 +208,11 @@ func TestSwiftPrecisionWithSourceKitLSP(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
-	waitPublished(t, srv, filepath.Join(dir, "Sources/Demo/Run.swift"))
+	// Proactive open is off by default: open Run.swift as an earlier tool
+	// call would, then wait for sourcekit-lsp to settle on it.
+	runPath := filepath.Join(dir, "Sources/Demo/Run.swift")
+	openOnChild(t, s, runPath)
+	waitPublished(t, srv, runPath)
 	q := query(t, s, map[string]any{"selector": `#'Sources/Demo/Run.swift#run'::out.call`, "limit": 20})
 	var saw bool
 	for _, m := range q.Matches {

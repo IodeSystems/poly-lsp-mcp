@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 	"time"
 )
@@ -22,6 +24,8 @@ type StatusFile struct {
 	// Index is what the owning server's last index build cost, by
 	// directory (symbols.CostReport), when the owner supplies it.
 	Index json.RawMessage `json:"index,omitempty"`
+	// MemoryLimit is the process's GOMEMLIMIT in bytes; absent when unset.
+	MemoryLimit int64 `json:"memoryLimit,omitempty"`
 }
 
 // statusPath is unique per manager: one process (the daemon) can hold a
@@ -49,6 +53,9 @@ func (m *Manager) writeStatus() {
 		Root:      m.startCwd,
 		UpdatedAt: time.Now().Format(time.RFC3339),
 		Children:  m.Status(),
+	}
+	if lim := debug.SetMemoryLimit(-1); lim < math.MaxInt64 {
+		sf.MemoryLimit = lim
 	}
 	if m.StatusIndex != nil {
 		if raw, err := json.Marshal(m.StatusIndex()); err == nil {

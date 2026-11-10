@@ -5,7 +5,7 @@ A polyglot LSP + MCP server in Go. One binary, two surfaces:
 - **LSP server** (`poly-lsp-mcp`) — editor integration. Multiplexes child language servers (gopls / tsserver / pylsp / …) and falls back to tree-sitter where no child exists.
 - **MCP server** (`poly-lsp-mcp mcp`) — LLM agent integration. The same workspace machinery exposed as **three tools** (`node_query` / `node_read` / `node_edit`) over a unified node tree, driven by a **CSS-inspired selector language** that queries containment *and* the reference graph. Edits are **LSP-validated by default** so an agent can't leave the workspace broken — an edit that introduces a new error is reverted, and `--no-validate` turns that off.
 - **Query CLI** (`poly-lsp-mcp query <selector>`) — run one selector from the shell, no editor or agent.
-- **Child-LSP lifecycle** — a child LSP (gopls etc.) is stopped after `--lsp-idle-stop` (10m) without use, above `--lsp-max-rss-mb` (min(3072, 15% of RAM)), or under machine memory pressure (`--lsp-psi-threshold`, PSI some avg10 ≥ 20; Linux only — macOS has no PSI); it starts again on the next request and gets its open documents back. `poly-lsp-mcp status` lists every process's children: pid, RSS, idle time, restarts and stops with reasons.
+- **Child-LSP lifecycle** — a child LSP (gopls etc.) is stopped after `--lsp-idle-stop` (10m) without use, above `--lsp-max-rss-mb` (min(3 GiB, 15% of RAM)), over the daemon-wide caps (`--lsp-max-children` 4, `--lsp-rss-budget-pct` 25; see "Resource bounds"), or under machine memory pressure (`--lsp-psi-threshold`, PSI some avg10 ≥ 20 on Linux; `--lsp-mac-pressure-level` on macOS); it starts again on the next request and gets its open documents back. `poly-lsp-mcp status` lists every process's children: pid, RSS, idle time, restarts and stops with reasons.
 - **Daemon mode** (the default for `poly-lsp-mcp mcp`; `--no-daemon` opts out) — every client proxies to ONE shared per-user daemon over a unix socket, so the workspace index, the child-LSP fleet and the parse cache exist once instead of once per session. Auto-starts on first use; `poly-lsp-mcp daemon --stop` / `--restart` manage it, `--read-only` / `--validate` are enforced per connection, and a newer build takes over blue/green with the index warm. See [Daemon mode](#daemon-mode-the-default).
 
 The unique value-add over single-language LSPs is **cross-language linkage**: rename `UserID` in Go and the rename propagates through TypeScript, Python, YAML config values, proto messages, OpenAPI schemas, and prose that names code in `backticks` — declared bindings, schema-anchored sites, and `@ref` comment markers all stitch the languages together.
@@ -228,6 +228,24 @@ Speaks MCP (newline-delimited JSON-RPC) over stdio. The **default surface is thr
 | `node_read` | Read a node whole — a symbol's complete declaration (never truncated), or a file — via a `<file>#<sym>` address or a selector matching exactly one node. |
 | `node_edit` | Edit one node: `oldText`+`newText`, whole-node rewrite, `delete`, `rename` (workspace-wide, atomic), `params`/`return` (signature). Under `--validate`, an edit that introduces a new error is reverted. |
 
+### Resource bounds
+
+Defaults hold in daemon mode with no client flags; the daemon ignores a client's values for the lifecycle flags (`--lsp-*`, `--proactive-open`, `--max-files`).
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--lsp-max-children` | 4 | Child LSPs running across the whole daemon; over it, the least recently used is stopped. A busy child is never stopped, so the cap can be exceeded |
+| `--lsp-rss-budget-pct` | 25 | Summed child RSS above this share of RAM stops the largest child |
+| `--lsp-max-rss-mb` | min(3 GiB, 15% of RAM) | Per-child RSS limit; `0` = none |
+| `--lsp-idle-stop` | 10m | Stop a child with no request for this long; `0` = never |
+| `--lsp-mac-pressure-level` | 2 | macOS: stop one child per interval at this `kern.memorystatus_vm_pressure_level` or above |
+| `--proactive-open` | false | Open workspace files at initialize; off means diagnostics cover only files a tool has touched |
+| `--index-concurrency` | 1 | Parallel index builds; the index thread runs at low priority |
+| `--max-files` | 50000 | Per-root file cap; over it the root fails with `TooManyFilesError`. `0` = none. Not lifted by `--index-anyway`; `include` cannot narrow a root, use `--exclude` or open one repo |
+| `--memory-limit-mb` | 0 | Daemon Go memory limit; `0` = min(2 GiB, 10% of RAM), unless `$GOMEMLIMIT` is set |
+
+Child LSPs do not outlive the daemon: Linux sets Pdeathsig and a process group; every platform reaps recorded orphans at daemon start and every 30s. See `docs/known-limits.md` for the macOS gaps.
+
 ### Startup and index size
 
 `initialize` replies at once with `"index": {"state": "building"}`; the index, bindings and child LSPs come up behind it, and a tool call waits for them. When the bring-up ends, the server sends `notifications/message` from logger `poly-lsp-mcp/index` with `state` (`ready` or `failed`), `ms`, and `index`: files, bytes, and the heaviest directories by share of indexed bytes, each with its file count, bytes, time and the number of nested checkouts (directories with their own `.git`) under it.
@@ -302,7 +320,7 @@ The edit is formatted only after it is kept (a reverted edit never is): `textDoc
 
 `poly-lsp-mcp mcp --root <dir>` serves the MCP surface from one shared per-user daemon, so the index, the parse cache and the child LSPs exist once for every session on a root. `--daemon` is still accepted: it keeps daemon mode when an in-process-only setting (below) is also given.
 
-- **In-process.** `--no-daemon` (or `$POLY_LSP_NO_DAEMON=1`) builds the index and runs the child LSPs in the `mcp` process, one set per session. Settings the daemon does not take from a client also mean in-process, logged: `--legacy-tools`, `--read-char-budget` / `$POLY_LSP_READ_CHAR_BUDGET`, `--config` or a `poly-lsp-mcp.yaml` in the working directory, `--lsp-idle-stop`, `--lsp-max-rss-mb`, `--lsp-psi-threshold`, `--lsp-roots-max`. With an explicit `--daemon` they are ignored instead, logged. A daemon that cannot start (no writable `~/.poly-lsp`, a socket that does not come up within 10 s) is logged and the session runs in-process.
+- **In-process.** `--no-daemon` (or `$POLY_LSP_NO_DAEMON=1`) builds the index and runs the child LSPs in the `mcp` process, one set per session. Settings the daemon does not take from a client also mean in-process, logged: `--legacy-tools`, `--read-char-budget` / `$POLY_LSP_READ_CHAR_BUDGET`, `--config` or a `poly-lsp-mcp.yaml` in the working directory, `--lsp-idle-stop`, `--lsp-max-rss-mb`, `--lsp-psi-threshold`, `--lsp-roots-max`, `--lsp-max-children`, `--lsp-rss-budget-pct`, `--lsp-mac-pressure-level`, `--proactive-open`, `--max-files`. With an explicit `--daemon` they are ignored instead, logged. A daemon that cannot start (no writable `~/.poly-lsp`, a socket that does not come up within 10 s) is logged and the session runs in-process.
 
 - **Start.** Before it reads stdin the proxy dials the daemon and starts it if nothing answers (`poly-lsp-mcp daemon`, detached, log in `~/.poly-lsp/daemon.log`); a daemon binds its socket before it loads anything. Then it answers `initialize` at once and opens the root behind the reply. The serving daemon holds `~/.poly-lsp/daemon.lock` (flock): of two daemons started at once, one serves and the other exits. `~/.poly-lsp/daemon.json` names its pid, socket, build and flags. The daemon runs in its daemon home (`~/.poly-lsp`), not in the directory of the client that started it, and reads no `poly-lsp-mcp.yaml` from its working directory, also when started by hand: its languages are the built-in ones and `servers.yaml`. `daemon --config` takes an absolute path only; a relative one is refused. `doctor` prints the config the running daemon loaded. The socket is `$XDG_RUNTIME_DIR/poly-lsp/daemon.sock`, else `~/.poly-lsp/daemon.sock`; a path too long for a unix socket falls back to a short hashed name.
 - **Same as stdio.** Each root comes up as an async stdio server does, bounded by the index budget, with the `poly-lsp-mcp/index` (cost, `leftOut`) and `poly-lsp-mcp/setup` notifications, and a tool call waits for it. A client's `--exclude`, `--include`, `--index-budget`, `--index-anyway`, `--symlink-depth` and `--lsp-roots` travel with its open, and so do `--lsp-off` / `--lsp-on` and `--format-on-edit` / `--no-format-on-edit`, which never rebuild a root. One index per root, and the last open wins: an open whose options differ from those the root was built with (the daemon's defaults filled in) rebuilds it, and every client on the root gets a `poly-lsp-mcp/daemon` notice `rebuilding` (from, to); equal options keep the warm root. `daemon` takes the same flags for every root. A failed root answers tool calls with its post-mortem; a new client retries it. `daemon --restart` with no flags replays the running daemon's.
@@ -519,7 +537,7 @@ After every `node_edit` / `node_delete` / `node_refactor`:
 3. Sibling files in the same package that gain new diagnostics are rolled in by default.
 4. Each diagnostic carries `text` (range source), `context` (configurable lines around it), `enclosingNode` (containing tree-sitter declaration with name + decl ranges), and `references` (node_references-shape hits when the range is an identifier).
 
-The diagnostic store also feeds `poly-lsp-mcp://diagnostics` for workspace-wide health checks without an edit. A proactive workspace open at MCP initialize seeds the store so the resource is useful before the agent makes its first change.
+The diagnostic store also feeds `poly-lsp-mcp://diagnostics` for workspace-wide health checks without an edit. With `--proactive-open` (off by default) a workspace open at MCP initialize seeds the store; otherwise it holds files a tool has touched.
 
 ## `node_refactor` — composable signature ops
 

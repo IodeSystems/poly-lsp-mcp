@@ -143,6 +143,21 @@ entry here.
   other's opens (one index per root, last open wins).
 - A root's grace stop can race a returning client; its child LSP restarts on
   demand.
+- `--max-files` (50000) cannot be met by narrowing a root with `include`;
+  use `exclude`, open one repo, or raise the cap. `--index-anyway` does not
+  lift it.
+- macOS has no Pdeathsig: orphaned child LSPs live until the next daemon
+  start or the 30s reap.
+- The macOS reap checks the executable by the 16-byte process name, so two
+  programs with the same first 16 characters match.
+- The macOS index thread background priority and the memory-pressure
+  sysctl are untested on real hardware.
+- Linux grandchildren get no Pdeathsig (only the process group kill and the
+  reap reach them).
+- `--lsp-max-children` is exceeded when every child is busy: a busy child
+  is never stopped, and the new one starts anyway (logged).
+- With `--proactive-open` off (default), diagnostics cover only files a
+  tool has touched.
 - Each git worktree of one repository gets its own child LSP in the daemon
   (measured 0.8-2 GB RSS per gopls).
 

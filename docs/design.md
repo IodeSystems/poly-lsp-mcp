@@ -141,6 +141,18 @@ ground; the most verbose variant did worse (more grep scaffolding).
   LFS pointers and skipped dirs are left out per file; symlinks inside the
   root are followed after plain files (dedupe by real path), bounded by
   `--symlink-depth` (4).
+- **Per-root file cap, `--max-files` (default 50000)** (v0.5.1). A client
+  machine went down when the daemon indexed a multi-repo root. A count pass
+  runs the build's own selection before any read; over the cap `Build`
+  returns `TooManyFilesError` (remedy: open one repo, `exclude`, or raise
+  the cap). Independent of `--index-anyway`: that flag lifts the
+  not-a-project refusal only, and a root can pass it and still be too big.
+  `0` lifts the cap. `include` cannot narrow a root, so the remedy names
+  `exclude` / `--exclude` and up to three nested repo paths.
+- **The index thread is niced.** The build locks its goroutine to an OS
+  thread and lowers that thread's priority (Linux nice 10; macOS
+  `PRIO_DARWIN_THREAD` background). `--index-concurrency` (default 1)
+  bounds parallel builds, so one multi-repo open cannot take every core.
 - iOS trees: `Pods`, `Carthage`, `.build`, `.swiftpm`, `DerivedData`,
   `xcuserdata` and `*.xcassets` are skip dirs (vendored, generated, per-user,
   or one `Contents.json` per image). `.xcodeproj` contents and
@@ -325,6 +337,24 @@ warm index, one child-LSP fleet, one parse cache for every client. README
   (the path always names a listener). Upgrades are refused when not newer by
   `vcs.time`; a build that fails twice is refused (`upgrade-failures.json`);
   `exe.prev` keeps the last good binary.
+- **Defaults hold in daemon mode with no client flags** (v0.5.1). The daemon
+  ignores a client's lifecycle flags (`--lsp-*`, `--proactive-open`,
+  `--max-files`), so the safe values are the defaults of the daemon's own
+  flags, not something a client must pass. The runaway-daemon crash
+  happened with none passed.
+- **`--memory-limit-mb`** sets the daemon's Go soft memory limit. `0` (the
+  default) means auto: `min(2 GiB, 10% of RAM)`, unless `$GOMEMLIMIT` is
+  set, which wins.
+- **Child LSPs die with the daemon.** Linux: each child starts in its own
+  process group with Pdeathsig SIGKILL, from one spawner goroutine locked
+  to an OS thread that never exits (Pdeathsig fires when the forking
+  thread exits, golang/go#27505). Kill signals the group. macOS has no
+  Pdeathsig. Every platform also records children (pid, start time, boot
+  id, executable) in `<StatusDir>/<pid>.children`. Reaping runs when the
+  daemon sets its status dir and every 30s: for a record whose owner is
+  gone, SIGKILL each recorded process only if pid, start time, boot id and
+  executable still match (a recycled pid is not killed). A record whose
+  owner is alive (blue during a takeover) is left alone.
 - Build identity is `<rev12>[+dirty]/<sha256(exe)[:8]>` from build info and
   the executable; nothing is stamped at link time.
 
@@ -455,7 +485,10 @@ separate children that both run clangd, and the daemon serves several roots.
   argument that already sets `-j` (`-j=N`, `-jN`, `-j N`, `--j...`) wins.
 - The cap 8 is an assumption, not a measurement. Change `maxClangdJobs`
   (`multiplex/limits.go`) to move it.
-- Not changed: proactive open, and the `c`/`cpp` children stay separate.
+- Not changed: the `c`/`cpp` children stay separate.
+- `--proactive-open` is off by default (v0.5.1): opening every file at
+  initialize started a child on every root and fed the diagnostics store
+  before any tool asked. Diagnostics now cover files a tool has touched.
 
 ## Child LSP fleet caps
 
@@ -464,6 +497,9 @@ pressure interval, and nothing capped the child count across roots. One
 `multiplex.Fleet` per daemon (the registry makes it; a stdio server's
 Manager makes its own) is shared by every root's Manager.
 
+- Defaults (v0.5.1): `--lsp-max-rss-mb` is `min(3 GiB, 15% of RAM)` when
+  unset (an explicit value, `0` included, wins); `--lsp-idle-stop` is 10m.
+  Both come from the daemon's own flags.
 - `--lsp-max-children` (default 4): checked before a child starts (Start,
   wake). Over the cap, the least recently used child of any root and any
   language is stopped (reason `cap`). `--lsp-roots-max` still applies per
@@ -471,8 +507,11 @@ Manager makes its own) is shared by every root's Manager.
 - `--lsp-rss-budget-pct` (default 25): every interval, while the summed
   child RSS is above that share of RAM, the largest child is stopped
   (reason `budget`).
-- Memory pressure (PSI on Linux, `kern.memorystatus_vm_pressure_level` on
-  macOS) stops at most one child per interval for the whole daemon.
+- Memory pressure (PSI on Linux; on macOS `kern.memorystatus_vm_pressure_level`
+  at or above `--lsp-mac-pressure-level`, default 2) stops at most one child per interval for the whole daemon.
+- Stops are LRU (cap) or largest-first (budget); one pressure stop per
+  interval for the whole daemon, because per-root stops multiplied by the
+  number of roots.
 - A child with a request in flight is never chosen. If every child is
   busy, the new child starts over the cap and the daemon logs it: a
   refused start would fail the request instead of degrading it.

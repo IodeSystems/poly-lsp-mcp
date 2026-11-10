@@ -762,6 +762,7 @@ func (r *Registry) build(root string, e *entry, opts OpenOptions, cfg *config.Co
 	srv.SetQuiet(true) // one daemon log for every root: the notifications carry the report
 	srv.SetReadOnly(r.readOnly)
 	srv.SetValidateEdits(r.validate)
+	srv.SetProactiveOpen(r.proactiveOpen)
 	srv.SetParseCache(r.cache)
 	srv.SetUsageLog(r.usageLog)
 	srv.SetNotifier(func(method string, params map[string]any) { r.notify(root, e, method, params) })

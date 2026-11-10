@@ -267,8 +267,7 @@ func mcpCmd(l *loader) *cobra.Command {
 		mgr.StatusDir = daemon.StatusDir()
 		srv.SetManager(mgr)
 		srv.SetLSPRoots(roots.auto, roots.max)
-		// Carried, not applied yet: gates SetProactiveOpen (mcp/diagnostics.go).
-		_ = proactiveOpen()
+		srv.SetProactiveOpen(proactiveOpen())
 		return srv.Serve(os.Stdin, os.Stdout)
 	}
 	return cmd

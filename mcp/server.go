@@ -355,7 +355,7 @@ func New(reg *config.Registry, root string, declared []config.Binding, schemas [
 		openDocs:      map[string]int32{},
 		sentDocs:      map[string][32]byte{},
 		openGen:       map[string]uint64{},
-		proactiveOpen: true,
+		proactiveOpen: false,
 		gitPrewarm:    true,
 		fileWatch:     true,
 		symlinkDep:    symbols.DefaultSymlinkDepth,
@@ -444,9 +444,9 @@ func (s *Server) applyReadOnly() {
 
 // SetProactiveOpen toggles the post-initialize workspace walk that
 // sends didOpen to every child LSP for every indexed file. Default
-// true — that's what makes poly-lsp-mcp://diagnostics useful before
-// any edits. Disable in tests where you want to control timing
-// precisely, or in workspaces too large to afford the up-front cost.
+// false (opt-in via --proactive-open); enable it to make
+// poly-lsp-mcp://diagnostics populated before any edits, at an
+// up-front cost proportional to workspace size.
 func (s *Server) SetProactiveOpen(enabled bool) {
 	s.proactiveOpen = enabled
 }

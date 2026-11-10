@@ -62,6 +62,7 @@ func TestOutOfBandRewriteDoesNotStrandTheChildLSP(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetProactiveOpen(true)
 	srv.SetManager(multiplex.NewManager(reg))
 	srv.SetDiagnosticWait(15 * time.Second)
 

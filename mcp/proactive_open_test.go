@@ -50,6 +50,7 @@ func TestProactiveOpenPopulatesDiagnosticsResource(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetProactiveOpen(true)
 	srv.SetLegacyTools(true) // uses the poly-lsp-mcp://diagnostics resource
 	srv.SetManager(multiplex.NewManager(reg))
 	srv.SetDiagnosticWait(8 * time.Second)
@@ -213,6 +214,7 @@ func TestWokenChildGetsOpenDocsReplayed(t *testing.T) {
 	mgr := multiplex.NewManager(reg)
 	mgr.Lifecycle = multiplex.Lifecycle{IdleStop: 500 * time.Millisecond, Interval: 100 * time.Millisecond}
 	srv := New(reg, dir, nil, nil)
+	srv.SetProactiveOpen(true)
 	srv.SetManager(mgr)
 
 	sIn, cOut := io.Pipe()

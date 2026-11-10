@@ -368,6 +368,7 @@ func fakeDiagSessionTrust(t *testing.T, mode string, wait time.Duration, text st
 		t.Fatal(err)
 	}
 	srv := New(reg, dir, nil, nil)
+	srv.SetProactiveOpen(true)
 	srv.SetManager(multiplex.NewManager(reg))
 	srv.SetValidateEdits(true)
 	srv.SetDiagnosticWait(wait)

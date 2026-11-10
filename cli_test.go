@@ -189,6 +189,24 @@ func TestDaemonReplaysIndexFlags(t *testing.T) {
 	}
 }
 
+// The v0.5.1 resource-bound flags replay, so a takeover or --restart keeps
+// them; sorted by flag name (pflag.Visit order).
+func TestDaemonReplaysResourceFlags(t *testing.T) {
+	cmd, _, err := newRoot().Find([]string{"daemon"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--lsp-max-children", "2", "--lsp-rss-budget-pct", "10", "--lsp-mac-pressure-level", "4", "--proactive-open", "--index-concurrency", "3", "--max-files", "99", "--memory-limit-mb", "512"}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatal(err)
+	}
+	got := replayFlags(cmd.Flags(), "stop", "restart", "help")
+	want := []string{"--index-concurrency=3", "--lsp-mac-pressure-level=4", "--lsp-max-children=2", "--lsp-rss-budget-pct=10", "--max-files=99", "--memory-limit-mb=512", "--proactive-open=true"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("replayFlags = %q, want %q", got, want)
+	}
+}
+
 // doctor names a language the workspace holds whose child LSP is not on
 // PATH, says how to install it, and exits non-zero.
 func TestDoctorFlagsMissingLSP(t *testing.T) {
@@ -287,6 +305,11 @@ func TestMCPChooseDaemon(t *testing.T) {
 		{args: []string{"--lsp-max-rss-mb", "1"}, want: false},
 		{args: []string{"--lsp-psi-threshold", "0"}, want: false},
 		{args: []string{"--lsp-roots-max", "2"}, want: false},
+		{args: []string{"--lsp-max-children", "2"}, want: false},
+		{args: []string{"--lsp-rss-budget-pct", "10"}, want: false},
+		{args: []string{"--lsp-mac-pressure-level", "4"}, want: false},
+		{args: []string{"--proactive-open"}, want: false},
+		{args: []string{"--max-files", "10"}, want: false},
 		{args: []string{"--daemon", "--legacy-tools"}, want: true},
 		{env: map[string]string{"POLY_LSP_NO_DAEMON": "1"}, want: false},
 		{args: []string{"--daemon"}, env: map[string]string{"POLY_LSP_NO_DAEMON": "1"}, want: true},

@@ -28,6 +28,18 @@ type Lifecycle struct {
 	// then the largest. systemd-oomd acts at 50 by default; act first.
 	// Linux only: elsewhere there is no PSI and this rule does nothing.
 	PSIThreshold float64
+	// MaxChildren caps concurrently running child LSPs across the whole
+	// process (the daemon: across every root). 0 = no cap. Per-language
+	// Manager.RootsMax stays. Scaffold: nothing reads it yet.
+	MaxChildren int
+	// RSSBudgetPct bounds the summed RSS of all children, as a percentage
+	// of physical RAM. 0 = off. Scaffold: nothing reads it yet.
+	RSSBudgetPct int
+	// MacPressureLevel: on macOS, the memory-pressure level (kern.memorystatus
+	// vm_pressure_level: 1 normal, 2 warn, 4 critical) at or above which one
+	// child is stopped, like PSIThreshold. 0 = off. Scaffold: nothing reads
+	// it yet.
+	MacPressureLevel int
 	// Interval between checks. Zero = 10s.
 	Interval time.Duration
 }

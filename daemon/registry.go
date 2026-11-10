@@ -60,6 +60,11 @@ type Registry struct {
 	// The daemon's index flags, for every root (see IndexDefaults). An
 	// /open adds its own excludes and includes and may set the rest.
 	idx IndexDefaults
+	// proactiveOpen is --proactive-open for every root's server;
+	// indexConcurrency is --index-concurrency: index builds running at once
+	// across roots. Scaffold: nothing reads either yet.
+	proactiveOpen    bool
+	indexConcurrency int
 
 	// hub fans each root's notifications out to the sessions holding it.
 	hub *hub
@@ -137,6 +142,8 @@ type IndexDefaults struct {
 	Budget       string
 	Anyway       bool
 	SymlinkDepth int
+	// MaxFiles is --max-files: per-root file-count cap, 0 = none.
+	MaxFiles int
 }
 
 type entry struct {
@@ -766,6 +773,7 @@ func (r *Registry) build(root string, e *entry, opts OpenOptions, cfg *config.Co
 		depth = *opts.SymlinkDepth
 	}
 	srv.SetSymlinkDepth(depth)
+	srv.SetMaxFiles(r.idx.MaxFiles)
 	budget := r.idx.Budget
 	if opts.Budget != "" {
 		budget = opts.Budget
@@ -852,6 +860,14 @@ func (r *Registry) Tools() []mcp.ToolDescriptor {
 // SetIndexDefaults sets the daemon's index flags for roots built after
 // the call. Call before Serve.
 func (r *Registry) SetIndexDefaults(d IndexDefaults) { r.idx = d }
+
+// SetProactiveOpen sets --proactive-open for roots built after the call.
+// Call before Serve.
+func (r *Registry) SetProactiveOpen(on bool) { r.proactiveOpen = on }
+
+// SetIndexConcurrency sets --index-concurrency: how many index builds run
+// at once across roots. Call before Serve.
+func (r *Registry) SetIndexConcurrency(n int) { r.indexConcurrency = n }
 
 // SetLSPRoots sets --lsp-roots for roots built after the call: auto = a
 // child LSP per project root, at most max running per language. Call

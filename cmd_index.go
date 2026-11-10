@@ -21,6 +21,9 @@ import (
 // indexes in 0.2 s; with 48 untracked worktrees in it, 15.8 s cold.
 const defaultIndexBudget = "30000ms"
 
+// defaultMaxFiles is --max-files' default.
+const defaultMaxFiles = 50000
+
 // indexOpts are the flags that shape the index, shared by mcp, query and
 // index.
 type indexOpts struct {
@@ -29,6 +32,7 @@ type indexOpts struct {
 	budget       string
 	anyway       bool
 	symlinkDepth int
+	maxFiles     int
 }
 
 func indexFlags(f *pflag.FlagSet) *indexOpts {
@@ -38,6 +42,7 @@ func indexFlags(f *pflag.FlagSet) *indexOpts {
 	f.StringVar(&o.budget, "index-budget", defaultIndexBudget, "startup budget for the index walk: Nms wall-clock (bare = ms) or Nops (one per file read). Over it the build fails with a trace of where the files are and how to get under budget or raise it. 0 = unbounded")
 	f.BoolVar(&o.anyway, "index-anyway", false, "index the root even when it is not a project: the home directory, the filesystem root, or a directory of 3+ git clones that is not inside a repository. Without it such a root is refused, naming the repositories found")
 	f.IntVar(&o.symlinkDepth, "symlink-depth", symbols.DefaultSymlinkDepth, "follow symlinks whose target is inside the root at most this many links deep (a link inside a followed dir link is 2); 0 = never follow. A link leaving the root is followed only when --include names it")
+	f.IntVar(&o.maxFiles, "max-files", defaultMaxFiles, "per-root file-count cap for the index; a root with more files is refused with the trace of where they are. Independent of --index-anyway. 0 = no cap")
 	return o
 }
 
@@ -54,6 +59,7 @@ func (o *indexOpts) apply(srv *mcp.Server, cfg *config.Config) error {
 	srv.SetIncludes(append(append([]string(nil), cfg.Include...), o.includes...))
 	srv.SetIndexAnyway(o.anyway)
 	srv.SetSymlinkDepth(o.symlinkDepth)
+	srv.SetMaxFiles(o.maxFiles)
 	return srv.SetIndexBudget(o.budget)
 }
 

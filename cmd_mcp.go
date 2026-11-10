@@ -83,6 +83,7 @@ func mcpCmd(l *loader) *cobra.Command {
 	f.IntVar(&readCharBudget, "read-char-budget", 0, "implicit char cap for a node_read with no lineLimit (0 = default 2048). Raising it trades round-trips for payload size: at the default, reading a ~1100-line file takes many truncated reads, and each re-read costs a turn plus the tokens to compose it")
 	f.StringVar(&hookPath, "hook", os.Getenv("POLY_LSP_HOOK"), "path to a host hook executable consulted before every file read/edit (exit 2 = cancel, stdout = injected note); $POLY_LSP_HOOK fallback; see mcp/hook.go. --daemon: the proxy runs it")
 	lifecycle := lifecycleFlags(f)
+	proactiveOpen := proactiveOpenFlag(f)
 	rootsFlag := lspRootsFlags(f)
 	idx := indexFlags(f)
 	daemonHome := daemonHomeFlag(f)
@@ -266,6 +267,8 @@ func mcpCmd(l *loader) *cobra.Command {
 		mgr.StatusDir = daemon.StatusDir()
 		srv.SetManager(mgr)
 		srv.SetLSPRoots(roots.auto, roots.max)
+		// Carried, not applied yet: gates SetProactiveOpen (mcp/diagnostics.go).
+		_ = proactiveOpen()
 		return srv.Serve(os.Stdin, os.Stdout)
 	}
 	return cmd
@@ -280,7 +283,7 @@ const noDaemonEnv = "POLY_LSP_NO_DAEMON"
 // --read-char-budget, --config) or its child-LSP fleet, which in daemon
 // mode is the daemon's, set by its own flags. Given without --daemon, any
 // of them means in-process.
-var inProcessOnlyFlags = []string{"legacy-tools", "read-char-budget", "config", "lsp-idle-stop", "lsp-max-rss-mb", "lsp-psi-threshold", "lsp-roots-max"}
+var inProcessOnlyFlags = []string{"legacy-tools", "read-char-budget", "config", "lsp-idle-stop", "lsp-max-rss-mb", "lsp-psi-threshold", "lsp-roots-max", "lsp-max-children", "lsp-rss-budget-pct", "lsp-mac-pressure-level", "proactive-open", "max-files"}
 
 func inProcessOnlyList() string {
 	names := make([]string, len(inProcessOnlyFlags))
@@ -346,9 +349,21 @@ func lifecycleFlags(f *pflag.FlagSet) func() multiplex.Lifecycle {
 	idle := f.Duration("lsp-idle-stop", 15*time.Minute, "stop a child LSP (gopls etc.) that got no request for this long; it starts again on the next request. 0 = never")
 	rssMB := f.Int64("lsp-max-rss-mb", 6144, "stop a child LSP whose RSS is above this many MiB; it starts again on the next request. 0 = no limit")
 	psi := f.Float64("lsp-psi-threshold", 20, "when /proc/pressure/memory 'some avg10' is at or above this, stop one child LSP per 10s (idle longest, then largest). Linux only. 0 = off")
+	children := f.Int("lsp-max-children", 4, "daemon-wide cap on concurrently running child LSPs (all roots, all languages); at the cap the least recently used is stopped to start another. 0 = no cap. --lsp-roots-max still caps each language")
+	budgetPct := f.Int("lsp-rss-budget-pct", 25, "stop children (largest idle first) while their summed RSS is above this percentage of physical RAM. 0 = off")
+	macLevel := f.Int("lsp-mac-pressure-level", 2, "macOS only: stop one child per 10s while the memory-pressure level is at or above this (1 normal, 2 warn, 4 critical). 0 = off")
 	return func() multiplex.Lifecycle {
-		return multiplex.Lifecycle{IdleStop: *idle, MaxRSS: *rssMB << 20, PSIThreshold: *psi}
+		return multiplex.Lifecycle{IdleStop: *idle, MaxRSS: *rssMB << 20, PSIThreshold: *psi,
+			MaxChildren: *children, RSSBudgetPct: *budgetPct, MacPressureLevel: *macLevel}
 	}
+}
+
+// proactiveOpenFlag registers --proactive-open, shared by `mcp` and
+// `daemon`; call the result after parsing. Off by default: the post-
+// initialize didOpen walk (mcp.Server.SetProactiveOpen) is opt-in.
+func proactiveOpenFlag(f *pflag.FlagSet) func() bool {
+	on := f.Bool("proactive-open", false, "after initialize, send didOpen to the child LSPs for every indexed file so poly-lsp-mcp://diagnostics is filled before any edit. Costs memory and start-up time on large workspaces")
+	return func() bool { return *on }
 }
 
 // lspRoots is the --lsp-roots choice; see mcp/lsp_roots.go.

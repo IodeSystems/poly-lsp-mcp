@@ -37,6 +37,10 @@ type Config struct {
 	// it exits after emptyExitWait. The next `mcp --daemon` starts one
 	// again. 0 = never exit when idle.
 	IdleExit time.Duration
+	// MemoryLimitMB is --memory-limit-mb: the daemon's GOMEMLIMIT in MiB,
+	// applied only when $GOMEMLIMIT is unset. 0 = auto (min(2 GiB, 10% of
+	// RAM)). Scaffold: nothing applies it yet.
+	MemoryLimitMB int64
 
 	// stop ends the daemon as SIGTERM does (tests, which serve in-process).
 	stop chan struct{}

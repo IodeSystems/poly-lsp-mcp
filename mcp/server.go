@@ -266,6 +266,8 @@ type Server struct {
 	// resource becomes useful before any edits — gopls (and most LSPs)
 	// only publish after didOpen / didSave. Default true.
 	proactiveOpen bool
+	// maxFiles is --max-files: the index's per-root file-count cap, 0 = none.
+	maxFiles int
 
 	// legacyTools / readOnly are remembered so SetLegacyTools and SetReadOnly
 	// compose in either call order: each re-registers the base surface, then
@@ -1079,6 +1081,10 @@ func (s *Server) SetSymlinkDepth(n int) { s.symlinkDep = n }
 // SetIndexAnyway indexes the root even when it is not a project (the home
 // directory, a directory of clones). See symbols.CheckProjectRoot.
 func (s *Server) SetIndexAnyway(on bool) { s.indexAnyway = on }
+
+// SetMaxFiles sets the per-root file-count cap for the index (--max-files).
+// 0 = no cap. Independent of SetIndexAnyway. Scaffold: nothing reads it yet.
+func (s *Server) SetMaxFiles(n int) { s.maxFiles = n }
 
 // excludeSet is the client's excludes alone, without git's ignores; nil
 // when there are none.

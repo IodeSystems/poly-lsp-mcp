@@ -346,14 +346,18 @@ func chooseDaemon(cmd *cobra.Command, daemonMode, noDaemon bool) (bool, error) {
 // lifecycleFlags registers the child-LSP lifecycle flags shared by `mcp`
 // and `daemon`; call the result after parsing. See multiplex.Lifecycle.
 func lifecycleFlags(f *pflag.FlagSet) func() multiplex.Lifecycle {
-	idle := f.Duration("lsp-idle-stop", 15*time.Minute, "stop a child LSP (gopls etc.) that got no request for this long; it starts again on the next request. 0 = never")
-	rssMB := f.Int64("lsp-max-rss-mb", 6144, "stop a child LSP whose RSS is above this many MiB; it starts again on the next request. 0 = no limit")
+	idle := f.Duration("lsp-idle-stop", 10*time.Minute, "stop a child LSP (gopls etc.) that got no request for this long; it starts again on the next request. 0 = never")
+	rssMB := f.Int64("lsp-max-rss-mb", -1, "stop a child LSP whose RSS is above this many MiB; it starts again on the next request. Unset = min(3072, 15% of RAM). 0 = no limit")
 	psi := f.Float64("lsp-psi-threshold", 20, "when /proc/pressure/memory 'some avg10' is at or above this, stop one child LSP per 10s (idle longest, then largest). Linux only. 0 = off")
 	children := f.Int("lsp-max-children", 4, "daemon-wide cap on concurrently running child LSPs (all roots, all languages); at the cap the least recently used is stopped to start another. 0 = no cap. --lsp-roots-max still caps each language")
 	budgetPct := f.Int("lsp-rss-budget-pct", 25, "stop children (largest idle first) while their summed RSS is above this percentage of physical RAM. 0 = off")
 	macLevel := f.Int("lsp-mac-pressure-level", 2, "macOS only: stop one child per 10s while the memory-pressure level is at or above this (1 normal, 2 warn, 4 critical). 0 = off")
 	return func() multiplex.Lifecycle {
-		return multiplex.Lifecycle{IdleStop: *idle, MaxRSS: *rssMB << 20, PSIThreshold: *psi,
+		maxRSS := *rssMB << 20
+		if *rssMB < 0 {
+			maxRSS = multiplex.DefaultMaxRSS(multiplex.TotalRAM())
+		}
+		return multiplex.Lifecycle{IdleStop: *idle, MaxRSS: maxRSS, PSIThreshold: *psi,
 			MaxChildren: *children, RSSBudgetPct: *budgetPct, MacPressureLevel: *macLevel}
 	}
 }

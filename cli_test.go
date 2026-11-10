@@ -10,9 +10,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/spf13/pflag"
 
 	"github.com/iodesystems/poly-lsp-mcp/daemon"
 	"github.com/iodesystems/poly-lsp-mcp/internal/ts"
+	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
@@ -464,5 +468,34 @@ func TestDaemonConfigOf(t *testing.T) {
 	}
 	if got := daemonConfigOf([]string{"--config=p.yaml"}); !strings.Contains(got, "restart it") {
 		t.Errorf("relative --config from an old daemon: %q", got)
+	}
+}
+
+// Unset, --lsp-max-rss-mb is min(3072 MiB, 15% of RAM) and --lsp-idle-stop
+// is 10m; an explicit value, 0 included, wins.
+func TestLifecycleDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		args    []string
+		maxRSS  int64
+		idle    time.Duration
+		maxRSSf bool // true: maxRSS is the computed default
+	}{
+		{args: nil, idle: 10 * time.Minute, maxRSSf: true},
+		{args: []string{"--lsp-max-rss-mb", "100", "--lsp-idle-stop", "1m"}, maxRSS: 100 << 20, idle: time.Minute},
+		{args: []string{"--lsp-max-rss-mb", "0", "--lsp-idle-stop", "0"}},
+	} {
+		fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
+		get := lifecycleFlags(fs)
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		lc := get()
+		want := tc.maxRSS
+		if tc.maxRSSf {
+			want = multiplex.DefaultMaxRSS(multiplex.TotalRAM())
+		}
+		if lc.MaxRSS != want || lc.IdleStop != tc.idle {
+			t.Errorf("%v: MaxRSS=%d IdleStop=%v, want %d %v", tc.args, lc.MaxRSS, lc.IdleStop, want, tc.idle)
+		}
 	}
 }

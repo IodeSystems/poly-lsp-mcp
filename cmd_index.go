@@ -115,6 +115,17 @@ indexed as part of this one. Uses the parse cache, read-only, as query does.`,
 				}
 				return buildErr
 			}
+			var tm *symbols.TooManyFilesError
+			if errors.As(buildErr, &tm) {
+				if asJSON {
+					b, _ := json.MarshalIndent(map[string]any{
+						"error": tm.Error(), "reason": symbols.LeftTooManyFiles,
+						"maxFiles": tm.Cap, "repos": tm.Repos, "remedy": tm.Remedy(),
+					}, "", "  ")
+					fmt.Println(string(b))
+				}
+				return buildErr
+			}
 			if asJSON {
 				b, _ := json.MarshalIndent(rep, "", "  ")
 				fmt.Println(string(b))

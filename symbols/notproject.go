@@ -162,3 +162,33 @@ func childRepos(root string) ([]string, int) {
 	}
 	return repos, total
 }
+
+// LeftTooManyFiles is the reason a file-count refusal carries.
+const LeftTooManyFiles = "too many files"
+
+// TooManyFilesError is a root refused for holding more files than --max-files
+// allows. --index-anyway does not lift it; only --max-files 0 does.
+type TooManyFilesError struct {
+	Root  string
+	Files int // the count when it stopped: at least this many
+	Cap   int
+	Repos int // nested git repositories found; 0 when none or not known
+}
+
+func (e *TooManyFilesError) Error() string {
+	s := fmt.Sprintf("%s: root %s has %d+ files (cap %d)", LeftTooManyFiles, e.Root, e.Files, e.Cap)
+	if e.Repos > 0 {
+		s += fmt.Sprintf(" across %d git repos", e.Repos)
+	}
+	return s
+}
+
+// Remedy names the ways out.
+func (e *TooManyFilesError) Remedy() string {
+	return "open one repo, or narrow with include:/--include, or raise --max-files (0 = no cap)"
+}
+
+// Detail is the refusal for a person: the reason and the remedy.
+func (e *TooManyFilesError) Detail() string {
+	return e.Error() + "\nremedy: " + e.Remedy() + "\n"
+}

@@ -44,6 +44,7 @@ func (m *Manager) writeStatus() {
 	if m.StatusDir == "" {
 		return
 	}
+	noteStatusDir(m.StatusDir) // the orphan record and reaping (child_orphans.go)
 	// Under statusMu, and not after Shutdown: a write racing removeStatus
 	// would leave a file behind for a root the daemon already evicted.
 	m.statusMu.Lock()

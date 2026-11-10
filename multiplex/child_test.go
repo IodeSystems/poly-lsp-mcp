@@ -22,6 +22,9 @@ import (
 var polyLspMcpBinary string
 
 func TestMain(m *testing.M) {
+	if dir := os.Getenv(spawnHelperEnv); dir != "" {
+		spawnHelper(dir) // never returns
+	}
 	dir, err := os.MkdirTemp("", "poly-lsp-mcp-mp-test-*")
 	if err != nil {
 		panic(err)

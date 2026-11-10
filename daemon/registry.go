@@ -893,8 +893,13 @@ func (r *Registry) SetLifecycle(lc multiplex.Lifecycle) {
 }
 
 // SetStatusDir makes roots built after the call write child-LSP status
-// files there. Call before Serve.
-func (r *Registry) SetStatusDir(dir string) { r.statusDir = dir }
+// files there. Call before Serve. It also kills the child LSPs left
+// behind by dead poly-lsp-mcp processes (multiplex.ReapOrphans); a live
+// one's, such as the daemon this one takes over from, are left alone.
+func (r *Registry) SetStatusDir(dir string) {
+	r.statusDir = dir
+	multiplex.ReapOrphans(dir)
+}
 
 // SetUsageLog makes roots built after the call append node_query usage to
 // path. Call before Serve.

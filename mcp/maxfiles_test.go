@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,7 +57,7 @@ func TestMaxFilesRefused(t *testing.T) {
 			t.Errorf("error should contain %q: %s", want, tm.Error())
 		}
 	}
-	for _, want := range []string{"open one repo", "--include", "--max-files"} {
+	for _, want := range []string{"open one repo (pass its path as the root), e.g. " + filepath.Join(dir, "other"), "exclude:/--exclude", "--max-files"} {
 		if !strings.Contains(tm.Detail(), want) {
 			t.Errorf("detail should contain %q: %s", want, tm.Detail())
 		}

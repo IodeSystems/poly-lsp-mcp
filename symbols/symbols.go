@@ -1464,6 +1464,9 @@ func Build(root string, reg *config.Registry, opts ...BuildOption) (*Index, erro
 			for _, n := range cfg.manifest.Nested {
 				if n.Reason == git.NestedRepo && !(inc.Covers(n.Dir) || inc.OnWay(n.Dir)) {
 					e.Repos++
+					if len(e.Dirs) < 3 {
+						e.Dirs = append(e.Dirs, n.Dir)
+					}
 				}
 			}
 		}

@@ -173,6 +173,8 @@ type TooManyFilesError struct {
 	Files int // the count when it stopped: at least this many
 	Cap   int
 	Repos int // nested git repositories found; 0 when none or not known
+	// Dirs are up to three of them, root-relative, as examples for the remedy.
+	Dirs []string
 }
 
 func (e *TooManyFilesError) Error() string {
@@ -185,7 +187,15 @@ func (e *TooManyFilesError) Error() string {
 
 // Remedy names the ways out.
 func (e *TooManyFilesError) Remedy() string {
-	return "open one repo, or narrow with include:/--include, or raise --max-files (0 = no cap)"
+	open := "open one repo (pass its path as the root)"
+	if len(e.Dirs) > 0 {
+		ex := make([]string, len(e.Dirs))
+		for i, d := range e.Dirs {
+			ex[i] = filepath.Join(e.Root, d)
+		}
+		open += ", e.g. " + strings.Join(ex, ", ")
+	}
+	return open + ", or narrow with exclude:/--exclude, or raise --max-files (0 = no cap)"
 }
 
 // Detail is the refusal for a person: the reason and the remedy.

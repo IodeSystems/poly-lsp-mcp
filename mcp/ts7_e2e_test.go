@@ -26,24 +26,33 @@ const ts7Env = "POLY_LSP_TEST_TS7"
 // ts7NodeModules returns a node_modules dir with typescript >= 7, or "".
 func ts7NodeModules() string {
 	for _, nm := range []string{os.Getenv(ts7Env), lspbin.NpmGlobalRoot()} {
-		if nm == "" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(nm, "typescript", "package.json"))
-		if err != nil {
-			continue
-		}
-		var pkg struct {
-			Version string `json:"version"`
-		}
-		var major int
-		if json.Unmarshal(data, &pkg) == nil {
-			if _, err := fmt.Sscanf(pkg.Version, "%d.", &major); err == nil && major >= 7 {
-				return nm
-			}
+		if tsMajorAt(nm) >= 7 {
+			return nm
 		}
 	}
 	return ""
+}
+
+// tsMajorAt is the major version of nm/typescript; 0 when there is none.
+func tsMajorAt(nm string) int {
+	if nm == "" {
+		return 0
+	}
+	data, err := os.ReadFile(filepath.Join(nm, "typescript", "package.json"))
+	if err != nil {
+		return 0
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	var major int
+	if json.Unmarshal(data, &pkg) != nil {
+		return 0
+	}
+	if _, err := fmt.Sscanf(pkg.Version, "%d.", &major); err != nil {
+		return 0
+	}
+	return major
 }
 
 // A project that resolves typescript 7 runs TS 7's native LSP. It

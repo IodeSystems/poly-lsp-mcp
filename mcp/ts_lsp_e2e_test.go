@@ -62,6 +62,7 @@ func tsEditValidate(t *testing.T, trust bool) {
 	orig := head + "export const who: string = load().name;\n"
 	write("src/main.ts", orig)
 	mainPath := filepath.Join(dir, "src/main.ts")
+	linkTS6(t, dir)
 
 	cfg := config.Default()
 	for i := range cfg.Languages {
@@ -106,6 +107,7 @@ func tsEditValidate(t *testing.T, trust bool) {
 	// the open's first publish only, which is skipped (waitForEditedText):
 	// it times out.
 	waitPublished(t, srv, mainPath)
+	wantTSLSChild(t, srv, pathToURI(mainPath))
 	broken := head + "export const who: number = load().name;\n"
 	m := edit(broken)
 	if m["rejected"] != true || m["reverted"] != true {

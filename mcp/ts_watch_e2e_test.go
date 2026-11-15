@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/iodesystems/poly-lsp-mcp/config"
+	"github.com/iodesystems/poly-lsp-mcp/internal/lspbin"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 )
 
@@ -21,6 +22,59 @@ import (
 // TestTSServerUsesThisWatcher, when the one on PATH is older than 6.1.0.
 // It must resolve a TypeScript of its own (installed beside it).
 const tslsClientWatchEnv = "POLY_LSP_TEST_TSLS"
+
+// ts6Env names a node_modules dir holding typescript 6.x, for the
+// typescript-language-server e2es: a fixture links it as its own
+// typescript, so the tsls path runs whatever the global typescript is (a
+// root that resolves 7 runs TS 7's native LSP, and tsls cannot run 7).
+// Unset, the global npm root is used when its typescript is 6.
+const ts6Env = "POLY_LSP_TEST_TS6"
+
+// linkTS6 links a typescript 6 as dir/node_modules/typescript, and skips
+// the test when there is none.
+func linkTS6(t *testing.T, dir string) {
+	t.Helper()
+	nm := ""
+	for _, c := range []string{os.Getenv(ts6Env), lspbin.NpmGlobalRoot()} {
+		if tsMajorAt(c) == 6 {
+			nm = c
+			break
+		}
+	}
+	if nm == "" {
+		t.Skip("no typescript 6 ($" + ts6Env + " or the global npm root): typescript-language-server cannot run TypeScript 7")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(nm, "typescript"), filepath.Join(dir, "node_modules", "typescript")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// wantTSLSChild fails the test when uri's typescript child is not
+// typescript-language-server (Linux: read from /proc).
+func wantTSLSChild(t *testing.T, srv *Server, uri string) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return
+	}
+	child := srv.manager.Running(uri)
+	if child == nil {
+		t.Fatal("no running typescript child")
+	}
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", child.Pid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+	for _, a := range args {
+		if strings.Contains(filepath.Base(a), "typescript-language-server") {
+			return
+		}
+	}
+	t.Fatalf("typescript child is %q, want typescript-language-server", args)
+}
 
 // tslsForClientWatch returns a typescript-language-server of 6.1.0 or
 // later: $POLY_LSP_TEST_TSLS, else the one on PATH. "" when neither is.
@@ -84,6 +138,7 @@ func TestTSServerUsesThisWatcher(t *testing.T) {
 	// events alone were measured not to be enough.
 	write("node_modules/other/package.json", `{"name":"other","version":"1.0.0","types":"index.d.ts"}`+"\n")
 	write("node_modules/other/index.d.ts", "export declare const o: number;\n")
+	linkTS6(t, dir)
 	for i := range 20 {
 		write(fmt.Sprintf("src/m%02d/x.ts", i), fmt.Sprintf("export const x%d = %d;\n", i, i))
 	}
@@ -141,10 +196,8 @@ func TestTSServerUsesThisWatcher(t *testing.T) {
 	// TS2307: cannot find module "foo".
 	waitFor("TS2307 for the missing package", func() bool { return hasCode(2307) })
 
+	wantTSLSChild(t, srv, mainURI)
 	child := srv.manager.Running(mainURI)
-	if child == nil {
-		t.Fatal("no running typescript child")
-	}
 	// The project has loaded (it published); let tsserver settle.
 	time.Sleep(3 * time.Second)
 	wc, err := multiplex.TreeWatches(child.Pid())

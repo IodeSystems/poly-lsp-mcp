@@ -2,10 +2,14 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -39,6 +43,9 @@ func (s *Server) kickFileWatch() {
 	s.watcherMu.Unlock()
 
 	root := s.getRoot()
+	s.watcherMu.Lock()
+	s.watchBudget = budgetFromHost(inotifyMaxPath)
+	s.watcherMu.Unlock()
 	added := s.addWatchDirs(w, root)
 	log.Printf("mcp file-watch: watching %d dir(s) under %s", added, root)
 
@@ -84,12 +91,116 @@ func (s *Server) WaitForFileWatch(ctx context.Context) error {
 	}
 }
 
+// watchAdder is the part of *fsnotify.Watcher addWatchDirs needs; a test
+// injects a fake to simulate ENOSPC.
+type watchAdder interface {
+	Add(name string) error
+}
+
+// Watch budget. A tsserver once held 30k of the 65,536 inotify watches,
+// most under .claude/worktrees/*/node_modules; the watch set is shared
+// by every process of the user, so this server takes at most a tenth of
+// the limit and warns when one top-level dir takes more than 5%.
+const (
+	inotifyMaxPath       = "/proc/sys/fs/inotify/max_user_watches"
+	inotifyMaxFallback   = 8192
+	watchBudgetPercent   = 10
+	watchPerDirWarnShare = 5 // percent of max
+)
+
+// readInotifyMax returns the host's max_user_watches, or ok=false when
+// the file cannot be read or parsed.
+func readInotifyMax(path string) (max int, ok bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// watchBudget counts the watches one server holds and refuses more once
+// the limit is reached. Safe for concurrent use: the root walk and the
+// event loop's dir-create handler both call addWatchDirs.
+type watchBudget struct {
+	mu         sync.Mutex
+	max        int // host max_user_watches
+	limit      int // watches this server may hold
+	watched    map[string]bool
+	perTop     map[string]int // watches per top-level dir; "." is the root itself
+	warnedTop  map[string]bool
+	full       bool
+	fullWarned bool
+}
+
+// newWatchBudget makes a budget of watchBudgetPercent of max.
+func newWatchBudget(max int) *watchBudget {
+	limit := max * watchBudgetPercent / 100
+	if limit < 1 {
+		limit = 1
+	}
+	return &watchBudget{max: max, limit: limit, watched: map[string]bool{},
+		perTop: map[string]int{}, warnedTop: map[string]bool{}}
+}
+
+// budgetFromHost builds the budget from the host limit, logging when the
+// fallback is used.
+func budgetFromHost(path string) *watchBudget {
+	max, ok := readInotifyMax(path)
+	if !ok {
+		max = inotifyMaxFallback
+		log.Printf("mcp file-watch: cannot read %s; assuming max_user_watches=%d", path, max)
+	}
+	return newWatchBudget(max)
+}
+
+// topDir names the top-level directory of path under root; "." for root.
+func topDir(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." {
+		return "."
+	}
+	if i := strings.IndexRune(rel, filepath.Separator); i >= 0 {
+		rel = rel[:i]
+	}
+	return rel
+}
+
+// forget drops a watched dir (deleted or renamed away) from the count,
+// freeing its slot.
+func (b *watchBudget) forget(root, path string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.watched[path] {
+		delete(b.watched, path)
+		b.perTop[topDir(root, path)]--
+		b.full = false
+	}
+}
+
 // addWatchDirs registers root and every descendant directory (minus the
-// noise dirs) with the watcher. fsnotify is non-recursive, so each dir
-// is added explicitly; newly created subtrees are added on the fly in
-// handleWatchEvent. Returns the count of directories added.
-func (s *Server) addWatchDirs(w *fsnotify.Watcher, root string) int {
+// noise dirs) with the watcher, within the watch budget. fsnotify is
+// non-recursive, so each dir is added explicitly; newly created subtrees
+// are added on the fly in handleWatchEvent. Returns the count of
+// directories newly added. When the budget is reached, or Add returns
+// ENOSPC, it stops and logs one warning listing the top-level dirs left
+// unwatched.
+func (s *Server) addWatchDirs(w watchAdder, root string) int {
+	s.watcherMu.Lock()
+	if s.watchBudget == nil {
+		s.watchBudget = budgetFromHost(inotifyMaxPath)
+	}
+	b := s.watchBudget
+	s.watcherMu.Unlock()
+	wroot := s.getRoot()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	count := 0
+	stopAt := ""
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
@@ -98,15 +209,73 @@ func (s *Server) addWatchDirs(w *fsnotify.Watcher, root string) int {
 			return filepath.SkipDir
 		}
 		// Don't spend watch descriptors on trees the index excludes.
-		if path != root && s.getIgnores().DirIgnored(s.getRoot(), path) {
+		if path != root && s.getIgnores().DirIgnored(wroot, path) {
 			return filepath.SkipDir
 		}
-		if err := w.Add(path); err == nil {
-			count++
+		if b.watched[path] {
+			return nil
+		}
+		if b.full || len(b.watched) >= b.limit {
+			b.full = true
+			stopAt = path
+			return filepath.SkipAll
+		}
+		if err := w.Add(path); err != nil {
+			if errors.Is(err, syscall.ENOSPC) {
+				log.Printf("mcp file-watch: inotify watch limit reached at %s (ENOSPC); not watching further", path)
+				b.full, b.fullWarned = true, true
+				stopAt = path
+				return filepath.SkipAll
+			}
+			if !errors.Is(err, os.ErrNotExist) { // a dir deleted mid-walk is routine
+				log.Printf("mcp file-watch: add %s: %v", path, err)
+			}
+			return nil
+		}
+		b.watched[path] = true
+		count++
+		top := topDir(wroot, path)
+		b.perTop[top]++
+		if n := b.perTop[top]; top != "." && !b.warnedTop[top] && n*100 > b.max*watchPerDirWarnShare {
+			b.warnedTop[top] = true
+			log.Printf("mcp file-watch: %s uses %d inotify watches (over %d%% of max_user_watches=%d)",
+				top, n, watchPerDirWarnShare, b.max)
 		}
 		return nil
 	})
+	if stopAt != "" && !b.fullWarned {
+		b.fullWarned = true
+		log.Printf("mcp file-watch: watch budget of %d reached (%d%% of max_user_watches=%d); unwatched top-level dirs: %s",
+			b.limit, watchBudgetPercent, b.max, strings.Join(s.unwatchedTops(b, wroot, stopAt), ", "))
+	}
 	return count
+}
+
+// unwatchedTops lists the top-level dirs of root holding no watch, plus
+// the one the walk stopped in (partly watched). Caller holds b.mu.
+func (s *Server) unwatchedTops(b *watchBudget, root, stopAt string) []string {
+	var out []string
+	stopTop := topDir(root, stopAt)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return []string{stopTop}
+	}
+	for _, e := range entries {
+		if !e.IsDir() || skipProactiveOpenDir(e.Name()) ||
+			s.getIgnores().DirIgnored(root, filepath.Join(root, e.Name())) {
+			continue
+		}
+		switch {
+		case e.Name() == stopTop:
+			out = append(out, e.Name()+" (partial)")
+		case b.perTop[e.Name()] == 0:
+			out = append(out, e.Name())
+		}
+	}
+	if len(out) == 0 {
+		out = []string{stopTop}
+	}
+	return out
 }
 
 // runFileWatch is the event loop. Each file event schedules a debounced
@@ -136,6 +305,15 @@ func (s *Server) runFileWatch(w *fsnotify.Watcher) {
 // the watch set, file events schedule a debounced index update. Removes
 // and renames evict the (old) path; creates and writes re-extract it.
 func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pending map[string]*time.Timer, mu *sync.Mutex) {
+	// A removed or renamed dir loses its kernel watch; free its slot.
+	if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		s.watcherMu.Lock()
+		b := s.watchBudget
+		s.watcherMu.Unlock()
+		if b != nil {
+			b.forget(s.getRoot(), ev.Name)
+		}
+	}
 	// A newly created directory: extend coverage to it (and its
 	// subtree). fsnotify won't recurse on its own.
 	if ev.Op&fsnotify.Create != 0 {

@@ -579,3 +579,27 @@ Manager makes its own) is shared by every root's Manager.
   tool-surface tokens. Each raise is justified in that file's comment.
 - `TestFileAccessMatchesTheGuard` keeps the daemon proxy's file-access hook
   in step with the guard sites in `modern.go`.
+
+## inotify watch budget and the shared skip list
+
+A tsserver once held 30k of the 65,536 inotify watches (the limit is per
+user, shared by every process), most of them under
+`.claude/worktrees/*/node_modules` in a DUN worktree.
+
+- One skip list: `internal/skipdirs` (leaf package, because `symbols`
+  imports `config`). `symbols.IsSkipDir` and `config` schema detection use
+  it. `skipdirs.IsWatchSkip` adds `.claude` and is used by the watcher,
+  proactive open and schema detection. `.claude` is NOT in `IsSkipDir`: the
+  index walk and queries must reach it to report a nested worktree as
+  "worktree of this repo" and to let `--include` walk one
+  (`TestQueryRollsUpWorktree`, `TestIncludeWalksNestedWorktree`).
+  `selfupdate.go`'s prune list stays separate on purpose: it decides what
+  can change the Go build, so it must stay short.
+- `mcp/file_watch.go` reads `/proc/sys/fs/inotify/max_user_watches` (8192
+  if unreadable, logged) and takes at most 10% of it. At the budget it stops
+  adding watches and logs one warning listing the unwatched top-level dirs.
+  A top-level dir using more than 5% of max gets its own warning. An
+  `fsnotify.Add` ENOSPC is treated as the limit: one warning, then stop.
+- The budget counts watched dirs, so the dir-create rewatch respects it;
+  a removed or renamed dir frees its slot. A `.gitignore` change reloads
+  the ignore filter but adds no watches.

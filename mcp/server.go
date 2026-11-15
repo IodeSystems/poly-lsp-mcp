@@ -321,6 +321,9 @@ type Server struct {
 
 	watcherMu sync.Mutex
 	watcher   io.Closer
+	// watchBudget caps inotify watches this server holds; set by
+	// kickFileWatch, or by a test before addWatchDirs.
+	watchBudget *watchBudget
 
 	// fileWatchDoneMu guards fileWatchDone — same dance as
 	// gitPrewarmDone; closed when the watcher goroutine exits.

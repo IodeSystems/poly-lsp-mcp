@@ -20,3 +20,7 @@ func countInotifyWds(fdinfo string) int {
 	}
 	return n
 }
+
+// TreeWatches counts the inotify watches of pid and all its descendants.
+// Linux only; an error elsewhere.
+func TreeWatches(pid int) (WatchCount, error) { return readTreeWatches(pid) }

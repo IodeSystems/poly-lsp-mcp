@@ -74,6 +74,13 @@ type Child struct {
 	ident  procIdent
 	killMu sync.Mutex
 	reaped bool
+
+	// watches are the file watchers the child registered
+	// (watched_files.go).
+	watches watchRegistry
+	// initOpts is the initialize request's initializationOptions; nil
+	// omits it (init_options.go).
+	initOpts any
 }
 
 // Spawn starts the child process and begins draining its stdout/stderr.
@@ -129,6 +136,7 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 		in:         stdin,
 		pending:    make(map[string]chan *jsonrpc.Message),
 		done:       make(chan struct{}),
+		initOpts:   initializationOptions(name, found.Path, cmd.Env),
 	}
 	c.ident, _ = readProcIdent(cmd.Process.Pid)
 	trackChild(c)
@@ -197,6 +205,14 @@ func (c *Child) handle(msg *jsonrpc.Message) {
 	}
 	if msg.Method == "window/workDoneProgress/create" {
 		// Accepted so the child reports progress (Busy).
+		_ = c.send(&jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("null")})
+		return
+	}
+	if msg.Method == "client/registerCapability" || msg.Method == "client/unregisterCapability" {
+		if errMsg := c.handleRegistration(msg.Method, msg.Params); errMsg != "" {
+			_ = c.send(&jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID, Error: &jsonrpc.Error{Code: -32601, Message: errMsg}})
+			return
+		}
 		_ = c.send(&jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("null")})
 		return
 	}
@@ -376,14 +392,26 @@ func (c *Child) Initialize(ctx context.Context, rootURI string) (json.RawMessage
 		// No versionSupport: a server that honours it would version its
 		// publishes, and what a version proves differs per server
 		// (config.LSP.TrustsCleanDiagnostics); that needs measuring first.
+		// didChangeWatchedFiles: this process is the child's file watcher
+		// (watched_files.go), so a child that registers its watchers needs
+		// no inotify watches of its own.
 		"capabilities": map[string]any{
 			"window":       map[string]any{"workDoneProgress": true},
 			"textDocument": map[string]any{"publishDiagnostics": map[string]any{}},
+			"workspace": map[string]any{
+				"didChangeWatchedFiles": map[string]any{
+					"dynamicRegistration":    true,
+					"relativePatternSupport": true,
+				},
+			},
 		},
 		"clientInfo": map[string]any{
 			"name":    "poly-lsp-mcp",
 			"version": "0.0.0",
 		},
+	}
+	if c.initOpts != nil {
+		params["initializationOptions"] = c.initOpts
 	}
 	raw, err := c.Call(ctx, "initialize", params)
 	if err != nil {

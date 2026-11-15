@@ -44,7 +44,11 @@ func TestGrammarPins(t *testing.T) {
 	if err != nil {
 		t.Skip("smacker module not available:", err)
 	}
-	b, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(out)), "_automation", "grammars.json"))
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		t.Skip("smacker module not in the module cache")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "_automation", "grammars.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

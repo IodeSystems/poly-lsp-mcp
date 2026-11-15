@@ -223,3 +223,19 @@ func TestPrependPath(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestNpmGlobalRoot(t *testing.T) {
+	for _, tc := range []struct{ goos, rel string }{{"linux", "lib/node_modules"}, {"windows", "node_modules"}} {
+		f, home := fake(t, tc.goos, t.TempDir(), nil)
+		put(t, filepath.Join(home, ".local/bin"), "npm", "#!/bin/sh\n", 0o755)
+		prefix := t.TempDir()
+		f.npmPrefix = func(string, []string) string { return prefix }
+		if got, want := f.npmGlobalRoot(), filepath.Join(prefix, filepath.FromSlash(tc.rel)); got != want {
+			t.Errorf("%s: npmGlobalRoot = %q, want %q", tc.goos, got, want)
+		}
+	}
+	f, _ := fake(t, "linux", t.TempDir(), nil)
+	if got := f.npmGlobalRoot(); got != "" {
+		t.Errorf("no npm: npmGlobalRoot = %q, want empty", got)
+	}
+}

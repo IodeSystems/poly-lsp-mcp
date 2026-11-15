@@ -81,6 +81,9 @@ type Child struct {
 	// initOpts is the initialize request's initializationOptions; nil
 	// omits it (init_options.go).
 	initOpts any
+	// pull is non-nil for a child that pushes no document diagnostics
+	// (TypeScript 7): they are pulled (pull_diagnostics.go).
+	pull *pullState
 }
 
 // Spawn starts the child process and begins draining its stdout/stderr.
@@ -91,6 +94,7 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 	if lsp == nil {
 		return nil, errors.New("multiplex: nil LSP config")
 	}
+	lsp = resolveTSServer(name, lsp, cwd) // TS 7: its native LSP (tsresolve.go)
 	found, err := lspbin.Resolve(lsp.Cmd)
 	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", lsp.Cmd, err)
@@ -137,6 +141,9 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 		pending:    make(map[string]chan *jsonrpc.Message),
 		done:       make(chan struct{}),
 		initOpts:   initializationOptions(name, found.Path, cmd.Env),
+	}
+	if pullsDiagnostics(found.Path, lsp.Args) {
+		c.pull = &pullState{}
 	}
 	c.ident, _ = readProcIdent(cmd.Process.Pid)
 	trackChild(c)
@@ -206,6 +213,11 @@ func (c *Child) handle(msg *jsonrpc.Message) {
 	if msg.Method == "window/workDoneProgress/create" {
 		// Accepted so the child reports progress (Busy).
 		_ = c.send(&jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("null")})
+		return
+	}
+	if msg.Method == "workspace/diagnostic/refresh" && c.pull != nil {
+		_ = c.send(&jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("null")})
+		go c.pullSweep(c.pull.nextGen(), c.pull.all())
 		return
 	}
 	if msg.Method == "client/registerCapability" || msg.Method == "client/unregisterCapability" {
@@ -370,11 +382,15 @@ func (c *Child) Notify(method string, params any) error {
 		rawParams = b
 	}
 	traceChild(c.name, "->", method, rawParams)
-	return c.send(&jsonrpc.Message{
+	if err := c.send(&jsonrpc.Message{
 		JSONRPC: "2.0",
 		Method:  method,
 		Params:  rawParams,
-	})
+	}); err != nil {
+		return err
+	}
+	c.afterNotify(method, rawParams)
+	return nil
 }
 
 // Initialize performs the LSP handshake (initialize request + initialized
@@ -412,6 +428,13 @@ func (c *Child) Initialize(ctx context.Context, rootURI string) (json.RawMessage
 	}
 	if c.initOpts != nil {
 		params["initializationOptions"] = c.initOpts
+	}
+	if c.pull != nil {
+		// Pull diagnostics, and the refresh request that says when to
+		// pull again (pull_diagnostics.go).
+		caps := params["capabilities"].(map[string]any)
+		caps["textDocument"].(map[string]any)["diagnostic"] = map[string]any{}
+		caps["workspace"].(map[string]any)["diagnostics"] = map[string]any{"refreshSupport": true}
 	}
 	raw, err := c.Call(ctx, "initialize", params)
 	if err != nil {

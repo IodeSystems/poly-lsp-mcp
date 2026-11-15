@@ -25,7 +25,7 @@ func writeFile(t *testing.T, path, body string) {
 
 // installTS writes a typescript package of version into nodeModules; a 7
 // gets its platform package and exe, as npm installs them. It returns the
-// exe path ("" for < 7).
+// resolved exe path ("" for < 7).
 func installTS(t *testing.T, nodeModules, version string) string {
 	t.Helper()
 	major := version[0] - '0'
@@ -38,7 +38,12 @@ func installTS(t *testing.T, nodeModules, version string) string {
 			exe += ".exe"
 		}
 		writeFile(t, exe, "")
-		return exe
+		// The resolver applies EvalSymlinks; macOS t.TempDir() is under a symlink.
+		real, err := filepath.EvalSymlinks(exe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return real
 	}
 	writeFile(t, filepath.Join(nodeModules, "typescript/package.json"), `{"name":"typescript","version":"`+version+`","bin":{"tsc":"./bin/tsc","tsserver":"./bin/tsserver"}}`)
 	return ""

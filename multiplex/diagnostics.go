@@ -81,6 +81,10 @@ func NewDiagnosticStore() *DiagnosticStore {
 // register two listeners.
 func (s *DiagnosticStore) Attach(c *Child) {
 	c.SetNotificationHandler(func(method string, params json.RawMessage) {
+		if method == PulledUnchanged {
+			s.activity()
+			return
+		}
 		if method != "textDocument/publishDiagnostics" {
 			return
 		}
@@ -123,8 +127,25 @@ func (s *DiagnosticStore) put(uri string, diags []Diagnostic, version *int, busy
 	}
 }
 
+// activity counts a pulled report equal to the last one published
+// (PulledUnchanged) in total, so the settle sees the child still
+// answering, and changes no URI's generation, so the sibling rollup does
+// not read it as fallout. Measured (TS 7.0.2, DUN mobile, 79 open): an
+// edit breaking 25 siblings reported 1 to 16 of them without it, the
+// unchanged siblings pulled first leaving 150 ms without a publish.
+func (s *DiagnosticStore) activity() {
+	s.mu.Lock()
+	s.total++
+	anyWaiters := s.anyChans
+	s.anyChans = nil
+	s.mu.Unlock()
+	for _, ch := range anyWaiters {
+		close(ch)
+	}
+}
+
 // TotalGen returns the number of publishes this store has seen across
-// every URI.
+// every URI, and the pulled reports equal to the last one (activity).
 func (s *DiagnosticStore) TotalGen() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -76,6 +76,8 @@ type fakePull struct {
 	c    *Child
 	reqs chan *jsonrpc.Message
 	pubs chan string // "uri v<version> <items>"
+	// unchanged gets the URI of each PulledUnchanged.
+	unchanged chan string
 }
 
 func newFakePull(t *testing.T) *fakePull {
@@ -83,7 +85,8 @@ func newFakePull(t *testing.T) *fakePull {
 	f := &fakePull{
 		t:    t,
 		reqs: make(chan *jsonrpc.Message, 100),
-		pubs: make(chan string, 100),
+		pubs:      make(chan string, 100),
+		unchanged: make(chan string, 100),
 		c: &Child{
 			name:    "fake",
 			in:      pw,
@@ -100,6 +103,10 @@ func newFakePull(t *testing.T) *fakePull {
 			Diagnostics json.RawMessage `json:"diagnostics"`
 		}
 		_ = json.Unmarshal(params, &p)
+		if method == PulledUnchanged {
+			f.unchanged <- p.URI
+			return
+		}
 		f.pubs <- fmt.Sprintf("%s v%d %s", p.URI, p.Version, p.Diagnostics)
 	})
 	go func() {
@@ -204,6 +211,17 @@ func TestPullSuppressesUnchangedReport(t *testing.T) {
 		t.Fatalf("pulled %s, %s; want a, b", u, u2)
 	}
 	f.noPub()
+	// Each is still handed on as activity for the settle.
+	for _, want := range []string{"a", "b"} {
+		select {
+		case got := <-f.unchanged:
+			if got != want {
+				t.Fatalf("unchanged %s, want %s", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no PulledUnchanged for %s", want)
+		}
+	}
 
 	f.notify("textDocument/didChange", "a", 2)
 	m, _ = f.next()
@@ -244,6 +262,17 @@ func TestPullEditedFirst(t *testing.T) {
 	}
 	if !got["b"] || !got["c"] {
 		t.Fatalf("siblings pulled %v", got)
+	}
+}
+
+// An unchanged pulled report is activity for the settle, not a publish.
+func TestStorePulledUnchangedIsActivityOnly(t *testing.T) {
+	s := NewDiagnosticStore()
+	s.put("a", []Diagnostic{}, nil, false)
+	g, total := s.Gen("a"), s.TotalGen()
+	s.activity()
+	if s.Gen("a") != g || s.TotalGen() != total+1 {
+		t.Fatalf("gen %d -> %d, total %d -> %d; want gen unchanged, total +1", g, s.Gen("a"), total, s.TotalGen())
 	}
 }
 

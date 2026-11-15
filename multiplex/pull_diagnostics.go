@@ -49,7 +49,7 @@ const pullTimeout = 30 * time.Second
 const pullConcurrency = 4
 
 // pullSiblingMax bounds the siblings one edit pulls (docs/design.md).
-const pullSiblingMax = 64
+const pullSiblingMax = 256
 
 // pullsDiagnostics reports whether the child at path with args is a
 // pull-only server: TypeScript 7's exe (tsc, or tsgo from
@@ -203,22 +203,39 @@ func (p *pullState) start(uri string) (pullTicket, bool) {
 	return pullTicket{epoch: doc.epoch, version: doc.version, seq: p.seq}, true
 }
 
-// accept reports whether items, the report of pull t of uri, is to be
-// published, and records it as published when it is. The caller holds
-// deliverMu until it has published.
-func (p *pullState) accept(uri string, t pullTicket, items []byte) bool {
+// PulledUnchanged is the notification a pull child hands its handler for
+// a report equal to the last one published ({"uri": ...}). The store
+// counts it as activity for the settle and changes no URI's generation.
+const PulledUnchanged = "$/poly-lsp/pulledUnchanged"
+
+// pullVerdict is what becomes of one pull's report.
+type pullVerdict int
+
+const (
+	pullPublish   pullVerdict = iota
+	pullUnchanged             // equal to the last published: activity only
+	pullDrop                  // stale
+)
+
+// accept decides what becomes of items, the report of pull t of uri, and
+// records it as published unless it is dropped. The caller holds
+// deliverMu until it has handed it on.
+func (p *pullState) accept(uri string, t pullTicket, items []byte) pullVerdict {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	doc, ok := p.docs[uri]
 	if !ok || doc.epoch != t.epoch || doc.version != t.version {
-		return false // changed, closed or reopened since: a newer pull follows
+		return pullDrop // changed, closed or reopened since: a newer pull follows
 	}
 	if doc.published && t.seq <= doc.pubSeq {
-		return false // a pull started later has been published
+		return pullDrop // a pull started later has been published
 	}
 	same := doc.published && doc.pubVer == t.version && bytes.Equal(doc.pubItems, items)
 	doc.published, doc.pubSeq, doc.pubVer, doc.pubItems = true, t.seq, t.version, items
-	return !same
+	if same {
+		return pullUnchanged
+	}
+	return pullPublish
 }
 
 // runPulls runs pl in the background. No-op for an empty plan.
@@ -269,18 +286,25 @@ func (c *Child) pullOne(uri string) {
 	}
 	c.pull.deliverMu.Lock()
 	defer c.pull.deliverMu.Unlock()
-	if !c.pull.accept(uri, t, rep.Items) {
+	method := "textDocument/publishDiagnostics"
+	var params []byte
+	switch c.pull.accept(uri, t, rep.Items) {
+	case pullDrop:
 		return
+	case pullUnchanged:
+		method = PulledUnchanged
+		params, err = json.Marshal(map[string]any{"uri": uri})
+	default:
+		params, err = json.Marshal(map[string]any{"uri": uri, "version": t.version, "diagnostics": rep.Items})
 	}
-	params, err := json.Marshal(map[string]any{"uri": uri, "version": t.version, "diagnostics": rep.Items})
 	if err != nil {
 		return
 	}
-	traceChild(c.name, "<- (pulled)", "textDocument/publishDiagnostics", params)
+	traceChild(c.name, "<- (pulled)", method, params)
 	c.notifyMu.Lock()
 	fn := c.notifyFn
 	c.notifyMu.Unlock()
 	if fn != nil {
-		fn("textDocument/publishDiagnostics", params)
+		fn(method, params)
 	}
 }

@@ -603,3 +603,54 @@ user, shared by every process), most of them under
 - The budget counts watched dirs, so the dir-create rewatch respects it;
   a removed or renamed dir frees its slot. A `.gitignore` change reloads
   the ignore filter but adds no watches.
+
+## poly-lsp-mcp watches files for its child LSPs
+
+The server's own fsnotify watcher (above) also feeds the children. Every
+child is told the client supports `workspace.didChangeWatchedFiles` with
+`dynamicRegistration` and `relativePatternSupport` (`multiplex/child.go`
+Initialize). A child that registers watchers (`client/registerCapability`)
+gets the events they match as one `didChangeWatchedFiles` per 200 ms batch
+(`mcp/child_watch.go`, `multiplex/watched_files.go`), and needs no inotify
+watches of its own.
+
+- **Advertised to every child** (2026-11-14). Measured with a probe client,
+  capability off vs on: gopls 0.24 holds 0 inotify watches either way; with
+  it on it registers two watchers (`**/*.{mod,work}` and
+  `<root>/**/*.{go,mod,sum,work}`) and otherwise behaves the same; the
+  existing gopls e2e tests pass. pylsp 1.15 and clangd 21 (Android NDK 29) register
+  nothing and hold 0 watches either way. sourcekit-lsp is not measured.
+- **typescript-language-server ≥ 6.1.0** also gets
+  `initializationOptions: {tsserver: {useClientFileWatcher: true}}`
+  (`multiplex/init_options.go`; version from `--version`, cached per
+  binary). On the DUN mobile root, tsserver (TS 6.0.2) held 18,196 inotify
+  watches without it and 0 with it; it registered 28 watchers in 6
+  requests, nearly all `**/*` under the root and under ancestor and global
+  `node_modules` dirs. In `TestTSServerUsesThisWatcher` (a 20-dir project)
+  the tree holds 0 with the option and 46 without. An older version gets
+  no option and one log warning.
+- **Events are filtered, not patterns.** `<root>/**/*` covers
+  `node_modules`, so matching a watcher says nothing about cost. A child
+  hears only what the server's watcher sees: nothing inside a skipped dir
+  (`skipdirs.IsWatchSkip`) or a gitignored dir, nothing outside the root.
+  A skipped dir's own create and delete are forwarded.
+- **Bases outside the root are not watched.** tsserver registers ancestor
+  and global `node_modules` dirs; they get no events. Same rule as
+  `node_read` outside the root (Editing, above).
+- **Package installs.** The writes inside `node_modules` reach no child. A
+  change to `package.json`, `package-lock.json`, `yarn.lock` or
+  `pnpm-lock.yaml` adds a Changed event for the `node_modules` beside it,
+  if that exists. Measured with tsls 6.1.0 + TS 6.0.2 on a scratch project
+  importing a missing package, then "installing" it: manifest events alone
+  cleared TS2307 only when `node_modules` did not exist before the install;
+  with `node_modules` already present they did not. A single Changed (or
+  Created) event for `<root>/node_modules` cleared it in both cases, as did
+  a Created event for the package dir. The Changed event for
+  `node_modules` is the one used; `TestTSServerUsesThisWatcher` fails
+  without it.
+- **Echoes dropped.** A Changed event for an open document whose bytes the
+  child already has is the watcher seeing the tool's own write, and is not
+  sent (the same hash guard as `notifyChildOfExternalChange`). An external
+  change to an open document still goes as `didChange` too: for an open
+  document the client's text wins.
+- Registration of any other method is still refused, as before.

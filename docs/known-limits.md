@@ -153,6 +153,19 @@ entry here.
 - The macOS index thread background priority and the memory-pressure
   sysctl are untested on real hardware.
 - Children's inotify watches (the child plus its descendants, read from `/proc`, Linux only) are observed and warned about at 5% of `max_user_watches`, not capped: a child's watches are outside poly-lsp-mcp's control.
+- typescript-language-server older than 6.1.0 has no
+  `tsserver.useClientFileWatcher`: its tsserver creates its own inotify
+  watches (18,196 measured on one repo, `node_modules` included). One
+  warning is logged; upgrading typescript-language-server fixes it.
+- TypeScript 7 (the native `tsgo`) ships no `tsserver.js`, so
+  typescript-language-server cannot run it, and client file watching does
+  not apply to it.
+- A child hears of no change outside the root, inside a skipped dir
+  (`node_modules`, `.claude`, ...) or inside a gitignored dir: tsserver's
+  watchers on ancestor and global `node_modules` get no events. A package
+  install is announced as a Changed event for the `node_modules` beside the
+  changed manifest; an install that writes no `package.json` or lockfile
+  in a watched dir is not seen until the child restarts.
 - Linux grandchildren get no Pdeathsig (only the process group kill and the
   reap reach them).
 - `--lsp-max-children` is exceeded when every child is busy: a busy child

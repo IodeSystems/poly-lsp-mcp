@@ -143,7 +143,7 @@ func Spawn(name string, lsp *config.LSP, cwd string) (*Child, error) {
 		initOpts:   initializationOptions(name, found.Path, cmd.Env),
 	}
 	if pullsDiagnostics(found.Path, lsp.Args) {
-		c.pull = &pullState{}
+		c.pull = newPullState()
 	}
 	c.ident, _ = readProcIdent(cmd.Process.Pid)
 	trackChild(c)
@@ -217,7 +217,7 @@ func (c *Child) handle(msg *jsonrpc.Message) {
 	}
 	if msg.Method == "workspace/diagnostic/refresh" && c.pull != nil {
 		_ = c.send(&jsonrpc.Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("null")})
-		go c.pullSweep(c.pull.nextGen(), c.pull.all())
+		c.runPulls(c.pull.refresh())
 		return
 	}
 	if msg.Method == "client/registerCapability" || msg.Method == "client/unregisterCapability" {
@@ -382,14 +382,25 @@ func (c *Child) Notify(method string, params any) error {
 		rawParams = b
 	}
 	traceChild(c.name, "->", method, rawParams)
-	if err := c.send(&jsonrpc.Message{
+	// A pull child records the notification under writeMu, so the order
+	// it records documents' versions in is the order they were sent in.
+	c.writeMu.Lock()
+	err := jsonrpc.Write(c.in, &jsonrpc.Message{
 		JSONRPC: "2.0",
 		Method:  method,
 		Params:  rawParams,
-	}); err != nil {
+	})
+	var pl pullPlan
+	if err == nil && c.pull != nil {
+		pl = c.pull.observe(method, rawParams)
+	}
+	c.writeMu.Unlock()
+	if err != nil {
 		return err
 	}
-	c.afterNotify(method, rawParams)
+	if c.pull != nil {
+		c.runPulls(pl)
+	}
 	return nil
 }
 

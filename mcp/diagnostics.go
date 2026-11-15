@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iodesystems/poly-lsp-mcp/internal/skipdirs"
 	"github.com/iodesystems/poly-lsp-mcp/multiplex"
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
@@ -359,7 +360,7 @@ const proactiveMaxFileSize = 1 << 20 // 1 MiB, matches symbols.Build
 // don't pour vendor/node_modules/.git into the child LSPs (which
 // would re-parse them anyway, wasting startup time).
 func skipProactiveOpenDir(name string) bool {
-	return symbols.IsSkipDir(name) || name == ".poly-lsp-mcp"
+	return skipdirs.IsWatchSkip(name) || name == ".poly-lsp-mcp"
 }
 
 // notifyChildOfOpen is a leaner sibling of notifyChildOfEdit: just

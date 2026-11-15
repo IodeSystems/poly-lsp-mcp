@@ -16,6 +16,7 @@ package symbols
 import (
 	"bytes"
 	"fmt"
+	"github.com/iodesystems/poly-lsp-mcp/internal/skipdirs"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -825,54 +826,10 @@ func DefaultExtractor(language string) Extractor {
 	return defaultExtractors[language]
 }
 
-// skipDirs are directories never descended into during Build. Hardcoded
-// for now; promote to config when a real workspace needs it.
-var skipDirs = map[string]bool{
-	".git":         true,
-	"node_modules": true,
-	"vendor":       true,
-	"__pycache__":  true,
-	"dist":         true,
-	"build":        true,
-	".idea":        true,
-	".vscode":      true,
-	// Gradle's per-project cache. It was harmless while we indexed no
-	// C/C++: on reposilite it holds a downloaded Node toolchain whose
-	// 2,290 bundled .h files are 1.5M lexical sites — 35x the rest of
-	// the repo put together, none of it the user's code.
-	".gradle": true,
-	// iOS / Swift. CocoaPods and Carthage vendor dependencies (Pods/ is
-	// the iOS node_modules, often committed), SwiftPM checks them out
-	// under .build/ and keeps Xcode state in .swiftpm/, Xcode writes
-	// DerivedData/ (a project-local one when so configured) and per-user
-	// UI state in xcuserdata/.
-	"Pods":        true,
-	"Carthage":    true,
-	".build":      true,
-	".swiftpm":    true,
-	"DerivedData": true,
-	"xcuserdata":  true,
-}
-
-// skipDirSuffixes are directory-name suffixes skipped like skipDirs. An
-// asset catalog (Assets.xcassets) is a tree of Contents.json files, one
-// per image set, each naming "images", "idiom", "scale" and "filename":
-// JSON the index would read as hundreds of identical names.
-var skipDirSuffixes = []string{".xcassets"}
-
 // IsSkipDir reports whether a directory name is one the index skips. The
-// node_query walk and the proactive open skip the same directories.
-func IsSkipDir(name string) bool {
-	if skipDirs[name] {
-		return true
-	}
-	for _, s := range skipDirSuffixes {
-		if len(name) > len(s) && strings.HasSuffix(name, s) {
-			return true
-		}
-	}
-	return false
-}
+// node_query walk skips the same directories. The
+// list lives in internal/skipdirs, shared with config.
+func IsSkipDir(name string) bool { return skipdirs.Is(name) }
 
 // maxFileSize caps any single file we'll index, in bytes. A file larger
 // than this is skipped and reported as LeftOverSize — generated bundles are

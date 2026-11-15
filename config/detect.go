@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/iodesystems/poly-lsp-mcp/internal/skipdirs"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -59,12 +60,7 @@ func DetectSchemas(root string, existing []Schema) []Schema {
 // descend into .git, vendor dirs, build output, or our own
 // .poly-lsp-mcp cache directory.
 func skipDetectDir(name string) bool {
-	switch name {
-	case ".git", "node_modules", "vendor", "__pycache__",
-		"dist", "build", ".idea", ".vscode", ".poly-lsp-mcp":
-		return true
-	}
-	return false
+	return name == ".poly-lsp-mcp" || skipdirs.IsWatchSkip(name)
 }
 
 // classifySchemaFile returns the dialect name for a single file or ""

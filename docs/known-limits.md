@@ -152,6 +152,7 @@ entry here.
   programs with the same first 16 characters match.
 - The macOS index thread background priority and the memory-pressure
   sysctl are untested on real hardware.
+- Children's inotify watches (the child plus its descendants, read from `/proc`, Linux only) are observed and warned about at 5% of `max_user_watches`, not capped: a child's watches are outside poly-lsp-mcp's control.
 - Linux grandchildren get no Pdeathsig (only the process group kill and the
   reap reach them).
 - `--lsp-max-children` is exceeded when every child is busy: a busy child

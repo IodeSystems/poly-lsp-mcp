@@ -330,6 +330,10 @@ type Server struct {
 	fileWatchDoneMu sync.Mutex
 	fileWatchDone   chan struct{}
 
+	// childEvents batches file events for the child LSPs
+	// (child_watch.go).
+	childEvents childEventBatch
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }

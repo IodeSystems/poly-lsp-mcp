@@ -314,6 +314,10 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 			b.forget(s.getRoot(), ev.Name)
 		}
 	}
+	// The child LSPs get every event their watchers match, whatever the
+	// index makes of it: package.json, go.mod and a new directory are
+	// not indexed files.
+	s.queueChildFileEvent(ev)
 	// A newly created directory: extend coverage to it (and its
 	// subtree). fsnotify won't recurse on its own.
 	if ev.Op&fsnotify.Create != 0 {

@@ -706,11 +706,34 @@ ships no `tsserver.js`, so typescript-language-server cannot run it.
   publishProgramDiagnostics; measured: no publish for any `.ts` file). For
   a child run as `tsc`/`tsgo` with `--lsp`, `multiplex/pull_diagnostics.go`
   pulls after didOpen (that document), after didChange/didSave (that
-  document, then every other open one) and on
-  `workspace/diagnostic/refresh` (every open one; the child is told it has
-  refreshSupport and sends it after relevant file events), and hands each
-  report to the store as a publish carrying the version it was asked for.
-  A report for a document changed or closed since is dropped.
+  document first and alone, never stopped by a later sweep; then the other
+  open ones, most recently touched first, at most 256) and on
+  `workspace/diagnostic/refresh` (every open one, most recently touched
+  first; the child is told it has refreshSupport and sends it after
+  relevant file events), and hands each report to the store as a publish
+  carrying the version it was asked for. All pulls but the edited
+  document's go through one limiter of 4 per child (a didOpen replay
+  after a restart included); a newer sweep stops the older one's
+  unstarted pulls. A report is dropped when its document changed, closed
+  or was reopened since (an open is a new epoch), or when a pull of it
+  started later has been published.
+- **Unchanged reports.** tsgo sends no `resultId` (typescript-go
+  `internal/ls/diagnostics.go` ProvideDiagnostics: always a full report),
+  so a report is compared with the last one published for that document:
+  equal items at the same version are not published (a publish bumps the
+  URI's generation, and the sibling rollup would report old errors as the
+  edit's fallout). It is handed on as `$/poly-lsp/pulledUnchanged`, which
+  the store counts toward the settle only. Measured (TS 7.0.2, copy of DUN
+  `mobile/`, 79 documents open, an edit renaming `useColors`, which 25
+  siblings import): without that count the settle went quiet while the
+  unchanged siblings, pulled first, were answered, and the edit reported
+  1 to 16 of the 25 errors; with it, 25 of 25 in 0.43-0.56 s, not timed
+  out, and an edit with no fallout reports none.
+- **Sibling cap.** 256: with 79 open an edit's sweep took ~0.3 s at 4 in
+  flight (4-35 ms a pull). A cap of 64 missed 9 of the 25 broken siblings
+  (the least recently touched), so the cap is set well above the open
+  documents a session without `--proactive-open` has; the rest are pulled
+  on the next refresh.
 - **didChangeConfiguration.** TS 7 registers it in `initialized`; refused,
   it returns from that handler early (skipping the rest of its setup), so
   the registration is accepted and nothing is ever sent for it.

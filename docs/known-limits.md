@@ -165,9 +165,11 @@ entry here.
   root with no typescript of its own takes the shallowest one below it,
   so subprojects on different versions share that one.
 - TypeScript 7's document diagnostics are pulled, not pushed: after an
-  edit, every other open document is pulled one by one, so with
-  `--proactive-open` on a large project the sibling sweep costs one
-  request per open file. Outside the root and inside skipped dirs (its
+  edit, the other open documents are pulled, 4 at a time, at most the 256
+  most recently touched. With more open (`--proactive-open` on a large
+  project) an edit reports no fallout in the rest, and the sweep, one
+  request per document, can keep the settle from going quiet until the
+  edit's wait ends (timed out). Outside the root and inside skipped dirs (its
   `<root>/node_modules/**/*` auto-import watcher included) it gets no
   file events, as tsserver does not.
 - With `--lsp-roots=auto` or a deferred typescript child,

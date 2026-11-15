@@ -54,7 +54,8 @@ func resolveTSServer(name string, lsp *config.LSP, root string) *config.LSP {
 	}
 	exe, err := tsNativeExe(pkgDir)
 	if err != "" {
-		log.Printf("[%s] typescript %d.%d.%d at %s: %s; running %s", name, ver[0], ver[1], ver[2], pkgDir, err, lsp.Cmd)
+		log.Printf("[%s] ERROR: typescript %d.%d.%d at %s, but its native LSP is not usable: %s. Running %s instead, which cannot work: TypeScript 7 has no tsserver.js. Install the platform package @typescript/%s for this typescript.",
+			name, ver[0], ver[1], ver[2], pkgDir, err, lsp.Cmd, tsPlatformPackage(runtime.GOOS, runtime.GOARCH))
 		return lsp
 	}
 	log.Printf("[%s] typescript %d.%d.%d at %s: running its native LSP %s", name, ver[0], ver[1], ver[2], pkgDir, exe)

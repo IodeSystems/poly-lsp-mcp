@@ -130,6 +130,23 @@ func TestTSResolve7WithoutExe(t *testing.T) {
 	wantTSLS(t, resolveTSServer("typescript", tsDefault(), root))
 }
 
+// A global npm install nests the platform package under typescript's own
+// node_modules (npm 11, node 24: <global>/typescript/node_modules/
+// @typescript/typescript-linux-x64). It is found first, before any
+// ancestor's.
+func TestTSResolveNestedPlatformPackage(t *testing.T) {
+	g := filepath.Join(t.TempDir(), "lib", "node_modules")
+	installTS(t, g, "7.0.2") // a sibling platform package, found second
+	exe := installTS(t, filepath.Join(g, "typescript", "node_modules"), "7.0.2")
+	// installTS wrote a second typescript package inside; the global one
+	// stays the package found.
+	if err := os.RemoveAll(filepath.Join(g, "typescript", "node_modules", "typescript")); err != nil {
+		t.Fatal(err)
+	}
+	noGlobalTS(t, g)
+	wantNative(t, resolveTSServer("typescript", tsDefault(), t.TempDir()), exe)
+}
+
 // pnpm: node_modules/typescript links into .pnpm, where the platform
 // package sits beside it.
 func TestTSResolvePnpmLayout(t *testing.T) {

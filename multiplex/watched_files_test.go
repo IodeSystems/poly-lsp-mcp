@@ -97,6 +97,15 @@ func TestHandleRegistration(t *testing.T) {
 		t.Fatal("a refused request stored its watchers")
 	}
 
+	// didChangeConfiguration is accepted and stores no watcher (TS 7).
+	cfg := `{"registrations":[{"id":"typescript-config-watch-id","method":"workspace/didChangeConfiguration","registerOptions":{"section":["typescript"]}}]}`
+	if msg := c.handleRegistration("client/registerCapability", json.RawMessage(cfg)); msg != "" {
+		t.Fatalf("register didChangeConfiguration: %s", msg)
+	}
+	if n := c.FileWatchers(); n != 2 {
+		t.Fatalf("FileWatchers = %d after didChangeConfiguration, want 2", n)
+	}
+
 	unreg := `{"unregisterations":[{"id":"w1","method":"workspace/didChangeWatchedFiles"}]}`
 	if msg := c.handleRegistration("client/unregisterCapability", json.RawMessage(unreg)); msg != "" {
 		t.Fatalf("unregister: %s", msg)

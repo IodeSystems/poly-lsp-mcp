@@ -157,9 +157,24 @@ entry here.
   `tsserver.useClientFileWatcher`: its tsserver creates its own inotify
   watches (18,196 measured on one repo, `node_modules` included). One
   warning is logged; upgrading typescript-language-server fixes it.
-- TypeScript 7 (the native `tsgo`) ships no `tsserver.js`, so
-  typescript-language-server cannot run it, and client file watching does
-  not apply to it.
+- TypeScript 7 runs as its native LSP only for the built-in typescript
+  command and a root that resolves typescript >= 7 (docs/design.md). A
+  root that resolves no local typescript uses the global one: once the
+  global typescript is 7, typescript-language-server runs only for roots
+  with a local TypeScript 6 in `node_modules`. In single `--lsp-roots`, a
+  root with no typescript of its own takes the shallowest one below it,
+  so subprojects on different versions share that one.
+- TypeScript 7's document diagnostics are pulled, not pushed: after an
+  edit, every other open document is pulled one by one, so with
+  `--proactive-open` on a large project the sibling sweep costs one
+  request per open file. Outside the root and inside skipped dirs (its
+  `<root>/node_modules/**/*` auto-import watcher included) it gets no
+  file events, as tsserver does not.
+- With `--lsp-roots=auto` or a deferred typescript child,
+  `typescript-language-server` must be installed even for a TS 7 project:
+  the start-up check looks for the configured command.
+- The TS 7 path is measured on Linux only; macOS and Windows platform
+  package names follow getExePath.js but are untested.
 - A child hears of no change outside the root, inside a skipped dir
   (`node_modules`, `.claude`, ...) or inside a gitignored dir: tsserver's
   watchers on ancestor and global `node_modules` get no events. A package

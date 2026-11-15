@@ -653,4 +653,64 @@ watches of its own.
   sent (the same hash guard as `notifyChildOfExternalChange`). An external
   change to an open document still goes as `didChange` too: for an open
   document the client's text wins.
-- Registration of any other method is still refused, as before.
+- `workspace/didChangeConfiguration` registration is accepted as a no-op
+  (TypeScript 7 registers it; see below). Registration of any other
+  method is still refused, as before.
+
+## TypeScript 7: the native LSP
+
+Decision (user, 2026-11-14): TypeScript 7 is the target. A typescript
+child whose LSP root resolves typescript >= 7 runs TS 7's native LSP; a
+root on TS <= 6 runs `typescript-language-server --stdio` as before. TS 7
+ships no `tsserver.js`, so typescript-language-server cannot run it.
+
+- **Resolution** (`multiplex/tsresolve.go`, in `Spawn`, per start):
+  `node_modules/typescript` in the root or an ancestor (Node's lookup);
+  else the shallowest one below the root, at most 3 dirs down, skipped and
+  dot dirs not entered, lexical order breaking a tie (single
+  `--lsp-roots`: a workspace root with no package.json whose TS project is
+  a subdir, e.g. DUN `mobile/`; with `--lsp-roots=auto` each tsconfig root
+  resolves its own); else the global npm root (`npm prefix -g`). For 7 or
+  later the exe is found as `lib/getExePath.js` (7.0.2) finds it: the
+  platform package `@typescript/typescript-<platform>-<arch>` resolved
+  from the package's real path (pnpm), then its `lib/tsc`, run with
+  `--lsp --stdio`. node is not run. A 7 without its exe keeps tsls, logged.
+- **Override.** Only the built-in command (`typescript-language-server`
+  with args exactly `--stdio`) is replaced. Any other command or args,
+  including tsls by absolute path, runs as given.
+- **No version probe.** The tsls `--version` probe and its tsserver
+  options key on the binary name `typescript-language-server`; TS 7's
+  exe is `tsc` and gets neither.
+- **Watching, measured** (TS 7.0.2, DUN `mobile/`, open
+  `src/providers/AuthProvider.tsx`, probe client, 15 s settle). A: no
+  `didChangeWatchedFiles` capability: 0 inotify watches, and its log says
+  "file watching: disabled (client lacks dynamic watch registration and
+  builtin watcher backend is not fast-recursive)": on Linux it does not
+  watch at all. B: `dynamicRegistration` + `relativePatternSupport`,
+  registrations answered: 0 inotify watches, "using LSP client-side
+  watching"; 2 watchers in 2 requests, absolute string globs
+  `<root>/**/*` and `<root>/node_modules/**/*`, kind 7. The choice is
+  typescript-go `internal/lsp/server.go` handleInitialized: client
+  watching when the client has dynamic registration, else its own watcher
+  only where the backend is fast-recursive (Windows, FSEvents), else none.
+  No initializationOption controls it. So the existing forwarding serves
+  it: `TestTS7NativeUsesThisWatcher` holds 0 watches with 3 watchers
+  registered.
+- **Package installs.** In the same e2e (node_modules present before the
+  install), TS 7 resolved the new package from the manifest events alone;
+  the synthesized `node_modules` Changed event is sent too (the root
+  `**/*` matches it) and does no harm.
+- **Diagnostics are pulled.** TS 7 pushes only tsconfig (program)
+  diagnostics; document diagnostics are served by `textDocument/diagnostic`
+  only (typescript-go `internal/project/session.go`
+  publishProgramDiagnostics; measured: no publish for any `.ts` file). For
+  a child run as `tsc`/`tsgo` with `--lsp`, `multiplex/pull_diagnostics.go`
+  pulls after didOpen (that document), after didChange/didSave (that
+  document, then every other open one) and on
+  `workspace/diagnostic/refresh` (every open one; the child is told it has
+  refreshSupport and sends it after relevant file events), and hands each
+  report to the store as a publish carrying the version it was asked for.
+  A report for a document changed or closed since is dropped.
+- **didChangeConfiguration.** TS 7 registers it in `initialized`; refused,
+  it returns from that handler early (skipping the rest of its setup), so
+  the registration is accepted and nothing is ever sent for it.

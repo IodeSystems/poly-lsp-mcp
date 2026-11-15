@@ -165,6 +165,22 @@ func (f *finder) npmGlobalBin() string {
 	return f.npmBin
 }
 
+// NpmGlobalRoot is the global node_modules dir (`npm root -g`), derived
+// from `npm prefix -g` (asked once per process). "" when there is no npm.
+func NpmGlobalRoot() string { return system.npmGlobalRoot() }
+
+func (f *finder) npmGlobalRoot() string {
+	bin := f.npmGlobalBin()
+	if bin == "" {
+		return ""
+	}
+	prefix := filepath.Dir(bin)
+	if f.goos == "windows" {
+		return filepath.Join(prefix, "node_modules")
+	}
+	return filepath.Join(prefix, "lib", "node_modules")
+}
+
 // interpreterEnv returns the environment for running the script at path,
 // when its shebang names an interpreter PATH lacks but a fallback dir has
 // (`#!/usr/bin/env node`; pnpm's sh shims call node too). nil when PATH

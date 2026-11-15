@@ -257,11 +257,18 @@ func (r *watchRegistry) wants(p string, t FileChangeType) bool {
 	return false
 }
 
+// methodDidChangeConfiguration's registration is accepted and does
+// nothing: this client never changes a child's configuration, so it
+// sends no didChangeConfiguration. TypeScript 7 registers it in its
+// `initialized` handler and, refused, returns before finishing that
+// handler (typescript-go internal/lsp/server.go handleInitialized).
+const methodDidChangeConfiguration = "workspace/didChangeConfiguration"
+
 // handleRegistration answers client/registerCapability and
-// client/unregisterCapability. Only didChangeWatchedFiles is supported: a
-// request that names any other method is refused whole, as every
-// registration was before this client supported one. It returns the
-// error message, "" on success.
+// client/unregisterCapability. didChangeWatchedFiles is supported and
+// didChangeConfiguration accepted as a no-op; a request that names any
+// other method is refused whole, as every registration was before this
+// client supported one. It returns the error message, "" on success.
 func (c *Child) handleRegistration(method string, params json.RawMessage) string {
 	if method == "client/unregisterCapability" {
 		// The LSP spec spells the field "unregisterations".
@@ -275,12 +282,14 @@ func (c *Child) handleRegistration(method string, params json.RawMessage) string
 			return "bad params: " + err.Error()
 		}
 		for _, u := range p.Unregisterations {
-			if u.Method != methodWatchedFiles {
+			if u.Method != methodWatchedFiles && u.Method != methodDidChangeConfiguration {
 				return "client does not implement unregistration of " + u.Method
 			}
 		}
 		for _, u := range p.Unregisterations {
-			c.watches.drop(u.ID)
+			if u.Method == methodWatchedFiles {
+				c.watches.drop(u.ID)
+			}
 		}
 		return ""
 	}
@@ -297,11 +306,14 @@ func (c *Child) handleRegistration(method string, params json.RawMessage) string
 		return "bad params: " + err.Error()
 	}
 	for _, r := range p.Registrations {
-		if r.Method != methodWatchedFiles {
+		if r.Method != methodWatchedFiles && r.Method != methodDidChangeConfiguration {
 			return "client does not implement registration of " + r.Method
 		}
 	}
 	for _, r := range p.Registrations {
+		if r.Method != methodWatchedFiles {
+			continue
+		}
 		var ws []fileWatcher
 		for _, raw := range r.RegisterOptions.Watchers {
 			if w, ok := compileWatcher(raw); ok {

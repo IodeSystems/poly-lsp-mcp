@@ -29,6 +29,8 @@ type Fleet struct {
 	readRSS      func(pid int) (int64, error)
 	readPSI      func() (float64, error)
 	readPressure func() (int, error)
+	readWatches  func(pid int) (WatchCount, error)
+	readWatchMax func() (int, error)
 
 	admitMu sync.Mutex // serializes admission: count, evict, reserve
 
@@ -36,6 +38,9 @@ type Fleet struct {
 	managers map[*Manager]struct{}
 	reserved int   // admitted children still in spawn+initialize
 	lastRSS  int64 // summed child RSS at the last check
+
+	lastWatches int          // summed inotify watches of all child trees at the last check; 0 = unknown
+	watchWarned map[int]bool // child pid -> already warned for this crossing
 
 	startOnce sync.Once
 	closeOnce sync.Once
@@ -58,18 +63,20 @@ type FleetStatus struct {
 	Running     int   `json:"running"`     // running children across every Manager
 	RSS         int64 `json:"rss"`         // summed child RSS in bytes, at the last check
 	RSSBudget   int64 `json:"rssBudget,omitempty"`
+	Watches     int   `json:"watches,omitempty"` // summed inotify watches of the child trees, at the last check; absent = unknown
 }
 
 // Status reports the cap, the running count and the summed RSS.
 func (f *Fleet) Status() FleetStatus {
 	f.mu.Lock()
-	rss := f.lastRSS
+	rss, watches := f.lastRSS, f.lastWatches
 	f.mu.Unlock()
 	return FleetStatus{
 		MaxChildren: f.lc.MaxChildren,
 		Running:     len(f.members()),
 		RSS:         rss,
 		RSSBudget:   f.budget(),
+		Watches:     watches,
 	}
 }
 
@@ -233,6 +240,7 @@ func (f *Fleet) check() {
 	f.mu.Lock()
 	f.lastRSS = sum
 	f.mu.Unlock()
+	f.checkWatches(ms)
 
 	// Budget: the largest first, until under it.
 	if budget := f.budget(); budget > 0 && sum > budget {
@@ -311,4 +319,66 @@ func (c *Child) inFlight() bool {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
 	return len(c.pending) > 0
+}
+
+// watchWarnPct is the share of max_user_watches one child tree may hold
+// before a warning is logged.
+const watchWarnPct = 5
+
+// checkWatches counts the inotify watches of each child's process tree
+// (the child and its descendants), records the sum for Status, and logs
+// one warning per child each time its tree crosses watchWarnPct of
+// max_user_watches. It only observes: a child's watches cannot be capped
+// from here. Unknown (non-Linux, unreadable limit) records 0 and warns
+// nothing.
+func (f *Fleet) checkWatches(ms []member) {
+	readMax, read := f.readWatchMax, f.readWatches
+	if readMax == nil {
+		readMax = readWatchLimit
+	}
+	if read == nil {
+		read = readTreeWatches
+	}
+	limit, err := readMax()
+	if err != nil || limit <= 0 {
+		f.mu.Lock()
+		f.lastWatches = 0
+		f.mu.Unlock()
+		return
+	}
+	threshold := limit / 100 * watchWarnPct
+	sum := 0
+	live := map[int]bool{}
+	for _, mb := range ms {
+		pid := mb.child.Pid()
+		if pid == 0 {
+			continue
+		}
+		wc, err := read(pid)
+		if err != nil {
+			continue
+		}
+		sum += wc.Total
+		live[pid] = true
+		f.mu.Lock()
+		if f.watchWarned == nil {
+			f.watchWarned = map[int]bool{}
+		}
+		warned := f.watchWarned[pid]
+		over := wc.Total > threshold
+		f.watchWarned[pid] = over
+		f.mu.Unlock()
+		if over && !warned {
+			log.Printf("multiplex: %s at %s (pid %d): process tree holds %d inotify watches, %d%% of max_user_watches %d; most in pid %d (%d). Observed only, not capped",
+				mb.k.lang, mb.k.dir, pid, wc.Total, wc.Total*100/limit, limit, wc.TopPid, wc.TopCount)
+		}
+	}
+	f.mu.Lock()
+	f.lastWatches = sum
+	for pid := range f.watchWarned {
+		if !live[pid] {
+			delete(f.watchWarned, pid)
+		}
+	}
+	f.mu.Unlock()
 }

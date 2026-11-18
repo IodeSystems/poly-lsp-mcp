@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // IgnoreSet is the set of paths git says are ignored in a workspace,
@@ -33,6 +34,9 @@ type IgnoreSet struct {
 	// carry excludes), so the git fallback is never asked.
 	noGit bool
 
+	// loaded is when git was asked; zero for a set with no git run.
+	loaded time.Time
+
 	// mu guards checked, the memo for the pattern fallback below.
 	mu      sync.Mutex
 	checked map[string]bool
@@ -52,13 +56,14 @@ func LoadIgnores(root string) *IgnoreSet {
 	// is correct: git still tracks it, so it is part of the project.
 	// --directory collapses a fully-ignored directory to one entry, so
 	// node_modules costs one line instead of a hundred thousand.
+	loaded := time.Now()
 	cmd := exec.Command("git", "-C", root,
 		"ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
-	s := &IgnoreSet{root: root, files: map[string]bool{}, checked: map[string]bool{}}
+	s := &IgnoreSet{root: root, files: map[string]bool{}, checked: map[string]bool{}, loaded: loaded}
 	for _, p := range strings.Split(string(out), "\x00") {
 		if p == "" {
 			continue
@@ -73,6 +78,16 @@ func LoadIgnores(root string) *IgnoreSet {
 	// may match paths that do not exist YET, and Matches falls back to
 	// git for those.
 	return s
+}
+
+// LoadedAt is when LoadIgnores asked git for this set: a .gitignore
+// last modified before then is reflected in it. Zero for a nil set or
+// one that never ran git.
+func (s *IgnoreSet) LoadedAt() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	return s.loaded
 }
 
 // WithExcludes returns a set that also ignores each directory in dirs

@@ -44,7 +44,7 @@ func (s *Server) kickFileWatch() {
 
 	root := s.getRoot()
 	s.watcherMu.Lock()
-	s.watchBudget = budgetFromHost(inotifyMaxPath)
+	s.watchBudget = hostWatchBudget()
 	s.watcherMu.Unlock()
 	added := s.addWatchDirs(w, root)
 	log.Printf("mcp file-watch: watching %d dir(s) under %s", added, root)
@@ -71,6 +71,7 @@ func (s *Server) stopFileWatch() {
 	if w != nil {
 		_ = w.Close()
 	}
+	s.ignoreReload.stop()
 }
 
 // WaitForFileWatch blocks until the watcher goroutine has exited (after
@@ -101,6 +102,11 @@ type watchAdder interface {
 // most under .claude/worktrees/*/node_modules; the watch set is shared
 // by every process of the user, so this server takes at most a tenth of
 // the limit and warns when one top-level dir takes more than 5%.
+//
+// On kqueue (macOS, BSD) the cost is file descriptors, not watches: the
+// backend opens one fd per entry of each watched dir, from the process's
+// RLIMIT_NOFILE, which every root of a shared daemon draws on. There the
+// budget charges each dir 1 + its entry count (file_watch_kqueue.go).
 const (
 	inotifyMaxPath       = "/proc/sys/fs/inotify/max_user_watches"
 	inotifyMaxFallback   = 8192
@@ -122,16 +128,21 @@ func readInotifyMax(path string) (max int, ok bool) {
 	return n, true
 }
 
-// watchBudget counts the watches one server holds and refuses more once
-// the limit is reached. Safe for concurrent use: the root walk and the
-// event loop's dir-create handler both call addWatchDirs.
+// watchBudget counts the watch cost one server holds and refuses more
+// once the limit is reached. Safe for concurrent use: the root walk and
+// the event loop's dir-create handler both call addWatchDirs.
 type watchBudget struct {
-	mu         sync.Mutex
-	max        int // host max_user_watches
-	limit      int // watches this server may hold
-	watched    map[string]bool
-	perTop     map[string]int // watches per top-level dir; "." is the root itself
-	warnedTop  map[string]bool
+	mu        sync.Mutex
+	max       int    // host limit
+	maxName   string // the host limit's name, for logs
+	unit      string // what one unit of cost is, for logs
+	limit     int    // cost this server may hold
+	used      int
+	watched   map[string]int // watched dir -> its cost
+	perTop    map[string]int // cost per top-level dir; "." is the root itself
+	warnedTop map[string]bool
+	// dirCost is the cost of watching one dir; nil means 1 (inotify).
+	dirCost    func(path string) int
 	full       bool
 	fullWarned bool
 }
@@ -142,8 +153,43 @@ func newWatchBudget(max int) *watchBudget {
 	if limit < 1 {
 		limit = 1
 	}
-	return &watchBudget{max: max, limit: limit, watched: map[string]bool{},
-		perTop: map[string]int{}, warnedTop: map[string]bool{}}
+	return &watchBudget{max: max, maxName: "max_user_watches", unit: "inotify watches",
+		limit: limit, watched: map[string]int{}, perTop: map[string]int{}, warnedTop: map[string]bool{}}
+}
+
+// kqueueMaxFallback is the fd limit assumed when RLIMIT_NOFILE cannot be
+// read: macOS's default kern.maxfilesperproc is larger, its launchd
+// default soft limit (256) smaller.
+const kqueueMaxFallback = 10240
+
+// newKqueueBudget makes a budget of watchBudgetPercent of an fd limit,
+// charging each dir what the kqueue backend opens for it.
+func newKqueueBudget(maxFDs int) *watchBudget {
+	b := newWatchBudget(maxFDs)
+	b.maxName, b.unit, b.dirCost = "RLIMIT_NOFILE", "kqueue fds", kqueueDirCost
+	return b
+}
+
+// kqueueDirCost is the fds fsnotify's kqueue backend opens to watch dir:
+// one for the dir and one per entry, file or subdir
+// (backend_kqueue.go watchDirectoryFiles). Overcounts a subdir that is
+// also watched, which errs on the safe side.
+func kqueueDirCost(dir string) int {
+	f, err := os.Open(dir)
+	if err != nil {
+		return 1
+	}
+	defer f.Close()
+	names, _ := f.Readdirnames(-1)
+	return 1 + len(names)
+}
+
+// cost is what watching path costs. Caller holds b.mu.
+func (b *watchBudget) cost(path string) int {
+	if b.dirCost == nil {
+		return 1
+	}
+	return b.dirCost(path)
 }
 
 // budgetFromHost builds the budget from the host limit, logging when the
@@ -174,9 +220,10 @@ func topDir(root, path string) string {
 func (b *watchBudget) forget(root, path string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.watched[path] {
+	if c, ok := b.watched[path]; ok {
 		delete(b.watched, path)
-		b.perTop[topDir(root, path)]--
+		b.used -= c
+		b.perTop[topDir(root, path)] -= c
 		b.full = false
 	}
 }
@@ -191,7 +238,7 @@ func (b *watchBudget) forget(root, path string) {
 func (s *Server) addWatchDirs(w watchAdder, root string) int {
 	s.watcherMu.Lock()
 	if s.watchBudget == nil {
-		s.watchBudget = budgetFromHost(inotifyMaxPath)
+		s.watchBudget = hostWatchBudget()
 	}
 	b := s.watchBudget
 	s.watcherMu.Unlock()
@@ -212,17 +259,18 @@ func (s *Server) addWatchDirs(w watchAdder, root string) int {
 		if path != root && s.getIgnores().DirIgnored(wroot, path) {
 			return filepath.SkipDir
 		}
-		if b.watched[path] {
+		if _, ok := b.watched[path]; ok {
 			return nil
 		}
-		if b.full || len(b.watched) >= b.limit {
+		c := b.cost(path)
+		if b.full || b.used+c > b.limit {
 			b.full = true
 			stopAt = path
 			return filepath.SkipAll
 		}
 		if err := w.Add(path); err != nil {
-			if errors.Is(err, syscall.ENOSPC) {
-				log.Printf("mcp file-watch: inotify watch limit reached at %s (ENOSPC); not watching further", path)
+			if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EMFILE) {
+				log.Printf("mcp file-watch: watch limit reached at %s (%v); not watching further", path, err)
 				b.full, b.fullWarned = true, true
 				stopAt = path
 				return filepath.SkipAll
@@ -232,21 +280,22 @@ func (s *Server) addWatchDirs(w watchAdder, root string) int {
 			}
 			return nil
 		}
-		b.watched[path] = true
+		b.watched[path] = c
+		b.used += c
 		count++
 		top := topDir(wroot, path)
-		b.perTop[top]++
+		b.perTop[top] += c
 		if n := b.perTop[top]; top != "." && !b.warnedTop[top] && n*100 > b.max*watchPerDirWarnShare {
 			b.warnedTop[top] = true
-			log.Printf("mcp file-watch: %s uses %d inotify watches (over %d%% of max_user_watches=%d)",
-				top, n, watchPerDirWarnShare, b.max)
+			log.Printf("mcp file-watch: %s uses %d %s (over %d%% of %s=%d)",
+				top, n, b.unit, watchPerDirWarnShare, b.maxName, b.max)
 		}
 		return nil
 	})
 	if stopAt != "" && !b.fullWarned {
 		b.fullWarned = true
-		log.Printf("mcp file-watch: watch budget of %d reached (%d%% of max_user_watches=%d); unwatched top-level dirs: %s",
-			b.limit, watchBudgetPercent, b.max, strings.Join(s.unwatchedTops(b, wroot, stopAt), ", "))
+		log.Printf("mcp file-watch: watch budget of %d %s reached (%d%% of %s=%d); unwatched top-level dirs: %s",
+			b.limit, b.unit, watchBudgetPercent, b.maxName, b.max, strings.Join(s.unwatchedTops(b, wroot, stopAt), ", "))
 	}
 	return count
 }
@@ -301,10 +350,22 @@ func (s *Server) runFileWatch(w *fsnotify.Watcher) {
 	}
 }
 
+// contentOp reports whether an event can mean new content or a new
+// path: Create, Write, Remove or Rename. A Chmod alone cannot, and on
+// macOS the kqueue backend reports one for every attribute change on
+// every file in a watched dir, including ones a read may cause
+// (docs/design.md). Acting on them re-read files and re-ran git.
+func contentOp(op fsnotify.Op) bool {
+	return op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0
+}
+
 // handleWatchEvent routes one fsnotify event: directory creates extend
 // the watch set, file events schedule a debounced index update. Removes
 // and renames evict the (old) path; creates and writes re-extract it.
 func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pending map[string]*time.Timer, mu *sync.Mutex) {
+	if !contentOp(ev.Op) {
+		return
+	}
 	// A removed or renamed dir loses its kernel watch; free its slot.
 	if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		s.watcherMu.Lock()
@@ -329,13 +390,11 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 		}
 	}
 	// A .gitignore change — most often a branch switch — invalidates the
-	// filter the walk and this watcher both use. Re-resolve it, and do
-	// so BEFORE the watchable check, since .gitignore is not itself an
-	// indexed file.
+	// filter the walk and this watcher both use. Re-resolve it (debounced,
+	// and only when the content changed), and do so BEFORE the watchable
+	// check, since .gitignore is not itself an indexed file.
 	if filepath.Base(ev.Name) == ".gitignore" {
-		if root := s.getRoot(); root != "" {
-			s.setIgnores(s.loadIgnores(root))
-		}
+		s.queueGitignoreReload(ev.Name)
 		return
 	}
 	if !s.watchedFile(ev.Name) {

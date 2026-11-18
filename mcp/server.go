@@ -334,6 +334,10 @@ type Server struct {
 	// (child_watch.go).
 	childEvents childEventBatch
 
+	// ignoreReload debounces the re-resolve a .gitignore event starts
+	// (gitignore_reload.go).
+	ignoreReload gitignoreReload
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }

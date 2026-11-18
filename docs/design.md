@@ -604,6 +604,43 @@ user, shared by every process), most of them under
   a removed or renamed dir frees its slot. A `.gitignore` change reloads
   the ignore filter but adds no watches.
 
+### macOS and BSD: kqueue
+
+On macOS a shared daemon (v0.5.2) ran at about 200% CPU for 12 hours with
+every child LSP stopped. Not reproduced: Linux has no kqueue. Code review
+found three causes that feed each other.
+
+- **One fd per file.** fsnotify 1.10.1's kqueue backend opens an fd for
+  every entry of each watched dir (`backend_kqueue.go`
+  `watchDirectoryFiles`, `internalWatch`) and asks for every note,
+  `NOTE_ATTRIB` included. The cost is the process's `RLIMIT_NOFILE`, which
+  every root of a shared daemon draws on. Go raises the soft limit at
+  start-up to the hard limit, capped on darwin at `kern.maxfilesperproc`
+  (`syscall/rlimit_darwin.go`), so `Getrlimit` already reflects both. On
+  kqueue the budget is 10% of that limit and a dir costs 1 + its entry
+  count (`file_watch_kqueue.go`, `kqueueDirCost`); `EMFILE` stops the walk
+  like `ENOSPC`. Linux keeps one unit per dir.
+- **Chmod events are dropped.** kqueue reports an attribute change on any
+  watched file as `Chmod`. A Chmod on `.gitignore` re-ran
+  `git ls-files --others --ignored --directory` and replaced the ignore
+  set, emptying its `git check-ignore` memo, so the next events each ran
+  `git check-ignore` again; a Chmod on an indexed file re-read and
+  re-parsed it. If macOS raises attribute events on read (atime, xattrs),
+  the daemon's own reads fed this loop. Only Create, Write, Remove and
+  Rename now count, in the watcher and in forwarding to children
+  (`contentOp`). Measured with a PATH wrapper that logs git calls
+  (`TestWatchChmodOnlyCostsNoGit`): before, one Chmod on `a.go` and one on
+  `.gitignore` ran git 3 times; after, 0.
+- **`.gitignore` re-resolves are debounced and content-checked**
+  (`mcp/gitignore_reload.go`). Events coalesce for 500 ms into one flush.
+  The flush hashes each queued `.gitignore` and runs `git ls-files` only
+  when one changed. A `.gitignore` seen for the first time counts as
+  unchanged when its mtime is more than 2 s older than the set's load time
+  (`IgnoreSet.LoadedAt`; 2 s covers coarse mtime resolution). An unchanged
+  flush keeps the set and its memo. A changed one replaces both: a new
+  pattern can change a `check-ignore` answer even when the `ls-files`
+  listing is the same, so the memo is not kept across a content change.
+
 ## poly-lsp-mcp watches files for its child LSPs
 
 The server's own fsnotify watcher (above) also feeds the children. Every

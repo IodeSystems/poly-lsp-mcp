@@ -2883,6 +2883,10 @@ func (s *Server) resolveFileArg(file string) (string, error) {
 	}
 	abs := file
 	if !filepath.IsAbs(abs) {
+		if missingLeadingSlash(root, file) {
+			return "", fmt.Errorf("path %q looks like an absolute path missing its leading /: it repeats the root %s; pass %q or a path relative to the root",
+				file, root, string(filepath.Separator)+filepath.Clean(file))
+		}
 		abs = filepath.Join(root, abs)
 	}
 	abs = filepath.Clean(abs)
@@ -2901,6 +2905,24 @@ func (s *Server) resolveFileArg(file string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("path escapes the workspace root: %q (paths must resolve inside %s)", file, root)
+}
+
+// missingLeadingSlash reports whether the relative path rel starts with
+// the root's own absolute path, minus the leading separator:
+// "Users/x/work/repo/plan.md" under root /Users/x/work/repo. Joined onto
+// the root it would create <root>/Users/x/work/repo/..., which a tool
+// call once did. The root's symlink-resolved spelling counts too.
+func missingLeadingSlash(root, rel string) bool {
+	r := filepath.ToSlash(filepath.Clean(rel))
+	repeats := func(rt string) bool {
+		p := strings.TrimLeft(filepath.ToSlash(filepath.Clean(rt)), "/")
+		return p != "" && (r == p || strings.HasPrefix(r, p+"/"))
+	}
+	if repeats(root) {
+		return true
+	}
+	rr, err := filepath.EvalSymlinks(root)
+	return err == nil && rr != root && repeats(rr)
 }
 
 // rootSpelling maps an absolute path a child LSP returned onto the root's

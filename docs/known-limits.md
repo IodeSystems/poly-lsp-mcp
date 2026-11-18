@@ -152,6 +152,13 @@ entry here.
   programs with the same first 16 characters match.
 - The macOS index thread background priority and the memory-pressure
   sysctl are untested on real hardware.
+- The kqueue watcher fixes (Chmod events dropped, per-fd watch budget,
+  debounced `.gitignore` re-resolve) are tested on Linux only; the 200%
+  CPU incident on macOS is not reproduced (docs/design.md, kqueue). The
+  kqueue budget charges a dir its entry count when it is added; files
+  created later in a watched dir open more fds that the budget does not
+  count. On a large root, 10% of `RLIMIT_NOFILE` (2,457 fds when the limit
+  is 24,576) leaves most dirs unwatched; one warning lists them.
 - Children's inotify watches (the child plus its descendants, read from `/proc`, Linux only) are observed and warned about at 5% of `max_user_watches`, not capped: a child's watches are outside poly-lsp-mcp's control.
 - typescript-language-server older than 6.1.0 has no
   `tsserver.useClientFileWatcher`: its tsserver creates its own inotify

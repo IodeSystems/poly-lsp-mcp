@@ -79,6 +79,9 @@ func coalesceChange(old, next multiplex.FileChangeType) multiplex.FileChangeType
 // skipped dir's own create or delete is kept: tsserver needs to see
 // node_modules appear (see manifestDirs).
 func (s *Server) childFileEvent(ev fsnotify.Event) (multiplex.FileEvent, bool) {
+	if !contentOp(ev.Op) {
+		return multiplex.FileEvent{}, false
+	}
 	var t multiplex.FileChangeType
 	switch {
 	case ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0:

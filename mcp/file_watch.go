@@ -301,10 +301,22 @@ func (s *Server) runFileWatch(w *fsnotify.Watcher) {
 	}
 }
 
+// contentOp reports whether an event can mean new content or a new
+// path: Create, Write, Remove or Rename. A Chmod alone cannot, and on
+// macOS the kqueue backend reports one for every attribute change on
+// every file in a watched dir, including ones a read may cause
+// (docs/design.md). Acting on them re-read files and re-ran git.
+func contentOp(op fsnotify.Op) bool {
+	return op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0
+}
+
 // handleWatchEvent routes one fsnotify event: directory creates extend
 // the watch set, file events schedule a debounced index update. Removes
 // and renames evict the (old) path; creates and writes re-extract it.
 func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pending map[string]*time.Timer, mu *sync.Mutex) {
+	if !contentOp(ev.Op) {
+		return
+	}
 	// A removed or renamed dir loses its kernel watch; free its slot.
 	if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		s.watcherMu.Lock()

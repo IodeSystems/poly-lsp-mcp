@@ -22,7 +22,9 @@ func usageCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Summarize node_query and node_edit usage",
-		Args:  cobra.NoArgs,
+		Example: `  poly-lsp-mcp usage
+  poly-lsp-mcp usage --json`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := daemonHome(); err != nil {
 				return err

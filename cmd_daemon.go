@@ -34,6 +34,9 @@ func daemonCmd(l *loader) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Run, stop or restart the shared per-user daemon",
+		Example: `  poly-lsp-mcp daemon
+  poly-lsp-mcp daemon --stop
+  poly-lsp-mcp daemon --restart`,
 		Long: `Run the shared per-user daemon: one process hosting many workspace roots
 over a unix socket. 'poly-lsp-mcp mcp' (daemon mode is its default) starts it
 on demand and proxies to it. --stop and --restart control a running daemon and

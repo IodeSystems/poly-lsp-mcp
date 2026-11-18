@@ -46,7 +46,11 @@ func mcpCmd(l *loader) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Run the MCP server on stdin/stdout",
-		Args:  cobra.NoArgs,
+		Example: `  poly-lsp-mcp mcp --root .
+  poly-lsp-mcp mcp --root . --read-only
+  poly-lsp-mcp mcp --root . --lsp-off python,c
+  poly-lsp-mcp mcp --root . --no-daemon`,
+		Args: cobra.NoArgs,
 	}
 	f := cmd.Flags()
 	f.StringVar(&rootPath, "root", ".", "workspace root directory the symbol index covers")
@@ -399,7 +403,9 @@ func statusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "List the child LSPs and index cost of every running poly-lsp-mcp process",
-		Args:  cobra.NoArgs,
+		Example: `  poly-lsp-mcp status
+  poly-lsp-mcp status --json`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := daemonHome(); err != nil {
 				return err

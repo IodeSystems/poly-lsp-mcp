@@ -19,6 +19,13 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
+// Command group IDs of the root's --help (see help.go).
+const (
+	groupRun     = "run"
+	groupInspect = "inspect"
+	groupSetup   = "setup"
+)
+
 // errUsage: the command already printed its usage; exit 2 with no message.
 var errUsage = errors.New("usage")
 
@@ -30,7 +37,11 @@ func main() {
 	// Before ANY subcommand: this may replace the process, and it must happen
 	// before a single byte of JSON-RPC has been read or written. A no-op
 	// unless LSP_REBUILD_PATH names this module's checkout (see selfupdate.go).
-	selfUpdate()
+	// A completion request (the shell asks on every TAB) must not rebuild
+	// or replace the binary.
+	if len(os.Args) < 2 || os.Args[1] != cobra.ShellCompRequestCmd {
+		selfUpdate()
+	}
 
 	err := newRoot().Execute()
 	if err == nil {
@@ -157,7 +168,27 @@ starts). Run a subcommand for anything else.`,
 		return err
 	})
 	root.PersistentFlags().StringVar(&l.configPath, "config", "poly-lsp-mcp.yaml", "language registry config file")
-	root.AddCommand(lspCmd(l), mcpCmd(l), queryCmd(l), indexCmd(l), statusCmd(), usageCmd(), doctorCmd(l), daemonCmd(l))
+	cobra.EnableCommandSorting = false // groups list in the order given here
+	root.AddGroup(
+		&cobra.Group{ID: groupRun, Title: "run"},
+		&cobra.Group{ID: groupInspect, Title: "inspect"},
+		&cobra.Group{ID: groupSetup, Title: "setup"},
+	)
+	root.SetHelpCommandGroupID(groupSetup)
+	for _, g := range []struct {
+		id   string
+		cmds []*cobra.Command
+	}{
+		{groupRun, []*cobra.Command{mcpCmd(l), lspCmd(l), daemonCmd(l)}},
+		{groupInspect, []*cobra.Command{statusCmd(), doctorCmd(l), indexCmd(l), queryCmd(l), usageCmd()}},
+	} {
+		for _, c := range g.cmds {
+			c.GroupID = g.id
+			root.AddCommand(c)
+		}
+	}
+	installCompletion(root)
+	installHelp(root)
 	return root
 }
 
@@ -169,6 +200,9 @@ func lspCmd(l *loader) *cobra.Command {
 
 lsp list, lsp add and lsp remove manage the user's child language servers in
 <daemon home>/servers.yaml, merged over the built-in languages by name.`,
+		Example: `  poly-lsp-mcp lsp list
+  poly-lsp-mcp lsp add zig --ext .zig,.zon --cmd zls
+  poly-lsp-mcp lsp remove zig`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runLSP(l)

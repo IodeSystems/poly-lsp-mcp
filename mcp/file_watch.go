@@ -71,6 +71,7 @@ func (s *Server) stopFileWatch() {
 	if w != nil {
 		_ = w.Close()
 	}
+	s.ignoreReload.stop()
 }
 
 // WaitForFileWatch blocks until the watcher goroutine has exited (after
@@ -341,13 +342,11 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 		}
 	}
 	// A .gitignore change — most often a branch switch — invalidates the
-	// filter the walk and this watcher both use. Re-resolve it, and do
-	// so BEFORE the watchable check, since .gitignore is not itself an
-	// indexed file.
+	// filter the walk and this watcher both use. Re-resolve it (debounced,
+	// and only when the content changed), and do so BEFORE the watchable
+	// check, since .gitignore is not itself an indexed file.
 	if filepath.Base(ev.Name) == ".gitignore" {
-		if root := s.getRoot(); root != "" {
-			s.setIgnores(s.loadIgnores(root))
-		}
+		s.queueGitignoreReload(ev.Name)
 		return
 	}
 	if !s.watchedFile(ev.Name) {

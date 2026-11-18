@@ -94,7 +94,7 @@ func TestWatchChmodOnlyCostsNoGit(t *testing.T) {
 	if len(pending) != 0 {
 		t.Errorf("Chmod scheduled %d refresh(es)", len(pending))
 	}
-	settle(fileWatchDebounce)
+	settle(gitignoreReloadDelay)
 	if got := c.calls(t); len(got) != 0 {
 		t.Errorf("Chmod-only events ran git %d time(s): %q", len(got), got)
 	}
@@ -108,5 +108,92 @@ func TestWatchChmodOnlyCostsNoGit(t *testing.T) {
 		if got := c.calls(t); len(got) > wantMax {
 			t.Errorf("Write #%d ran git %d time(s), want <= %d: %q", i+1, len(got), wantMax, got)
 		}
+	}
+}
+
+// lsFiles counts the `git ls-files` runs (ignore-set re-resolves) in calls.
+func lsFiles(calls []string) int {
+	n := 0
+	for _, c := range calls {
+		if strings.Contains(c, " ls-files ") {
+			n++
+		}
+	}
+	return n
+}
+
+// A burst of .gitignore events re-resolves the ignore set once.
+func TestGitignoreBurstRunsGitOnce(t *testing.T) {
+	c := newGitCounter(t)
+	s, dir := newGitServer(t)
+	gi := filepath.Join(dir, ".gitignore")
+	var mu sync.Mutex
+	pending := map[string]*time.Timer{}
+	c.calls(t)
+	for i := 0; i < 20; i++ {
+		body := "generated/\n" + strings.Repeat("#\n", i)
+		if err := os.WriteFile(gi, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s.handleWatchEvent(nil, fsnotify.Event{Name: gi, Op: fsnotify.Write}, pending, &mu)
+	}
+	settle(gitignoreReloadDelay)
+	if got := c.calls(t); lsFiles(got) != 1 || len(got) != 1 {
+		t.Errorf("20 .gitignore writes ran git %q, want one ls-files", got)
+	}
+	if !s.pathIgnored(filepath.Join(dir, "generated", "x.go")) {
+		t.Error("generated/ not ignored after reload")
+	}
+}
+
+// A .gitignore event with unchanged content runs no git and keeps the
+// check-ignore memo.
+func TestGitignoreUnchangedRunsNoGit(t *testing.T) {
+	c := newGitCounter(t)
+	s, dir := newGitServer(t)
+	gi := filepath.Join(dir, ".gitignore")
+	a := filepath.Join(dir, "a.go")
+	s.pathIgnored(a) // fills the memo
+	set := s.getIgnores()
+	var mu sync.Mutex
+	pending := map[string]*time.Timer{}
+	for round := 0; round < 2; round++ {
+		// An editor's save that writes the same bytes. Round 0 is the
+		// first event for the file: its mtime must predate the set.
+		if err := os.WriteFile(gi, []byte("generated/\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if round == 0 {
+			old := time.Now().Add(-time.Hour)
+			if err := os.Chtimes(gi, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c.calls(t)
+		s.handleWatchEvent(nil, fsnotify.Event{Name: gi, Op: fsnotify.Write}, pending, &mu)
+		settle(gitignoreReloadDelay)
+		if got := c.calls(t); len(got) != 0 {
+			t.Errorf("round %d: unchanged .gitignore ran git %q", round, got)
+		}
+	}
+	if s.getIgnores() != set {
+		t.Error("ignore set replaced though nothing changed")
+	}
+	s.pathIgnored(a)
+	if got := c.calls(t); len(got) != 0 {
+		t.Errorf("check-ignore memo lost: %q", got)
+	}
+
+	// A real change still re-resolves.
+	if err := os.WriteFile(gi, []byte("other/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.handleWatchEvent(nil, fsnotify.Event{Name: gi, Op: fsnotify.Write}, pending, &mu)
+	settle(gitignoreReloadDelay)
+	if got := c.calls(t); lsFiles(got) != 1 {
+		t.Errorf("changed .gitignore ran git %q, want one ls-files", got)
+	}
+	if s.pathIgnored(filepath.Join(dir, "generated", "x.go")) {
+		t.Error("generated/ still ignored after the change")
 	}
 }

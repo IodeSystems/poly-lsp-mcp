@@ -19,6 +19,13 @@ import (
 	"github.com/iodesystems/poly-lsp-mcp/symbols"
 )
 
+// Command group IDs of the root's --help (see help.go).
+const (
+	groupRun     = "run"
+	groupInspect = "inspect"
+	groupSetup   = "setup"
+)
+
 // errUsage: the command already printed its usage; exit 2 with no message.
 var errUsage = errors.New("usage")
 
@@ -155,7 +162,22 @@ starts). Run a subcommand for anything else.`,
 		return err
 	})
 	root.PersistentFlags().StringVar(&l.configPath, "config", "poly-lsp-mcp.yaml", "language registry config file")
-	root.AddCommand(lspCmd(l), mcpCmd(l), queryCmd(l), indexCmd(l), statusCmd(), usageCmd(), doctorCmd(l), daemonCmd(l))
+	root.AddGroup(
+		&cobra.Group{ID: groupRun, Title: "run"},
+		&cobra.Group{ID: groupInspect, Title: "inspect"},
+		&cobra.Group{ID: groupSetup, Title: "setup"},
+	)
+	root.SetHelpCommandGroupID(groupSetup)
+	root.SetCompletionCommandGroupID(groupSetup)
+	for id, cmds := range map[string][]*cobra.Command{
+		groupRun:     {mcpCmd(l), lspCmd(l), daemonCmd(l)},
+		groupInspect: {statusCmd(), doctorCmd(l), indexCmd(l), queryCmd(l), usageCmd()},
+	} {
+		for _, c := range cmds {
+			c.GroupID = id
+			root.AddCommand(c)
+		}
+	}
 	return root
 }
 

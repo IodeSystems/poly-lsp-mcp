@@ -247,6 +247,7 @@ func (s *Server) startManagerIfPresent(idx *symbols.Index) {
 		return
 	}
 	s.manager.StatusIndex = func() any { return s.IndexCost() }
+	s.manager.StatusActivity = func() any { return s.ActivityStatus() }
 	// A child no client wants is left stopped until one does.
 	s.manager.Defer = func(lang string) bool { return lazy[lang] || !s.lspWanted(lang) }
 	if s.lspRootsAuto {

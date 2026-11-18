@@ -433,10 +433,11 @@ func statusCmd() *cobra.Command {
 				return "-"
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "PID\tROOT\tLANG\tLSP ROOT\tSTATE\tCHILD\tRSS\tIDLE\tSTARTS\tCRASH\tIDLE-STOP\tMEM-STOP\tPSI-STOP\tLAST STOP\tVERSION")
+			fmt.Fprintln(w, "PID\tROOT\tLANG\tLSP ROOT\tSTATE\tCHILD\tRSS\tIDLE\tSTARTS\tCRASH\tIDLE-STOP\tMEM-STOP\tPSI-STOP\tLAST STOP\tVERSION\tACTIVITY\tEV/MIN")
 			for _, f := range files {
+				act, evMin := activityCols(f.Activity)
 				if len(f.Children) == 0 {
-					fmt.Fprintf(w, "%d\t%s\t-\t-\tno child LSPs\t\t\t\t\t\t\t\t\t\t%s\n", f.PID, f.Root, ver(f))
+					fmt.Fprintf(w, "%d\t%s\t-\t-\tno child LSPs\t\t\t\t\t\t\t\t\t\t%s\t%s\t%s\n", f.PID, f.Root, ver(f), act, evMin)
 				}
 				for _, c := range f.Children {
 					last := "-"
@@ -447,9 +448,9 @@ func statusCmd() *cobra.Command {
 					if c.PID != 0 {
 						child, rss = strconv.Itoa(c.PID), fmt.Sprintf("%dM", c.RSS>>20)
 					}
-					fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n",
+					fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n",
 						f.PID, f.Root, c.Language, lspRoot(f.Root, c.Root), c.State, child, rss, time.Duration(c.IdleSec)*time.Second,
-						c.Starts, c.CrashRestarts, c.IdleStops, c.MemoryStops, c.PressureStops, last, ver(f))
+						c.Starts, c.CrashRestarts, c.IdleStops, c.MemoryStops, c.PressureStops, last, ver(f), act, evMin)
 				}
 			}
 			if err := w.Flush(); err != nil {
@@ -468,6 +469,21 @@ func statusCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the status files as one JSON array")
 	daemonHome = daemonHomeFlag(cmd.Flags())
 	return cmd
+}
+
+// activityCols renders a status file's activity as the ACTIVITY and
+// EV/MIN columns: "-" for a file from before activity. A backed-off root
+// shows when the backoff ends (local time).
+func activityCols(raw json.RawMessage) (state, evMin string) {
+	var a mcp.ActivityStatus
+	if len(raw) == 0 || json.Unmarshal(raw, &a) != nil || a.State == "" {
+		return "-", "-"
+	}
+	state = a.State
+	if t, err := time.Parse(time.RFC3339, a.BackedOffUntil); err == nil {
+		state += " until " + t.Local().Format("15:04")
+	}
+	return state, strconv.FormatInt(a.EventsLastMin, 10)
 }
 
 // lspRoot renders a child's root relative to its workspace root: "." for

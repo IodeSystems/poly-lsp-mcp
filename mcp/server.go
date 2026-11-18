@@ -338,6 +338,11 @@ type Server struct {
 	// (gitignore_reload.go).
 	ignoreReload gitignoreReload
 
+	// activity is this root's work counters and runaway guard
+	// (activity.go); made by act on first use.
+	activityOnce sync.Once
+	activity     *rootActivity
+
 	tools     map[string]Tool
 	resources map[string]Resource
 }
@@ -763,6 +768,7 @@ func (s *Server) buildIndex() error {
 			return np
 		}
 	}
+	defer s.act().start(opIndexWalk)()
 	// Resolved alongside the walk so the watcher filters by exactly the
 	// same set the build used, and re-resolved on every rebuild so a
 	// branch switch that changes .gitignore is picked up.
@@ -1125,6 +1131,7 @@ func (s *Server) excludeSet() *git.IgnoreSet {
 
 // loadIgnores is git's ignore set for root plus the client's excludes.
 func (s *Server) loadIgnores(root string) *git.IgnoreSet {
+	defer s.act().start(opIgnoreResolve)()
 	return s.withClientDirs(root, git.LoadIgnores(root))
 }
 

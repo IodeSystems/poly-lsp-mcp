@@ -366,6 +366,10 @@ func (s *Server) handleWatchEvent(w *fsnotify.Watcher, ev fsnotify.Event, pendin
 	if !contentOp(ev.Op) {
 		return
 	}
+	if s.act().watchEvent(ev) {
+		return // backed off (activity.go): kept for the resync
+	}
+	defer s.act().start(opWatchEvent)()
 	// A removed or renamed dir loses its kernel watch; free its slot.
 	if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		s.watcherMu.Lock()
@@ -450,6 +454,7 @@ func (s *Server) watchableFile(path string) bool {
 // parse cache included). A file that vanished or grew past the scan cap
 // is treated as a removal.
 func (s *Server) watchRefreshFile(path string) {
+	defer s.act().start(opParse)()
 	// Belt to watchableFile's braces: this is the one place a WATCHED
 	// change enters the index, so the ignore check lives here too. An
 	// explicit tool edit still refreshes whatever it touched — that is a

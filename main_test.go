@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The parse cache must not live inside the workspace it indexes. It used to,
@@ -41,5 +43,25 @@ func TestCachePathIsPerWorkspace(t *testing.T) {
 	p2 := filepath.Join(b, "proj")
 	if cachePathFor(p1) == cachePathFor(p2) {
 		t.Errorf("same-named roots collide: %s", cachePathFor(p1))
+	}
+}
+
+// The status table's ACTIVITY and EV/MIN columns, including a status
+// file written before activity existed.
+func TestActivityCols(t *testing.T) {
+	until := time.Date(2026, 11, 17, 9, 30, 0, 0, time.Local)
+	cases := []struct {
+		raw, state, ev string
+	}{
+		{``, "-", "-"},
+		{`{"state":"idle","eventsLastMin":0,"ops":{}}`, "idle", "0"},
+		{`{"state":"backed-off","backedOffUntil":"` + until.Format(time.RFC3339) + `","eventsLastMin":4120,"ops":{}}`,
+			"backed-off until 09:30", "4120"},
+	}
+	for _, c := range cases {
+		state, ev := activityCols(json.RawMessage(c.raw))
+		if state != c.state || ev != c.ev {
+			t.Errorf("activityCols(%s) = %q, %q; want %q, %q", c.raw, state, ev, c.state, c.ev)
+		}
 	}
 }

@@ -185,3 +185,39 @@ func TestPathResolvingOutsideTheRootIsRefused(t *testing.T) {
 		t.Fatal("SANDBOX ESCAPE: a file was created outside the root")
 	}
 }
+
+// A relative path that repeats the root's absolute path without its
+// leading slash is refused: joined onto the root it created
+// <root>/Users/<name>/.../plan/plan.md in a live session.
+func TestRelativePathRepeatingRootIsRefused(t *testing.T) {
+	dir := goWorkspace(t, jailSrc)
+	s := newIndexedServer(t, dir)
+	noSlash := strings.TrimPrefix(filepath.ToSlash(dir), "/")
+	for _, p := range []string{noSlash, noSlash + "/plan/plan.md", noSlash + "/./main.go"} {
+		_, err := s.resolveFileArg(p)
+		if err == nil || !strings.Contains(err.Error(), "looks like an absolute path missing its leading /") {
+			t.Errorf("resolveFileArg(%q) = %v, want the missing-slash error", p, err)
+		}
+	}
+	// Not a repeat of the whole root: allowed.
+	parent := strings.TrimPrefix(filepath.ToSlash(filepath.Dir(dir)), "/")
+	for _, p := range []string{"plan/plan.md", parent + "x/a.go", filepath.Base(dir) + "/a.go"} {
+		if _, err := s.resolveFileArg(p); err != nil {
+			t.Errorf("resolveFileArg(%q) refused: %v", p, err)
+		}
+	}
+
+	// Through node_edit: nothing is created.
+	ss := startSessionFull(t, dir, nil, nil)
+	defer ss.close()
+	ss.request("initialize", map[string]any{})
+	ss.notify("notifications/initialized", map[string]any{})
+	r := ss.callTool("node_edit", map[string]any{"node": noSlash + "/plan/plan.md", "newText": "x\n"})
+	if !r.IsError {
+		t.Errorf("node_edit accepted a root-repeating relative path")
+	}
+	first := strings.SplitN(noSlash, "/", 2)[0]
+	if _, err := os.Stat(filepath.Join(dir, first)); err == nil {
+		t.Errorf("node_edit created %s under the root", first)
+	}
+}

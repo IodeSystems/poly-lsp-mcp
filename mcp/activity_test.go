@@ -341,3 +341,50 @@ func TestActivityGitCheckout500(t *testing.T) {
 		t.Errorf("lastEventPath = %q", st.LastEventPath)
 	}
 }
+
+// The debounced .gitignore re-resolve (gitignore_reload.go) is counted:
+// one ignoreResolve and its git spawn, credited to the root.
+func TestActivityCountsGitignoreReload(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = r
+	}
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := config.Default().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(reg, dir, nil, nil)
+	srv.SetGitPrewarm(false)
+	srv.SetProactiveOpen(false)
+	srv.SetQuiet(true)
+	if err := srv.BuildIndex(); err != nil {
+		t.Fatal(err)
+	}
+	before := srv.ActivityStatus().Ops
+	gi := filepath.Join(dir, ".gitignore")
+	if err := os.WriteFile(gi, []byte("out/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// What the debounce timer would flush, flushed now.
+	srv.ignoreReload.mu.Lock()
+	srv.ignoreReload.pending = map[string]bool{gi: true}
+	srv.ignoreReload.mu.Unlock()
+	srv.flushGitignoreReload()
+	after := srv.ActivityStatus().Ops
+	if got := after["ignoreResolve"].Count - before["ignoreResolve"].Count; got != 1 {
+		t.Errorf("ignoreResolve count +%d, want +1", got)
+	}
+	if after["gitSpawn"].Count <= before["gitSpawn"].Count {
+		t.Errorf("gitSpawn count %d -> %d: the reload's git ls-files was not counted",
+			before["gitSpawn"].Count, after["gitSpawn"].Count)
+	}
+}

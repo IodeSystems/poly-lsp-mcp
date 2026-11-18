@@ -84,7 +84,7 @@ func TestAddWatchDirsStopsAtBudgetAndWarnsOnce(t *testing.T) {
 		t.Errorf("rewatch exceeded budget: %d", len(w.added))
 	}
 	out := buf.String()
-	if c := strings.Count(out, "watch budget of 10 reached"); c != 1 {
+	if c := strings.Count(out, "watch budget of 10 inotify watches reached"); c != 1 {
 		t.Fatalf("budget warning count = %d\n%s", c, out)
 	}
 	// Walk order is lexical: root, aaa(5), bbb partial; ccc never reached.
@@ -152,5 +152,72 @@ func TestWatchBudgetForgetFreesSlot(t *testing.T) {
 	srv.addWatchDirs(w, root)
 	if len(w.added) != 4 {
 		t.Errorf("slot not reused: %d", len(w.added))
+	}
+}
+
+// On kqueue each dir costs 1 + its entry count in fds. A budget with fake
+// per-dir costs stops by cost, not by dir count, and warns once.
+func TestKqueueBudgetChargesPerFile(t *testing.T) {
+	// max 1000 -> limit 100. Walk order: root, aaa, aaa/d0..d3, bbb, ...
+	root := mkTree(t, map[string]int{"aaa": 4, "bbb": 4})
+	buf := captureLog(t)
+	srv := newIndexedServer(t, root)
+	b := newKqueueBudget(1000)
+	costs := map[string]int{
+		root:                          3,  // aaa, bbb, + itself
+		filepath.Join(root, "aaa"):    5,  // 4 subdirs + itself
+		filepath.Join(root, "aaa/d0"): 40, // 39 files + itself
+		filepath.Join(root, "aaa/d1"): 40,
+		filepath.Join(root, "aaa/d2"): 40, // 3+5+40+40+40 = 128 > 100
+	}
+	b.dirCost = func(p string) int {
+		if c, ok := costs[p]; ok {
+			return c
+		}
+		return 1
+	}
+	srv.watchBudget = b
+	w := &fakeAdder{}
+	if n := srv.addWatchDirs(w, root); n != 4 {
+		t.Fatalf("added %d dirs, want 4 (cost 88 of 100): %v", n, w.added)
+	}
+	out := buf.String()
+	if c := strings.Count(out, "watch budget of 100 kqueue fds reached"); c != 1 {
+		t.Errorf("budget warning count = %d\n%s", c, out)
+	}
+	if !strings.Contains(out, "RLIMIT_NOFILE=1000") || !strings.Contains(out, "aaa (partial)") {
+		t.Errorf("warning lacks limit or stop dir:\n%s", out)
+	}
+	// aaa holds 85 fds, over 5% of 1000: one per-dir warning.
+	if c := strings.Count(out, "aaa uses 85 kqueue fds"); c != 1 {
+		t.Errorf("per-dir warnings = %d\n%s", c, out)
+	}
+	// Deleting a 40-fd dir frees 40, enough for the 40-fd d2.
+	if err := os.Remove(filepath.Join(root, "aaa/d0")); err != nil {
+		t.Fatal(err)
+	}
+	b.forget(root, filepath.Join(root, "aaa/d0"))
+	srv.addWatchDirs(w, root)
+	if b.used > b.limit {
+		t.Errorf("used %d over limit %d", b.used, b.limit)
+	}
+	if b.watched[filepath.Join(root, "aaa/d2")] != 40 {
+		t.Errorf("freed fds not reused for aaa/d2: %v", b.watched)
+	}
+}
+
+// kqueueDirCost counts the dir plus every entry.
+func TestKqueueDirCost(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"a", "b", "c"} {
+		if err := os.WriteFile(filepath.Join(dir, n), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := kqueueDirCost(dir); got != 5 {
+		t.Errorf("kqueueDirCost = %d, want 5", got)
 	}
 }

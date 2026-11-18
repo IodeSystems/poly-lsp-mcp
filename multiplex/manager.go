@@ -96,6 +96,9 @@ type Manager struct {
 	// StatusIndex, if set, supplies the status file's index field. Set
 	// before Start.
 	StatusIndex func() any
+	// StatusActivity, if set, supplies the status file's activity field.
+	// Set before Start.
+	StatusActivity func() any
 
 	// Test seam; nil = read /proc.
 	readRSS func(pid int) (int64, error)

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // ErrNotInRepo is returned by FromCWD when the supplied working
@@ -161,7 +162,10 @@ func (r *Repo) FileAt(branch, path string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	start := time.Now()
+	err := cmd.Run()
+	noteSpawn(r.Dir, start, cmd.ProcessState)
+	if err != nil {
 		return nil, fmt.Errorf("show %s:%s: %v (%s)", branch, path, err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
@@ -177,7 +181,10 @@ func runIn(dir string, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	start := time.Now()
+	err := cmd.Run()
+	noteSpawn(dir, start, cmd.ProcessState)
+	if err != nil {
 		return "", fmt.Errorf("git %s: %v (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil

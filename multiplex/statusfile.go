@@ -34,6 +34,10 @@ type StatusFile struct {
 	// Index is what the owning server's last index build cost, by
 	// directory (symbols.CostReport), when the owner supplies it.
 	Index json.RawMessage `json:"index,omitempty"`
+	// Activity is the owning server's watcher and index activity for
+	// this root (mcp.ActivityStatus), when the owner supplies it.
+	// docs/design.md "Per-root activity" lists the fields.
+	Activity json.RawMessage `json:"activity,omitempty"`
 	// MemoryLimit is the process's GOMEMLIMIT in bytes; absent when unset.
 	MemoryLimit int64 `json:"memoryLimit,omitempty"`
 }
@@ -76,6 +80,11 @@ func (m *Manager) writeStatus() {
 	if m.StatusIndex != nil {
 		if raw, err := json.Marshal(m.StatusIndex()); err == nil {
 			sf.Index = raw
+		}
+	}
+	if m.StatusActivity != nil {
+		if raw, err := json.Marshal(m.StatusActivity()); err == nil {
+			sf.Activity = raw
 		}
 	}
 	b, err := json.MarshalIndent(sf, "", "  ")

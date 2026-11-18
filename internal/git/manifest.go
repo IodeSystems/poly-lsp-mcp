@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Manifest is the project's file set as git already knows it: tracked
@@ -93,7 +94,10 @@ func LoadManifest(root string) *Manifest {
 }
 
 func lsFiles(root string, args ...string) ([]string, error) {
-	out, err := exec.Command("git", append([]string{"-C", root, "ls-files", "-z"}, args...)...).Output()
+	cmd := exec.Command("git", append([]string{"-C", root, "ls-files", "-z"}, args...)...)
+	start := time.Now()
+	out, err := cmd.Output()
+	noteSpawn(root, start, cmd.ProcessState)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +113,10 @@ func lsFiles(root string, args ...string) ([]string, error) {
 // commonDir is this repository's shared .git directory (absolute); its
 // worktrees live under <common>/worktrees/.
 func commonDir(root string) string {
-	out, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	start := time.Now()
+	out, err := cmd.Output()
+	noteSpawn(root, start, cmd.ProcessState)
 	if err != nil {
 		return ""
 	}

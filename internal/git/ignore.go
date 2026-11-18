@@ -59,7 +59,9 @@ func LoadIgnores(root string) *IgnoreSet {
 	loaded := time.Now()
 	cmd := exec.Command("git", "-C", root,
 		"ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+	start := time.Now()
 	out, err := cmd.Output()
+	noteSpawn(root, start, cmd.ProcessState)
 	if err != nil {
 		return nil
 	}
@@ -201,7 +203,9 @@ func (s *IgnoreSet) checkIgnore(rel string) bool {
 
 	cmd := exec.Command("git", "-C", s.root, "check-ignore", "-q", "--", rel)
 	// Exit 0 = ignored, 1 = not ignored, anything else = error.
+	start := time.Now()
 	ignored := cmd.Run() == nil
+	noteSpawn(s.root, start, cmd.ProcessState)
 
 	s.mu.Lock()
 	s.checked[rel] = ignored

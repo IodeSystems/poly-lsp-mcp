@@ -162,6 +162,7 @@ starts). Run a subcommand for anything else.`,
 		return err
 	})
 	root.PersistentFlags().StringVar(&l.configPath, "config", "poly-lsp-mcp.yaml", "language registry config file")
+	cobra.EnableCommandSorting = false // groups list in the order given here
 	root.AddGroup(
 		&cobra.Group{ID: groupRun, Title: "run"},
 		&cobra.Group{ID: groupInspect, Title: "inspect"},
@@ -169,15 +170,19 @@ starts). Run a subcommand for anything else.`,
 	)
 	root.SetHelpCommandGroupID(groupSetup)
 	root.SetCompletionCommandGroupID(groupSetup)
-	for id, cmds := range map[string][]*cobra.Command{
-		groupRun:     {mcpCmd(l), lspCmd(l), daemonCmd(l)},
-		groupInspect: {statusCmd(), doctorCmd(l), indexCmd(l), queryCmd(l), usageCmd()},
+	for _, g := range []struct {
+		id   string
+		cmds []*cobra.Command
+	}{
+		{groupRun, []*cobra.Command{mcpCmd(l), lspCmd(l), daemonCmd(l)}},
+		{groupInspect, []*cobra.Command{statusCmd(), doctorCmd(l), indexCmd(l), queryCmd(l), usageCmd()}},
 	} {
-		for _, c := range cmds {
-			c.GroupID = id
+		for _, c := range g.cmds {
+			c.GroupID = g.id
 			root.AddCommand(c)
 		}
 	}
+	installHelp(root)
 	return root
 }
 
@@ -189,6 +194,9 @@ func lspCmd(l *loader) *cobra.Command {
 
 lsp list, lsp add and lsp remove manage the user's child language servers in
 <daemon home>/servers.yaml, merged over the built-in languages by name.`,
+		Example: `  poly-lsp-mcp lsp list
+  poly-lsp-mcp lsp add zig --ext .zig,.zon --cmd zls
+  poly-lsp-mcp lsp remove zig`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runLSP(l)

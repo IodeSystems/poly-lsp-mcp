@@ -8,7 +8,6 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
@@ -16,7 +15,10 @@ import (
 // (runSelf): the binary is the test binary itself.
 func TestMain(m *testing.M) {
 	if os.Getenv("POLY_LSP_TEST_RUN_MAIN") == "1" {
-		os.Args = append(os.Args[:1], strings.Fields(os.Getenv("POLY_LSP_TEST_ARGS"))...)
+		os.Args = os.Args[:1]
+		for _, a := range strings.Fields(os.Getenv("POLY_LSP_TEST_ARGS")) {
+			os.Args = append(os.Args, strings.Trim(a, "'")) // '' is an empty argument
+		}
 		main()
 		return
 	}
@@ -48,15 +50,6 @@ func runSelf(t *testing.T, args string, env ...string) (stdout, stderr string, c
 		t.Fatal(err)
 	}
 	return so.String(), se.String(), code
-}
-
-// allCommands is root and every command below it.
-func allCommands(c *cobra.Command) []*cobra.Command {
-	out := []*cobra.Command{c}
-	for _, s := range c.Commands() {
-		out = append(out, allCommands(s)...)
-	}
-	return out
 }
 
 // No help line is wider than the width, for every command, with and without
@@ -196,7 +189,7 @@ func TestHelpCommandGroups(t *testing.T) {
 	var b bytes.Buffer
 	writeHelp(&b, newRoot(), 80, false)
 	out := b.String()
-	for _, want := range []string{"\nrun:\n  mcp ", "\ninspect:\n  status ", "start:\n", "source <(poly-lsp-mcp completion bash)", "more flags: poly-lsp-mcp <cmd> --help-all"} {
+	for _, want := range []string{"\nrun:\n  mcp ", "\ninspect:\n  status ", "\nsetup:\n  completion ", "start:\n", "source <(poly-lsp-mcp completion bash)", "more flags: poly-lsp-mcp <cmd> --help-all"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("root help lacks %q:\n%s", want, out)
 		}

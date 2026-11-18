@@ -215,7 +215,8 @@ func writeHelp(w io.Writer, cmd *cobra.Command, width int, all bool) {
 		desc = cmd.Short
 	}
 	writeParagraphs(w, desc, width)
-	fmt.Fprintf(w, "\nusage: %s\n", cmd.UseLine())
+	fmt.Fprintln(w)
+	writeHanging(w, "usage: "+cmd.UseLine(), 0, 7, width)
 	if ex := strings.TrimRight(cmd.Example, "\n"); ex != "" {
 		fmt.Fprintln(w, "\nstart:")
 		for _, line := range strings.Split(ex, "\n") {
@@ -410,4 +411,13 @@ func completionHowTo(prog string) []string {
 		"zsh: source <(" + prog + " completion zsh)",
 		"fish: " + prog + " completion fish | source",
 	}
+}
+
+// allCommands is root and every command below it.
+func allCommands(c *cobra.Command) []*cobra.Command {
+	out := []*cobra.Command{c}
+	for _, s := range c.Commands() {
+		out = append(out, allCommands(s)...)
+	}
+	return out
 }

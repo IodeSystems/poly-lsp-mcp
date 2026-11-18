@@ -37,7 +37,11 @@ func main() {
 	// Before ANY subcommand: this may replace the process, and it must happen
 	// before a single byte of JSON-RPC has been read or written. A no-op
 	// unless LSP_REBUILD_PATH names this module's checkout (see selfupdate.go).
-	selfUpdate()
+	// A completion request (the shell asks on every TAB) must not rebuild
+	// or replace the binary.
+	if len(os.Args) < 2 || os.Args[1] != cobra.ShellCompRequestCmd {
+		selfUpdate()
+	}
 
 	err := newRoot().Execute()
 	if err == nil {
@@ -169,7 +173,6 @@ starts). Run a subcommand for anything else.`,
 		&cobra.Group{ID: groupSetup, Title: "setup"},
 	)
 	root.SetHelpCommandGroupID(groupSetup)
-	root.SetCompletionCommandGroupID(groupSetup)
 	for _, g := range []struct {
 		id   string
 		cmds []*cobra.Command
@@ -182,6 +185,7 @@ starts). Run a subcommand for anything else.`,
 			root.AddCommand(c)
 		}
 	}
+	installCompletion(root)
 	installHelp(root)
 	return root
 }

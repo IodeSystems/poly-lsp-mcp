@@ -141,10 +141,12 @@ starts). Run a subcommand for anything else.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Version:       versionLine(readBuildInfo()),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runLSP(l)
 		},
 	}
+	root.SetVersionTemplate("{{.Version}}\n")
 	// Flags parse before the command name is checked, so `poly-lsp-mcp
 	// explain --root .` would report "unknown flag: --root". The unknown
 	// word is the real mistake; name it.

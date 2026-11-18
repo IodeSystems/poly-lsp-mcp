@@ -10,6 +10,7 @@ The project ships from `main` without semver tags today. This section captures t
 
 - Go 1.26 module at `github.com/iodesystems/poly-lsp-mcp`.
 - Single binary; default invocation is the LSP server, `poly-lsp-mcp mcp` is the MCP server.
+- `poly-lsp-mcp --version` prints one line from the embedded build info (no stamping): version, short revision (`-dirty` when modified), commit date, build kind (release, go install, checkout), OS/arch. `status` shows each process's version in a `VERSION` column and `version` in `--json`.
 
 ### Breaking changes since the early scaffold
 

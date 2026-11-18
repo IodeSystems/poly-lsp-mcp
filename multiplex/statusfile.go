@@ -14,13 +14,20 @@ import (
 	"time"
 )
 
+// BuildLabel is this binary's one-line version (set by main), written into
+// every status file so `status` shows which build each process runs.
+var BuildLabel string
+
 // StatusFile is what a Manager writes to StatusDir every Interval, so
 // `poly-lsp-mcp status` can show every process's children in one place.
 type StatusFile struct {
-	PID       int           `json:"pid"` // the poly-lsp-mcp process
-	Root      string        `json:"root"`
-	UpdatedAt string        `json:"updatedAt"` // RFC 3339
-	Children  []ChildStatus `json:"children"`
+	PID       int    `json:"pid"` // the poly-lsp-mcp process
+	Root      string `json:"root"`
+	UpdatedAt string `json:"updatedAt"` // RFC 3339
+	// Version is the writing process's `--version` line; absent from older
+	// binaries' files.
+	Version  string        `json:"version,omitempty"`
+	Children []ChildStatus `json:"children"`
 	// Fleet is the process-wide child count, cap and summed RSS: the
 	// same for every root of one daemon.
 	Fleet *FleetStatus `json:"fleet,omitempty"`
@@ -56,6 +63,7 @@ func (m *Manager) writeStatus() {
 		PID:       os.Getpid(),
 		Root:      m.startCwd,
 		UpdatedAt: time.Now().Format(time.RFC3339),
+		Version:   BuildLabel,
 		Children:  m.Status(),
 	}
 	if m.Fleet != nil {

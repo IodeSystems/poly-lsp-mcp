@@ -419,11 +419,18 @@ func statusCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "no running poly-lsp-mcp process has written status (looked in %s)\n", dir)
 				return nil
 			}
+			// A process from before the version field shows "-".
+			ver := func(f multiplex.StatusFile) string {
+				if v := strings.TrimPrefix(f.Version, "poly-lsp-mcp "); v != "" {
+					return v
+				}
+				return "-"
+			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "PID\tROOT\tLANG\tLSP ROOT\tSTATE\tCHILD\tRSS\tIDLE\tSTARTS\tCRASH\tIDLE-STOP\tMEM-STOP\tPSI-STOP\tLAST STOP")
+			fmt.Fprintln(w, "PID\tROOT\tLANG\tLSP ROOT\tSTATE\tCHILD\tRSS\tIDLE\tSTARTS\tCRASH\tIDLE-STOP\tMEM-STOP\tPSI-STOP\tLAST STOP\tVERSION")
 			for _, f := range files {
 				if len(f.Children) == 0 {
-					fmt.Fprintf(w, "%d\t%s\t-\t-\tno child LSPs\t\t\t\t\t\t\t\t\t\n", f.PID, f.Root)
+					fmt.Fprintf(w, "%d\t%s\t-\t-\tno child LSPs\t\t\t\t\t\t\t\t\t\t%s\n", f.PID, f.Root, ver(f))
 				}
 				for _, c := range f.Children {
 					last := "-"
@@ -434,9 +441,9 @@ func statusCmd() *cobra.Command {
 					if c.PID != 0 {
 						child, rss = strconv.Itoa(c.PID), fmt.Sprintf("%dM", c.RSS>>20)
 					}
-					fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n",
+					fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n",
 						f.PID, f.Root, c.Language, lspRoot(f.Root, c.Root), c.State, child, rss, time.Duration(c.IdleSec)*time.Second,
-						c.Starts, c.CrashRestarts, c.IdleStops, c.MemoryStops, c.PressureStops, last)
+						c.Starts, c.CrashRestarts, c.IdleStops, c.MemoryStops, c.PressureStops, last, ver(f))
 				}
 			}
 			if err := w.Flush(); err != nil {

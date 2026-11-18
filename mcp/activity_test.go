@@ -320,7 +320,7 @@ func TestActivityGitCheckout500(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	gitT("checkout", "-q", "b")
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(60 * time.Second) // polls; a slow macOS runner took >10s for 500 check-ignore spawns
 	var st ActivityStatus
 	for time.Now().Before(deadline) {
 		if st = srv.ActivityStatus(); st.Ops["parse"].Count >= 500 {

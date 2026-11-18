@@ -100,7 +100,7 @@ func TestCallRoutesThroughChildLSP(t *testing.T) {
 	}
 	defer child.Kill()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // the stub child indexes the fixture before answering; 5s flaked on macos-15-intel
 	defer cancel()
 
 	if _, err := child.Initialize(ctx, "file://"+fixture); err != nil {

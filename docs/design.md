@@ -694,6 +694,52 @@ watches of its own.
   (TypeScript 7 registers it; see below). Registration of any other
   method is still refused, as before.
 
+## Per-root activity and the runaway guard
+
+On a MacBook the shared daemon ran at about 200% CPU for 12h, and nothing
+showed which root cost it. Process CPU cannot be split by root, so
+`mcp/activity.go` times each piece of work per root instead: wall time,
+not CPU time. Per-thread CPU time is not portable (no `RUSAGE_THREAD` on
+macOS) and the work moves between threads. Git subprocesses are the
+exception: `os.ProcessState` gives their user + system CPU at no cost
+(`internal/git` `SpawnHook`).
+
+`status --json` gives each status file an `activity` object (absent in
+files from older versions; old readers ignore it):
+
+- `state`: `idle`, `indexing` (the first index walk), `rebuilding` (a later
+  walk or an ignore re-resolve), `handling-events` (an event in the last
+  5s), or `backed-off`.
+- `backedOffUntil` (RFC 3339, only while backed off); `backoffs`: count
+  since start.
+- `eventsLastMin`, `gitSpawnsLastMin`: the last 60s, from 10s buckets.
+- `lastEventAt`, `lastEventPath`: the last watch event.
+- `ops`: `{count, wallMs}` cumulative for `indexWalk`, `parse` (a watched
+  file re-read and re-extracted), `ignoreResolve`, `gitSpawn` (also
+  `cpuMs`) and `watchEvent` (routing one fsnotify event).
+
+The plain table adds two columns: `ACTIVITY` (the state; `backed-off until
+HH:MM`) and `EV/MIN`.
+
+**Runaway guard.** A minute is hot when the root receives 300 or more
+watch events, or spends 15s or more on event-driven work (watch events,
+parses, ignore re-resolves). Five hot minutes in a row back the root off
+for 1m. While backed off its events are dropped, kept by path (at most
+4096) for the resync. When the backoff ends: one index rebuild, a re-walk
+of the watch dirs, and one event per kept path to the child LSPs. After a
+backoff one hot minute backs off again with the time doubled (2m, 4m, ...
+30m), until the root has stayed calm for 30m. Each start and end of a
+backoff is one log line, with the rates and the top paths.
+
+- Why these numbers: a save is 1-4 events; a 500-file checkout is about
+  1,500 events in seconds, which makes one or two hot minutes, not five
+  (`TestGuardCheckoutBurstDoesNotBackOff`, `TestActivityGitCheckout500`).
+  Five minutes without a break is a loop. 15s/min is a quarter of a core,
+  for a slow loop of few, costly events. The one-minute re-trip keeps a
+  permanent storm at 1 minute of work in 31 at the cap, not 5 in 6.
+- Limit: a child LSP hears of at most 4096 paths changed during one
+  backoff; the index has no such limit, since it is rebuilt.
+
 ## TypeScript 7: the native LSP
 
 Decision (user, 2026-11-14): TypeScript 7 is the target. A typescript

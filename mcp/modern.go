@@ -886,9 +886,9 @@ func (s *Server) classicNode(file, abs string, content []byte, symPath, class st
 		// creates a new FILE, not a new symbol inside one, so name the idiom
 		// that does work.
 		return nil, fmt.Errorf("no symbol %q in %s; %s. "+
-			"To ADD it instead: there is no insert op — grow a NEIGHBOUR. "+
-			"node_read a symbol next to where it belongs, then node_edit that address with "+
-			"oldText=<its whole text> and newText=<its whole text>+\"\\n\\n\"+<the new declaration>. "+
+			"To ADD it instead: use node_edit with insert:\"after\" on a NEIGHBOUR. "+
+			"Address a symbol next to where the new one belongs, then node_edit that address with "+
+			"insert:\"after\" and newText=<the new declaration>. "+
 			"(newText alone creates a new FILE; a whole-file address works but rewrites the file.)",
 			symPath, file, nearestSyms(symPath, syms))
 	case 1:
@@ -1427,7 +1427,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	// ---- create: newText alone, and only where nothing resolves yet.
 	// Guarded so a create can never silently degrade into clobbering
 	// something that already exists.
-	if p.NewText != nil && p.OldText == nil {
+	if p.NewText != nil && p.OldText == nil && p.Insert == nil {
 		if rn.exists {
 			return nil, true, fmt.Errorf(
 				"node already exists; supply oldText to modify it (%s). To replace it entirely, pass its whole current text as oldText", rn.addr)
@@ -1467,6 +1467,18 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 			}
 		}
 	}
+	// ---- insert: splice a new declaration at the anchor's boundary.
+	//
+	// insert:"after" splices at the END of the anchor's declRange:
+	//   \n\n<newText>
+	// insert:"before" splices at the START of the anchor's declRange:
+	//   <newText>\n\n
+	// The \n\n is the blank-line separator the language requires between
+	// top-level declarations. The anchor's existing text is unchanged.
+	if p.Insert != nil {
+		return s.handleModernNodeEditInsert(rn, *p.Insert, p.NewText, p.diagnosticOptions)
+	}
+
 	if p.Delete != nil {
 		if rn.wholeFile() {
 			return s.applyWholeFileDelete(rn.file, p.diagnosticOptions)
@@ -1586,4 +1598,176 @@ func (s *Server) oldTextOutsizesNodeErr(rn *modernNode, cur, oldText string) err
 			"not the block around it, so this oldText can never fit inside it. "+
 			"Do not trim the oldText: %s. The node's whole text is:\n---\n%s\n---",
 		oldLines, rn.addr, curLines, fix, cur)
+}
+
+// handleModernNodeEditInsert splices a new declaration at the anchor's
+// boundary. "after" inserts at the END of the anchor's declRange;
+// "before" inserts at the START. The separator is a blank line (\n\n),
+// which every supported language requires between top-level declarations.
+// The anchor's existing text is unchanged.
+func (s *Server) handleModernNodeEditInsert(rn *modernNode, insert string, newText *string, opts diagnosticOptions) ([]Content, bool, error) {
+	if newText == nil {
+		return nil, true, errors.New("insert needs newText (the new declaration)")
+	}
+	if strings.TrimSpace(*newText) == "" {
+		return nil, true, fmt.Errorf("insert needs non-empty newText")
+	}
+	switch insert {
+	case "after", "before":
+	default:
+		return nil, true, fmt.Errorf("insert must be \"after\" or \"before\", got %q", insert)
+	}
+	if rn.wholeFile() {
+		return nil, true, fmt.Errorf("insert needs a symbol address (file#Name): %s is a whole file, which has no declaration boundary", rn.addr)
+	}
+
+	abs, err := s.resolveFileArg(rn.file)
+	if err != nil {
+		return nil, true, err
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", rn.file, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, true, fmt.Errorf("stat %s: %w", rn.file, err)
+	}
+
+	// Compute the splice point and the text to insert.
+	var spliceOff int
+	var spliceText string
+	switch insert {
+	case "after":
+		off, ok := lineColToByteOffset(content, rn.decl.EndLine, rn.decl.EndCol)
+		if !ok {
+			return nil, true, fmt.Errorf("anchor end out of range: %d:%d", rn.decl.EndLine, rn.decl.EndCol)
+		}
+		if off > len(content) {
+			off = len(content)
+		}
+		spliceOff = off
+		spliceText = "\n\n" + *newText
+	case "before":
+		off, ok := lineColToByteOffset(content, rn.decl.StartLine, rn.decl.StartCol)
+		if !ok {
+			return nil, true, fmt.Errorf("anchor start out of range: %d:%d", rn.decl.StartLine, rn.decl.StartCol)
+		}
+		spliceOff = off
+		spliceText = *newText + "\n\n"
+	}
+
+	// Conflict check: parse newText to get the new symbol's name, then
+	// check existing symbols in the anchor's scope for a collision.
+	lang := s.languageForFile(abs)
+	newName := extractInsertName(lang, *newText)
+	if newName != "" {
+		if conflict := s.insertNameConflict(abs, lang, newName, rn); conflict != "" {
+			return nil, true, fmt.Errorf("insert refused: %q already exists in %s", newName, rn.file)
+		}
+	}
+
+	// Splice.
+	out := make([]byte, 0, len(content)+len(spliceText))
+	out = append(out, content[:spliceOff]...)
+	out = append(out, spliceText...)
+	out = append(out, content[spliceOff:]...)
+
+	oc, err := s.applyBytes(abs, content, out, info.Mode().Perm(), opts)
+	if err != nil {
+		return nil, true, err
+	}
+	if c, isErr, handled := batchResponse(oc); handled {
+		return c, isErr, nil
+	}
+	line := rn.decl.EndLine
+	if insert == "before" {
+		line = rn.decl.StartLine
+	}
+	label := fmt.Sprintf("%s:%d", rn.file, line)
+	if oc.Rejected {
+		return jsonContent(oc.rejection(label)), true, nil
+	}
+	payload := map[string]any{
+		"note":       editNote("inserted", label, 0, len(spliceText)),
+		"node":       rn.addr,
+		"inserted":   insert,
+		"bytesAdded": len(spliceText),
+	}
+	oc.attach(payload)
+	return jsonContent(payload), false, nil
+}
+
+// extractInsertName parses newText (with a language preamble where needed)
+// and returns the leaf name of the first top-level symbol it declares.
+// Returns "" if the text does not parse to a recognizable symbol.
+func extractInsertName(lang, text string) string {
+	var padded []byte
+	switch lang {
+	case "go":
+		padded = []byte("package main\n\n" + text)
+	default:
+		padded = []byte(text)
+	}
+	syms, err := symbols.FileSymbols(lang, padded)
+	if err != nil || len(syms) == 0 {
+		return ""
+	}
+	// The leaf name is the last segment of the dotted Sym path.
+	// Skip the package declaration (Class "module" or "package") — the
+	// symbol we want is the first non-package declaration.
+	for _, sym := range syms {
+		if sym.Class == "module" || sym.Class == "package" {
+			continue
+		}
+		s := sym.Sym
+		if i := strings.LastIndexByte(s, '.'); i >= 0 {
+			s = s[i+1:]
+		}
+		return s
+	}
+	return ""
+}
+
+// insertNameConflict checks whether a symbol with name `name` already exists
+// in the same scope as the anchor rn. Returns the address of the conflicting
+// symbol, or "" if there is no conflict.
+func (s *Server) insertNameConflict(abs, lang, name string, rn *modernNode) string {
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return ""
+	}
+	syms, err := symbols.FileSymbols(lang, content)
+	if err != nil {
+		return ""
+	}
+	// Determine the scope prefix: for a top-level anchor (no dot in sym),
+	// scope is the file; for a nested anchor, scope is the parent path.
+	scopePrefix := ""
+	if i := strings.LastIndexByte(rn.sym, '.'); i >= 0 {
+		scopePrefix = rn.sym[:i+1] // include the trailing dot
+	}
+	for _, sym := range syms {
+		leaf := sym.Sym
+		if i := strings.LastIndexByte(sym.Sym, '.'); i >= 0 {
+			leaf = sym.Sym[i+1:]
+		}
+		if leaf != name {
+			continue
+		}
+		// Check scope: the conflicting symbol must be at the same level.
+		if scopePrefix == "" {
+			// Top-level: the conflicting symbol must also be top-level.
+			if strings.Contains(sym.Sym, ".") {
+				continue
+			}
+		} else {
+			// Nested: the conflicting symbol must be in the same parent.
+			if !strings.HasPrefix(sym.Sym, scopePrefix) {
+				continue
+			}
+		}
+		return sym.Sym
+	}
+	return ""
 }

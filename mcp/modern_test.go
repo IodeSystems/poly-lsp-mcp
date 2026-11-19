@@ -2407,3 +2407,64 @@ func firstSuggestion(msg string) string {
 	}
 	return strings.TrimSpace(rest)
 }
+
+// TestModernNodeEditInsertAfter proves spec 2: after an after-insert of a new
+// function, the file gains exactly the new declaration plus the blank-line
+// separator at the anchor's declaration end; a parse of the file after the
+// edit resolves the new symbol, and a query for it finds the new node.
+func TestModernNodeEditInsertAfter(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+
+	newDecl := "func NewFunc(x int) int { return x }"
+	r := s.callTool("node_edit", map[string]any{
+		"node": "main.go#Free", "insert": "after", "newText": newDecl,
+	})
+	if r.IsError {
+		t.Fatalf("insert after errored: %s", r.Content[0].Text)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(got)
+
+	// The file must contain the new declaration preceded by exactly a blank
+	// line (the separator) immediately after Free's closing brace.
+	wantSplice := "func Free(only int) {}\n\n" + newDecl
+	if !strings.Contains(src, wantSplice) {
+		t.Errorf("file does not contain the expected splice.\nWant substring:\n  %q\nGot file:\n%s", wantSplice, src)
+	}
+
+	// The anchor's existing text is unchanged.
+	if !strings.Contains(src, "func Free(only int) {}") {
+		t.Error("anchor's declaration was modified")
+	}
+
+	// Neighbours are unchanged.
+	if !strings.Contains(src, "func CallsStart()") {
+		t.Error("neighbour after anchor was clobbered")
+	}
+	if !strings.Contains(src, "func (s *Server) Start(") {
+		t.Error("neighbour before anchor was clobbered")
+	}
+
+	// A query for the new symbol finds it.
+	q := s.callTool("node_query", map[string]any{"selector": "#NewFunc"})
+	if q.IsError {
+		t.Fatalf("query for new symbol errored: %s", q.Content[0].Text)
+	}
+	if !strings.Contains(q.Content[0].Text, "NewFunc") {
+		t.Errorf("query did not find NewFunc: %s", q.Content[0].Text)
+	}
+
+	// node_read on the new address resolves.
+	nr := s.callTool("node_read", map[string]any{"node": "main.go#NewFunc"})
+	if nr.IsError {
+		t.Fatalf("node_read of new symbol errored: %s", nr.Content[0].Text)
+	}
+	if !strings.Contains(nr.Content[0].Text, newDecl) {
+		t.Errorf("node_read text missing the new declaration: %s", nr.Content[0].Text)
+	}
+}

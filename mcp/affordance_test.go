@@ -66,7 +66,7 @@ func TestMissingSymbolErrorTeachesHowToAddOne(t *testing.T) {
 	}
 	msg := r.Content[0].Text
 	// Both readings: the typo (did-you-mean) and the insert (the idiom).
-	for _, want := range []string{"did you mean", "To ADD it instead", "NEIGHBOUR", "oldText"} {
+	for _, want := range []string{"did you mean", "To ADD it instead", "NEIGHBOUR", `insert:"after"`} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("the error should cover both readings (%q missing); got %q", want, msg)
 		}

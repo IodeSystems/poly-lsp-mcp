@@ -115,6 +115,120 @@ func TestQueryTextMarksCallerFixableErrors(t *testing.T) {
 	}
 }
 
+// F3: a declaration block `{ name; path; line; signature }` at the end of a
+// selector switches the renderer from the grouped tree to a flat TSV
+// projection: one row per match carrying ONLY the named fields. A match
+// missing a field leaves that cell empty rather than failing the query.
+func TestQueryTextProjectionTSV(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := "package q\n\nfunc Save() {}\n\nfunc Caller() {\n\tSave()\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newQueryServer(t, dir)
+
+	var b strings.Builder
+	if err := s.QueryText(`#Save { name; path; line }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("projection query failed: %v", err)
+	}
+	out := b.String()
+
+	// Header line: the field names tab-separated. There is a "read as"
+	// reading above it, so the TSV starts after that.
+	if !strings.Contains(out, "name\tpath\tline\n") {
+		t.Fatalf("TSV header must be the field names; got:\n%s", out)
+	}
+	// One data row for the Save func: name=Save, path=a.go, line=3.
+	if !strings.Contains(out, "Save\ta.go\t3\n") {
+		t.Errorf("expected a row with Save, a.go, 3; got:\n%s", out)
+	}
+}
+
+// F3: a field the match does not carry (e.g. `signature` on a bare `func`
+// with no generated text, or `conf` on a non-ref node) renders as an empty
+// cell, not an error.
+func TestQueryTextProjectionMissingFieldIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := "package q\n\nfunc Save() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newQueryServer(t, dir)
+
+	// `conf` is an edge field; a plain node match has no conf → empty cell.
+	var b strings.Builder
+	if err := s.QueryText(`#Save { name; conf }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	out := b.String()
+	// Header then a row where the conf cell is empty (trailing tab + newline).
+	if !strings.Contains(out, "Save\t\n") {
+		t.Errorf("missing field must be an empty cell, not an error; got:\n%q", out)
+	}
+}
+
+// F3: `{ count }` collapses all matches to a single row with the match count.
+func TestQueryTextAggregateCount(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := "package q\n\nfunc A() {}\nfunc B() {}\nfunc C() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newQueryServer(t, dir)
+
+	var b strings.Builder
+	if err := s.QueryText(`func { count }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("aggregate query failed: %v", err)
+	}
+	out := b.String()
+	// Header is "count", then the value "3".
+	if !strings.Contains(out, "count\n3\n") {
+		t.Errorf("expected a count row with value 3; got:\n%s", out)
+	}
+}
+
+// F3: `{ max(length) }` and `{ min(length) }` over a match set that carries
+// no path capture (no `:path`) leave the value empty.
+func TestQueryTextAggregateLengthNoPathIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := "package q\n\nfunc A() {}\nfunc B() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newQueryServer(t, dir)
+
+	var b strings.Builder
+	if err := s.QueryText(`func { max(length) }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("aggregate query failed: %v", err)
+	}
+	out := b.String()
+	// Header "max(length)" then an empty value line.
+	if !strings.Contains(out, "max(length)\n\n") {
+		t.Errorf("max(length) with no path capture must be empty; got:\n%q", out)
+	}
+
+	b.Reset()
+	if err := s.QueryText(`func { min(length) }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("aggregate query failed: %v", err)
+	}
+	out = b.String()
+	if !strings.Contains(out, "min(length)\n\n") {
+		t.Errorf("min(length) with no path capture must be empty; got:\n%q", out)
+	}
+}
+
 // The CLI answers on stdout and stays silent on stderr unless --verbose; see
 // the "answers quietly" fix. Loading the parse cache re-introduced exactly
 // the bring-up line that removed, because maybeLoadCache used log.Printf

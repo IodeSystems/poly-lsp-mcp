@@ -115,9 +115,20 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 	if e.workExceeded {
 		trace = e.costTrace(list)
 	}
-	// With a manager attached (query --resolve) each edge row carries its
-	// conf, the label node_query gives the same edge. Without one every
-	// edge is name-keyed and the caveat below says so instead.
+
+	// A declaration block on the subject complex switches the renderer
+	// from the grouped tree to a flat projection: one row per match,
+	// carrying only the named fields, as TSV. Aggregates (count,
+	// max/min length) collapse to a single row.
+	if len(list) > 0 && list[0].hasFields {
+		agg := aggregateKind(list[0].fields)
+		if agg != "" {
+			return renderAggregateRow(w, e, rows, agg)
+		}
+		return renderProjectionTSV(w, e, paged, total, offset, end, e.workExceeded, e.timedOut, trace, list[0].fields)
+	}
+
+	// No declaration block: the grouped tree, as before.
 	showConf := s.manager != nil
 	if err := renderQueryTree(w, paged, total, offset, end, e.workExceeded, e.timedOut, trace, showConf); err != nil {
 		return err
@@ -220,13 +231,29 @@ func (s *Server) QueryJSON(selector string, limit, offset int, budget string, w 
 	if end > total {
 		end = total
 	}
-	matches := make([]map[string]any, 0, end-offset)
-	for _, n := range rows[offset:end] {
-		m := s.queryRow(e, n)
-		if n.file != "" {
-			m["file"] = n.file
+	// A declaration block projects each match to the named fields; an
+	// aggregate collapses to one row. Without a block the rows are the
+	// full node_query row builder output.
+	var matches []map[string]any
+	if len(list) > 0 && list[0].hasFields {
+		agg := aggregateKind(list[0].fields)
+		if agg != "" {
+			matches = []map[string]any{aggregateRow(e, rows, agg)}
+		} else {
+			matches = make([]map[string]any, 0, end-offset)
+			for _, n := range rows[offset:end] {
+				matches = append(matches, projectedRow(e, n, list[0].fields))
+			}
 		}
-		matches = append(matches, m)
+	} else {
+		matches = make([]map[string]any, 0, end-offset)
+		for _, n := range rows[offset:end] {
+			m := s.queryRow(e, n)
+			if n.file != "" {
+				m["file"] = n.file
+			}
+			matches = append(matches, m)
+		}
 	}
 	// total is a floor, not a count, when the budget stopped the walk:
 	// budgetExceeded says which one a caller is holding.
@@ -531,4 +558,219 @@ func summarize(groups []*queryGroup, total, offset, end int) string {
 			len(groups), unit, offset+1, end, total)
 	}
 	return fmt.Sprintf("%d %s · %d matches", len(groups), unit, total)
+}
+
+// ----------------------------------------------------------------
+// F3 projection & aggregates
+// ----------------------------------------------------------------
+
+// aggregateKind recognises a single-field aggregate block: "count",
+// "max(length)", or "min(length)". Returns a short tag, or "" if the
+// fields are not an aggregate.
+func aggregateKind(fields []string) string {
+	if len(fields) != 1 {
+		return ""
+	}
+	switch strings.TrimSpace(fields[0]) {
+	case "count":
+		return "count"
+	case "max(length)":
+		return "max_length"
+	case "min(length)":
+		return "min_length"
+	}
+	return ""
+}
+
+// pathChainFor returns the walkPath for a match node, reading through
+// reachedVia for far-end rows (the chain is keyed on the end REF node,
+// the same way `hop` is read in queryRow).
+func pathChainFor(e *engine, n *treeNode) *walkPath {
+	if e.pathChain == nil {
+		return nil
+	}
+	if p, ok := e.pathChain[n]; ok {
+		return p
+	}
+	if via, ok := e.reachedVia[n]; ok {
+		return e.pathChain[via]
+	}
+	return nil
+}
+
+// renderPathChain renders a walkPath as a human-readable chain string:
+// host, then for each ref edge its site and far end, arrow-separated.
+func renderPathChain(p *walkPath) string {
+	var parts []string
+	if p.Host != nil {
+		parts = append(parts, p.Host.addr())
+	}
+	for _, r := range p.Refs {
+		parts = append(parts, r.addr()) // site (file@line)
+		if len(r.refFar) > 0 {
+			parts = append(parts, r.refFar[0].addr())
+		}
+	}
+	return strings.Join(parts, " → ")
+}
+
+// fieldValue extracts one named field from a match row. Returns ""
+// when the node lacks the field (project/dir has no @, a non-ref has
+// no conf, etc.) — the spec says missing fields are empty, not errors.
+func fieldValue(e *engine, n *treeNode, field string) string {
+	switch field {
+	case "node":
+		return n.addr()
+	case "type":
+		if n.class == "ref" {
+			return refTypeLabel(n)
+		}
+		return n.class
+	case "@":
+		if n.class == "project" || n.class == "dir" {
+			return ""
+		}
+		if n.at[0] == n.at[1] {
+			return strconv.Itoa(n.at[0])
+		}
+		return fmt.Sprintf("%d-%d", n.at[0], n.at[1])
+	case "name":
+		if n.sym != "" {
+			return n.sym
+		}
+		return n.leaf
+	case "path":
+		// pathCapture chain takes priority; otherwise the file path.
+		if p := pathChainFor(e, n); p != nil {
+			return renderPathChain(p)
+		}
+		return n.file
+	case "length":
+		if p := pathChainFor(e, n); p != nil {
+			return strconv.Itoa(len(p.Refs))
+		}
+		return ""
+	case "line":
+		if n.at[0] == 0 {
+			return ""
+		}
+		return strconv.Itoa(n.at[0])
+	case "signature":
+		return n.genText
+	case "conf":
+		return n.refConf
+	case "kind":
+		return n.refKind
+	case "site":
+		if n.class == "ref" {
+			return n.addr()
+		}
+		return ""
+	case "from":
+		if n.class == "ref" && n.refDir == "in" {
+			far := make([]string, 0, len(n.refFar))
+			for _, f := range n.refFar {
+				far = append(far, f.addr())
+			}
+			return strings.Join(far, ", ")
+		}
+		return ""
+	case "to":
+		if n.class == "ref" && n.refDir == "out" {
+			far := make([]string, 0, len(n.refFar))
+			for _, f := range n.refFar {
+				far = append(far, f.addr())
+			}
+			return strings.Join(far, ", ")
+		}
+		return ""
+	case "file":
+		return n.file
+	default:
+		return "" // unknown field: empty
+	}
+}
+
+// projectedRow builds one JSON-serialisable projection row for a match,
+// carrying only the named fields (each as a string; missing = "").
+func projectedRow(e *engine, n *treeNode, fields []string) map[string]any {
+	m := make(map[string]any, len(fields))
+	for _, f := range fields {
+		m[f] = fieldValue(e, n, f)
+	}
+	return m
+}
+
+// renderProjectionTSV writes the flat TSV projection: a header line
+// with the field names, then one row per match (missing fields are
+// empty cells). Replaces the grouped tree for a query with a block.
+func renderProjectionTSV(w io.Writer, e *engine, paged []*treeNode, total, offset, end int, workExceeded, timedOut bool, trace []string, fields []string) error {
+	// Header
+	fmt.Fprintln(w, strings.Join(fields, "\t"))
+	for _, n := range paged {
+		vals := make([]string, len(fields))
+		for i, f := range fields {
+			vals[i] = fieldValue(e, n, f)
+		}
+		fmt.Fprintln(w, strings.Join(vals, "\t"))
+	}
+	if workExceeded {
+		fmt.Fprintf(w, "\nwarning: evaluation stopped at %s — results are INCOMPLETE.\n", budgetLabel(timedOut))
+		return writeBudgetBlow(w, timedOut, trace)
+	}
+	return nil
+}
+
+// aggregateRow computes one aggregate value over the full match set.
+// Returns a map with a single key: the aggregate name → value string
+// (empty when no match carries the relevant data).
+func aggregateRow(e *engine, rows []*treeNode, kind string) map[string]any {
+	switch kind {
+	case "count":
+		return map[string]any{"count": strconv.Itoa(len(rows))}
+	case "max_length":
+		max := 0
+		found := false
+		for _, n := range rows {
+			if p := pathChainFor(e, n); p != nil {
+				if !found || len(p.Refs) > max {
+					max = len(p.Refs)
+					found = true
+				}
+			}
+		}
+		if found {
+			return map[string]any{"max(length)": strconv.Itoa(max)}
+		}
+		return map[string]any{"max(length)": ""}
+	case "min_length":
+		min := 0
+		found := false
+		for _, n := range rows {
+			if p := pathChainFor(e, n); p != nil {
+				if !found || len(p.Refs) < min {
+					min = len(p.Refs)
+					found = true
+				}
+			}
+		}
+		if found {
+			return map[string]any{"min(length)": strconv.Itoa(min)}
+		}
+		return map[string]any{"min(length)": ""}
+	}
+	return map[string]any{}
+}
+
+// renderAggregateRow writes the single aggregate row as TSV: header +
+// value. An empty value (no match carries length) is an empty cell.
+func renderAggregateRow(w io.Writer, e *engine, rows []*treeNode, kind string) error {
+	agg := aggregateRow(e, rows, kind)
+	var key, val string
+	for k, v := range agg {
+		key, val = k, v.(string)
+	}
+	fmt.Fprintln(w, key)
+	_, err := fmt.Fprintln(w, val)
+	return err
 }

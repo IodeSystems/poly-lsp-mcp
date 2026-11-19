@@ -2497,6 +2497,18 @@ func (p *modSelParser) parseDeclarationBlock() ([]string, error) {
 		if name == "" {
 			return nil, p.errf("a field name (e.g. { name; path; line })")
 		}
+		// Aggregates "max(length)" and "min(length)" are the one field
+		// name that is not a bare identifier: the ident is followed by
+		// "(length)". Consume the parenthesised argument.
+		if (name == "max" || name == "min") && !p.eof() && p.s[p.i] == '(' {
+			p.i++ // '('
+			inner := p.readIdent()
+			if inner != "length" || p.eof() || p.s[p.i] != ')' {
+				return nil, p.errf("'(length)' after " + name)
+			}
+			p.i++ // ')'
+			name = name + "(length)"
+		}
 		fields = append(fields, name)
 		p.skipWS()
 		switch p.peek() {
@@ -3074,7 +3086,29 @@ SPEC
   ORDER  :first/:last — this position's matches, per anchor, document order.
   REP    {m,n} repeats an element or (group), child-joined: func{2} = func>func; within 1..3
          levels = "> *{0,2} > x". {m,} unbounded (safe: cycle-guarded + work budget).
-  COMB   space = descendant, '>' = child, ',' = union.`
+  COMB   space = descendant, '>' = child, ',' = union.
+
+PROJECTION & AGGREGATES — a declaration block '{ ... }' at the END of a selector
+  projects each match to the NAMED FIELDS only, as TSV (or --json). The block is
+  terminal: nothing follows it in the chain. An aggregate collapses to ONE row.
+
+  FIELDS  { node; type; @; name; path; line; signature; conf; kind; site; from; to; file; length }
+          A match missing a field leaves it EMPTY (not an error). Examples:
+            #Save::in.call > * { name; path; line; signature }
+            #'S'::in.type { site; conf; kind }
+            :root > * { node; type; @ }
+
+  PATH CAPTURE  {m,n}:path on a ref element — the match carries path (the rendered chain:
+          host → each site → each far end) and length (number of edges crossed).
+          Only a ref with an EXPLICIT range captures: ::out.call{1,}:path > * { name; path; length }
+          A bare ::out.call (default {1,1}) does NOT capture — :path is only legal after {m,n}.
+
+  AGGREGATES  { count }            → one row: total match count
+               { max(length) }     → one row: longest path (EMPTY if no match carries a length)
+               { min(length) }     → one row: shortest path  (EMPTY if no match carries a length)
+          Examples:
+            #Save::in.call{1,}:path > * { count }
+            #Save::in.call{1,}:path > * { max(length) }`
 
 // ----------------------------------------------------------- evaluation
 //

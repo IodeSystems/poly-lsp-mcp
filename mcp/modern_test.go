@@ -1719,6 +1719,53 @@ func TestBarePathIsTakenAsTheIDItIs(t *testing.T) {
 	}
 }
 
+// `<path>:<Symbol>` is the address `#'<path>#<Symbol>'`. The ':' used to hand
+// the symbol to the pseudo-class parser, which refused it as an unknown pseudo.
+// Real pseudo-classes and `::` pseudo-elements after a path are unchanged.
+func TestPathColonSymbolIsTheAddress(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	for _, c := range []struct{ short, long string }{
+		{"web/some_file.ts:topLevel", "#'web/some_file.ts#topLevel'"},
+		{"web/some_file.ts:UserService.getUser", "#'web/some_file.ts#UserService.getUser'"},
+		{"main.go:Free", "#'main.go#Free'"},
+		{"main.go:Free > argument", "#'main.go#Free' > argument"},
+		{"main.go:Free::in.call", "#'main.go#Free'::in.call"},
+		{"main.go:Free, main.go:Server", "#'main.go#Free', #'main.go#Server'"},
+	} {
+		t.Run(c.short, func(t *testing.T) {
+			want := query(t, s, map[string]any{"selector": c.long})
+			got := query(t, s, map[string]any{"selector": c.short})
+			if want.TotalMatches == 0 && c.long != "#'main.go#Free'::in.call" {
+				t.Fatalf("baseline %s matched nothing", c.long)
+			}
+			if got.TotalMatches != want.TotalMatches {
+				t.Errorf("%s matched %d, want %d (same as %s)", c.short, got.TotalMatches, want.TotalMatches, c.long)
+			}
+		})
+	}
+
+	// Real pseudo-classes and pseudo-elements after a path keep their meaning:
+	// each spelling answers exactly as the quoted-id form does, error or not.
+	for _, pair := range [][2]string{
+		{"web/some_file.ts:empty", "#'web/some_file.ts':empty"},
+		{"web/some_file.ts:first", "#'web/some_file.ts':first"},
+		{"main.go:in.call", "#'main.go':in.call"},
+		{"main.go::grep('Free')", "#'main.go'::grep('Free')"},
+		{"main.go::in", "#'main.go'::in"},
+	} {
+		a := s.callTool("node_query", map[string]any{"selector": pair[0]})
+		b := s.callTool("node_query", map[string]any{"selector": pair[1]})
+		if a.IsError != b.IsError || a.Content[0].Text != b.Content[0].Text && a.IsError {
+			t.Errorf("%s diverged from %s:\n%s\nvs\n%s", pair[0], pair[1], a.Content[0].Text, b.Content[0].Text)
+		}
+	}
+	if q := query(t, s, map[string]any{"selector": "main.go::grep('Free')"}); q.TotalMatches == 0 {
+		t.Error("::grep after a path should still match lines")
+	}
+}
+
 // A regex searched literally is the worst kind of wrong answer: correct to the
 // question asked, useless to the question meant, and indistinguishable from
 // "it isn't there". In one recorded session 44 of 49 empty results were this,

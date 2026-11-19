@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1900,6 +1901,7 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 				// (`harness.go > type[…]`, `cmd/dun/tui.go ::grep('…')`).
 				// The parse is not in doubt and the `:explain` reading RENDERS
 				// the id it became, so nothing is normalised silently.
+				path, end = p.pathSymbolSuffix(path, end)
 				p.i = end
 				comp.class = ""
 				comp.anyType = true
@@ -2034,6 +2036,7 @@ func (p *modSelParser) readID() (string, error) {
 		// path (or the address they were handed) and reached for the id sigil,
 		// which is the right sigil. It IS the id; take it rather than sending
 		// them to `path=`, which cannot match an address at all.
+		path, end = p.pathSymbolSuffix(path, end)
 		p.i = end
 		return path, nil
 	}
@@ -2779,6 +2782,39 @@ func (p *modSelParser) scanPathTail(first string) (string, int) {
 		return "", 0
 	}
 	return first + tail, p.i + len(tail)
+}
+
+// pseudoWords are the names a ':' or '::' may introduce, beyond
+// selectorPseudoNames: the pseudo-elements and the legacy ":in"/":out".
+// pathSymbolSuffix must never read one of these as a symbol.
+var pseudoWords = map[string]bool{
+	"in": true, "out": true, "grep": true, "comment": true, "signature": true,
+	"body": true, "conflict": true, "mine": true, "theirs": true, "base": true,
+	"ref": true, "explain": true,
+}
+
+// pathSymbolSuffix reads `<path>:<Ident>` as the address `<path>#<Ident>`.
+// path is a scanned path tail ending at end. The suffix must be a single ':'
+// (not '::', a pseudo-element) followed by an identifier — dotted for
+// `Type.Method`, as `#'f#Type.Method'` is — whose first segment is not a
+// pseudo-class or pseudo-element name, so `a.go:empty` and `a.go:in.call`
+// stay pseudos. A path that already names a symbol ('#') is left alone.
+func (p *modSelParser) pathSymbolSuffix(path string, end int) (string, int) {
+	if strings.Contains(path, "#") || end+1 >= len(p.s) || p.s[end] != ':' ||
+		!isSelIdentStart(p.s[end+1]) {
+		return path, end
+	}
+	j := end + 1
+	for j < len(p.s) && isModIDPart(p.s[j]) {
+		j++
+	}
+	sym := strings.TrimRight(string(p.s[end+1:j]), ".")
+	j = end + 1 + len(sym)
+	first, _, _ := strings.Cut(sym, ".")
+	if pseudoWords[first] || slices.Contains(selectorPseudoNames, first) {
+		return path, end
+	}
+	return path + "#" + sym, j
 }
 
 // selectorPseudoNames is the pseudo-class vocabulary, for errors and

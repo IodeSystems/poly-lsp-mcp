@@ -1910,6 +1910,17 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 					leaf: selAttr{op: selExact, value: path}})
 				break
 			}
+			// No tag contains '-', so a hyphenated word (`terminal-view`, a
+			// dir) can only be a workspace NAME: take it as the id.
+			if strings.Contains(comp.class, "-") {
+				name := comp.class
+				comp.class = ""
+				comp.anyType = true
+				comp.implied = true
+				comp.addAttrExpr(&attrExpr{op: attrExprLeaf,
+					leaf: selAttr{op: selExact, value: name}})
+				break
+			}
 			return comp, unknownTypeErr(comp.class)
 		}
 		sawType = true

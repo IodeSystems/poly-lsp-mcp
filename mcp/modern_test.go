@@ -1766,6 +1766,71 @@ func TestPathColonSymbolIsTheAddress(t *testing.T) {
 	}
 }
 
+// writeLateFiles adds files to a running modern fixture. The index is rebuilt
+// per query, so they are visible to the next node_query.
+func writeLateFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for rel, body := range files {
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+const (
+	lateJava     = "package x;\nclass TerminalView { void handleKeyCode() {} }\n"
+	lateJavaPath = "terminal-view/src/main/java/com/termux/view/TerminalView.java"
+)
+
+// A bare path whose first segment has a '-', or a non-code file, is the id it
+// names — not an unknown node type. A bare word that is neither (a symbol or
+// type name) still errors, and the error points at the id form.
+func TestBarePathWithHyphenOrNonCodeFile(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+	writeLateFiles(t, dir, map[string]string{
+		lateJavaPath: lateJava,
+		"SPEC.md":    "# Spec\nhello\n",
+	})
+	jv := lateJavaPath
+
+	for _, c := range []struct{ sel, want string }{
+		{jv, "#'" + jv + "'"},
+		{jv + "::grep('void')", "#'" + jv + "'::grep('void')"},
+		{"SPEC.md", "#'SPEC.md'"},
+		{"SPEC.md::grep('hello')", "#'SPEC.md'::grep('hello')"},
+		{"terminal-view", "#'terminal-view'"},
+		{"terminal-view > dir", "#'terminal-view' > dir"},
+	} {
+		t.Run(c.sel, func(t *testing.T) {
+			want := query(t, s, map[string]any{"selector": c.want})
+			got := query(t, s, map[string]any{"selector": c.sel})
+			if want.TotalMatches == 0 {
+				t.Fatalf("baseline %s matched nothing", c.want)
+			}
+			if got.TotalMatches != want.TotalMatches {
+				t.Errorf("%s matched %d, want %d", c.sel, got.TotalMatches, want.TotalMatches)
+			}
+		})
+	}
+
+	// `file.java` is a tag plus a language class, and java is one.
+	if q := query(t, s, map[string]any{"selector": "file.java::grep('void')"}); q.TotalMatches == 0 {
+		t.Error("file.java::grep should match lines in java files")
+	}
+
+	for _, sel := range []string{"app > *", "TerminalView::grep('x')"} {
+		msg := queryErr(t, s, map[string]any{"selector": sel})
+		if !strings.Contains(msg, "no node type") || !strings.Contains(msg, "#") {
+			t.Errorf("%s: want a no-node-type error that suggests the #id form; got %s", sel, msg)
+		}
+	}
+}
+
 // A regex searched literally is the worst kind of wrong answer: correct to the
 // question asked, useless to the question meant, and indistinguishable from
 // "it isn't there". In one recorded session 44 of 49 empty results were this,

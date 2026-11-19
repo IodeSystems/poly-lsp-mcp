@@ -248,8 +248,9 @@ turns it back off. A client overrides it with mcp --format-on-edit /
 the same name replaces the earlier one, so give the other flags again.
 
 The running daemon re-reads the file on each client open and rebuilds the
-opened root (index and child LSPs) when it changed. --root-marker is stored
-but not yet used: --lsp-roots auto reads the built-in markers only.`,
+opened root (index and child LSPs) when it changed. --root-marker names a
+file that marks a project root for the language: --lsp-roots auto starts a
+child at every directory that holds one, beside the built-in markers.`,
 		Example: `  poly-lsp-mcp lsp add zig --ext .zig,.zon --cmd zls
   poly-lsp-mcp lsp add java --cmd jdtls --off-by-default
   poly-lsp-mcp lsp add go --off-by-default
@@ -263,7 +264,7 @@ but not yet used: --lsp-roots auto reads the built-in markers only.`,
 	f.StringVar(&cmdName, "cmd", "", "child LSP command (name on PATH or a path). Required for a new language; on a built-in it replaces the command and its arguments")
 	f.StringArrayVar(&args, "arg", nil, "argument to the command (repeatable, in order)")
 	f.StringArrayVar(&env, "env", nil, "KEY=VALUE added to the command's environment (repeatable)")
-	f.StringArrayVar(&markers, "root-marker", nil, "file name that marks a project root for this language (repeatable). Stored, not yet used")
+	f.StringArrayVar(&markers, "root-marker", nil, "file name that marks a project root for this language (repeatable); --lsp-roots auto starts a child at every directory that holds one")
 	f.BoolVar(&offByDefault, "off-by-default", false, "no client gets this child LSP unless it turns it on (mcp --lsp-on <name>)")
 	f.BoolVar(&formatOnEdit, "format-on-edit", false, "format a kept edit to this language's files through its child LSP (format_on_edit); =false writes an explicit off")
 	f.BoolVar(&trust, "trust-clean-diagnostics", false, "a clean diagnostics result from this server may validate an edit (see trust_clean_diagnostics)")

@@ -218,7 +218,7 @@ checkout named by LSP_REBUILD_PATH). --no-update-check skips it.`,
 			// to look for, and no 2 s search for them.
 			var pr symbols.ProjectRoots
 			if len(rep.Languages) > 0 {
-				pr = symbols.DetectProjectRoots(root, ign, symbols.DefaultRootsTime, symbols.DefaultRootsDirs)
+				pr = symbols.DetectProjectRoots(root, ign, reg, symbols.DefaultRootsTime, symbols.DefaultRootsDirs)
 			}
 			rep.RootsBounded = pr.Bounded
 			for _, l := range rep.Languages {

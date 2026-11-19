@@ -65,8 +65,10 @@ type Language struct {
 	// turns it on (mcp --lsp-on, open option lspOn). See LSPOff.
 	OffByDefault bool `yaml:"off_by_default,omitempty"`
 	// RootMarkers are file names that mark a project root for this
-	// language. Stored, NOT YET USED: --lsp-roots auto reads the built-in
-	// marker table in symbols/roots.go only.
+	// language: `lsp add --root-marker`. symbols.DetectProjectRoots honours
+	// them — every dir the walk finds holding one is a root for the
+	// language — in addition to the built-in marker table in
+	// symbols/roots.go.
 	RootMarkers []string `yaml:"root_markers,omitempty"`
 	// FormatOnEdit: an edit to this language's files that is kept is
 	// formatted by its child LSP (range formatting over the changed

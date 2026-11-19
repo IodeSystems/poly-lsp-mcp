@@ -39,7 +39,8 @@ type UserServer struct {
 	Cmd        string   `yaml:"cmd,omitempty"`
 	Args       []string `yaml:"args,omitempty"`
 	Env        []string `yaml:"env,omitempty"`
-	// RootMarkers: stored, not yet used (see Language.RootMarkers).
+	// RootMarkers: file names that mark a project root for the language
+	// (see Language.RootMarkers; read by symbols.DetectProjectRoots).
 	RootMarkers           []string `yaml:"root_markers,omitempty"`
 	OffByDefault          bool     `yaml:"off_by_default,omitempty"`
 	TrustCleanDiagnostics *bool    `yaml:"trust_clean_diagnostics,omitempty"`

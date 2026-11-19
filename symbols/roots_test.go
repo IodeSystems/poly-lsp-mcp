@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 )
 
@@ -35,7 +36,63 @@ func relRoots(root string, dirs []string) []string {
 }
 
 func detect(root string) ProjectRoots {
-	return DetectProjectRoots(root, git.LoadIgnores(root), DefaultRootsTime, DefaultRootsDirs)
+	return DetectProjectRoots(root, git.LoadIgnores(root), nil, DefaultRootsTime, DefaultRootsDirs)
+}
+
+// userReg builds a registry from the given language definitions, as
+// servers.yaml entries would.
+func userReg(t *testing.T, langs ...config.Language) *config.Registry {
+	t.Helper()
+	reg, err := (&config.Config{Languages: langs}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
+
+// A registry language's root markers are honoured: every dir holding one
+// is a root for it. The nil registry (today's default) finds none.
+func TestProjectRootsUserMarkers(t *testing.T) {
+	root := rootsTree(t, "a/build.zig", "b/build.zig")
+	reg := userReg(t, config.Language{Name: "zig", Extensions: []string{"zig"}, LSP: &config.LSP{Cmd: "zls"}, RootMarkers: []string{"build.zig"}})
+	got := DetectProjectRoots(root, git.LoadIgnores(root), reg, DefaultRootsTime, DefaultRootsDirs)
+	if want := []string{"a", "b"}; !reflect.DeepEqual(relRoots(root, got.Roots["zig"]), want) {
+		t.Fatalf("zig roots = %v, want %v", relRoots(root, got.Roots["zig"]), want)
+	}
+	if nilGot := detect(root); len(nilGot.Roots["zig"]) != 0 {
+		t.Fatalf("nil registry gave zig roots: %v", nilGot.Roots["zig"])
+	}
+}
+
+// A built-in language re-declared with a marker that is ALREADY in the static
+// table adds the same root twice: once by the static go logic, once by the
+// registry loop. Each dir must appear exactly once.
+func TestProjectRootsUserMarkerOverlapNoDup(t *testing.T) {
+	root := rootsTree(t, "go.mod", "svc/go.mod")
+	reg := userReg(t,
+		config.Language{Name: "go", Extensions: []string{"go"}, LSP: &config.LSP{Cmd: "gopls"}, RootMarkers: []string{"go.mod"}},
+	)
+	got := DetectProjectRoots(root, git.LoadIgnores(root), reg, DefaultRootsTime, DefaultRootsDirs)
+	if want := []string{".", "svc"}; !reflect.DeepEqual(relRoots(root, got.Roots["go"]), want) {
+		t.Fatalf("go roots = %v, want %v (no duplicates)", relRoots(root, got.Roots["go"]), want)
+	}
+}
+
+// A built-in language re-declared with an extra marker gets both its
+// static roots and the dirs holding the extra marker.
+func TestProjectRootsUserMarkerAddsToStatic(t *testing.T) {
+	root := rootsTree(t, "go.mod", "svc/go.mod", "tools/zig/build.zig")
+	reg := userReg(t,
+		config.Language{Name: "go", Extensions: []string{"go"}, LSP: &config.LSP{Cmd: "gopls"}, RootMarkers: []string{"build.zig"}},
+		config.Language{Name: "zig", Extensions: []string{"zig"}, LSP: &config.LSP{Cmd: "zls"}, RootMarkers: []string{"build.zig"}},
+	)
+	got := DetectProjectRoots(root, git.LoadIgnores(root), reg, DefaultRootsTime, DefaultRootsDirs)
+	if want := []string{".", "svc", "tools/zig"}; !reflect.DeepEqual(relRoots(root, got.Roots["go"]), want) {
+		t.Fatalf("go roots = %v, want %v", relRoots(root, got.Roots["go"]), want)
+	}
+	if want := []string{"tools/zig"}; !reflect.DeepEqual(relRoots(root, got.Roots["zig"]), want) {
+		t.Fatalf("zig roots = %v, want %v", relRoots(root, got.Roots["zig"]), want)
+	}
 }
 
 func TestProjectRootsTwoGoModules(t *testing.T) {
@@ -127,7 +184,7 @@ func TestProjectRootsTypescriptAndCMake(t *testing.T) {
 
 func TestProjectRootsBoundedSaysSo(t *testing.T) {
 	root := rootsTree(t, "a/go.mod", "b/go.mod", "c/go.mod")
-	got := DetectProjectRoots(root, nil, time.Minute, 2)
+	got := DetectProjectRoots(root, nil, nil, time.Minute, 2)
 	if got.Bounded == "" {
 		t.Fatalf("a search stopped at 2 directories should say so: %+v", got)
 	}

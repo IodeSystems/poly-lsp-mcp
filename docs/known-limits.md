@@ -210,8 +210,6 @@ entry here.
 - A servers.yaml change rebuilds a root's whole index and restarts all its
   child LSPs, not only the changed language's, and only when a client next
   opens that root.
-- `root_markers` (`lsp add --root-marker`) is stored and not yet used:
-  `--lsp-roots auto` reads the built-in marker table only.
 - In daemon mode, node_read / node_edit address resolution (a selector in
   `node`) and the daemon's `/query` use the daemon's defaults
   (off-by-default languages off), not the client's switch; node_query uses

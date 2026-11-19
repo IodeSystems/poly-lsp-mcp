@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iodesystems/poly-lsp-mcp/config"
 	"github.com/iodesystems/poly-lsp-mcp/internal/git"
 )
 
@@ -96,16 +97,35 @@ const (
 //   - swift: Package.swift, or a directory holding an .xcodeproj or
 //     .xcworkspace (an app's local packages are roots of their own).
 //
+// reg's languages carry RootMarkers of their own (servers.yaml,
+// `lsp add --root-marker`): each directory the walk finds holding one is
+// a root for that language — a dir with the marker is a root, no nesting
+// collapse. A nil reg reads the built-in table only. The built-in
+// languages' special logic (go.work, tsconfig packages, python nesting,
+// CMake outermost, Xcode bundles) applies to the static markers; the
+// registry's roots are additive on top of it.
+//
 // The walk skips what the index skips: skipDirs and ign's ignored
 // directories are never entered, and an ignored marker file does not
 // count. It stops after maxDirs directories or limit, and says so in
 // Bounded.
-func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, maxDirs int) ProjectRoots {
+func DetectProjectRoots(root string, ign *git.IgnoreSet, reg *config.Registry, limit time.Duration, maxDirs int) ProjectRoots {
 	out := ProjectRoots{Roots: map[string][]string{}}
 	if _, err := os.Stat(filepath.Join(root, "go.work")); err == nil {
 		out.GoWork = true
 	}
 	found := map[string]map[string]bool{} // marker → dirs
+	known := make(map[string]bool, len(rootMarkers))
+	for m := range rootMarkers {
+		known[m] = true
+	}
+	if reg != nil {
+		for _, l := range reg.Languages() {
+			for _, m := range l.RootMarkers {
+				known[m] = true
+			}
+		}
+	}
 	start := time.Now()
 	dirs := 0
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -137,7 +157,7 @@ func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, ma
 			}
 			return nil
 		}
-		if _, ok := rootMarkers[d.Name()]; !ok || ign.KnownIgnored(root, p) {
+		if !known[d.Name()] || ign.KnownIgnored(root, p) {
 			return nil
 		}
 		if found[d.Name()] == nil {
@@ -147,7 +167,18 @@ func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, ma
 		return nil
 	})
 
+	// add appends a root, once: a language a user re-declares with a marker
+	// that is also in the static table (e.g. go with go.mod) would otherwise
+	// be added by both the static logic and the registry loop.
+	added := map[string]map[string]bool{}
 	add := func(lang, dir string) {
+		if added[lang] == nil {
+			added[lang] = map[string]bool{}
+		}
+		if added[lang][dir] {
+			return
+		}
+		added[lang][dir] = true
 		out.Roots[lang] = append(out.Roots[lang], dir)
 	}
 	// go
@@ -203,6 +234,24 @@ func DetectProjectRoots(root string, ign *git.IgnoreSet, limit time.Duration, ma
 	}
 	for dir := range sw {
 		add("swift", dir)
+	}
+	// Registry languages: every dir holding one of their markers is a
+	// root, flat (no nesting collapse), additive with the static logic.
+	if reg != nil {
+		for _, l := range reg.Languages() {
+			if len(l.RootMarkers) == 0 {
+				continue
+			}
+			seen := map[string]bool{}
+			for _, m := range l.RootMarkers {
+				for dir := range found[m] {
+					seen[dir] = true
+				}
+			}
+			for dir := range seen {
+				add(l.Name, dir)
+			}
+		}
 	}
 	for lang := range out.Roots {
 		sort.Strings(out.Roots[lang])

@@ -287,6 +287,7 @@ When a `node_query` leaves something out, its result carries `leftOut`: `pruned`
 | python | `pyproject.toml`, `setup.py`, `setup.cfg` (nested packages are roots of their own) |
 | c, cpp | `compile_commands.json`, or the outermost `CMakeLists.txt` |
 | swift | `Package.swift`, or a directory holding an `.xcodeproj` / `.xcworkspace` |
+| any `lsp add` language | every file it declares with `--root-marker`: a directory holding one is a root |
 
 The search skips what the index skips (`node_modules`, `vendor` and the like, gitignored and excluded directories) and test fixtures (`testdata`, and `fixtures`/`__fixtures__` under a test dir; they stay indexed), and stops after 2 s or 20,000 directories, and says so. Each child starts on the first request for a file under its root; a file goes to the nearest enclosing root, else to a child at the workspace root. At most `--lsp-roots-max` (8) run per language: the least recently used is stopped (reason `lru`) and starts again on demand, and idle and memory stops apply to each child as before. `poly-lsp-mcp status` shows each child's root (`LSP ROOT`).
 
@@ -306,7 +307,9 @@ servers:
     off_by_default: true
 ```
 
-Entries merge over the built-in languages by name: a new name adds a language, an existing name overrides the fields it gives, and removing the entry restores the built-in. `lsp add` refuses an entry with no name, no command (its own or the built-in's), or an extension another language claims. To turn a built-in child off for every client, override it with `--off-by-default`. A `poly-lsp-mcp.yaml` that declares `languages:` replaces the registry, and `servers.yaml` is then not merged; that file still means in-process. The daemon re-reads `servers.yaml` on each client open and rebuilds the opened root (index and child LSPs) when it changed. `--root-marker` is stored but not yet used.
+Entries merge over the built-in languages by name: a new name adds a language, an existing name overrides the fields it gives, and removing the entry restores the built-in. `lsp add` refuses an entry with no name, no command (its own or the built-in's), or an extension another language claims. To turn a built-in child off for every client, override it with `--off-by-default`. A `poly-lsp-mcp.yaml` that declares `languages:` replaces the registry, and `servers.yaml` is then not merged; that file still means in-process. The daemon re-reads `servers.yaml` on each client open and rebuilds the opened root (index and child LSPs) when it changed. `--root-marker` names a file that marks a project root for
+the language: `--lsp-roots auto` starts a child at every directory that
+holds one, beside the built-in markers.
 
 Per client, `mcp --lsp-off go,python` and `--lsp-on <name>` (for an off-by-default language) choose which child LSPs this client uses; they travel with the client's open, through the daemon. A child is shared by every client of a root, so the switch filters what this client sees and does not stop a child another client wants: for an off language the client gets references and definitions from the tree-sitter index only, no diagnostics, and its edits are checked by a tree-sitter parse only (`validationSkipped: lsp-off`). A child starts only when some client of the root wants its language.
 

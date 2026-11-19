@@ -42,7 +42,7 @@ func (s *Server) projectRoots() symbols.ProjectRoots {
 		if ign == nil {
 			ign = s.loadIgnores(root)
 		}
-		pr := symbols.DetectProjectRoots(root, ign, symbols.DefaultRootsTime, symbols.DefaultRootsDirs)
+		pr := symbols.DetectProjectRoots(root, ign, s.registry, symbols.DefaultRootsTime, symbols.DefaultRootsDirs)
 		s.roots = &pr
 	}
 	return *s.roots

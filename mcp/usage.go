@@ -148,6 +148,8 @@ func editOpKind(p *modernEditArgs) string {
 	switch {
 	case p.OldText != nil:
 		kinds = append(kinds, "edit")
+	case p.Insert != nil:
+		kinds = append(kinds, "insert")
 	case p.Delete != nil:
 		kinds = append(kinds, "delete")
 	case p.NewText != nil:

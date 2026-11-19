@@ -102,7 +102,8 @@ const modernNodeEditDescription = `Edit one node of the projection. node = an ad
 Exactly ONE op:
 rename:"NewName" — ONE call renames the declaration and every usage, workspace-wide, atomically (never hand-edit a rename with oldText); lexical guesses are reported under candidates, never applied.
 oldText+newText — replace a snippet inside the node. oldText must occur exactly once in the node; the address scopes it, so it need only be unique WITHIN that node — keep it short. Pass the node's whole text to rewrite it entirely, or that text + a new declaration to ADD one next to it.
-newText alone — REPLACES a span address (@start-end: ::body/::signature/::grep/a conflict); CREATES a file at a new path; refused on a symbol (use oldText) and never inserts one.
+newText alone — REPLACES a span address (@start-end: ::body/::signature/::grep/a conflict); CREATES a file at a new path; refused on a symbol (use oldText).
+insert:"after"|"before" + newText — splice at the anchor's boundary; neighbour unchanged.
 delete:true — excise the node.
 accept:"mine"|"theirs" — resolve merge conflicts (whole file, or one block by its @start-end span); markers go too. A conflicted file indexes both sides as PEERS; ::conflict/::mine/::theirs/::base read them apart (sides carry their ref).
 params [{name,type}] / return — rebuild the parameter list / return type (go/typescript/python).
@@ -117,7 +118,8 @@ var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"properties":{"name":{"type":"string"},"type":{"type":"string"}},"required":["name","type"]}},` +
 	`"return":{"type":"string"},` +
 	`"delete":{"type":"boolean"},` +
-	`"accept":{"type":"string","enum":["mine","theirs"]}},` +
+	`"accept":{"type":"string","enum":["mine","theirs"]},` +
+	`"insert":{"type":"string","enum":["after","before"]}},` +
 	`"required":["node"]}`)
 
 // --------------------------------------------------------- node_query
@@ -1163,6 +1165,11 @@ type modernEditArgs struct {
 	// (a.k.a. "ours") or "theirs". See applyConflictAccept.
 	Accept *string `json:"accept,omitempty"`
 
+	// Insert splices a new declaration at the anchor's boundary.
+	// "after" → end of the anchor's declRange; "before" → start.
+	// Pairs with newText (which carries the new declaration only).
+	Insert *string `json:"insert,omitempty"`
+
 	// commit / rollback drive the staged-edit transaction. HIDDEN — kept
 	// out of the schema on purpose; the rejection help reveals them when a
 	// multi-stage edit is actually needed. commit:false stages (unvalidated);
@@ -1184,7 +1191,8 @@ type modernEditArgs struct {
 // model as six independent options and hides that oldText and newText are
 // one edit.
 const editOpShapes = "exactly one of: an edit {oldText, newText}, a create or span rewrite {newText}, " +
-	"a refactor {delete} | {rename} | {params} | {return}, or a conflict resolution {accept}"
+	"an insert {newText, insert}, a refactor {delete} | {rename} | {params} | {return}, " +
+	"or a conflict resolution {accept}"
 
 // ops names every op BUCKET actually supplied — node_edit requires
 // exactly one and never silently picks. The text bucket
@@ -1202,6 +1210,9 @@ func (p *modernEditArgs) ops() []string {
 	}
 	if p.Delete != nil {
 		text = append(text, "delete")
+	}
+	if p.Insert != nil {
+		text = append(text, "insert")
 	}
 	if len(text) > 0 {
 		out = append(out, strings.Join(text, "+"))

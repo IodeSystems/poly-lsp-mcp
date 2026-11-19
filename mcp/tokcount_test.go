@@ -111,7 +111,12 @@ import (
 // 1300 → 1240: `resolution` left node_edit entirely (a rename of a @derived
 // name always cascades; anything narrower is a commit:false batch). Measured
 // 1268 → 1220; 1240 keeps ~20 of headroom.
-const modernTokenBudget = 1240
+// 1240 → 1270: the node_edit `insert` op — splice a new declaration at an
+// anchor's boundary (after/before) without re-sending the neighbour's text.
+// Shape B (folded: reuse `node` as anchor + one enum field) measured 32
+// tokens; the old "newText alone … never inserts one" line shrank to make
+// room. Fifth raise; same standing candidate (params/return, i_1m5r2tw1g34cjn13c7neek).
+const modernTokenBudget = 1270
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

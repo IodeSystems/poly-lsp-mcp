@@ -561,7 +561,7 @@ func summarize(groups []*queryGroup, total, offset, end int) string {
 }
 
 // ----------------------------------------------------------------
-// F3 projection & aggregates
+// F3: projection & aggregates
 // ----------------------------------------------------------------
 
 // aggregateKind recognises a single-field aggregate block: "count",

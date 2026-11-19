@@ -1831,6 +1831,44 @@ func TestBarePathWithHyphenOrNonCodeFile(t *testing.T) {
 	}
 }
 
+// Lenient id spellings that mean one thing: an unquoted path id, a single
+// quote left open at the end of the selector, and a double-quoted path.
+func TestLenientIDForms(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+	writeLateFiles(t, dir, map[string]string{lateJavaPath: lateJava})
+
+	for _, c := range []struct{ sel, want string }{
+		{"#" + lateJavaPath, "#'" + lateJavaPath + "'"},
+		{"#" + lateJavaPath + " > class", "#'" + lateJavaPath + "' > class"},
+		{"#" + lateJavaPath + "::grep('void')", "#'" + lateJavaPath + "'::grep('void')"},
+		{"#'" + lateJavaPath + "#handleKeyCode", "#'" + lateJavaPath + "#handleKeyCode'"},
+		{`"` + lateJavaPath + `"::grep('void')`, "#'" + lateJavaPath + "'::grep('void')"},
+		{`"notes.md"`, "#'notes.md'"},
+		{`"main.go" > func`, "#'main.go' > func"},
+	} {
+		t.Run(c.sel, func(t *testing.T) {
+			want := query(t, s, map[string]any{"selector": c.want})
+			got := query(t, s, map[string]any{"selector": c.sel})
+			if want.TotalMatches == 0 {
+				t.Fatalf("baseline %s matched nothing", c.want)
+			}
+			if got.TotalMatches != want.TotalMatches {
+				t.Errorf("%s matched %d, want %d", c.sel, got.TotalMatches, want.TotalMatches)
+			}
+		})
+	}
+
+	// An empty or genuinely unclosed quote followed by more syntax is still
+	// refused where it cannot be read; an absolute path is still an error.
+	if msg := queryErr(t, s, map[string]any{"selector": "#'"}); !strings.Contains(msg, "closing") {
+		t.Errorf("an empty open quote should still error; got %s", msg)
+	}
+	if msg := queryErr(t, s, map[string]any{"selector": `"/tmp/x/main.go"::grep('a')`}); !strings.Contains(msg, "PATH") {
+		t.Errorf("an absolute path should still be refused; got %s", msg)
+	}
+}
+
 // A regex searched literally is the worst kind of wrong answer: correct to the
 // question asked, useless to the question meant, and indistinguishable from
 // "it isn't there". In one recorded session 44 of 49 empty results were this,

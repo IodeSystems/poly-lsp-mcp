@@ -1924,6 +1924,17 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 			return comp, unknownTypeErr(comp.class)
 		}
 		sawType = true
+	case p.peek() == '"' && p.doubleQuotedPathEnd() > 0:
+		// `"a/b.java"::grep('x')` — the id spelled with double quotes. The
+		// meaning is not in doubt, so take it as `#'a/b.java'`.
+		end := p.doubleQuotedPathEnd()
+		path := string(p.s[p.i+1 : end-1])
+		p.i = end
+		comp.anyType = true
+		comp.implied = true
+		comp.addAttrExpr(&attrExpr{op: attrExprLeaf,
+			leaf: selAttr{op: selExact, value: path}})
+		sawType = true
 	case p.peek() == '/' || p.peek() == '"':
 		// An ABSOLUTE path ("/tmp/ws/cmd/tui.go") or one the caller quoted with
 		// double quotes. Neither can start a compound, and both are the same
@@ -2023,10 +2034,17 @@ func (p *modSelParser) readID() (string, error) {
 		for !p.eof() && p.s[p.i] != q {
 			p.i++
 		}
-		if p.eof() {
-			return "", p.errf(fmt.Sprintf("a closing %c for the quoted id", q))
-		}
 		v := string(p.s[start:p.i])
+		if p.eof() {
+			// A quote left open at the very end of the selector
+			// (`#'a/b.java#sym`) runs to the end: the intent is plain when
+			// the text is path- or address-shaped. A bare word stays an
+			// error (`file#'unterminated` is a typo, not an id).
+			if !strings.ContainsAny(v, "/#.") {
+				return "", p.errf(fmt.Sprintf("a closing %c for the quoted id", q))
+			}
+			return v, nil
+		}
 		p.i++
 		return v, nil
 	}
@@ -2052,6 +2070,24 @@ func (p *modSelParser) readID() (string, error) {
 		return path, nil
 	}
 	return id, nil
+}
+
+// doubleQuotedPathEnd returns the index just past a double-quoted, relative
+// path-like string at the cursor ("a/b.java", "SPEC.md"), or 0 when the cursor
+// is not on one.
+func (p *modSelParser) doubleQuotedPathEnd() int {
+	for j := p.i + 1; j < len(p.s); j++ {
+		switch p.s[j] {
+		case '"':
+			if v := string(p.s[p.i+1 : j]); v != "" && v[0] != '/' && strings.ContainsAny(v, "/.") {
+				return j + 1
+			}
+			return 0
+		case '\\', '\n':
+			return 0
+		}
+	}
+	return 0
 }
 
 // peekIsBareAttr reports whether the cursor is on an unbracketed attribute —

@@ -72,16 +72,16 @@ func registerModernTools() map[string]Tool {
 // turn, so pretty-printing indentation is a per-turn tax for zero
 // information. Keep them dense.
 
-const modernNodeQueryDescription = `CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements. Files are nodes; no separate filesystem API.
+const modernNodeQueryDescription = `EXAMPLE: mcp/tools.go -> #'mcp/tools.go#Fn' (or mcp/tools.go:Fn) -> #'mcp/tools.go#Fn'::in.call
+CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements. Files are nodes; no separate filesystem API.
 TAGS are a FIXED set: project dir file func method type struct interface class const var field enum ctor module import argument, *. Workspace NAMES are NEVER tags, always #ids: #cache, #'store.go#Save' (quote with '). Language as class: file.go. space=descendant >=child ,=union — space is ALWAYS a node boundary. FILTER by bracketing ONTO an element: func[path=a.go] ≠ func path=a.go (things inside a func). In [] | is OR and & AND over whole TESTS — but ONLY before another test: [name=a|name=b] is boolean, [name~=a|b] is one regex.
 GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive.
 ::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E); no ctx by default (hit=the line), -A/-B/-C adds it; result carries a per-file rollup.
 FOOTGUNS: * NEVER matches ::edges or ::grep lines — name them or they're invisible. {m,n} elsewhere is regex REPETITION child-joined, NOT depth: func{2} = func>func; within-3-levels = "> *{0,2} > x". :not/:is(sel) test the node ITSELF; :where/:any/:all/:empty(sel) test AROUND it (leading tag = a descendant, leading ::/pseudo = the node; bare :any/:all/:empty judge their position). :parents(sel) = ALL upstream (ancestors + incoming refs) — broader than callers. Edge/::grep addresses are file@line: node_read/node_edit hit that exact line.
-RECIPES: START at a name/string: ::grep('needle'), method[name=x] — NOT :root > * (dir listing). #'a.go#Save'::in.call callers | #'main'::out.call > * callees | func:not([name^=Test]):empty(::in) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints.
-selector "?" = the full grammar.`
+RECIPES: START at a name/string: ::grep('needle'), method[name=x] — NOT :root > * (dir listing). #'main'::out.call > * callees | func:not([name^=Test]):empty(::in) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints.`
 
 var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
-	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
+	`"selector":{"type":"string","description":"\"?\" = full grammar"},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."},` +
 	`"budget":{"type":"string","description":"\"2000\", \"500ms\", \"20ops\"; default 10000ms"},` +

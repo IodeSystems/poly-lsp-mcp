@@ -172,3 +172,131 @@ func TestParsePathCapture_SuffixDoesNotBreakChainedPseudo(t *testing.T) {
 		t.Error("the ::grep fragment must be parsed as its own element")
 	}
 }
+
+// runPathWalk evaluates a :path selector on a real workspace tree and
+// returns the engine's recorded chains.
+func runPathWalk(t *testing.T, files map[string]string, sel string) (map[*treeNode]*walkPath, []*treeNode) {
+	t.Helper()
+	dir := writeTree(t, files)
+	s := startSession(t, dir)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+	e, err := s.srv.buildTreeFor(sel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := parseModernSelector(sel)
+	if err != nil {
+		t.Fatalf("parse %q: %v", sel, err)
+	}
+	e.evaluate(list)
+	return e.pathChain, e.evaluate(list)
+}
+
+// pathsSimple reports whether no chain repeats a node.
+func pathsSimple(chains map[*treeNode]*walkPath) (bad string) {
+	for r, p := range chains {
+		seen := map[*treeNode]bool{}
+		for _, rr := range p.Refs {
+			if seen[rr] {
+				return r.leaf
+			}
+			seen[rr] = true
+		}
+	}
+	return ""
+}
+
+func TestEvalPathCapture_ChainSimpleAndBounded(t *testing.T) {
+	// A→B→C→D: the unbounded walk records D's route as the three edges
+	// A→B, B→C, C→D — length 3, no node repeated.
+	files := map[string]string{
+		"app.go": "package p\n\nfunc A() { B() }\nfunc B() { C() }\nfunc C() { D() }\nfunc D() {}\n",
+	}
+	chains, _ := runPathWalk(t, files, "#A::out.call{1,}:path")
+	if chains == nil {
+		t.Fatal("a :path walk must record chains")
+	}
+	var dChain *walkPath
+	for r, p := range chains {
+		if r.leaf == "D" {
+			dChain = p
+		}
+	}
+	if dChain == nil {
+		t.Fatal("no chain to D")
+	}
+	if len(dChain.Refs) != 3 {
+		t.Fatalf("D's chain has %d edges, want 3 (A→B, B→C, C→D)", len(dChain.Refs))
+	}
+	if got := pathsSimple(chains); got != "" {
+		t.Errorf("chain to %s repeats a node — paths must be simple", got)
+	}
+	// The chain's edges are the WALK's edges, in order: each edge's far
+	// end is the next edge's host.
+	for i, r := range dChain.Refs[:len(dChain.Refs)-1] {
+		if len(r.refFar) != 1 || r.refFar[0] != dChain.Refs[i+1].parent {
+			t.Errorf("chain edge %d's far end is not the next edge's host", i)
+		}
+	}
+	// Bounded: {1,2} caps D's route at two edges, and D is not in the
+	// bounded match set at all.
+	chains, rows := runPathWalk(t, files, "#A::out.call{1,2}:path")
+	var dRow bool
+	for _, n := range rows {
+		if n.leaf == "D" {
+			dRow = true
+		}
+	}
+	if dRow {
+		t.Error("D is 3 hops out; a {1,2} walk must not reach it")
+	}
+	for r, p := range chains {
+		if len(p.Refs) > 2 {
+			t.Errorf("chain to %s has %d edges; the bound is 2", r.leaf, len(p.Refs))
+		}
+	}
+	if got := pathsSimple(chains); got != "" {
+		t.Errorf("bounded chain to %s repeats a node", got)
+	}
+}
+
+func TestEvalPathCapture_CycleSafe(t *testing.T) {
+	// E↔F is a 2-cycle: an unbounded walk must TERMINATE and every
+	// recorded chain must be simple (E→F and F→E, never E→F→E).
+	files := map[string]string{
+		"app.go": "package p\n\nfunc E() { F() }\nfunc F() { E() }\n",
+	}
+	chains, _ := runPathWalk(t, files, "func::out.call{1,}:path")
+	if chains == nil {
+		t.Fatal("a :path walk must record chains")
+	}
+	if got := pathsSimple(chains); got != "" {
+		t.Fatalf("cycle leaked into a chain at %s — the walk is not cycle-safe", got)
+	}
+	// Both directions exist, each exactly one edge long: the walk followed
+	// the cycle to the repeated node and stopped.
+	for _, leaf := range []string{"E", "F"} {
+		var found bool
+		for r, p := range chains {
+			if r.leaf == leaf && len(p.Refs) == 1 {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no one-edge chain to %s (want both cycle directions)", leaf)
+		}
+	}
+}
+
+func TestEvalPathCapture_AbsentWithoutSuffix(t *testing.T) {
+	// A {1,} walk WITHOUT :path is the F1 edge walk: no chains are
+	// recorded, so the renderer cannot invent a path for it.
+	files := map[string]string{
+		"app.go": "package p\n\nfunc A() { B() }\nfunc B() {}\n",
+	}
+	chains, _ := runPathWalk(t, files, "func::out.call{1,}")
+	if chains != nil {
+		t.Errorf("a walk without :path must not record chains; got %d", len(chains))
+	}
+}

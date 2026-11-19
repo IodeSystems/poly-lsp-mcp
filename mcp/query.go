@@ -379,6 +379,14 @@ type engine struct {
 	// is most of what a caller wants to know from a {1,n} walk.
 	firstHop map[*treeNode]int
 
+	// pathChain is the CHAIN a {m,n}:path walk crossed to reach each end
+	// ref node: the ordered ref nodes (edges) of the FIRST — fewest-hops —
+	// simple path to it, recorded when the BFS frontier first reaches the
+	// node, the same first-wins rule firstHop applies. Only pathCapture
+	// elements write it. A `> *` far-end row reads it through reachedVia,
+	// exactly the way `hop` is read in the row mapper.
+	pathChain map[*treeNode]*walkPath
+
 	// reachedVia is the ref node a crossed far end came through, so a result
 	// produced by `::out.call > *` can still report the call site and the
 	// edge's confidence. See kids().
@@ -3905,6 +3913,32 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 	if trackHops {
 		e.noteHop(1, frontier)
 	}
+	// A :path element threads the CHAIN each hop's edges crossed, in
+	// parallel with the set walk: the set walk dedupes (a node reached at
+	// more than one hop is one entry), the chains do not — they are
+	// simple, so a node appears in a chain at most once, which is what
+	// makes an unbounded walk terminate on a cycle. First-wins per end
+	// ref node, so a row's chain is its fewest-hops simple route, the
+	// same rule `hop` follows.
+	// The chain frontier holds ALL the chains ending at this hop's
+	// frontier — hop 1's one-edge chains, then each hop every chain
+	// extended through the frontier, seen or not. A chain extending
+	// THROUGH an already-recorded node is the only way a longer route
+	// past it gets recorded (B→C is recorded at hop 1; its extension
+	// B→C→D is what D's route needs), so the frontier keeps everything
+	// and only the RECORDS are first-wins: `seen` mirrors firstHop's
+	// visited set, a node's chain is recorded the first (fewest-hops)
+	// hop it is reached.
+	var chainFrontier, chainSeen map[*treeNode]*walkPath
+	if el.pathCapture {
+		chainFrontier = map[*treeNode]*walkPath{}
+		chainSeen = map[*treeNode]*walkPath{}
+		for _, r := range ordered(frontier) {
+			chainFrontier[r] = &walkPath{Host: r.parent, Refs: []*treeNode{r}}
+			chainSeen[r] = chainFrontier[r]
+		}
+		e.notePathChain(1, chainFrontier)
+	}
 	if el.min <= 1 {
 		for n := range frontier {
 			out[n] = true
@@ -3947,12 +3981,113 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 			e.noteHop(count, next)
 			e.noteFirstHop(count, next)
 		}
+		if chainFrontier != nil {
+			chainFrontier = e.extendPathChains(chainFrontier, el.comp, relaxed, el.max)
+			fresh := map[*treeNode]*walkPath{}
+			for n, p := range chainFrontier {
+				if _, seen := chainSeen[n]; !seen {
+					chainSeen[n] = p
+					fresh[n] = p
+				}
+			}
+			e.notePathChain(count, fresh)
+		}
 		if count >= el.min {
 			for n := range next {
 				out[n] = true
 			}
 		}
 		frontier = next
+	}
+	return out
+}
+
+// walkPath is the chain a {m,n}:path walk crossed to reach one end ref
+// node: the ordered ref nodes (the EDGES, one per hop), so a row carrying
+// it can render the full route — host, each site, each far end — and its
+// length is len(Refs). Chains are SIMPLE: a path never repeats a node,
+// which is also what makes an unbounded {1,} walk terminate on a cycle
+// (extending a cycle's last hop to a node already in the chain is
+// refused, so the frontier empties).
+type walkPath struct {
+	Refs   []*treeNode
+	Host   *treeNode // the node the first edge was crossed FROM
+}
+
+// notePathChain records the first (fewest-hops) simple chain to each end
+// ref node, the same first-wins rule noteFirstHop applies.
+func (e *engine) notePathChain(hops int, chains map[*treeNode]*walkPath) {
+	if e.pathChain == nil {
+		e.pathChain = map[*treeNode]*walkPath{}
+	}
+	for r, p := range chains {
+		if _, seen := e.pathChain[r]; !seen {
+			e.pathChain[r] = p
+		}
+	}
+}
+
+// extendPathChains walks ONE hop of the chains of a pathCapture ref
+// element: each chain's end ref crosses to its far end(s), and each far
+// end's matching refs start the chain's extensions. An extension is
+// refused when its far end is already IN the chain (simple), so a cycle
+// A→B→A yields the chains [A→B] and [B→A] and then stops — the walk is
+// cycle-safe with no visited set, because a simple path over a finite
+// node set is finite. Bounded walks are bounded the same way the set
+// walk is: the caller stops extending past el.max.
+//
+// Cost matches refHop: ONE refMatches call over all far ends (its cache
+// does the same work the set walk's hop does), then the new refs are
+// mapped back to the chain they extended by their SITE (file, line,
+// col) — buildOutRefs mints one ref per site, so a site identifies the
+// host's edge, and a collision on one site (foo(foo)) takes the
+// shortest chain, which is also the one firstHop's first-wins would
+// have reported.
+func (e *engine) extendPathChains(chains map[*treeNode]*walkPath, comp *selCompound, relaxed bool, maxEdges int) map[*treeNode]*walkPath {
+	fars := map[*treeNode]bool{}
+	for _, p := range chains {
+		if maxEdges > 0 && len(p.Refs) >= maxEdges {
+			continue // at the bound — this chain extends no further
+		}
+		for _, f := range p.Refs[len(p.Refs)-1].refFar {
+			fars[f] = true
+		}
+	}
+	next := e.refMatches(fars, comp, relaxed)
+	out := map[*treeNode]*walkPath{}
+	for nr := range next {
+		var best *walkPath
+		for r, p := range chains {
+			// nr is an edge AT r's far end: the far end is the edge's
+			// host, so nr.parent is the anchor. A site match would be
+			// wrong — nr's SITE sits at the far end, one hop ahead of
+			// r's site.
+			if len(r.refFar) != 1 || r.refFar[0] != nr.parent {
+				continue
+			}
+			inChain := false
+			for _, rr := range p.Refs {
+				if rr.parent == nr.parent {
+					inChain = true // extending would repeat a node
+					break
+				}
+			}
+			if inChain {
+				continue
+			}
+			if best == nil || len(p.Refs) < len(best.Refs) {
+				best = p
+			}
+		}
+		if best == nil {
+			continue
+		}
+		ext := &walkPath{Host: best.Host, Refs: make([]*treeNode, 0, len(best.Refs)+1)}
+		ext.Refs = append(ext.Refs, best.Refs...)
+		ext.Refs = append(ext.Refs, nr)
+		if prev, ok := out[nr]; !ok || len(prev.Refs) > len(ext.Refs) {
+			out[nr] = ext
+		}
 	}
 	return out
 }

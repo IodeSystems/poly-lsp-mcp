@@ -213,6 +213,7 @@ type probeState struct {
 	unsettledFromHop int
 	transUnsettled   int
 	hopCounted       map[*treeNode]bool
+	pathChain        map[*treeNode]*walkPath
 
 	lspCapReady bool
 	probing     bool
@@ -242,7 +243,7 @@ func (e *engine) probe(list selectorList) (hit *treeNode, ok bool) {
 	e.workLeft, e.workExceeded, e.timedOut, e.spendTick = ops, false, false, 0
 	e.deadline = e.hintDeadline
 	e.cap, e.capHit = 0, false
-	e.costStack, e.hopCounted = nil, nil
+	e.costStack, e.hopCounted, e.pathChain = nil, nil, nil
 	e.lspCapReady, e.lspLeft = true, 0
 	e.probing, e.probeDegraded = true, false
 
@@ -280,6 +281,7 @@ func (e *engine) probeSnapshot() probeState {
 		lspLeft: e.lspLeft, lspAsked: e.lspAsked, lspResolved: e.lspResolved,
 		maxHopReached: e.maxHopReached, unsettledFromHop: e.unsettledFromHop,
 		transUnsettled: e.transUnsettled, hopCounted: e.hopCounted,
+		pathChain: e.pathChain,
 		lspCapReady: e.lspCapReady, probing: e.probing,
 		recursiveUnconfirmed:  e.recursiveUnconfirmed,
 		implementsUnavailable: e.implementsUnavailable,
@@ -294,6 +296,7 @@ func (e *engine) probeRestore(s probeState) {
 	e.lspLeft, e.lspAsked, e.lspResolved = s.lspLeft, s.lspAsked, s.lspResolved
 	e.maxHopReached, e.unsettledFromHop = s.maxHopReached, s.unsettledFromHop
 	e.transUnsettled, e.hopCounted = s.transUnsettled, s.hopCounted
+	e.pathChain = s.pathChain
 	e.lspCapReady, e.probing = s.lspCapReady, s.probing
 	e.recursiveUnconfirmed = s.recursiveUnconfirmed
 	e.implementsUnavailable = s.implementsUnavailable

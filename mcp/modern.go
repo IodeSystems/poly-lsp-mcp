@@ -84,7 +84,7 @@ var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"selector":{"type":"string","description":"e.g. #'app.go' func, or #'app.go#Save'::in.call"},` +
 	`"limit":{"type":"integer","minimum":1,"description":"Max rows. Default 20."},` +
 	`"offset":{"type":"integer","minimum":0,"description":"Skip this many rows. Default 0."},` +
-	`"budget":{"type":["integer","string"],"description":"limit Nms (bare=ms) or Nops; def 10000ms"},` +
+	`"budget":{"type":"string","description":"\"2000\", \"500ms\", \"20ops\"; default 10000ms"},` +
 	`"include":{"type":"array","items":{"type":"string"},"description":"override excluded path patterns"}},` +
 	`"required":["selector"]}`)
 
@@ -308,13 +308,18 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 		offset = *p.Offset
 	}
 
+	// Validate before the tree build: a bad budget must not cost an index walk.
+	if _, _, _, err := parseBudgetArg(p.Budget); err != nil {
+		return nil, true, err
+	}
+
 	queryStart := time.Now()
 	e, err := s.buildTreeFor(sel, p.Include...)
 	if err != nil {
 		return nil, true, err
 	}
 	e.forSession(sess)
-	if v, unit, ok := parseBudget(string(p.Budget)); ok {
+	if v, unit, ok, _ := parseBudgetArg(p.Budget); ok {
 		e.setBudget(v, unit) // Nms wall-clock (bare=ms) or Nops deterministic
 	}
 

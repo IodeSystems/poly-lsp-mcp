@@ -112,6 +112,46 @@ func TestParseBudgetSuffixes(t *testing.T) {
 	}
 }
 
+// A malformed budget is an error naming the valid forms — not a silent
+// fall-back to the default, which hid every typo ("4k") behind a normal run.
+// Well-formed values (incl. a bare JSON integer and an over-cap one, which is
+// clamped) still evaluate.
+func TestNodeQueryBudgetValidation(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	for _, bad := range []any{"4k", "abc", "0", "-5", "-5ms", "0ops", "1.5", "ms", 0, -3} {
+		msg := queryErr(t, s, map[string]any{"selector": "func", "budget": bad})
+		for _, want := range []string{"bad budget", "Nms", "Nops"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("budget %v: error should contain %q; got %s", bad, want, msg)
+			}
+		}
+	}
+
+	for _, ok := range []any{"2000", "500ms", "20ops", 2000, "", nil, "999999999ops", "999999999ms"} {
+		args := map[string]any{"selector": "func"}
+		if ok != nil {
+			args["budget"] = ok
+		}
+		if r := s.callTool("node_query", args); r.IsError {
+			t.Errorf("budget %v should be accepted; got %s", ok, r.Content[0].Text)
+		}
+	}
+}
+
+func TestParseBudgetArg(t *testing.T) {
+	if _, _, ok, err := parseBudgetArg(nil); ok || err != nil {
+		t.Errorf("absent budget = default, no error; got ok=%v err=%v", ok, err)
+	}
+	if v, u, ok, err := parseBudgetArg([]byte(`2000`)); !ok || err != nil || v != 2000 || u != "ms" {
+		t.Errorf("bare JSON integer = ms; got %d %q %v %v", v, u, ok, err)
+	}
+	if _, _, _, err := parseBudgetArg([]byte(`"4k"`)); err == nil {
+		t.Error(`"4k" must error`)
+	}
+}
+
 // A ms budget trips the WALL CLOCK and says so — nondeterministic, unlike
 // the ops budget. (A 1ms limit against the workspace-wide edge sweep is
 // reliably slower than 1ms, so it trips.)

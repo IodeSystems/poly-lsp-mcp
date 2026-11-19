@@ -3590,6 +3590,22 @@ func parseBudget(s string) (value int, unit string, ok bool) {
 	return n, unit, true
 }
 
+// parseBudgetArg reads node_query's budget argument: absent, null or "" means
+// the default (ok=false, no error); a non-empty value parseBudget rejects is an
+// error naming the valid forms. Over-cap values are valid — setBudget clamps
+// them to the cap.
+func parseBudgetArg(raw json.RawMessage) (value int, unit string, ok bool, err error) {
+	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(string(raw)), `"`))
+	if s == "" || s == "null" {
+		return 0, "", false, nil
+	}
+	value, unit, ok = parseBudget(s)
+	if !ok {
+		return 0, "", false, fmt.Errorf("bad budget %q: use N or Nms (milliseconds, up to %d) or Nops (up to %d); N > 0", s, maxBudgetMs, maxBudgetOps)
+	}
+	return value, unit, true, nil
+}
+
 // setBudget applies a parsed budget: `ops` sets the deterministic work
 // budget; `ms` sets a wall-clock deadline and leaves work effectively
 // unbounded (capped) so the clock is the limit. Call after buildTree.

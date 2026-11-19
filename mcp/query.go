@@ -2705,11 +2705,39 @@ func (p *modSelParser) readAttrValue(regex bool) (string, bool) {
 		return v, true
 	}
 	start := p.i
+	// Parentheses inside a regex value are PART of it, alternation included:
+	// `[name~=^(New|Notify)$]`. Balanced ones only — if the value never
+	// closes them, fall back to the old reading (the first ')' ends it).
+	if regex {
+		if v, open := p.readAttrValueRaw(start, true, true); open == 0 {
+			return v, false
+		}
+		p.i = start
+	}
+	v, _ := p.readAttrValueRaw(start, regex, false)
+	return v, false
+}
+
+// readAttrValueRaw reads an unquoted value; open counts parentheses left
+// unclosed when parens tracking is on.
+func (p *modSelParser) readAttrValueRaw(start int, regex, parens bool) (string, int) {
 	depth := 0
+	paren := 0
 	for !p.eof() {
 		c := p.s[p.i]
 		if c == ']' && depth == 0 {
 			break // the attribute's closing bracket
+		}
+		if parens && c == '\\' && p.i+1 < len(p.s) && (p.s[p.i+1] == '(' || p.s[p.i+1] == ')') {
+			p.i += 2
+			continue
+		}
+		if parens && c == '(' {
+			paren++
+		} else if parens && c == ')' && paren > 0 {
+			paren--
+			p.i++
+			continue
 		}
 		if depth == 0 && c == ')' {
 			break
@@ -2728,7 +2756,7 @@ func (p *modSelParser) readAttrValue(regex bool) (string, bool) {
 		// cheaper to parse more than it is to spend an LLM turn. The
 		// ambiguity is only apparent — `queued` is not an attribute phrase
 		// and `name=derp` is, so the two readings never actually collide.
-		if depth == 0 && (c == '|' || c == '&') && p.boolOpFollows(p.i+1) {
+		if depth == 0 && paren == 0 && (c == '|' || c == '&') && p.boolOpFollows(p.i+1) {
 			break
 		}
 		if regex {
@@ -2740,7 +2768,7 @@ func (p *modSelParser) readAttrValue(regex bool) (string, bool) {
 		}
 		p.i++
 	}
-	return strings.TrimSpace(string(p.s[start:p.i])), false
+	return strings.TrimSpace(string(p.s[start:p.i])), paren
 }
 
 func isModIdentPart(c rune) bool {

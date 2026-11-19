@@ -1869,6 +1869,45 @@ func TestLenientIDForms(t *testing.T) {
 	}
 }
 
+// `|` inside balanced parentheses of an unquoted regex value is part of the
+// value: `name~=^(Start|Free)$`. Outside parentheses the existing rules hold
+// (`|` before another test is boolean OR; `name~=a|b` is one regex).
+func TestAlternationInsideParensOfARegexValue(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	want := query(t, s, map[string]any{"selector": `func[name~='^(Start|Free)$'], method[name~='^(Start|Free)$']`})
+	if want.TotalMatches < 2 {
+		t.Fatalf("baseline should match Start and Free; got %d", want.TotalMatches)
+	}
+	for _, sel := range []string{
+		`func name~=^(Start|Free)$`,
+		`method name~=^(Start|Free)$`,
+		`*[name~=^(Start|Free)$]`,
+		`path=main.go *[name~=^(Start|Free)$]`,
+		`func[name~=^(Start|Free)]`,
+		`func[name~=^(Start|Free)$&path=main.go]`,
+		`func[(name~=^(Start|Free)$)]`,
+	} {
+		r := s.callTool("node_query", map[string]any{"selector": sel})
+		if r.IsError {
+			t.Errorf("%s: %s", sel, r.Content[0].Text)
+		}
+	}
+	got := query(t, s, map[string]any{"selector": `path=main.go *[name~=^(Start|Free)$]`})
+	if got.TotalMatches != want.TotalMatches {
+		t.Errorf("unquoted alternation matched %d, want %d", got.TotalMatches, want.TotalMatches)
+	}
+
+	// Unchanged: a plain `|` is still regex alternation / boolean OR.
+	if q := query(t, s, map[string]any{"selector": `func[name~=Start|Free]`}); q.TotalMatches == 0 {
+		t.Error("bare alternation without parentheses must keep working")
+	}
+	if q := query(t, s, map[string]any{"selector": `func[name=Free|name=init]`}); q.TotalMatches < 2 {
+		t.Errorf("boolean OR between tests must keep working; got %d", q.TotalMatches)
+	}
+}
+
 // A regex searched literally is the worst kind of wrong answer: correct to the
 // question asked, useless to the question meant, and indistinguishable from
 // "it isn't there". In one recorded session 44 of 49 empty results were this,

@@ -1069,6 +1069,11 @@ type selElem struct {
 	comp     *selCompound
 	group    *selComplex // parenthesized sub-chain; comp == nil
 	min, max int         // {m,n}; max < 0 = unbounded; default {1,1}
+	// pathCapture is the {m,n}:path suffix — the element carries the chain of
+	// nodes and sites it walked. Only set on a ref element that names an
+	// explicit range, so `{1,}:path` is a path query and a bare `::out.call`
+	// is not. The evaluator threads the chain; the renderer prints it.
+	pathCapture bool
 }
 
 // hasMove reports whether the compound re-roots (carries a move).
@@ -1158,6 +1163,14 @@ func (r selRel) rng() (min, max int) {
 type selComplex struct {
 	elems []selElem
 	rel   selRel
+
+	// fields is the declaration block `{ name; path; … }` — the per-match
+	// field projection, in written order. hasFields is its presence flag: a
+	// block that is present but empty (`{ }`) is distinct from no block at
+	// all. The renderer projects each match to exactly these fields (TSV or
+	// --json); a match missing a field leaves it empty.
+	fields    []string
+	hasFields bool
 }
 
 // subjectComp returns the complex's subject compound (a group's subject
@@ -1436,6 +1449,20 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 			}
 		}
 
+		// A declaration block is terminal: it projects the fields of every
+		// match and nothing may follow it in the complex. The combinator
+		// (and its whitespace) is already consumed, so the '{' sits right
+		// after the last element: `* { … }`, `> * { … }`.
+		if p.peekDeclarationBlock() {
+			fields, err := p.parseDeclarationBlock()
+			if err != nil {
+				return cx, err
+			}
+			cx.fields = fields
+			cx.hasFields = true
+			return cx, nil
+		}
+
 		switch {
 		case p.peek() == '(':
 			// Group: a parenthesized sub-chain, usually repeated.
@@ -1484,6 +1511,7 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 				}
 			}
 		}
+
 		firstElem = false
 	}
 }
@@ -1510,6 +1538,19 @@ func (p *modSelParser) appendRefElem(cx *selComplex) error {
 		}
 		if el.min < 1 {
 			return fmt.Errorf("::%s{%d,…}: edge hops start at 1 (0 edges crossed is the host itself — drop the element)", comp.refDir, el.min)
+		}
+		// {m,n}:path — the element carries the chain it walked, not just its
+		// end. Only a ref element with an explicit range names a path: a bare
+		// `::out.call` (default {1,1}) does not, so `:path` is unambiguous.
+		if p.peek() == ':' {
+			save := p.i
+			p.i++
+			w := p.readIdent()
+			if w != "path" {
+				p.i = save // not :path — leave the cursor for the caller
+			} else {
+				el.pathCapture = true
+			}
 		}
 	}
 	cx.elems = append(cx.elems, el)
@@ -2409,6 +2450,57 @@ func (p *modSelParser) parseBraceRange() (lo, hi int, err error) {
 	}
 	p.i++
 	return lo, hi, nil
+}
+
+// peekDeclarationBlock reports whether the '{' at the cursor opens a
+// declaration block ({ field; … }) rather than a {m,n} repetition range.
+// The two are told apart by the first char after '{': a range starts with a
+// DIGIT, a field list with an IDENTIFIER (or '}' for an empty `{ }`). A
+// range is consumed immediately after its element, so a '{' reached at a
+// chain boundary can only be a declaration block — this peek just confirms
+// the shape.
+func (p *modSelParser) peekDeclarationBlock() bool {
+	if p.peek() != '{' {
+		return false
+	}
+	save := p.i
+	p.i++
+	p.skipWS()
+	ident := isSelIdentStart(p.peek()) || p.peek() == '}'
+	p.i = save
+	return ident
+}
+
+// parseDeclarationBlock parses the terminal "{ field; field; … }" that
+// follows a selector — the per-match field projection. Fields are
+// identifiers, separated by ';' (a trailing ';' before '}' is optional, as
+// in CSS). Returns them in written order. The block is terminal: nothing
+// may follow it in the complex.
+func (p *modSelParser) parseDeclarationBlock() ([]string, error) {
+	p.i++ // '{'
+	var fields []string
+	for {
+		p.skipWS()
+		if p.peek() == '}' {
+			p.i++
+			return fields, nil
+		}
+		name := p.readIdent()
+		if name == "" {
+			return nil, p.errf("a field name (e.g. { name; path; line })")
+		}
+		fields = append(fields, name)
+		p.skipWS()
+		switch p.peek() {
+		case ';':
+			p.i++ // separator; the loop re-enters and accepts '}'
+		case '}':
+			p.i++
+			return fields, nil
+		default:
+			return nil, p.errf("';' between fields, or '}' to close the block")
+		}
+	}
 }
 
 // parseParenRange parses a pseudo's "(m)", "(m,)" or "(m,n)" argument —

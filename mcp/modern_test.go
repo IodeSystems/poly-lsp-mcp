@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1905,6 +1906,64 @@ func TestAlternationInsideParensOfARegexValue(t *testing.T) {
 	}
 	if q := query(t, s, map[string]any{"selector": `func[name=Free|name=init]`}); q.TotalMatches < 2 {
 		t.Errorf("boolean OR between tests must keep working; got %d", q.TotalMatches)
+	}
+}
+
+// `path:Symbol` and the `{m,n}:path` capture suffix both use ':' — the symbol
+// rewrite applies only right after a bare path, never after an edge range.
+func TestPathSymbolDoesNotCaptureTheEdgePathSuffix(t *testing.T) {
+	for _, sel := range []string{
+		"main.go:Free::in.call{1,}:path > *",
+		"#'main.go#Free'::in.call{1,}:path > *",
+		"main.go:Free::in.call{1,3}:path > *",
+	} {
+		if _, err := parseModernSelector(sel); err != nil {
+			t.Errorf("%s: %v", sel, err)
+		}
+	}
+	a, err := parseModernSelector("main.go:Free::in.call{1,}:path > *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := parseModernSelector("#'main.go#Free'::in.call{1,}:path > *")
+	if !reflect.DeepEqual(a, b) {
+		t.Error("main.go:Free must parse exactly as #'main.go#Free'")
+	}
+}
+
+// The lenient forms must not turn input that was an error into a silent empty
+// result: an open quote followed by more selector, a misspelled or retired
+// pseudo after a path, and a misspelled hyphenated tag all keep their errors.
+func TestLenientFormsKeepTheirErrors(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	for _, c := range []struct{ sel, want string }{
+		{"#'main.go > func", "closing"},
+		{"#'main.go func", "closing"},
+		{"main.go:emtpy", "did you mean :empty"},
+		{"main.go:fist", "unknown pseudo-class"},
+		{"main.go:references(x)", ":references is now a NODE"},
+		{"main.go:decorated('x')", ":annotated"},
+		{"main.go:depth", ":depth is gone"},
+		{"type-alias > func", "no node type"},
+		{"func-decl", "no node type"},
+	} {
+		msg := queryErr(t, s, map[string]any{"selector": c.sel})
+		if !strings.Contains(msg, c.want) {
+			t.Errorf("%s: want error containing %q; got %s", c.sel, c.want, msg)
+		}
+	}
+
+	// Symbols that merely resemble a pseudo name still resolve.
+	for _, sel := range []string{"main.go:Free", "main.go:Server", "main.go:Start"} {
+		if q := query(t, s, map[string]any{"selector": sel}); q.TotalMatches == 0 {
+			t.Errorf("%s should match its symbol", sel)
+		}
+	}
+	// A whitespace-free open quote is still accepted.
+	if q := query(t, s, map[string]any{"selector": "#'main.go#Free"}); q.TotalMatches == 0 {
+		t.Error("an open quote at the end of a single token should still resolve")
 	}
 }
 

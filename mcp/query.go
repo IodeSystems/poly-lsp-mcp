@@ -1912,7 +1912,9 @@ func (p *modSelParser) parseCompound() (selCompound, error) {
 			}
 			// No tag contains '-', so a hyphenated word (`terminal-view`, a
 			// dir) can only be a workspace NAME: take it as the id.
-			if strings.Contains(comp.class, "-") {
+			// Not when it is a hyphenated misspelling of a tag (`type-alias`,
+			// `func-decl`): there the "no node type" error is the better answer.
+			if strings.Contains(comp.class, "-") && !hyphenatedTagLookalike(comp.class) {
 				name := comp.class
 				comp.class = ""
 				comp.anyType = true
@@ -2040,7 +2042,7 @@ func (p *modSelParser) readID() (string, error) {
 			// (`#'a/b.java#sym`) runs to the end: the intent is plain when
 			// the text is path- or address-shaped. A bare word stays an
 			// error (`file#'unterminated` is a typo, not an id).
-			if !strings.ContainsAny(v, "/#.") {
+			if !strings.ContainsAny(v, "/#.") || strings.ContainsAny(v, " \t\r\n") {
 				return "", p.errf(fmt.Sprintf("a closing %c for the quoted id", q))
 			}
 			return v, nil
@@ -2070,6 +2072,14 @@ func (p *modSelParser) readID() (string, error) {
 		return path, nil
 	}
 	return id, nil
+}
+
+// hyphenatedTagLookalike reports whether a hyphenated word starts with a tag,
+// or is within did-you-mean distance of one, in either its first segment or
+// the whole word.
+func hyphenatedTagLookalike(word string) bool {
+	seg, _, _ := strings.Cut(word, "-")
+	return knownSelectorClass(seg) || nearestType(seg) != "" || nearestType(word) != ""
 }
 
 // doubleQuotedPathEnd returns the index just past a double-quoted, relative
@@ -2868,6 +2878,13 @@ var pseudoWords = map[string]bool{
 	"ref": true, "explain": true,
 }
 
+// removedPseudoWords are retired pseudo names that parsePseudo answers with a
+// redirect message; they must reach it, not become symbols.
+var removedPseudoWords = map[string]bool{
+	"decorated": true, "tagged": true, "annotation": true,
+	"has": true, "has_parent": true, "references": true, "depth": true,
+}
+
 // pathSymbolSuffix reads `<path>:<Ident>` as the address `<path>#<Ident>`.
 // path is a scanned path tail ending at end. The suffix must be a single ':'
 // (not '::', a pseudo-element) followed by an identifier — dotted for
@@ -2886,8 +2903,17 @@ func (p *modSelParser) pathSymbolSuffix(path string, end int) (string, int) {
 	sym := strings.TrimRight(string(p.s[end+1:j]), ".")
 	j = end + 1 + len(sym)
 	first, _, _ := strings.Cut(sym, ".")
-	if pseudoWords[first] || slices.Contains(selectorPseudoNames, first) {
+	if pseudoWords[first] || slices.Contains(selectorPseudoNames, first) || removedPseudoWords[first] {
 		return path, end
+	}
+	// A near-miss of a pseudo name (`:emtpy`) keeps unknownPseudoErr's
+	// did-you-mean. Only an all-lowercase word can be one: nearestName folds
+	// case, and would otherwise refuse symbols like `Allow` or `NotFound`.
+	if first == strings.ToLower(first) {
+		names := append(append([]string{}, selectorPseudoNames...), "in", "out", "grep")
+		if nearestName(first, names) != "" {
+			return path, end
+		}
 	}
 	return path + "#" + sym, j
 }

@@ -229,6 +229,74 @@ func TestQueryTextAggregateLengthNoPathIsEmpty(t *testing.T) {
 	}
 }
 
+// F3: an edge field set `{ site; conf; kind }` on a ref row carries only
+// those edge fields. A call reference to Save has a site (file@line), a
+// kind ("call"), and a conf (may be empty in the no-LSP CLI path) — the
+// projection must name exactly those three columns and resolve each one.
+func TestQueryTextProjectionEdgeFields(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := "package q\n\nfunc Save() {}\n\nfunc Caller() {\n\tSave()\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newQueryServer(t, dir)
+
+	var b strings.Builder
+	if err := s.QueryText(`#Save::in.call { site; conf; kind }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("edge projection query failed: %v", err)
+	}
+	out := b.String()
+
+	// Header: the three edge field names, tab-separated, in order.
+	if !strings.Contains(out, "site\tconf\tkind\n") {
+		t.Fatalf("TSV header must be site, conf, kind; got:\n%s", out)
+	}
+	// A data row: the site is the file@line of the call, kind is "call".
+	// In the no-LSP CLI path conf is "lexical" — the row is
+	// "a.go@6\tlexical\tcall".
+	if !strings.Contains(out, "a.go@6\tlexical\tcall\n") {
+		t.Errorf("expected a row with site=a.go@6, conf=lexical, kind=call; got:\n%s", out)
+	}
+}
+
+// F3: `{ max(length) }` and `{ min(length) }` over a match set that carries
+// real path data (a :path walk) return the extreme path length. A→B→C→D
+// gives lengths 1, 2, 3 for B, C, D respectively — max is 3, min is 1.
+func TestQueryTextAggregateLengthWithPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := "package q\n\nfunc A() { B() }\nfunc B() { C() }\nfunc C() { D() }\nfunc D() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newQueryServer(t, dir)
+
+	// max(length): the deepest match (D) has a 3-edge chain.
+	var b strings.Builder
+	if err := s.QueryText(`#A::out.call{1,}:path > * { max(length) }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("max(length) query failed: %v", err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "max(length)\n3\n") {
+		t.Errorf("max(length) over A→B→C→D must be 3; got:\n%s", out)
+	}
+
+	// min(length): the shallowest match (B) has a 1-edge chain.
+	b.Reset()
+	if err := s.QueryText(`#A::out.call{1,}:path > * { min(length) }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("min(length) query failed: %v", err)
+	}
+	out = b.String()
+	if !strings.Contains(out, "min(length)\n1\n") {
+		t.Errorf("min(length) over A→B→C→D must be 1; got:\n%s", out)
+	}
+}
+
 // The CLI answers on stdout and stays silent on stderr unless --verbose; see
 // the "answers quietly" fix. Loading the parse cache re-introduced exactly
 // the bring-up line that removed, because maybeLoadCache used log.Printf
@@ -269,5 +337,51 @@ func TestCacheLoadRespectsQuiet(t *testing.T) {
 	v.LoadCache()
 	if !strings.Contains(logged.String(), "loaded") {
 		t.Errorf("--verbose should still report it; got %q", logged.String())
+	}
+}
+
+// TestQueryHelpDocumentsNewForms proves the "?" reference output documents
+// the three F3 forms: the declaration block, the :path repetition modifier,
+// and the three aggregates (count, max(length), min(length)).
+func TestQueryHelpDocumentsNewForms(t *testing.T) {
+	dir := t.TempDir()
+	// Minimal fixture: a package main so the indexer has something.
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\n\nfunc Save() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newQueryServer(t, dir)
+
+	var b bytes.Buffer
+	if err := s.QueryText("?", 0, 0, "", &b); err != nil {
+		t.Fatalf("QueryText(\"?\") failed: %v", err)
+	}
+	out := b.String()
+
+	// Declaration block: the help must mention the { ... } projection form.
+	if !strings.Contains(out, "PROJECTION & AGGREGATES") {
+		t.Errorf("? reference missing the PROJECTION & AGGREGATES section")
+	}
+	if !strings.Contains(out, "declaration block") {
+		t.Errorf("? reference missing mention of declaration block")
+	}
+
+	// :path repetition modifier: must document {m,n}:path.
+	if !strings.Contains(out, ":path") {
+		t.Errorf("? reference missing :path documentation")
+	}
+
+	// Aggregates: count, max(length), min(length).
+	if !strings.Contains(out, "AGGREGATES") {
+		t.Errorf("? reference missing AGGREGATES section")
+	}
+	if !strings.Contains(out, "count") {
+		t.Errorf("? reference missing count aggregate")
+	}
+	if !strings.Contains(out, "max(length)") {
+		t.Errorf("? reference missing max(length) aggregate")
+	}
+	if !strings.Contains(out, "min(length)") {
+		t.Errorf("? reference missing min(length) aggregate")
 	}
 }

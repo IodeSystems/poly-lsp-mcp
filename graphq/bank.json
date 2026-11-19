@@ -26,7 +26,7 @@
   {
     "id": "q3",
     "question": "What functions are defined in `mcp/query_text.go`?",
-    "expected": ["mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON", "mcp/query_text.go#writeJSONDoc", "mcp/query_text.go#usesEdge", "mcp/query_text.go#InitResolve", "mcp/query_text.go#childLSPServes", "mcp/query_text.go#groupKey", "mcp/query_text.go#renderQueryTree", "mcp/query_text.go#budgetLabel", "mcp/query_text.go#renderExplain", "mcp/query_text.go#writeBudgetBlow", "mcp/query_text.go#isContainerOf", "mcp/query_text.go#groupHeader", "mcp/query_text.go#describeNode", "mcp/query_text.go#nodeSpan", "mcp/query_text.go#summarize", "mcp/query_text.go#Error", "mcp/query_text.go#Unwrap"],
+    "expected": ["mcp/query_text.go#QueryText", "mcp/query_text.go#QueryJSON", "mcp/query_text.go#writeJSONDoc", "mcp/query_text.go#usesEdge", "mcp/query_text.go#InitResolve", "mcp/query_text.go#childLSPServes", "mcp/query_text.go#groupKey", "mcp/query_text.go#renderQueryTree", "mcp/query_text.go#budgetLabel", "mcp/query_text.go#renderExplain", "mcp/query_text.go#writeBudgetBlow", "mcp/query_text.go#isContainerOf", "mcp/query_text.go#groupHeader", "mcp/query_text.go#describeNode", "mcp/query_text.go#nodeSpan", "mcp/query_text.go#summarize", "mcp/query_text.go#Error", "mcp/query_text.go#Unwrap", "mcp/query_text.go#aggregateKind", "mcp/query_text.go#aggregateRow", "mcp/query_text.go#fieldValue", "mcp/query_text.go#pathChainFor", "mcp/query_text.go#projectedRow", "mcp/query_text.go#renderAggregateRow", "mcp/query_text.go#renderPathChain", "mcp/query_text.go#renderProjectionTSV"],
     "canonical": {
       "gsl": "#'mcp/query_text.go' > func",
       "cypher": "MATCH (f:File {address:'mcp/query_text.go'})<-[:CONTAINS]-(fn:Function) RETURN fn.address",

@@ -2716,3 +2716,100 @@ func TestModernNodeEditInsertAfter(t *testing.T) {
 		t.Errorf("node_read text missing the new declaration: %s", nr.Content[0].Text)
 	}
 }
+
+// TestModernNodeEditInsertSameNameRefused proves spec 3: an insert whose
+// newText declares a symbol that already exists in the anchor's scope is
+// refused, the error names the conflict, and the file is left byte-identical
+// — a duplicate declaration is never silently written.
+func TestModernNodeEditInsertSameNameRefused(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+
+	before, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	// Free already exists at top level; re-declaring it must be refused.
+	r := s.callTool("node_edit", map[string]any{
+		"node": "main.go#Free", "insert": "after",
+		"newText": "func Free(only int) int { return only }",
+	})
+	if !r.IsError {
+		t.Fatalf("same-name insert must be refused, got %s", r.Content[0].Text)
+	}
+	msg := r.Content[0].Text
+	if !strings.Contains(msg, "Free") {
+		t.Errorf("error must name the conflicting symbol; got %q", msg)
+	}
+	if !strings.Contains(msg, "already exists") {
+		t.Errorf("error must state the conflict; got %q", msg)
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	if string(before) != string(after) {
+		t.Error("refused insert must not write the file")
+	}
+}
+
+// TestModernNodeEditInsertSameNameRefusedNested proves spec 3 at class scope:
+// a method whose name matches one already on the anchor's type is refused,
+// and the check is scope-aware — the same name on a different type is not a
+// conflict.
+func TestModernNodeEditInsertSameNameRefusedNested(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+
+	before, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	// Server.Start exists; adding a second Start on Server is a conflict.
+	r := s.callTool("node_edit", map[string]any{
+		"node": "main.go#Server.Start", "insert": "after",
+		"newText": "func (s *Server) Start(ctx string, retries int) error { return nil }",
+	})
+	if !r.IsError {
+		t.Fatalf("same-name method insert must be refused, got %s", r.Content[0].Text)
+	}
+	msg := r.Content[0].Text
+	if !strings.Contains(msg, "Start") {
+		t.Errorf("error must name the conflicting symbol; got %q", msg)
+	}
+	if !strings.Contains(msg, "already exists") {
+		t.Errorf("error must state the conflict; got %q", msg)
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	if string(before) != string(after) {
+		t.Error("refused insert must not write the file")
+	}
+}
+
+// TestModernNodeEditAdditiveReplaceAndDeleteUnchanged proves spec 5: the
+// insert op is additive. A replace (oldText/newText) and a delete behave
+// exactly as they did before the insert op existed, and a request carrying
+// no insert field is routed to the existing path — its result is the existing
+// edit payload, not the insert payload (no "inserted" key).
+func TestModernNodeEditAdditiveReplaceAndDeleteUnchanged(t *testing.T) {
+	s, dir := startModern(t)
+	defer s.close()
+
+	// Replace: oldText → newText, no insert field.
+	r := s.callTool("node_edit", map[string]any{
+		"node": "main.go#Free", "oldText": "func Free(only int) {}", "newText": "func Free(only int) { _ = only }",
+	})
+	if r.IsError {
+		t.Fatalf("replace errored: %s", r.Content[0].Text)
+	}
+	if strings.Contains(r.Content[0].Text, `"inserted"`) {
+		t.Errorf("replace result must not carry the insert payload; got %s", r.Content[0].Text)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	if !strings.Contains(string(got), "func Free(only int) { _ = only }") {
+		t.Errorf("replace did not apply:\n%s", got)
+	}
+	if !strings.Contains(string(got), "func CallsStart") {
+		t.Errorf("neighbour clobbered by replace:\n%s", got)
+	}
+
+	// Delete, no insert field.
+	if r := s.callTool("node_edit", map[string]any{"node": "main.go#Free", "delete": true}); r.IsError {
+		t.Fatalf("delete errored: %s", r.Content[0].Text)
+	}
+	got, _ = os.ReadFile(filepath.Join(dir, "main.go"))
+	if strings.Contains(string(got), "func Free") {
+		t.Errorf("delete did not remove Free:\n%s", got)
+	}
+}

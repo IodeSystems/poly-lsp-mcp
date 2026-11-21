@@ -2,10 +2,13 @@ package mcp
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -337,6 +340,187 @@ func TestCacheLoadRespectsQuiet(t *testing.T) {
 	v.LoadCache()
 	if !strings.Contains(logged.String(), "loaded") {
 		t.Errorf("--verbose should still report it; got %q", logged.String())
+	}
+}
+
+// f3AdditiveFixture is the shared workspace for the F3 additive-regression
+// tests: a Go file with a declaration and a call to it, a TS file, and a
+// markdown file — enough tree (file, symbol, ref) for the selectors tested.
+func f3AdditiveFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module q\ngo 1.21\n")
+	write("a.go", "package q\n\nfunc Save() {}\n\nfunc Caller() {\n\tSave()\n}\n")
+	write("web/x.ts", "export function f(a: number) { return a; }\n")
+	write("notes.md", "# hello\n")
+	return dir
+}
+
+// F3 additive regression, the text view. A selector with no declaration
+// block and no :path modifier must answer BYTE-FOR-BYTE what F1's grouped
+// tree answers — the expected strings below are exactly that, so any
+// renderer change on this path (a stray tab, a reordered row, a dropped
+// summary line) fails the test. The same selector plus a block, or plus a
+// :path, must NOT match — those are the new forms, and the only ones
+// allowed to change the output.
+func TestQueryTextNoBlockNoPathIsByteForByteF1(t *testing.T) {
+	s := newQueryServer(t, f3AdditiveFixture(t))
+
+	run := func(sel string) string {
+		var b strings.Builder
+		if err := s.QueryText(sel, 0, 0, "", &b); err != nil {
+			t.Fatalf("%s: %v", sel, err)
+		}
+		return b.String()
+	}
+
+	cases := []struct {
+		sel  string
+		want string
+	}{
+		// A plain symbol query: reading line, the groups, the node rows,
+		// the summary line.
+		{`func`, "read as ─ func: nodes of type `func`\n\na.go\n├─ func Save    3\n└─ func Caller  5-7\n\nweb/x.ts\n└─ func f  1\n\n2 files · 3 matches\n"},
+		// An edge query: the full reading table, the ref row with its
+		// site, the summary, and the lexical-edge caveat.
+		{`#'a.go#Save'::in.call`, "read as ─\n  #a.go#Save  named `a.go#Save` — a dir, file or symbol id (also matches the `file#symbol` address form)\n  ::in.call   reference edges pointing IN to it (who references this), only of kind call. A generated node — `*` never matches these\n  ⇒ returns the `::in.call` nodes — NOT the `*` nodes, which only constrain them\n\na.go\n└─ ::in.call ← a.go#Caller  6\n\n1 file · 1 matches\n\nnote: ::in/::out edges are name-keyed (lexical) here — a far end may be a\nsame-named symbol, not the resolved one. The MCP server resolves via child\nLSPs and labels each edge (conf: lsp|lexical|unsettled); `query` does not.\n"},
+		// An edge traversal: the reading table, the landed symbol, the
+		// same caveat.
+		{`#'a.go#Save'::in.call > *`, "read as ─\n  #a.go#Save  named `a.go#Save` — a dir, file or symbol id (also matches the `file#symbol` address form)\n  ::in.call   reference edges pointing IN to it (who references this), only of kind call. A generated node — `*` never matches these\n  >           DIRECT children of the above — one level only, not any descendant\n  *           nodes of ANY type\n  ⇒ returns the `*` nodes — NOT the `*#a.go#Save` nodes, which only constrain them\n\na.go\n└─ func Caller  5-7\n\n1 file · 1 matches\n\nnote: ::in/::out edges are name-keyed (lexical) here — a far end may be a\nsame-named symbol, not the resolved one. The MCP server resolves via child\nLSPs and labels each edge (conf: lsp|lexical|unsettled); `query` does not.\n"},
+	}
+
+	for _, c := range cases {
+		if got := run(c.sel); got != c.want {
+			t.Errorf("no-block %q is not F1's bytes:\n--- got ---\n%q\n--- want ---\n%q", c.sel, got, c.want)
+		}
+	}
+
+	// The new forms change the output where they are supposed to: the
+	// block projects (a TSV, not the grouped tree). :path is invisible
+	// in the grouped tree by design — the chain rides the projected
+	// fields (checked in the --json test below), so the grouped tree
+	// must stay identical with or without it.
+	if got := run(`func { name; line }`); got == run(`func`) || !strings.Contains(got, "name\tline\n") {
+		t.Errorf("the block form must render the TSV projection, not the grouped tree; got:\n%s", got)
+	}
+	if got, plain := run(`#Caller::out.call{1,}:path > *`), run(`#Caller::out.call{1,} > *`); got != plain {
+		t.Errorf(":path must NOT change the grouped tree (the chain rides the projected fields); got:\n%s\n--- no :path ---\n%s", got, plain)
+	}
+}
+
+// F3 additive regression, the --json view. A no-block selector's document
+// is byte-for-byte F1's: the same fields, the same order (json.Marshal
+// sorts map keys, so the bytes ARE the contract), no projection keys
+// anywhere. The same selector with a block differs — and only the
+// named fields survive.
+func TestQueryJSONNoBlockIsByteForByteF1(t *testing.T) {
+	s := newQueryServer(t, f3AdditiveFixture(t))
+
+	run := func(sel string) string {
+		var b strings.Builder
+		if err := s.QueryJSON(sel, 0, 0, "", &b); err != nil {
+			t.Fatalf("%s: %v", sel, err)
+		}
+		return b.String()
+	}
+
+	// writeJSONDoc pretty-prints with two-space indent, and the
+	// document carries budgetExceeded. The bytes are F1's.
+	want := `{
+  "budgetExceeded": false,
+  "matches": [
+    {
+      "@": [
+        6,
+        6
+      ],
+      "conf": "lexical",
+      "file": "a.go",
+      "from": [
+        "a.go#Caller"
+      ],
+      "node": "a.go@6",
+      "type": "::in.call"
+    }
+  ],
+  "offset": 0,
+  "returned": 1,
+  "timedOut": false,
+  "total": 1,
+  "truncated": false
+}
+`
+	if got := run(`#'a.go#Save'::in.call`); got != want {
+		t.Errorf("no-block --json is not F1's bytes:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+
+	// The block form: the row carries exactly the named fields.
+	var bb bytes.Buffer
+	if err := s.QueryJSON(`#'a.go#Save'::in.call { node; kind; conf }`, 0, 0, "", &bb); err != nil {
+		t.Fatalf("block --json: %v", err)
+	}
+	var doc struct {
+		Matches []map[string]any `json:"matches"`
+	}
+	if err := json.Unmarshal(bb.Bytes(), &doc); err != nil {
+		t.Fatalf("not a JSON document: %v\n%s", err, bb.String())
+	}
+	if len(doc.Matches) != 1 || len(doc.Matches[0]) != 3 {
+		t.Fatalf("the block row must carry exactly the 3 named fields; got: %s", bb.String())
+	}
+	if doc.Matches[0]["node"] != "a.go@6" || doc.Matches[0]["kind"] != "call" || doc.Matches[0]["conf"] != "lexical" {
+		t.Errorf("block row = %v; want node=a.go@6 kind=call conf=lexical", doc.Matches[0])
+	}
+}
+
+// F3 additive regression, the MCP node_query view. The handler has no
+// declaration-block branch at all — a no-block selector's rows are built
+// with the same queryRow F1 uses, and the payload fields are F1's. Pin
+// the row's exact keys so a projection leaking into the model's view
+// fails loudly: that view is the one a model reads every turn.
+func TestNodeQueryNoBlockRowsAreF1Shape(t *testing.T) {
+	s, _ := startModern(t)
+	defer s.close()
+
+	r := s.callTool("node_query", map[string]any{"selector": `#"main.go#Server.Start":in.call`, "limit": 50})
+	if r.IsError {
+		t.Fatalf("node_query errored: %s", r.Content[0].Text)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(r.Content[0].Text), &doc); err != nil {
+		t.Fatalf("decode: %v (%s)", err, r.Content[0].Text)
+	}
+	matches, _ := doc["matches"].([]any)
+	if len(matches) != 1 {
+		t.Fatalf("want the one call edge into Server.Start; got: %s", r.Content[0].Text)
+	}
+	row, _ := matches[0].(map[string]any)
+	var keys []string
+	for k := range row {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	want := []string{"@", "conf", "from", "node", "type"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("row keys = %v; want %v (F1's queryRow shape — no projection fields)", keys, want)
+	}
+	if row["node"] != "main.go@22" || row["type"] != "::in.call" {
+		t.Errorf("row = %v; want the call site main.go@22 with type ::in.call", row)
+	}
+	// The payload carries F1's shape: totalMatches, matches, read.
+	for _, k := range []string{"matches", "read", "totalMatches"} {
+		if _, ok := doc[k]; !ok {
+			t.Errorf("payload missing %q; got keys %s", k, r.Content[0].Text)
+		}
 	}
 }
 

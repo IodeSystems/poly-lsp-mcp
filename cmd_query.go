@@ -30,6 +30,7 @@ func queryCmd(l *loader) *cobra.Command {
 		asJSON   bool
 		resolve  bool
 		noDaemon bool
+		api      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "query [flags] <selector>",
@@ -52,6 +53,7 @@ with ':explain ' to see what each step cost instead of the matches.`,
 	idx := indexFlags(f)
 	f.BoolVar(&resolve, "resolve", false, "resolve ::in/::out edges through child LSPs (spawns them for this run, e.g. gopls) and label each edge conf: lsp|lexical|unsettled, as node_query does; slower to start")
 	f.BoolVar(&noDaemon, "no-daemon", false, "never route to the shared daemon: run the query in this process even when a daemon is already serving this workspace. $"+noDaemonEnv+"=1 does the same")
+	f.BoolVar(&api, "api", false, "API summary view: one row per EXPORTED declaration — kind, name, owner type, head without body, doc text, and the field type text — with multi-name fields split per name and interface methods signed. --json writes the rows as a JSON document.")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		// The selector is one argument, but an unquoted one arrives as
@@ -84,7 +86,10 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		// --no-daemon (or $POLY_LSP_NO_DAEMON=1) skips the probe entirely:
 		// a batch caller that must not open a scratch root on the shared
 		// daemon runs standalone, period.
-		if !noDaemon && os.Getenv(noDaemonEnv) != "1" {
+		// --api is a batch door: it reads the tree in-process and renders
+		// per-declaration rows. The shared daemon answers the match view
+		// only, so the daemon probe is skipped for --api runs.
+		if !api && !noDaemon && os.Getenv(noDaemonEnv) != "1" {
 			if out, ok := queryViaDaemon(verbose, root, asJSON, selector, limit, offset, budget, idx.includes); ok {
 				fmt.Print(out)
 				return nil
@@ -119,6 +124,15 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		// A successful query prints its answer and nothing else. The bring-up
 		// commentary (index size, binding passes) is a server's startup record;
 		// here it is a preamble the caller re-reads on every invocation.
+		if api {
+			// The API view is one render over the same parse/evaluate/buildTree
+			// path; --json shapes it as a document.
+			if err := srv.QueryAPI(selector, limit, offset, budget, asJSON, os.Stdout, idx.includes...); err != nil {
+				// main prints a *mcp.SelectorError as plain prose.
+				return err
+			}
+			return nil
+		}
 		query := srv.QueryText
 		if asJSON {
 			query = srv.QueryJSON

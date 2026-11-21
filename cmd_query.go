@@ -29,6 +29,7 @@ func queryCmd(l *loader) *cobra.Command {
 		verbose  bool
 		asJSON   bool
 		resolve  bool
+		noDaemon bool
 	)
 	cmd := &cobra.Command{
 		Use:   "query [flags] <selector>",
@@ -50,6 +51,7 @@ with ':explain ' to see what each step cost instead of the matches.`,
 	f.BoolVar(&asJSON, "json", false, "print ONE JSON document (matches with node, file, type, @, and for an edge from/to and conf; total, offset, stop-early flags) instead of the grouped text tree")
 	idx := indexFlags(f)
 	f.BoolVar(&resolve, "resolve", false, "resolve ::in/::out edges through child LSPs (spawns them for this run, e.g. gopls) and label each edge conf: lsp|lexical|unsettled, as node_query does; slower to start")
+	f.BoolVar(&noDaemon, "no-daemon", false, "never route to the shared daemon: run the query in this process even when a daemon is already serving this workspace. $"+noDaemonEnv+"=1 does the same")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		// The selector is one argument, but an unquoted one arrives as
@@ -78,9 +80,15 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		// own child-LSP manager), so this path needs no --resolve. On no daemon,
 		// a dead one, or any transport error, fall back to the standalone path
 		// below — the answer is the same matches, built in-process.
-		if out, ok := queryViaDaemon(verbose, root, asJSON, selector, limit, offset, budget, idx.includes); ok {
-			fmt.Print(out)
-			return nil
+		//
+		// --no-daemon (or $POLY_LSP_NO_DAEMON=1) skips the probe entirely:
+		// a batch caller that must not open a scratch root on the shared
+		// daemon runs standalone, period.
+		if !noDaemon && os.Getenv(noDaemonEnv) != "1" {
+			if out, ok := queryViaDaemon(verbose, root, asJSON, selector, limit, offset, budget, idx.includes); ok {
+				fmt.Print(out)
+				return nil
+			}
 		}
 
 		// No Serve: a query is read-only and never writes the persisted index.

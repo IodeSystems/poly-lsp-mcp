@@ -38,7 +38,7 @@ var flagGroups = []flagGroup{
 	{"editing", []string{"read-only", "validate", "validate-wait", "format-on-edit", "legacy-tools", "read-char-budget", "hook"}},
 	{"language servers", []string{"lsp-off", "lsp-on", "lsp-roots", "lsp-roots-max", "lsp-idle-stop", "lsp-max-rss-mb", "lsp-psi-threshold", "lsp-max-children", "lsp-rss-budget-pct", "lsp-mac-pressure-level", "proactive-open"}},
 	{"server entry", []string{"ext", "cmd", "arg", "env", "root-marker", "off-by-default", "trust-clean-diagnostics"}},
-	{"daemon", []string{"daemon", "daemon-home", "allow", "socket", "stop", "restart", "idle-exit", "root-lsp-grace", "idle-roots-mb", "warm-recent", "index-concurrency", "memory-limit-mb"}},
+	{"daemon", []string{"daemon", "daemon-home", "no-daemon", "allow", "socket", "stop", "restart", "idle-exit", "root-lsp-grace", "idle-roots-mb", "warm-recent", "index-concurrency", "memory-limit-mb"}},
 	{"query and output", []string{"resolve", "limit", "offset", "json", "verbose", "budget", "no-update-check"}},
 }
 

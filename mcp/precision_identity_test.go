@@ -12,6 +12,11 @@ func TestExternalIdentityReadsAToolchainModuleAsTheStdlib(t *testing.T) {
 		module, version string
 	}{
 		{"/home/u/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.8.linux-amd64/src/strings/strings.go", "strings", ""},
+		// The shape gopls actually reports: the @version on the PACKAGE
+		// segment under /src/, not the module segment.
+		{"/home/u/go/pkg/mod/golang.org/toolchain/src/strings@v0.0.1-go1.26.8.linux-amd64/strings.go", "strings", ""},
+		// Nested stdlib package, version on the package segment.
+		{"/home/u/go/pkg/mod/golang.org/toolchain/src/net/http@v0.0.1-go1.26.8.linux-amd64/server.go", "net/http", ""},
 		{"/usr/local/go/src/strings/strings.go", "strings", ""},
 		{"/home/u/go/pkg/mod/github.com/foo/bar@v1.2.3/sub/x.go", "github.com/foo/bar/sub", "v1.2.3"},
 	}

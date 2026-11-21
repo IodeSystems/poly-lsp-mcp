@@ -474,11 +474,30 @@ func externalIdentity(defAbs string) (module, version string) {
 	if i := strings.LastIndex(p, "/pkg/mod/"); i >= 0 {
 		sub := p[i+len("/pkg/mod/"):]
 		// An auto-downloaded Go toolchain is a GOROOT tree kept in the
-		// module cache (golang.org/toolchain@v0.0.1-go1.N.linux-amd64/src/strings/...):
-		// its files are the stdlib, named like the /src/ branch below.
-		if strings.HasPrefix(sub, "golang.org/toolchain@") {
-			if j := strings.Index(sub, "/src/"); j >= 0 {
-				return path.Dir(sub[j+len("/src/"):]), ""
+		// module cache. gopls reports its files with the @version on
+		// either the module segment (golang.org/toolchain@v0.0.1-go1.N.
+		// linux-amd64/src/strings/...) or the package segment (golang.
+		// org/toolchain/src/strings@v0.0.1-go1.N.linux-amd64/strings.go):
+		// both are the stdlib, named like the /src/ branch below. The
+		// module path is golang.org/toolchain, so match it as a prefix
+		// followed by @ (version on the module) or / (version on the
+		// package, or none).
+		if strings.HasPrefix(sub, "golang.org/toolchain@") ||
+			strings.HasPrefix(sub, "golang.org/toolchain/") {
+			if j := strings.LastIndex(sub, "/src/"); j >= 0 {
+				pkg := path.Dir(sub[j+len("/src/"):])
+				// The version can sit on the package leaf
+				// (src/strings@v0.0.1/strings.go): strip it from the
+				// last segment only, so the file is already gone.
+				if slash := strings.LastIndex(pkg, "/"); slash >= 0 {
+					seg := pkg[slash+1:]
+					if at := strings.Index(seg, "@"); at >= 0 {
+						pkg = pkg[:slash+1] + seg[:at]
+					}
+				} else if at := strings.Index(pkg, "@"); at >= 0 {
+					pkg = pkg[:at]
+				}
+				return pkg, ""
 			}
 		}
 		return splitModuleVersion(path.Dir(sub))

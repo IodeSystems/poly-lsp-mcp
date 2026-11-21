@@ -290,6 +290,12 @@ type Server struct {
 	// See engine.spend — tripping it is loud, never silent.
 	queryWorkBudget int
 
+	// queryRev, when non-empty, makes a node_query read its tree and every
+	// file from that git ref (git ls-tree + git show) instead of the working
+	// tree, so a batch caller can query a commit with no checkout. Empty =
+	// the working tree (the default). Set by the CLI --rev flag.
+	queryRev string
+
 	// lspResolveCap bounds child-LSP round-trips per query (see
 	// precision.go). 0 = tune it from the workspace collision rate.
 	lspResolveCap int
@@ -496,6 +502,13 @@ func (s *Server) WaitForProactiveOpen(ctx context.Context) error {
 // monstrous workspaces in either direction.
 func (s *Server) SetQueryWorkBudget(n int) {
 	s.queryWorkBudget = n
+}
+
+// SetQueryRev makes node_query read its tree and files from a git ref
+// instead of the working tree — a commit read without a checkout. Empty
+// clears it (back to the working tree). See queryRev.
+func (s *Server) SetQueryRev(rev string) {
+	s.queryRev = rev
 }
 
 // SetLSPResolveCap bounds how many child-LSP round-trips ONE query may

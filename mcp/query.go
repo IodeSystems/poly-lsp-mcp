@@ -307,6 +307,16 @@ type engine struct {
 	// reference site (which is file+line) becomes a tree node again.
 	fileByRel map[string]*treeNode
 
+	// readFile is the content source for this query: a file's bytes by
+	// absolute path. Defaults to os.ReadFile (the working tree); a --rev
+	// query replaces it with a git-backed reader (git show ref:path) so
+	// the tree and every read come from the ref, not a checkout.
+	readFile func(abs string) ([]byte, error)
+	// revFiles is the ref's file set (git ls-tree) — non-nil only for a
+	// --rev query, whose tree is built from THIS list instead of an
+	// os.ReadDir walk of the working tree.
+	revFiles []string
+
 	// Per-query memos. All are keyed for the life of ONE query: the tree
 	// and the index don't change under a running evaluation.
 	//
@@ -611,7 +621,7 @@ func (e *engine) loadFileSymbols(f *treeNode) {
 	if lang == "" {
 		return
 	}
-	content, err := os.ReadFile(f.abs)
+	content, err := e.readFile(f.abs)
 	if err != nil {
 		return
 	}
@@ -717,6 +727,7 @@ func (s *Server) buildTreeFor(selector string, include ...string) (*engine, erro
 	}
 	e := &engine{s: s, project: project, fileByRel: map[string]*treeNode{},
 		elemCost: map[*selElem]int{}, startedAt: time.Now(), lspOff: s.lspOff(localSession)}
+	e.readFile = os.ReadFile
 	if s.queryWorkBudget > 0 {
 		// An explicit server-level ops budget (tests, --legacy paths):
 		// deterministic, no wall clock.
@@ -744,8 +755,94 @@ func (s *Server) buildTreeFor(selector string, include ...string) (*engine, erro
 	for _, p := range selectorPaths(selector) {
 		e.namedFiles[p] = true
 	}
+	// --rev: read the tree and every file from a git ref, not the working
+	// tree. The file set is ls-tree of the ref; each read is git show
+	// ref:path. No checkout is involved.
+	if s.queryRev != "" {
+		repo, err := git.FromCWD(root)
+		if err != nil {
+			return nil, fmt.Errorf("--rev: %w", err)
+		}
+		files, err := repo.ListFiles(s.queryRev)
+		if err != nil {
+			return nil, fmt.Errorf("--rev %q: %w", s.queryRev, err)
+		}
+		e.revFiles = files
+		e.readFile = func(abs string) ([]byte, error) {
+			rel, err := filepath.Rel(root, abs)
+			if err != nil {
+				return nil, err
+			}
+			return repo.FileAt(s.queryRev, filepath.ToSlash(rel))
+		}
+		e.buildRefTree(project, root)
+		return e, nil
+	}
 	e.walkDir(root, project, false, false)
 	return e, nil
+}
+
+// buildRefTree builds the project node's subtree from the REF's file list
+// instead of walking the working tree: every path in e.revFiles becomes a
+// dir/file node, and every read is a git show against the ref (e.readFile).
+// The tree therefore matches the ref's file set — files added to the
+// working tree after the commit, and files the working tree changed, are
+// invisible; it requires no checkout at all.
+func (e *engine) buildRefTree(project *treeNode, root string) {
+	// dirByPath maps a ref-relative dir (slash form) to its node, so a
+	// file's ancestor dirs are created once and shared.
+	dirByPath := map[string]*treeNode{"": project}
+	var dirNode func(dir string) *treeNode
+	dirNode = func(dir string) *treeNode {
+		if d, ok := dirByPath[dir]; ok {
+			return d
+		}
+		var parent *treeNode
+		pdir := ""
+		if i := strings.LastIndexByte(dir, '/'); i >= 0 {
+			pdir = dir[:i]
+			parent = dirNode(pdir)
+		} else {
+			parent = project
+		}
+		leaf := dir
+		if i := strings.LastIndexByte(dir, '/'); i >= 0 {
+			leaf = dir[i+1:]
+		}
+		abs := filepath.Join(root, filepath.FromSlash(dir))
+		d := &treeNode{
+			class: "dir", leaf: leaf, full: dir, file: dir,
+			parent: parent, depth: parent.depth + 1, abs: abs,
+		}
+		parent.children = append(parent.children, d)
+		dirByPath[dir] = d
+		return d
+	}
+	// Sort so the tree's ordinal order is deterministic regardless of
+	// ls-tree's order.
+	files := append([]string(nil), e.revFiles...)
+	sort.Strings(files)
+	for _, rel := range files {
+		rel = filepath.ToSlash(rel)
+		dir, leaf := "", filepath.Base(rel)
+		if i := strings.LastIndexByte(rel, '/'); i >= 0 {
+			dir = rel[:i]
+		}
+		parent := dirNode(dir)
+		abs := filepath.Join(root, filepath.FromSlash(rel))
+		f := &treeNode{
+			class: "file", leaf: leaf, full: rel, file: rel,
+			parent: parent, depth: parent.depth + 1, abs: abs,
+		}
+		// at comes from the REF's content, not the working tree: a file
+		// whose working-tree copy is longer or shorter must not shift
+		// symbol positions.
+		if content, err := e.readFile(abs); err == nil {
+			f.at = [2]int{1, len(splitNodeReadLines(content))}
+		}
+		parent.children = append(parent.children, f)
+		e.fileByRel[rel] = f
+	}
 }
 
 var namedPathToken = regexp.MustCompile(`[A-Za-z0-9_.@+\-/#]+`)
@@ -899,7 +996,7 @@ func (e *engine) fileLines(abs string) ([]string, bool) {
 	if v, ok := e.lineCache[abs]; ok {
 		return v, v != nil
 	}
-	content, err := os.ReadFile(abs)
+	content, err := e.readFile(abs)
 	if err != nil {
 		if e.lineCache == nil {
 			e.lineCache = map[string][]string{}

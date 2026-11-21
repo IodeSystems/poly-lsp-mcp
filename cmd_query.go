@@ -31,6 +31,7 @@ func queryCmd(l *loader) *cobra.Command {
 		resolve  bool
 		noDaemon bool
 		api      bool
+		rev      string
 	)
 	cmd := &cobra.Command{
 		Use:   "query [flags] <selector>",
@@ -54,6 +55,7 @@ with ':explain ' to see what each step cost instead of the matches.`,
 	f.BoolVar(&resolve, "resolve", false, "resolve ::in/::out edges through child LSPs (spawns them for this run, e.g. gopls) and label each edge conf: lsp|lexical|unsettled, as node_query does; slower to start")
 	f.BoolVar(&noDaemon, "no-daemon", false, "never route to the shared daemon: run the query in this process even when a daemon is already serving this workspace. $"+noDaemonEnv+"=1 does the same")
 	f.BoolVar(&api, "api", false, "API summary view: one row per EXPORTED declaration — kind, name, owner type, head without body, doc text, and the field type text — with multi-name fields split per name and interface methods signed. --json writes the rows as a JSON document.")
+	f.StringVar(&rev, "rev", "", "read the tree and files from a git ref (commit, branch) instead of the working tree — no checkout required. Implies --no-daemon")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		// The selector is one argument, but an unquoted one arrives as
@@ -88,8 +90,9 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		// daemon runs standalone, period.
 		// --api is a batch door: it reads the tree in-process and renders
 		// per-declaration rows. The shared daemon answers the match view
-		// only, so the daemon probe is skipped for --api runs.
-		if !api && !noDaemon && os.Getenv(noDaemonEnv) != "1" {
+		// only, so the daemon probe is skipped for --api runs. --rev skips it
+		// too: the daemon reads the working tree, not a ref.
+		if !api && rev == "" && !noDaemon && os.Getenv(noDaemonEnv) != "1" {
 			if out, ok := queryViaDaemon(verbose, root, asJSON, selector, limit, offset, budget, idx.includes); ok {
 				fmt.Print(out)
 				return nil
@@ -111,6 +114,9 @@ with ':explain ' to see what each step cost instead of the matches.`,
 		srv.SetQuiet(!verbose)
 		srv.SetCachePath(cachePathFor(root))
 		srv.LoadCache()
+		if rev != "" {
+			srv.SetQueryRev(rev)
+		}
 		// --resolve: start the child LSPs so evaluate settles ambiguous edges
 		// the way node_query does. Shutdown on every return path below, so no
 		// child process outlives the run.

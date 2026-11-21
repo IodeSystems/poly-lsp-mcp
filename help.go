@@ -35,12 +35,12 @@ type flagGroup struct {
 // "options"; TestHelpEveryFlagGrouped keeps the table complete. --api renders
 // the per-declaration API summary (kind, name, owner, head, doc, field type).
 var flagGroups = []flagGroup{
-	{"workspace", []string{"root", "config", "exclude", "include", "index-budget", "index-anyway", "symlink-depth", "max-files", "allow-path", "exclude-path"}},
+	{"workspace", []string{"root", "config", "exclude", "include", "index-budget", "index-anyway", "symlink-depth", "max-files", "allow-path", "exclude-path", "rev"}},
 	{"editing", []string{"read-only", "validate", "validate-wait", "format-on-edit", "legacy-tools", "read-char-budget", "hook"}},
 	{"language servers", []string{"lsp-off", "lsp-on", "lsp-roots", "lsp-roots-max", "lsp-idle-stop", "lsp-max-rss-mb", "lsp-psi-threshold", "lsp-max-children", "lsp-rss-budget-pct", "lsp-mac-pressure-level", "proactive-open"}},
 	{"server entry", []string{"ext", "cmd", "arg", "env", "root-marker", "off-by-default", "trust-clean-diagnostics"}},
 	{"daemon", []string{"daemon", "daemon-home", "no-daemon", "allow", "socket", "stop", "restart", "idle-exit", "root-lsp-grace", "idle-roots-mb", "warm-recent", "index-concurrency", "memory-limit-mb"}},
-	{"query and output", []string{"api", "resolve", "limit", "offset", "json", "verbose", "budget", "no-update-check"}},
+	{"query and output", []string{"api", "rev", "resolve", "limit", "offset", "json", "verbose", "budget", "no-update-check"}},
 }
 
 // advancedFlags are listed by --help-all only: tuning knobs with working

@@ -119,25 +119,27 @@ func TestPrecisionPicksTheRealCallTarget(t *testing.T) {
 		t.Fatal("Run calls store.Save — expected an outgoing call edge")
 	}
 	var saw bool
+	// F5: a bare-edge selector lands on the far node (the callee), not
+	// the edge row. The far node is a plain func; m.Node is its address
+	// and m.Conf carries the edge's conf via reachedVia.
 	for _, m := range q.Matches {
-		if len(m.To) == 0 {
+		if m.Class != "func" {
+			continue
+		}
+		if !strings.Contains(m.Node, "store/store.go#Save") {
 			continue
 		}
 		saw = true
-		joined := strings.Join(m.To, ",")
-		if !strings.Contains(joined, "store/store.go#Save") {
-			continue
-		}
-		if strings.Contains(joined, "cache/cache.go#Save") {
-			t.Errorf("gopls resolves store.Save; the edge still lists cache's Save too: %v\n"+
-				"conf=%q — the precision pass did not narrow it", m.To, m.Conf)
+		if strings.Contains(m.Node, "cache/cache.go#Save") {
+			t.Errorf("gopls resolves store.Save; the far node is cache's Save: %q\n"+
+				"conf=%q — the precision pass did not narrow it", m.Node, m.Conf)
 		}
 		if m.Conf != refLSP {
-			t.Errorf("an edge a child LSP settled must say so: conf=%q, want %q", m.Conf, refLSP)
+			t.Errorf("a far node a child LSP settled must say so: conf=%q, want %q", m.Conf, refLSP)
 		}
 	}
 	if !saw {
-		t.Fatal("no edge carried a far end; fixture or query is wrong")
+		t.Fatal("no far node landed on store.Save; fixture or query is wrong")
 	}
 }
 
@@ -197,9 +199,16 @@ func TestWithoutLSPEdgesStayUnsettledAndSaySo(t *testing.T) {
 	}
 	// Run's only outgoing call is `Save`, which two packages declare — an
 	// ambiguity nothing here can settle, so it is unsettled, not lexical.
+	// F5: the rows are far nodes (plain funcs), not ref nodes. The conf
+	// lives on the reaching ref, found via reachedVia.
 	for _, r := range rows {
-		if r.refConf != refUnsettled {
-			t.Errorf("an ambiguous edge with no child LSP is a GUESS (unsettled); got conf=%q", r.refConf)
+		via, ok := e.reachedVia[r]
+		if !ok {
+			t.Errorf("far node %q has no reaching ref (via); cannot check conf", r.addr())
+			continue
+		}
+		if via.refConf != refUnsettled {
+			t.Errorf("an ambiguous edge with no child LSP is a GUESS (unsettled); got conf=%q", via.refConf)
 		}
 	}
 	if e.lspAsked != 0 {
@@ -417,28 +426,29 @@ func TestPrecisionResolvesToExternalStub(t *testing.T) {
 		t.Fatal("Run calls strings.Split — expected an outgoing call edge")
 	}
 	var saw bool
+	// F5: a bare-edge selector lands on the far node (the callee), not
+	// the edge row. The far node's address is in m.Node; m.To is empty.
 	for _, m := range q.Matches {
-		joined := strings.Join(m.To, ",")
-		if !strings.Contains(joined, "Split") {
+		if !strings.Contains(m.Node, "Split") {
 			continue
 		}
 		saw = true
 		// The real target is external: the stub is named strings#Split,
 		// NOT either local pkg's Split.
-		if !strings.Contains(joined, "strings#Split") {
-			t.Errorf("Split edge far end = %v, want the external stub strings#Split", m.To)
+		if !strings.Contains(m.Node, "strings#Split") {
+			t.Errorf("far node = %q, want the external stub strings#Split", m.Node)
 		}
-		if strings.Contains(joined, "pkga") || strings.Contains(joined, "pkgb") {
-			t.Errorf("edge fell back to a FALSE LOCAL: %v", m.To)
+		if strings.Contains(m.Node, "pkga") || strings.Contains(m.Node, "pkgb") {
+			t.Errorf("far node fell back to a FALSE LOCAL: %q", m.Node)
 		}
-		if m.Domain != "external" {
-			t.Errorf("an out-of-root far end must be domain=external; got %q", m.Domain)
-		}
+		// domain is a ref-node field; a far node (a plain func) does not
+		// carry it. The external nature is proven by the node's address
+		// naming strings#Split, not a local pkg.
 		if m.Conf != refLSP {
 			t.Errorf("gopls resolved it — conf must be %q; got %q", refLSP, m.Conf)
 		}
 	}
 	if !saw {
-		t.Fatal("no Split edge in the result; fixture or query is wrong")
+		t.Fatal("no Split far node in the result; fixture or query is wrong")
 	}
 }

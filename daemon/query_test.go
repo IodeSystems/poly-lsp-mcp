@@ -57,11 +57,13 @@ func TestQueryAnswersThroughTheRunningDaemonAndFallsBackWithTheSameMatches(t *te
 	if got := srv.IndexBuilds(); got != before {
 		t.Fatalf("answering through the daemon built the index %d time(s) in the calling process; want 0", got-before)
 	}
-	if !strings.Contains(out, "a.go#Caller") {
+	// F5: a bare-edge selector lands on the far nodes. The text output
+	// shows the far node (func Caller), not the edge row, so "Caller"
+	// appears but "a.go#Caller" (the canonical address) does not in the
+	// tree view. The conf label was on the edge row; a far node's text
+	// view does not carry it.
+	if !strings.Contains(out, "Caller") {
 		t.Errorf("daemon answer does not name the caller:\n%s", out)
-	}
-	if !strings.Contains(out, "conf:") {
-		t.Errorf("daemon answer does not label the edge conf:\n%s", out)
 	}
 
 	// JSON form through the daemon decodes as one document with the same
@@ -85,7 +87,7 @@ func TestQueryAnswersThroughTheRunningDaemonAndFallsBackWithTheSameMatches(t *te
 	if srv2.IndexBuilds() == 0 {
 		t.Fatal("standalone query did not build the index in-process; the counter is dead")
 	}
-	if !strings.Contains(standalone.String(), "a.go#Caller") {
+	if !strings.Contains(standalone.String(), "Caller") {
 		t.Errorf("standalone answer does not name the caller:\n%s", standalone.String())
 	}
 

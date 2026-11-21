@@ -39,8 +39,8 @@ func TestGSLRunQueryCallers(t *testing.T) {
 	}
 	h := &harness{server: srv, limit: 100, edgeQueryCap: 100}
 
-	// The call edges into Save: each row is a call SITE (a.go@N) whose from:
-	// is the caller symbol.
+	// F5: a bare-edge selector lands on the far nodes — for ::in.call,
+	// the far nodes ARE the callers. m.Node is the caller's address.
 	matches, se, err := h.runQuery(`#'a.go#Save'::in.call`)
 	if se != nil {
 		t.Fatalf("selector error: %v", se.Err)
@@ -48,12 +48,9 @@ func TestGSLRunQueryCallers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runQuery: %v", err)
 	}
-	// Collect the caller symbols (the from: far ends).
 	callers := map[string]bool{}
 	for _, m := range matches {
-		for _, f := range m.From {
-			callers[f] = true
-		}
+		callers[m.Node] = true
 	}
 	if !callers["a.go#Caller"] || !callers["a.go#Other"] {
 		t.Fatalf("callers = %v, want a.go#Caller and a.go#Other", callers)

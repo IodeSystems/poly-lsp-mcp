@@ -40,6 +40,12 @@ type match struct {
 	To   []string `json:"to"`
 }
 
+// edgeKinds are the reference kinds BuildRows queries per direction.
+// F5: a bare-edge selector lands on far nodes, so the kind is no longer
+// in the row's type field. Querying per kind and tagging it from the
+// selector keeps the edge's kind intact.
+var edgeKinds = []string{"call", "type", "import"}
+
 // queryDoc is one mcp.QueryJSON document.
 type queryDoc struct {
 	Matches []match `json:"matches"`
@@ -135,6 +141,9 @@ func (h *harness) BuildRows(seeds []string) (*Rows, error) {
 	seenEdge := map[string]bool{}
 	edgeQueries := 0
 	// depth 0 = the seeds' own edges; depth 1 = one hop out (transitive).
+	// F5: a bare-edge selector lands on far nodes, so the row's node IS
+	// the far end (caller for ::in, callee for ::out). The kind is not in
+	// the row, so we query per kind and tag it from the selector.
 	for depth := 0; depth < 2 && len(frontier) > 0; depth++ {
 		var next []string
 		for _, name := range frontier {
@@ -142,35 +151,47 @@ func (h *harness) BuildRows(seeds []string) (*Rows, error) {
 				break
 			}
 			for _, dir := range []string{"in", "out"} {
-				sel := "#'" + name + "'::" + dir
-				em, se, err := h.runQuery(sel)
-				if se != nil || err != nil {
-					// A seed the graph doesn't have (renamed, external) is
-					// skipped: its questions will simply miss, the honest
-					// outcome. Not a build failure.
-					continue
-				}
-				edgeQueries++
-				for _, m := range em {
-					e, ok := normalizeEdge(m, name, dir, byID)
-					if !ok {
+				for _, kind := range edgeKinds {
+					sel := "#'" + name + "'::" + dir + "." + kind
+					em, se, err := h.runQuery(sel)
+					if se != nil || err != nil {
+						// A seed the graph doesn't have (renamed, external) is
+						// skipped: its questions will simply miss, the honest
+						// outcome. Not a build failure.
 						continue
 					}
-					k := e.From + "\x00" + e.To + "\x00" + e.Kind
-					if seenEdge[k] {
-						continue
-					}
-					seenEdge[k] = true
-					rows.Edges = append(rows.Edges, e)
-					for _, far := range []string{e.From, e.To} {
-						if !seenNode[far] {
-							seenNode[far] = true
-							rows.Nodes = append(rows.Nodes, Node{ID: far, File: fileOf(far), Name: symbolLeaf(far)})
+					edgeQueries++
+					anchor := anchorID(name, byID)
+					for _, m := range em {
+						var from, to string
+						if dir == "in" {
+							from, to = m.Node, anchor
+						} else {
+							from, to = anchor, m.Node
+						}
+						if from == "" || to == "" {
+							continue
+						}
+						e := Edge{From: from, To: to, Kind: kind}
+						k := e.From + "\x00" + e.To + "\x00" + e.Kind
+						if seenEdge[k] {
+							continue
+						}
+						seenEdge[k] = true
+						rows.Edges = append(rows.Edges, e)
+						for _, far := range []string{e.From, e.To} {
+							if !seenNode[far] {
+								seenNode[far] = true
+								rows.Nodes = append(rows.Nodes, Node{ID: far, File: fileOf(far), Name: symbolLeaf(far)})
+							}
+						}
+						if depth == 0 {
+							next = append(next, e.From, e.To)
 						}
 					}
-					if depth == 0 {
-						next = append(next, e.From, e.To)
-					}
+				}
+				if edgeQueries >= h.edgeQueryCap {
+					break
 				}
 			}
 			if edgeQueries >= h.edgeQueryCap {
@@ -204,29 +225,6 @@ func normalizeNode(m match) Node {
 	return Node{ID: id, File: fileOf(id), Name: symbolLeaf(id)}
 }
 
-// normalizeEdge maps one `::in`/`::out` match to a directed Edge. The anchor
-// is the seed symbol the selector was written against; the far end is the
-// row's from: (for ::in) or to: (for ::out).
-func normalizeEdge(m match, anchor, dir string, byID map[string]Node) (Edge, bool) {
-	kind := edgeKindFromType(m.Type)
-	var from, to string
-	if dir == "in" {
-		if len(m.From) == 0 {
-			return Edge{}, false
-		}
-		from, to = m.From[0], anchorID(anchor, byID)
-	} else {
-		if len(m.To) == 0 {
-			return Edge{}, false
-		}
-		from, to = anchorID(anchor, byID), m.To[0]
-	}
-	if from == "" || to == "" {
-		return Edge{}, false
-	}
-	return Edge{From: from, To: to, Kind: kind}, true
-}
-
 // anchorID returns the canonical node ID for a seed symbol name, preferring
 // the node already in the set (so a same-named symbol resolves to the one `*`
 // found) and falling back to the bare name.
@@ -237,17 +235,6 @@ func anchorID(name string, byID map[string]Node) string {
 		}
 	}
 	return name
-}
-
-// edgeKindFromType parses the reference kind out of a row's type field
-// ("::in.call" → "call", "::out.type.return" → "type", "::in" → "any").
-func edgeKindFromType(typ string) string {
-	for _, p := range strings.Split(typ, ".")[1:] {
-		if p == "call" || p == "type" || p == "import" {
-			return p
-		}
-	}
-	return "any"
 }
 
 // symbolLeaf returns the leaf symbol name from a canonical address

@@ -76,11 +76,15 @@ func TestQueryResolveListsOnlyTheAskedFunctionsCallersLabelledLSP(t *testing.T) 
 	}
 
 	out = run(srv, edges)
-	if !strings.Contains(out, "main.go#Run  [conf: lsp]") {
-		t.Errorf("the edge from Run must be labelled conf lsp\n%s", out)
+	// F5: a bare-edge selector lands on the far node (the caller), not
+	// the edge row. The far node is a plain func, rendered without a
+	// [conf:] label (that is an edge-row field). The LSP resolution is
+	// proven by the far node being Run (not Flush).
+	if !strings.Contains(out, "func Run") {
+		t.Errorf("the far node must be Run (the LSP-resolved caller)\n%s", out)
 	}
 	if strings.Contains(out, "Flush") {
-		t.Errorf("the edge lists cache.Save's caller\n%s", out)
+		t.Errorf("the far node lists cache.Save's caller\n%s", out)
 	}
 	// A child LSP served, so the no-LSP caveat would be false here.
 	if strings.Contains(out, "name-keyed (lexical) here") {

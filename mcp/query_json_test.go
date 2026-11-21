@@ -9,10 +9,9 @@ import (
 )
 
 // query --json is for a program, not a person: stdout must decode as ONE
-// JSON document, and an edge row must carry what the text tree leaves to
-// the reader's eye - the node address, the file, the far end and the conf
-// label that says what settled the edge. No child LSP here, so the edge is
-// lexical.
+// JSON document. F5: a bare-edge selector lands on the far node, so the
+// row carries the node's address, file, type, and the conf/via of the edge
+// that reached it. No child LSP here, so the edge is lexical.
 func TestQueryJSONPrintsOneDocumentWithNodeFileFarEndAndConf(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
@@ -38,6 +37,7 @@ func TestQueryJSONPrintsOneDocumentWithNodeFileFarEndAndConf(t *testing.T) {
 			From []string `json:"from"`
 			To   []string `json:"to"`
 			Conf string   `json:"conf"`
+			Via  string   `json:"via"`
 		} `json:"matches"`
 		Total  *int `json:"total"`
 		Offset *int `json:"offset"`
@@ -52,23 +52,29 @@ func TestQueryJSONPrintsOneDocumentWithNodeFileFarEndAndConf(t *testing.T) {
 		t.Fatalf("want total 1 and offset 0; got:\n%s", out.String())
 	}
 	if len(doc.Matches) != 1 {
-		t.Fatalf("want the one call edge into Save; got:\n%s", out.String())
+		t.Fatalf("want the one far node (the caller of Save); got:\n%s", out.String())
 	}
 	m := doc.Matches[0]
-	if m.Node != "a.go@6" {
-		t.Errorf("node = %q, want the call site a.go@6", m.Node)
+	// F5: a bare-edge selector lands on the far node (the caller), not
+	// the edge row. The far node carries its own address, file, type,
+	// and the conf/via of the edge that reached it.
+	if m.Node != "a.go#Caller" {
+		t.Errorf("node = %q, want the far node a.go#Caller", m.Node)
 	}
 	if m.File != "a.go" {
 		t.Errorf("file = %q, want a.go", m.File)
 	}
-	if m.Type != "::in.call" {
-		t.Errorf("type = %q, want ::in.call", m.Type)
+	if m.Type != "func" {
+		t.Errorf("type = %q, want func (the far node's class, not an edge row)", m.Type)
 	}
-	if len(m.From) != 1 || m.From[0] != "a.go#Caller" || len(m.To) != 0 {
-		t.Errorf("far end: from = %q, to = %q; want from [a.go#Caller]", m.From, m.To)
+	if len(m.From) != 0 || len(m.To) != 0 {
+		t.Errorf("far node has no from/to; from=%v to=%v", m.From, m.To)
 	}
 	if m.Conf != "lexical" {
 		t.Errorf("conf = %q, want lexical (no child LSP)", m.Conf)
+	}
+	if m.Via != "a.go@6" {
+		t.Errorf("via = %q, want a.go@6 (the edge that reached the far node)", m.Via)
 	}
 }
 

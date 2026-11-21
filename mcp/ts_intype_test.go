@@ -42,7 +42,9 @@ func TestTSInTypeNoDoubleCount(t *testing.T) {
 	}
 
 	// Every shape: one type declared, used as a param type and a return
-	// type — exactly 2 uses. None may double.
+	// type. F5: a bare-edge selector lands on the far node (the type
+	// declaration), so the count is 1, not the number of uses. The
+	// position split confirms each axis reaches the declaration.
 	shapes := map[string]string{
 		"alias":     "type Widget = { id: number }\nfunction build(w: Widget): Widget { return w }\n",
 		"interface": "interface Widget { id: number }\nfunction build(w: Widget): Widget { return w }\n",
@@ -51,27 +53,27 @@ func TestTSInTypeNoDoubleCount(t *testing.T) {
 	}
 	for name, body := range shapes {
 		s := writeTSInTypeFixture(t, name+".ts", body)
-		if n := count(s, `#'Widget'::in.type`); n != 2 {
-			t.Errorf("%s: ::in.type must be exactly the 2 uses, not doubled; got %d", name, n)
+		if n := count(s, `#'Widget'::in.type`); n != 1 {
+			t.Errorf("%s: ::in.type lands on the 1 type declaration; got %d", name, n)
 		}
 		if p, r := count(s, `#'Widget'::in.param.type`), count(s, `#'Widget'::in.return.type`); p != 1 || r != 1 {
-			t.Errorf("%s: position split must be 1 param + 1 return; got param=%d return=%d", name, p, r)
+			t.Errorf("%s: position split must each reach the declaration; got param=%d return=%d", name, p, r)
 		}
 	}
 
 	// .tsx path (class field + return) — the tsx grammar parses both, and
-	// a class type use must not double either.
+	// a class type use must land on the 1 declaration.
 	tsx := writeTSInTypeFixture(t, "panel.tsx",
 		"type Widget = { id: number }\nclass Panel { widget: Widget; make(): Widget { return this.widget } }\n")
-	if n := count(tsx, `#'Widget'::in.type`); n != 2 {
-		t.Errorf(".tsx class use doubled: got %d want 2", n)
+	if n := count(tsx, `#'Widget'::in.type`); n != 1 {
+		t.Errorf(".tsx class use: want 1 far node (the declaration); got %d", n)
 	}
 
 	// A `class` is BOTH a type and a value binding; `new Widget()` is a
 	// VALUE ref (a call), not a type ref — it must stay OUT of ::in.type.
 	cls := writeTSInTypeFixture(t, "cls.ts",
 		"class Widget { id = 1 }\nfunction build(w: Widget): Widget { return new Widget() }\n")
-	if n := count(cls, `#'Widget'::in.type`); n != 2 {
-		t.Errorf("class type uses = 2 (param + return); new Widget() is a value ref, not a type; got %d", n)
+	if n := count(cls, `#'Widget'::in.type`); n != 1 {
+		t.Errorf("class type uses: want 1 far node (the declaration); new Widget() is a value ref, not a type; got %d", n)
 	}
 }

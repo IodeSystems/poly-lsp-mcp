@@ -222,9 +222,12 @@ func TestLSPOffQueryStaysLexical(t *testing.T) {
 		s.notify("notifications/initialized", map[string]any{})
 		q := query(t, s, map[string]any{"selector": `#'main.go#Run'::out.call`, "limit": 20})
 		s.close()
+		// F5: a bare-edge selector lands on the far nodes. The far node
+		// IS store/store.go#Save, so check m.Node; conf comes from
+		// reachedVia via queryRow.
 		var conf string
 		for _, m := range q.Matches {
-			if strings.Contains(strings.Join(m.To, ","), "store/store.go#Save") {
+			if strings.Contains(m.Node, "store/store.go#Save") {
 				conf = m.Conf
 			}
 		}

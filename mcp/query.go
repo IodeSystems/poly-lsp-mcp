@@ -3472,8 +3472,69 @@ func ordered(set map[*treeNode]bool) []*treeNode {
 
 // evaluate runs a parsed selector over the tree and returns the
 // matching nodes in deterministic pre-order.
+//
+// A selector whose last step is a bare edge (a ref element with no
+// id/attr/pseudo, min=max=1, and no `> *` after it) lands on the edge's
+// far nodes by default: the answer is the nodes the edge points AT, not
+// the edge rows themselves. This is the same mapping an explicit `> *`
+// performs — it just makes the bare form and the `> *` form agree. An
+// explicit `> *` puts a non-ref compound last, so `lastIsBareEdge` is
+// false and the far-node rows are already the answer.
 func (e *engine) evaluate(list selectorList) []*treeNode {
-	return dedupGenerated(ordered(e.evalList(list, e.project, false)))
+	set := e.evalList(list, e.project, false)
+	if lastIsBareEdge(list) {
+		set = e.landBareEdge(set)
+	}
+	return dedupGenerated(ordered(set))
+}
+
+// lastIsBareEdge reports whether the list's last complex ends with a bare
+// ref element: `::in` / `::out` with no id/attr/pseudo, min=max=1, no
+// group. This is the shape that lands on far nodes by default — the
+// answer is the nodes the edge points AT, not the edge rows. An explicit
+// `> *` after the edge makes the non-ref compound the last element, so
+// this is false and the far-node rows are already in the result.
+func lastIsBareEdge(list selectorList) bool {
+	if len(list) == 0 {
+		return false
+	}
+	cx := &list[len(list)-1]
+	if len(cx.elems) == 0 {
+		return false
+	}
+	el := &cx.elems[len(cx.elems)-1]
+	if el.group != nil || el.comp == nil || el.min != 1 || el.max != 1 {
+		return false
+	}
+	c := el.comp
+	return c.isRef && len(c.attrs) == 0 && c.ordSel == 0 &&
+		len(c.pseudos) == 0 && len(c.positionClaims) == 0
+}
+
+// landBareEdge replaces a tip set of ref nodes with their far ends, using
+// the same first-wins rule reachedVia applies: the earliest ref in document
+// order to reach a given far node claims it, so a far row carries the edge
+// that first reached it (the `via` / `conf` fields queryRow reads). This
+// is the top-level landing: a selector ending in a bare edge answers with
+// the nodes the edge points at, not the edge rows themselves.
+func (e *engine) landBareEdge(tips map[*treeNode]bool) map[*treeNode]bool {
+	if e.reachedVia == nil {
+		e.reachedVia = map[*treeNode]*treeNode{}
+	}
+	out := map[*treeNode]bool{}
+	for _, n := range ordered(tips) {
+		if n.class != "ref" {
+			out[n] = true
+			continue
+		}
+		for _, f := range n.refFar {
+			if _, seen := e.reachedVia[f]; !seen {
+				e.reachedVia[f] = n
+			}
+			out[f] = true
+		}
+	}
+	return out
 }
 
 // dedupGenerated collapses generated rows that several hosts minted for the

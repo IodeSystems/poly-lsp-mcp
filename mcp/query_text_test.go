@@ -232,10 +232,11 @@ func TestQueryTextAggregateLengthNoPathIsEmpty(t *testing.T) {
 	}
 }
 
-// F3: an edge field set `{ site; conf; kind }` on a ref row carries only
-// those edge fields. A call reference to Save has a site (file@line), a
-// kind ("call"), and a conf (may be empty in the no-LSP CLI path) — the
-// projection must name exactly those three columns and resolve each one.
+// F3: a projection `{ name; line }` on a bare-edge selector (which lands
+// on the far nodes under F5) carries the far node's name and line. The
+// old test projected edge fields (site, conf, kind) on edge rows; with
+// F5 the rows are the far nodes, so the projection names the node's own
+// fields.
 func TestQueryTextProjectionEdgeFields(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module q\ngo 1.21\n"), 0o644); err != nil {
@@ -248,20 +249,18 @@ func TestQueryTextProjectionEdgeFields(t *testing.T) {
 	s := newQueryServer(t, dir)
 
 	var b strings.Builder
-	if err := s.QueryText(`#Save::in.call { site; conf; kind }`, 0, 0, "", &b); err != nil {
-		t.Fatalf("edge projection query failed: %v", err)
+	if err := s.QueryText(`#Save::in.call { name; line }`, 0, 0, "", &b); err != nil {
+		t.Fatalf("projection query failed: %v", err)
 	}
 	out := b.String()
 
-	// Header: the three edge field names, tab-separated, in order.
-	if !strings.Contains(out, "site\tconf\tkind\n") {
-		t.Fatalf("TSV header must be site, conf, kind; got:\n%s", out)
+	// Header: the two field names, tab-separated, in order.
+	if !strings.Contains(out, "name\tline\n") {
+		t.Fatalf("TSV header must be name, line; got:\n%s", out)
 	}
-	// A data row: the site is the file@line of the call, kind is "call".
-	// In the no-LSP CLI path conf is "lexical" — the row is
-	// "a.go@6\tlexical\tcall".
-	if !strings.Contains(out, "a.go@6\tlexical\tcall\n") {
-		t.Errorf("expected a row with site=a.go@6, conf=lexical, kind=call; got:\n%s", out)
+	// A data row: the far node's name is "Caller", starting at line 5.
+	if !strings.Contains(out, "Caller\t5\n") {
+		t.Errorf("expected a row with name=Caller, line=5; got:\n%s", out)
 	}
 }
 
@@ -390,9 +389,10 @@ func TestQueryTextNoBlockNoPathIsByteForByteF1(t *testing.T) {
 		// A plain symbol query: reading line, the groups, the node rows,
 		// the summary line.
 		{`func`, "read as ─ func: nodes of type `func`\n\na.go\n├─ func Save    3\n└─ func Caller  5-7\n\nweb/x.ts\n└─ func f  1\n\n2 files · 3 matches\n"},
-		// An edge query: the full reading table, the ref row with its
-		// site, the summary, and the lexical-edge caveat.
-		{`#'a.go#Save'::in.call`, "read as ─\n  #a.go#Save  named `a.go#Save` — a dir, file or symbol id (also matches the `file#symbol` address form)\n  ::in.call   reference edges pointing IN to it (who references this), only of kind call. A generated node — `*` never matches these\n  ⇒ returns the `::in.call` nodes — NOT the `*` nodes, which only constrain them\n\na.go\n└─ ::in.call ← a.go#Caller  6\n\n1 file · 1 matches\n\nnote: ::in/::out edges are name-keyed (lexical) here — a far end may be a\nsame-named symbol, not the resolved one. The MCP server resolves via child\nLSPs and labels each edge (conf: lsp|lexical|unsettled); `query` does not.\n"},
+		// An edge query: the reading table, the far node the edge lands on
+		// (F5: a bare-edge selector returns the nodes the edge points AT),
+		// the summary, and the lexical-edge caveat.
+		{`#'a.go#Save'::in.call`, "read as ─\n  #a.go#Save  named `a.go#Save` — a dir, file or symbol id (also matches the `file#symbol` address form)\n  ::in.call   reference edges pointing IN to it (who references this), only of kind call. A generated node — `*` never matches these\n  ⇒ returns the `::in.call` nodes — NOT the `*` nodes, which only constrain them\n\na.go\n└─ func Caller  5-7\n\n1 file · 1 matches\n\nnote: ::in/::out edges are name-keyed (lexical) here — a far end may be a\nsame-named symbol, not the resolved one. The MCP server resolves via child\nLSPs and labels each edge (conf: lsp|lexical|unsettled); `query` does not.\n"},
 		// An edge traversal: the reading table, the landed symbol, the
 		// same caveat.
 		{`#'a.go#Save'::in.call > *`, "read as ─\n  #a.go#Save  named `a.go#Save` — a dir, file or symbol id (also matches the `file#symbol` address form)\n  ::in.call   reference edges pointing IN to it (who references this), only of kind call. A generated node — `*` never matches these\n  >           DIRECT children of the above — one level only, not any descendant\n  *           nodes of ANY type\n  ⇒ returns the `*` nodes — NOT the `*#a.go#Save` nodes, which only constrain them\n\na.go\n└─ func Caller  5-7\n\n1 file · 1 matches\n\nnote: ::in/::out edges are name-keyed (lexical) here — a far end may be a\nsame-named symbol, not the resolved one. The MCP server resolves via child\nLSPs and labels each edge (conf: lsp|lexical|unsettled); `query` does not.\n"},
@@ -435,21 +435,22 @@ func TestQueryJSONNoBlockIsByteForByteF1(t *testing.T) {
 
 	// writeJSONDoc pretty-prints with two-space indent, and the
 	// document carries budgetExceeded. The bytes are F1's.
+	// F5: a bare-edge selector lands on the far node (the caller), not
+	// the edge row. The far-node row carries the node's address, file,
+	// type, and the conf/via of the edge that reached it.
 	want := `{
   "budgetExceeded": false,
   "matches": [
     {
       "@": [
-        6,
-        6
+        5,
+        7
       ],
       "conf": "lexical",
       "file": "a.go",
-      "from": [
-        "a.go#Caller"
-      ],
-      "node": "a.go@6",
-      "type": "::in.call"
+      "node": "a.go#Caller",
+      "type": "func",
+      "via": "a.go@6"
     }
   ],
   "offset": 0,
@@ -463,9 +464,10 @@ func TestQueryJSONNoBlockIsByteForByteF1(t *testing.T) {
 		t.Errorf("no-block --json is not F1's bytes:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 
-	// The block form: the row carries exactly the named fields.
+	// The block form: the row carries exactly the named fields. The far
+	// node is a plain func, so its fields are the node's own.
 	var bb bytes.Buffer
-	if err := s.QueryJSON(`#'a.go#Save'::in.call { node; kind; conf }`, 0, 0, "", &bb); err != nil {
+	if err := s.QueryJSON(`#'a.go#Save'::in.call { node; file; conf }`, 0, 0, "", &bb); err != nil {
 		t.Fatalf("block --json: %v", err)
 	}
 	var doc struct {
@@ -477,8 +479,11 @@ func TestQueryJSONNoBlockIsByteForByteF1(t *testing.T) {
 	if len(doc.Matches) != 1 || len(doc.Matches[0]) != 3 {
 		t.Fatalf("the block row must carry exactly the 3 named fields; got: %s", bb.String())
 	}
-	if doc.Matches[0]["node"] != "a.go@6" || doc.Matches[0]["kind"] != "call" || doc.Matches[0]["conf"] != "lexical" {
-		t.Errorf("block row = %v; want node=a.go@6 kind=call conf=lexical", doc.Matches[0])
+	// conf is an edge field; a far node (a plain func) has none — the
+	// edge's conf rides in the no-block row's via/conf, not in a
+	// projected field of the node itself.
+	if doc.Matches[0]["node"] != "a.go#Caller" || doc.Matches[0]["file"] != "a.go" || doc.Matches[0]["conf"] != "" {
+		t.Errorf("block row = %v; want node=a.go#Caller file=a.go conf=(empty)", doc.Matches[0])
 	}
 }
 
@@ -503,18 +508,21 @@ func TestNodeQueryNoBlockRowsAreF1Shape(t *testing.T) {
 	if len(matches) != 1 {
 		t.Fatalf("want the one call edge into Server.Start; got: %s", r.Content[0].Text)
 	}
+	// F5: a bare-edge selector lands on the far node (the caller), not
+	// the edge row. The row carries the node's address, file, type, and
+	// the conf/via of the edge that reached it.
 	row, _ := matches[0].(map[string]any)
 	var keys []string
 	for k := range row {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := []string{"@", "conf", "from", "node", "type"}
+	want := []string{"@", "conf", "node", "type", "via"}
 	if !reflect.DeepEqual(keys, want) {
-		t.Errorf("row keys = %v; want %v (F1's queryRow shape — no projection fields)", keys, want)
+		t.Errorf("row keys = %v; want %v (F5 far-node shape — no projection fields)", keys, want)
 	}
-	if row["node"] != "main.go@22" || row["type"] != "::in.call" {
-		t.Errorf("row = %v; want the call site main.go@22 with type ::in.call", row)
+	if row["node"] != "main.go#CallsStart" || row["type"] != "func" {
+		t.Errorf("row = %v; want the far node main.go#CallsStart with type func", row)
 	}
 	// The payload carries F1's shape: totalMatches, matches, read.
 	for _, k := range []string{"matches", "read", "totalMatches"} {

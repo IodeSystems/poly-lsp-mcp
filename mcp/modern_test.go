@@ -2219,9 +2219,11 @@ func TestSelectorCorpus_EdgeFarEndTag(t *testing.T) {
 	}, {
 		// The edge spelling of the same guess-before-you-ask: which KIND of
 		// use is it? A wrong kind returns the same ∅ as no edges at all.
+		// F5: the hint names the far node (main.go#CallsStart), not the
+		// edge row address (main.go@22).
 		name:     "wrong kind class",
 		selector: "#'main.go#Server.Start'::in.type",
-		want:     []string{"no ::in.type edge here", "KIND class", "::in.call", "main.go@"},
+		want:     []string{"no ::in.type edge here", "KIND class", "main.go#CallsStart"},
 	}}
 
 	for _, c := range cases {

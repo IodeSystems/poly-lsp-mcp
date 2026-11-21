@@ -79,26 +79,40 @@ func evalSel(t *testing.T, e *engine, sel string) []*treeNode {
 
 // Single-hop edges carry the tri-state directly: A→B is name-unique
 // (lexical), C→D is ambiguous with no LSP (unsettled) — not the same value.
+// F5: a bare-edge selector lands on the far nodes (plain funcs), not the
+// edge rows. The conf lives on the reaching ref, found via reachedVia.
 func TestTriStateConfSplitsCertainFromGuess(t *testing.T) {
 	dir := writeChainFixture(t)
 
-	unique := evalSel(t, newChainEngine(t, dir), `#'main.go#A'::out.call`)
+	e1 := newChainEngine(t, dir)
+	unique := evalSel(t, e1, `#'main.go#A'::out.call`)
 	if len(unique) == 0 {
 		t.Fatal("A calls B — expected an outgoing edge")
 	}
 	for _, r := range unique {
-		if r.refConf != refLexical {
-			t.Errorf("A→B is name-unique — want conf %q, got %q", refLexical, r.refConf)
+		via, ok := e1.reachedVia[r]
+		if !ok {
+			t.Errorf("far node %q has no reaching ref (via); cannot check conf", r.addr())
+			continue
+		}
+		if via.refConf != refLexical {
+			t.Errorf("A→B is name-unique — want conf %q, got %q", refLexical, via.refConf)
 		}
 	}
 
-	ambiguous := evalSel(t, newChainEngine(t, dir), `#'main.go#C'::out.call`)
+	e2 := newChainEngine(t, dir)
+	ambiguous := evalSel(t, e2, `#'main.go#C'::out.call`)
 	if len(ambiguous) == 0 {
 		t.Fatal("C calls D — expected an outgoing edge")
 	}
 	for _, r := range ambiguous {
-		if r.refConf != refUnsettled {
-			t.Errorf("C→D is ambiguous with no LSP — want conf %q (a guess), got %q", refUnsettled, r.refConf)
+		via, ok := e2.reachedVia[r]
+		if !ok {
+			t.Errorf("far node %q has no reaching ref (via); cannot check conf", r.addr())
+			continue
+		}
+		if via.refConf != refUnsettled {
+			t.Errorf("C→D is ambiguous with no LSP — want conf %q (a guess), got %q", refUnsettled, via.refConf)
 		}
 	}
 }

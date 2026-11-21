@@ -53,19 +53,22 @@ func TestRefPositionAxis(t *testing.T) {
 		return len(e.evaluate(list))
 	}
 
-	// The bare kind is unchanged — every type use, all positions.
-	if n := count(`#'Server'::in.type`); n != 3 {
-		t.Errorf("::in.type should see all 3 type uses (param, return, field); got %d", n)
+	// Bare-edge landing: the answer is the FAR NODES (the symbols that
+	// use Server as a type), not the edge rows. The 3 type uses (param,
+	// return, field) point to 2 distinct far nodes: build and Config.
+	if n := count(`#'Server'::in.type`); n != 2 {
+		t.Errorf("::in.type should land on 2 far nodes (build, Config); got %d", n)
 	}
-	// Position splits them, one each.
+	// Position splits them: each position's far node is the one symbol
+	// that uses Server in that slot.
 	if n := count(`#'Server'::in.return.type`); n != 1 {
-		t.Errorf("::in.return.type should be exactly the return use; got %d", n)
+		t.Errorf("::in.return.type should land on exactly 1 far node (build); got %d", n)
 	}
 	if n := count(`#'Server'::in.param.type`); n != 1 {
-		t.Errorf("::in.param.type should be exactly the param use; got %d", n)
+		t.Errorf("::in.param.type should land on exactly 1 far node (build); got %d", n)
 	}
 	if n := count(`#'Server'::in.field.type`); n != 1 {
-		t.Errorf("::in.field.type should be exactly the field use; got %d", n)
+		t.Errorf("::in.field.type should land on exactly 1 far node (Config); got %d", n)
 	}
 	// Order-free, like CSS classes.
 	if count(`#'Server'::in.type.return`) != count(`#'Server'::in.return.type`) {

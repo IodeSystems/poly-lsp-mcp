@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -94,20 +93,23 @@ func TestEdgeNodesAndKinds(t *testing.T) {
 
 	// C is pointed at by B (call), X (call) and the var h — an
 	// unclassified reference, NOT a call. The kind class separates them.
+	// Bare-edge landing: the answer is the far nodes (the callers), not
+	// the edge rows.
 	q := query(t, s, map[string]any{"selector": `#'main.go#C'::in`})
 	if q.TotalMatches != 3 {
-		t.Errorf("C has 3 incoming refs; got %v", nodes(q))
+		t.Errorf("C has 3 incoming refs (far nodes); got %v", nodes(q))
 	}
 	q = query(t, s, map[string]any{"selector": `#'main.go#C'::in.call`})
 	if q.TotalMatches != 2 {
 		t.Errorf("only B and X CALL C — h is a plain ref; got %v", nodes(q))
 	}
-	// The edge rows speak the grammar: type is the selector spelling.
+	// The far nodes are plain symbols, not edge rows.
 	for _, m := range q.Matches {
-		if m.Class != "::in.call" {
-			t.Errorf("edge row type = %q, want ::in.call", m.Class)
+		if m.Class != "func" {
+			t.Errorf("far-node type = %q, want func (not an edge row)", m.Class)
 		}
 	}
+	wantNodes(t, q, "main.go#B", "main.go#X")
 
 	// T is used AS A TYPE; tsHelper is imported AND called.
 	if q := query(t, s, map[string]any{"selector": `#'main.go#T'::in.type`}); q.TotalMatches != 1 {
@@ -284,22 +286,14 @@ func TestEdgeAddressesAreSites(t *testing.T) {
 	s := startGraph(t)
 	defer s.close()
 
+	// Bare-edge landing: `#'main.go#A'::out.call` now returns the far
+	// node (B), not the edge row. The edge row's file@line address is
+	// still reachable via `> *` (which was the explicit far-node form).
 	q := query(t, s, map[string]any{"selector": `#'main.go#A'::out.call`})
 	if q.TotalMatches != 1 {
-		t.Fatalf("A makes one call; got %v", nodes(q))
+		t.Fatalf("A makes one call (one far node); got %v", nodes(q))
 	}
-	addr := q.Matches[0].Node
-	if !regexp.MustCompile(`^main\.go@\d+$`).MatchString(addr) {
-		t.Fatalf("edge address should be file@line, got %q", addr)
-	}
-	// Reading the edge reads the call site.
-	r := s.callTool("node_read", map[string]any{"node": addr})
-	if r.IsError {
-		t.Fatalf("node_read %s errored: %s", addr, r.Content[0].Text)
-	}
-	if !strings.Contains(r.Content[0].Text, "B(1)") {
-		t.Errorf("reading %s should show the call site, got: %s", addr, r.Content[0].Text)
-	}
+	wantNodes(t, q, "main.go#B")
 }
 
 // --------------------------------------------------------- import edges
@@ -365,19 +359,22 @@ func TestImportEdgesFindHumaEndpoints(t *testing.T) {
 	if q.TotalMatches != 2 {
 		t.Fatalf("expected both imports; got %v", nodes(q))
 	}
+	// F5: a bare-edge selector lands on the far nodes. The far node of
+	// an incoming call to an import IS the import, so the count is 1
+	// (deduplicated), not the number of call sites.
 	q = query(t, s, map[string]any{"selector": `#'main.go#huma'::in.call`, "limit": 10})
-	if q.TotalMatches != 2 {
-		t.Errorf("main.go registers 2 endpoints via huma; got %v", nodes(q))
+	if q.TotalMatches != 1 {
+		t.Errorf("main.go's huma import is the one far node of its incoming calls; got %v", nodes(q))
 	}
 	// The alias resolves the same way, and edges are FILE-scoped: h's
 	// import sees only admin.go's site, huma's only main.go's.
 	q = query(t, s, map[string]any{"selector": `#'admin.go#h'::in.call`, "limit": 10})
 	if q.TotalMatches != 1 {
-		t.Errorf("admin.go registers 1 endpoint via h; got %v", nodes(q))
+		t.Errorf("admin.go's h import is the one far node; got %v", nodes(q))
 	}
 	for _, m := range q.Matches {
-		if !strings.HasPrefix(m.Node, "admin.go@") {
-			t.Errorf("an import's edges must come from its own file; got %v", m.Node)
+		if !strings.HasPrefix(m.Node, "admin.go#") {
+			t.Errorf("an import's far node must be in its own file; got %v", m.Node)
 		}
 	}
 

@@ -42,6 +42,8 @@ func TestImportRefsFindJavaImporters(t *testing.T) {
 	s.request("initialize", map[string]any{})
 	s.notify("notifications/initialized", map[string]any{})
 
+	// F5: a bare-edge selector lands on the far nodes (the import
+	// declarations), not the edge rows.
 	q := query(t, s, map[string]any{"selector": "class[name=Widget]::in.import", "limit": 50})
 	got := map[string]bool{}
 	for _, m := range q.Matches {
@@ -50,7 +52,7 @@ func TestImportRefsFindJavaImporters(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("Widget is imported by exactly Screen.java and Panel.java; got %d: %+v", len(got), q.Matches)
 	}
-	for _, want := range []string{"app/Screen.java@3", "app/Panel.java@3"} {
+	for _, want := range []string{"app/Screen.java#Widget", "app/Panel.java#Widget"} {
 		if !got[want] {
 			t.Errorf("missing importer %s; got %+v", want, q.Matches)
 		}

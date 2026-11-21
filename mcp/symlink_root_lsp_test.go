@@ -127,23 +127,24 @@ func TestPrecisionMapsResolvedChildPathIntoSymlinkedRoot(t *testing.T) {
 
 	q := query(t, s, map[string]any{"selector": `#'main.go#Run'::out.call`, "limit": 20})
 	var saw bool
+	// F5: a bare-edge selector lands on the far node (the callee), not
+	// the edge row. The far node's address is in m.Node.
 	for _, m := range q.Matches {
 		if m.Domain == "external" {
-			t.Errorf("an in-root definition became an external stub: %v (conf=%q)", m.To, m.Conf)
+			t.Errorf("an in-root definition became an external stub: %q (conf=%q)", m.Node, m.Conf)
 		}
-		joined := strings.Join(m.To, ",")
-		if !strings.Contains(joined, "store/store.go#Save") {
+		if !strings.Contains(m.Node, "store/store.go#Save") {
 			continue
 		}
 		saw = true
-		if strings.Contains(joined, "cache/cache.go#Save") {
-			t.Errorf("the child resolves store.Save; the edge still lists cache's Save: %v (conf=%q)", m.To, m.Conf)
+		if strings.Contains(m.Node, "cache/cache.go#Save") {
+			t.Errorf("the child resolves store.Save; the far node is cache's Save: %q (conf=%q)", m.Node, m.Conf)
 		}
 		if m.Conf != refLSP {
 			t.Errorf("conf=%q, want %q", m.Conf, refLSP)
 		}
 	}
 	if !saw {
-		t.Fatalf("no outgoing call edge to store.Save; got %+v", q.Matches)
+		t.Fatalf("no far node landed on store.Save; got %+v", q.Matches)
 	}
 }

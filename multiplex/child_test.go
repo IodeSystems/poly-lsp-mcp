@@ -21,6 +21,20 @@ import (
 // end-to-end without an external dependency.
 var polyLspMcpBinary string
 
+// buildBinaryForTests builds the poly-lsp-mcp binary into dir and returns its
+// path, removing dir on the way out if the build fails. The caller owns the
+// directory on success: TestMain must remove it, and it must do so on a
+// failing run too — a run whose tests fail must leave no temp dir behind.
+func buildBinaryForTests(dir string) (string, error) {
+	bin := filepath.Join(dir, "poly-lsp-mcp")
+	out, err := exec.Command("go", "build", "-o", bin, "github.com/iodesystems/poly-lsp-mcp").CombinedOutput()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("build poly-lsp-mcp for tests: %v\n%s", err, out)
+	}
+	return bin, nil
+}
+
 func TestMain(m *testing.M) {
 	if dir := os.Getenv(spawnHelperEnv); dir != "" {
 		spawnHelper(dir) // never returns
@@ -30,14 +44,14 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
-	polyLspMcpBinary = filepath.Join(dir, "poly-lsp-mcp")
-	out, err := exec.Command("go", "build", "-o", polyLspMcpBinary, "github.com/iodesystems/poly-lsp-mcp").CombinedOutput()
+	polyLspMcpBinary, err = buildBinaryForTests(dir)
 	if err != nil {
-		_ = os.RemoveAll(dir)
-		panic(fmt.Sprintf("build poly-lsp-mcp for tests: %v\n%s", err, out))
+		panic(err)
 	}
 
 	// os.Exit skips deferred calls, so the directory is removed before it.
+	// m.Run returns a non-zero code when any test fails, and the removal
+	// runs on that path too: a failed run leaves no poly-lsp-mcp-mp-test-*.
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -201,4 +215,81 @@ func TestSpawnRejectsNilConfig(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Spawn to fail for nil config")
 	}
+}
+
+// TestTempDirCleanupOnFailureSentinel fails on purpose, but only when its
+// env var is set: TestTempDirRemovedOnFailedRun sets it on the child so the
+// run genuinely fails mid-test, without making this package red on every
+// normal run.
+func TestTempDirCleanupOnFailureSentinel(t *testing.T) {
+	if os.Getenv("POLY_LSP_MCP_MP_SENTINEL_FAIL") != "1" {
+		t.Skip("sentinel: only fails when POLY_LSP_MCP_MP_SENTINEL_FAIL=1")
+	}
+	t.Fatal("sentinel: expected to fail")
+}
+
+// TestTempDirRemovedOnFailedRun runs this package's test binary with only the
+// failing sentinel test and asserts it leaves no poly-lsp-mcp-mp-test-* dir
+// in os.TempDir. This is the failure-proof for the cleanup in TestMain: a
+// regression that removes the dir only on success re-creates the leak this
+// node exists to close (46 GB of leftover dirs, user quota exhausted).
+func TestTempDirRemovedOnFailedRun(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("no caller path")
+	}
+	abs, err := filepath.Abs(filepath.Dir(thisFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := tempTestDirs("poly-lsp-mcp-mp-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A compiled test binary selects tests with -test.run, not a subcommand.
+	// Stdin is closed: the child must not consume the harness's stdin.
+	cmd := exec.Command(exe, "-test.run", "TestTempDirCleanupOnFailureSentinel", "-test.count", "1")
+	cmd.Dir = abs
+	cmd.Stdin = nil
+	cmd.Env = append(os.Environ(), "POLY_LSP_MCP_MP_SENTINEL_FAIL=1")
+	out, rerr := cmd.CombinedOutput()
+	if rerr == nil {
+		t.Fatalf("child test run should have failed, output:\n%s", out)
+	}
+	// The sentinel must be the failure, not a build or TestMain panic.
+	if !strings.Contains(string(out), "sentinel: expected to fail") {
+		t.Fatalf("child run failed for the wrong reason:\n%s", out)
+	}
+
+	after, err := tempTestDirs("poly-lsp-mcp-mp-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for d := range after {
+		if _, seen := before[d]; !seen {
+			t.Fatalf("failing run left a temp dir behind: %s", d)
+		}
+	}
+}
+
+// tempTestDirs returns the set of directories in os.TempDir with the given
+// prefix.
+func tempTestDirs(prefix string) (map[string]bool, error) {
+	set := map[string]bool{}
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			set[filepath.Join(os.TempDir(), e.Name())] = true
+		}
+	}
+	return set, nil
 }

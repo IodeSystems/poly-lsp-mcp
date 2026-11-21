@@ -31,8 +31,8 @@ type QuestionBank struct {
 
 // bankEntry is the committed bank.json entry shape.
 type bankEntry struct {
-	ID       string `json:"id"`
-	Question string `json:"question"`
+	ID       string   `json:"id"`
+	Question string   `json:"question"`
 	Expected []string `json:"expected"`
 }
 

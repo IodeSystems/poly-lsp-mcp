@@ -11,20 +11,20 @@ import (
 //
 // The supported subset (documented so it matches the committed Cypher card):
 //
-//	MATCH (a)-[:TYPE*1..n]->(b)   // one pattern; TYPE is a relationship type
-//	MATCH (a:Label)-[:TYPE]->(b)  // optional node label
-//	MATCH (#'a.go#Save')-[:CALLS]->(b)  // a quoted node id anchors an endpoint
-//	RETURN [DISTINCT] b           // one or more variables
+//		MATCH (a)-[:TYPE*1..n]->(b)   // one pattern; TYPE is a relationship type
+//		MATCH (a:Label)-[:TYPE]->(b)  // optional node label
+//		MATCH (#'a.go#Save')-[:CALLS]->(b)  // a quoted node id anchors an endpoint
+//		RETURN [DISTINCT] b           // one or more variables
 //
-//   - Relationship TYPE: the model writes CALLS / TYPES / IMPORTS (the card's
-//     names); they map to the row kinds call / type / import.
-//   - Node Label: Func / Method / Type / Struct / Interface / Class / Const /
-//     Var / Field / Enum / Ctor / Module / Import / Argument / Annotation /
-//     Return. A labelled node is filtered to rows whose kind matches.
-//   - A quoted id ('a.go#Save') anchors that endpoint to one specific node.
-//   - Variable length: *1..n bounds the hops (n >= 1); a bare :TYPE is one hop.
-//   - RETURN: the variable(s) to output; DISTINCT de-duplicates. The answer
-//     set is the returned variable's node ID(s) (canonical "file#Name").
+//	  - Relationship TYPE: the model writes CALLS / TYPES / IMPORTS (the card's
+//	    names); they map to the row kinds call / type / import.
+//	  - Node Label: Func / Method / Type / Struct / Interface / Class / Const /
+//	    Var / Field / Enum / Ctor / Module / Import / Argument / Annotation /
+//	    Return. A labelled node is filtered to rows whose kind matches.
+//	  - A quoted id ('a.go#Save') anchors that endpoint to one specific node.
+//	  - Variable length: *1..n bounds the hops (n >= 1); a bare :TYPE is one hop.
+//	  - RETURN: the variable(s) to output; DISTINCT de-duplicates. The answer
+//	    set is the returned variable's node ID(s) (canonical "file#Name").
 //
 // This is deliberately small: a hand-written evaluator over the rows, NO
 // external Cypher engine (the spec forbids one). It is a pure function of the
@@ -85,11 +85,11 @@ func execCypher(rows *Rows, query string) ([]string, error) {
 
 // pattern is one parsed MATCH element: (a)-[:TYPE*1..n]->(b).
 type pattern struct {
-	from, to     string
-	fromLabel    string
-	toLabel      string
-	fromID, toID string
-	relType      string // "call"|"type"|"import"
+	from, to       string
+	fromLabel      string
+	toLabel        string
+	fromID, toID   string
+	relType        string // "call"|"type"|"import"
 	minHop, maxHop int
 }
 
@@ -215,7 +215,7 @@ func splitClauses(q string) (match, ret string, err error) {
 	if mi < 0 || ri < 0 || ri < mi {
 		return "", "", fmt.Errorf("query needs a MATCH clause and a RETURN clause")
 	}
-	return strings.TrimSpace(q[mi+len("MATCH"):ri]), strings.TrimSpace(q[ri+len("RETURN"):]), nil
+	return strings.TrimSpace(q[mi+len("MATCH") : ri]), strings.TrimSpace(q[ri+len("RETURN"):]), nil
 }
 
 // parsePatterns finds every pattern in the MATCH clause.
@@ -235,10 +235,10 @@ func parsePatterns(match string) ([]pattern, error) {
 		// Group layout: 1 from, 2 fromID, 3 fromLabel, 4 relType,
 		// 5 varLen (the *n..n), 6 min, 7 max, 8 to, 9 toID, 10 toLabel.
 		p := pattern{
-			from: g(1),
+			from:    g(1),
 			relType: relTypeToKind(g(4)),
-			to: g(8),
-			minHop: 1, maxHop: 1,
+			to:      g(8),
+			minHop:  1, maxHop: 1,
 		}
 		// The colon value (g2/g9) is an anchored id (#'file#Name') or a label.
 		if v := g(2); v != "" {

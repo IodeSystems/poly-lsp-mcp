@@ -100,10 +100,10 @@ func TestGatGreeterFixture(t *testing.T) {
 	// emits today; assertions fail if any expected artifact drops the
 	// marker on the next gwag bump.
 	cases := []struct {
-		name         string
-		wantProto    bool // hand-authored marker on the source .proto
-		wantSDL      bool // gat-rendered GraphQL SDL
-		wantOpenAPI  bool // gat-rendered OpenAPI JSON
+		name        string
+		wantProto   bool // hand-authored marker on the source .proto
+		wantSDL     bool // gat-rendered GraphQL SDL
+		wantOpenAPI bool // gat-rendered OpenAPI JSON
 	}{
 		// rpc: lives in all three (source + SDL field description + OpenAPI x-ref).
 		{name: "Hello", wantProto: true, wantSDL: true, wantOpenAPI: true},

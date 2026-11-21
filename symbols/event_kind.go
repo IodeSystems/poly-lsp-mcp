@@ -38,7 +38,7 @@ func scanEventKinds(f PluginFile) []PluginEdge {
 	}
 	var edges []PluginEdge
 	for _, m := range matches {
-		lit := f.Content[m[0]:m[1]] // includes the quotes
+		lit := f.Content[m[0]:m[1]]         // includes the quotes
 		kind := string(lit[1 : len(lit)-1]) // strip quotes
 		// Compute line and column of the opening quote.
 		line, col := 1, 1
@@ -51,11 +51,11 @@ func scanEventKinds(f PluginFile) []PluginEdge {
 			}
 		}
 		edges = append(edges, PluginEdge{
-			Kind:   kind,
-			File:   f.Path,
-			Line:   line,
-			Col:    col,
-			Conf:   "lexical",
+			Kind: kind,
+			File: f.Path,
+			Line: line,
+			Col:  col,
+			Conf: "lexical",
 		})
 	}
 	return edges

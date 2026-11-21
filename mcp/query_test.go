@@ -73,10 +73,10 @@ func TestParseDeclarationBlock_AbsentByDefault(t *testing.T) {
 
 func TestParseDeclarationBlock_RejectsBadShape(t *testing.T) {
 	for _, sel := range []string{
-		"func { name path }",        // missing ';'
-		"func { name; } extra",      // something after the terminal block
-		"func { name; [path=x] }",   // a field is an identifier, not an attr
-		"func { name; }",            // fine on its own — control: see below
+		"func { name path }",      // missing ';'
+		"func { name; } extra",    // something after the terminal block
+		"func { name; [path=x] }", // a field is an identifier, not an attr
+		"func { name; }",          // fine on its own — control: see below
 	} {
 		// The last one is legal; parse the bad ones and require an error.
 		if sel == "func { name; }" {

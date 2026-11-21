@@ -427,10 +427,10 @@ func TestRewriteSignaturePythonReplaceReturn(t *testing.T) {
 
 func TestRewriteCallSiteArgsLanguages(t *testing.T) {
 	cases := []struct {
-		lang     string
-		current  []string
-		params   []Param
-		want     string
+		lang    string
+		current []string
+		params  []Param
+		want    string
 	}{
 		{"go", []string{`"a"`}, []Param{{Name: "name", Type: "string"}, {Name: "age", Type: "int"}}, `"a", 0`},
 		{"typescript", []string{`"a"`}, []Param{{Name: "name", Type: "string"}, {Name: "age", Type: "number"}}, `"a", 0`},

@@ -281,7 +281,7 @@ func (e *engine) probeSnapshot() probeState {
 		lspLeft: e.lspLeft, lspAsked: e.lspAsked, lspResolved: e.lspResolved,
 		maxHopReached: e.maxHopReached, unsettledFromHop: e.unsettledFromHop,
 		transUnsettled: e.transUnsettled, hopCounted: e.hopCounted,
-		pathChain: e.pathChain,
+		pathChain:   e.pathChain,
 		lspCapReady: e.lspCapReady, probing: e.probing,
 		recursiveUnconfirmed:  e.recursiveUnconfirmed,
 		implementsUnavailable: e.implementsUnavailable,

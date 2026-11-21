@@ -4197,8 +4197,8 @@ func (e *engine) evalRepeat(tips map[*treeNode]bool, el *selElem, min1, max1 int
 // (extending a cycle's last hop to a node already in the chain is
 // refused, so the frontier empties).
 type walkPath struct {
-	Refs   []*treeNode
-	Host   *treeNode // the node the first edge was crossed FROM
+	Refs []*treeNode
+	Host *treeNode // the node the first edge was crossed FROM
 }
 
 // notePathChain records the first (fewest-hops) simple chain to each end

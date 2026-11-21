@@ -28,16 +28,16 @@ func LanguageByName(name string) *sitter.Language { return segment.LanguageByNam
 // Both are 1-based, end-exclusive (a single character at line 1 col 1
 // occupies startLine=1 startCol=1 endLine=1 endCol=2).
 type StructureNode struct {
-	Type           string `json:"type"`
-	Name           string `json:"name,omitempty"`
-	StartLine      int    `json:"startLine"`
-	StartCol       int    `json:"startCol"`
-	EndLine        int    `json:"endLine"`
-	EndCol         int    `json:"endCol"`
-	NameStartLine  int    `json:"nameStartLine,omitempty"`
-	NameStartCol   int    `json:"nameStartCol,omitempty"`
-	NameEndLine    int    `json:"nameEndLine,omitempty"`
-	NameEndCol     int    `json:"nameEndCol,omitempty"`
+	Type          string `json:"type"`
+	Name          string `json:"name,omitempty"`
+	StartLine     int    `json:"startLine"`
+	StartCol      int    `json:"startCol"`
+	EndLine       int    `json:"endLine"`
+	EndCol        int    `json:"endCol"`
+	NameStartLine int    `json:"nameStartLine,omitempty"`
+	NameStartCol  int    `json:"nameStartCol,omitempty"`
+	NameEndLine   int    `json:"nameEndLine,omitempty"`
+	NameEndCol    int    `json:"nameEndCol,omitempty"`
 }
 
 // StructureNodes parses content with the given language's grammar and

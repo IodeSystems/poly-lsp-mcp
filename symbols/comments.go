@@ -105,13 +105,13 @@ func ExtractCommentRefs(content []byte) []CommentRef {
 // symbolFromRef extracts the identifier-shaped tail from a reference
 // token. Handles a few common shapes:
 //
-//   Foo                       → Foo
-//   Class#method              → method      (JavaDoc/JSDoc)
-//   path/file.ts!Symbol       → Symbol      (TypeDoc)
-//   server/main.go:Symbol     → Symbol
-//   server/main.go:42:18      → ""           (positional refs not surfaced
-//                                            as names today)
-//   https://example.com/x     → ""           (URL — not a reference)
+//	Foo                       → Foo
+//	Class#method              → method      (JavaDoc/JSDoc)
+//	path/file.ts!Symbol       → Symbol      (TypeDoc)
+//	server/main.go:Symbol     → Symbol
+//	server/main.go:42:18      → ""           (positional refs not surfaced
+//	                                         as names today)
+//	https://example.com/x     → ""           (URL — not a reference)
 //
 // Trailing punctuation (commas, periods, semicolons) is stripped.
 func symbolFromRef(ref string) string {

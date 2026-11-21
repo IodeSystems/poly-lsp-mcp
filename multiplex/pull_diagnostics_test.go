@@ -83,8 +83,8 @@ type fakePull struct {
 func newFakePull(t *testing.T) *fakePull {
 	pr, pw := io.Pipe()
 	f := &fakePull{
-		t:    t,
-		reqs: make(chan *jsonrpc.Message, 100),
+		t:         t,
+		reqs:      make(chan *jsonrpc.Message, 100),
 		pubs:      make(chan string, 100),
 		unchanged: make(chan string, 100),
 		c: &Child{

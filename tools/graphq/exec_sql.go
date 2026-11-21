@@ -461,8 +461,8 @@ type fromClause struct {
 }
 
 type join struct {
-	table string
-	alias string
+	table    string
+	alias    string
 	onL, onR string // qualified column refs (lower-cased qual.col)
 }
 

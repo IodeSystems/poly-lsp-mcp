@@ -243,7 +243,6 @@ extension Greeter.Inner {
 	}
 }
 
-
 func TestSwiftExtractorSkipsCommentsAndStrings(t *testing.T) {
 	src := []byte(`import UIKit
 // mentions ghostInComment

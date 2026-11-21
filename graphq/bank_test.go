@@ -13,10 +13,10 @@ import (
 
 // Bank is the shape of one entry in bank.json.
 type Bank struct {
-	ID       string            `json:"id"`
-	Question string            `json:"question"`
-	Expected []string          `json:"expected"`
-	Category string            `json:"category"`
+	ID        string            `json:"id"`
+	Question  string            `json:"question"`
+	Expected  []string          `json:"expected"`
+	Category  string            `json:"category"`
 	Canonical map[string]string `json:"canonical"`
 }
 
@@ -72,7 +72,7 @@ func TestFileScopedQuestionsMatchSource(t *testing.T) {
 		t.Fatalf("unmarshal bank.json: %v", err)
 	}
 
-	fileRe := regexp.MustCompile(`mcp/(\w+\.go)` )
+	fileRe := regexp.MustCompile(`mcp/(\w+\.go)`)
 	for _, q := range bank {
 		if q.Category != "functions_in_file" {
 			continue

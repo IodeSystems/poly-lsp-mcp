@@ -197,15 +197,16 @@ func execute(h *harness, rows *Rows, lang, query string) (answer []string, opErr
 
 // selectorErr carries a model-fixable parse/execute message for the retry.
 type selectorErr struct{ Err string }
+
 func (e *selectorErr) Error() string { return e.Err }
 
 // writeJSON writes the results and aggregates to the out path.
 func writeJSON(path, lang string, results []Result, aggs []Aggregate) error {
 	doc := map[string]any{
-		"language":   lang,
-		"results":    results,
-		"aggregate":  aggs,
-		"generated":  time.Now().UTC().Format(time.RFC3339),
+		"language":  lang,
+		"results":   results,
+		"aggregate": aggs,
+		"generated": time.Now().UTC().Format(time.RFC3339),
 	}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

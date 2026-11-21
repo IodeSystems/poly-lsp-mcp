@@ -99,12 +99,12 @@ type Result struct {
 
 // Aggregate is the per-language rollup.
 type Aggregate struct {
-	Language       string  `json:"language"`
-	Total          int     `json:"total"`
-	Correct        int     `json:"correct"`
-	Retries        int     `json:"retries"`
-	MeanPromptTok  float64 `json:"mean_prompt_tokens"`
-	MeanWallMs     float64 `json:"mean_wall_ms"`
+	Language      string  `json:"language"`
+	Total         int     `json:"total"`
+	Correct       int     `json:"correct"`
+	Retries       int     `json:"retries"`
+	MeanPromptTok float64 `json:"mean_prompt_tokens"`
+	MeanWallMs    float64 `json:"mean_wall_ms"`
 }
 
 // aggregate rolls per-question results into the per-language summary.

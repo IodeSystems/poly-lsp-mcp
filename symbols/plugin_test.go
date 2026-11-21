@@ -198,5 +198,3 @@ func TestPluginEdgeFlowsThroughLookup(t *testing.T) {
 			idx.Lookup("Write"), plain.Lookup("Write"))
 	}
 }
-
-

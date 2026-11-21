@@ -30,11 +30,11 @@ type PluginFile struct {
 // confidence label from the same set query already prints ("lexical",
 // "lsp", "unsettled").
 type PluginEdge struct {
-	Kind   string
-	File   string
-	Line   int
-	Col    int
-	Conf   string
+	Kind string
+	File string
+	Line int
+	Col  int
+	Conf string
 }
 
 // confFromLabel maps a plugin confidence label to the Site's Confidence

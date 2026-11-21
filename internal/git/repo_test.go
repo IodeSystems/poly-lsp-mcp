@@ -134,10 +134,10 @@ func TestUpstreamAndAncestorChain(t *testing.T) {
 func TestListFilesAndFileAt(t *testing.T) {
 	dir := newRepo(t)
 	writeAndCommit(t, dir, map[string]string{
-		"a.txt":       "a",
-		"sub/b.txt":   "b",
-		"sub/c.txt":   "c",
-		".gitignore":  "ignored.txt\n",
+		"a.txt":      "a",
+		"sub/b.txt":  "b",
+		"sub/c.txt":  "c",
+		".gitignore": "ignored.txt\n",
 	}, "init")
 	// Add an ignored file on disk; it should NOT show up in ls-tree.
 	if err := os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("ignored"), 0o644); err != nil {

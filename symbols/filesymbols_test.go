@@ -808,8 +808,6 @@ func TestFileSymbolsGroovyDeclinesDSLJuxtaposition(t *testing.T) {
 	}
 }
 
-
-
 func TestFileSymbolsJavaGenericReturnAnswersToBareName(t *testing.T) {
 	src := []byte(`class Repo {
     Field<String> nameField() { return null; }
@@ -890,7 +888,6 @@ class Settings(BaseSettings):
 		}
 	}
 }
-
 
 func TestFileSymbolsGoMapReturnClaimsNoLeaf(t *testing.T) {
 	src := []byte(`package x

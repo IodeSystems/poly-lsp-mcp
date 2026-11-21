@@ -55,8 +55,8 @@ func commit(t *testing.T, dir, msg string, files map[string]string) {
 func TestPrewarmFromBranchSeedsCache(t *testing.T) {
 	dir := newPrewarmRepo(t)
 	commit(t, dir, "init", map[string]string{
-		"main.go":  "package main\n\nfunc Hello() {}\n",
-		"util.go":  "package main\n\nfunc Helper() {}\n",
+		"main.go":   "package main\n\nfunc Hello() {}\n",
+		"util.go":   "package main\n\nfunc Helper() {}\n",
 		"README.md": "hi\n",
 	})
 	repo, err := git.FromCWD(dir)

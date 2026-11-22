@@ -121,7 +121,7 @@ import (
 // the `?` reference. It is the one form the reference was missing that a model
 // reaching for "A AND B" has to spell out by hand; naming it in the card is
 // what makes it discoverable at all. Sixth raise; same standing candidate.
-const modernTokenBudget = 1320
+const modernTokenBudget = 1320 // & intersection operator (1270 → 1320)
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

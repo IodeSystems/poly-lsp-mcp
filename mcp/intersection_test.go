@@ -9,6 +9,7 @@ import (
 // F5: the `&` intersection operator between two ref clauses. The canonical
 // form for "A AND B" — two edge steps from the same node, each landing on
 // its far nodes; the answer is the nodes in BOTH.
+
 //
 // Fixture graph (main.go):
 //

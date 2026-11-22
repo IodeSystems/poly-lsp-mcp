@@ -4325,6 +4325,7 @@ func (e *engine) evalComplex(cx selComplex, anchor *treeNode, relaxSubject bool)
 	// its bare edges, and return the set intersection. Each side lands on
 	// far nodes independently — `#'Store'::in.type & #run::out.call` means
 	// "nodes the type-edges point at" ∩ "nodes the call-edges point at".
+	// The result is the far-node set, not edge rows.
 	if cx.and != nil {
 		left := tips
 		// The left side lands on its far nodes on its own: the complex

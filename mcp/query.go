@@ -6428,7 +6428,7 @@ type grepSpec struct {
 	word          bool // -w
 	invert        bool // -v
 	before, after int  // -B / -A / -C (0 = no context, the default)
-	countOnly         bool // -c: per-file match counts, no line rows
+	countOnly     bool // -c: per-file match counts, no line rows
 
 	re *regexp.Regexp
 }

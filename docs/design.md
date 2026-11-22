@@ -845,7 +845,9 @@ the full suite (`test-all`) are also declared.
 **HOLDS.** Every feature in the tree carries `Specs`: the `Specs` field on
 each `DevFeature` entry is the proof, checked by attribution. All 30
 feature rows (F1–F30) plus the D4 dev row have at least one spec with a
-testable assertion.
+testable assertion, with two degenerate exceptions: F7 (superseded, empty —
+use F8) and F14 (leftOut) are 0-spec rows that promise nothing, so the
+attestation holds for them trivially.
 
 ### D5 — The change is visible
 

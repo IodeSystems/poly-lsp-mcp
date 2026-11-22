@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1101,6 +1102,12 @@ type selCompound struct {
 	refDir     string // "in" | "out"
 	refClasses []string
 
+	// rows is the `::rows` suffix on a ref element: the edge's own rows are
+	// the answer (site, from:, to:), not its far nodes. A ref element that
+	// ends a selector WITHOUT `::rows` lands on the far nodes by default
+	// (lastIsBareEdge); `::rows` is the opt-out that returns the edge rows.
+	rows bool
+
 	// isFrag marks a `::grep('pattern')` pseudo-element — a generated
 	// node per MATCHED LINE of the host's own source (URL text-fragment
 	// prior, grep muscle memory). Same contract as edges: invisible to
@@ -1393,7 +1400,7 @@ var normalizeAliases = map[string]string{"parent": "parents"}
 
 func selPseudoElemName(w string) bool {
 	switch w {
-	case "in", "out", "grep", "ref", "comment":
+	case "in", "out", "grep", "ref", "comment", "rows":
 		return true
 	}
 	return false
@@ -1595,7 +1602,10 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 			cx.elems = append(cx.elems, selElem{comb: comb, comp: &host, min: 1, max: 1})
 			for p.peekIsPseudoElement() {
 				if err := p.appendRefElem(&cx); err != nil {
-					return cx, err
+					if !errors.Is(err, errRowsCloses) {
+						return cx, err
+					}
+					break
 				}
 			}
 		default:
@@ -1613,7 +1623,10 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 			// Tight-bound pseudo-elements chain: X::out::grep('…').
 			for p.peekIsPseudoElement() {
 				if err := p.appendRefElem(&cx); err != nil {
-					return cx, err
+					if !errors.Is(err, errRowsCloses) {
+						return cx, err
+					}
+					break
 				}
 			}
 		}
@@ -1626,6 +1639,12 @@ func (p *modSelParser) peekIsPseudoElement() bool {
 	return p.peek() == ':' && p.i+1 < len(p.s) && p.s[p.i+1] == ':'
 }
 
+// errRowsCloses is the internal signal that a `::rows` marker closed the
+// current element: the parse loops must stop appending elements (the
+// selector can still continue with a combinator, which the loop's own
+// peek handles on the next pass).
+var errRowsCloses = fmt.Errorf("::rows closes its element")
+
 // appendRefElem parses one `::in`/`::out` pseudo-element (plus its optional
 // {m,n} hop range) and appends it CHILD-joined to the last element —
 // the host. Repetition of a ref element counts edges crossed.
@@ -1633,6 +1652,27 @@ func (p *modSelParser) appendRefElem(cx *selComplex) error {
 	comp, err := p.parsePseudoElement()
 	if err != nil {
 		return err
+	}
+	// ::rows is a marker on the PRECEDING ref element, not an element: it
+	// suppresses the far-node landing and returns the edge rows (site,
+	// from:, to:) as the answer. Nothing may follow it — it is the last
+	// thing written on that element.
+	if comp.rows {
+		if len(cx.elems) == 0 {
+			return fmt.Errorf("::rows follows a ref element (e.g. #'Save'::in.call::rows) — it has no ref to mark")
+		}
+		prev := cx.elems[len(cx.elems)-1].comp
+		if prev == nil || !prev.isRef {
+			return fmt.Errorf("::rows marks a ref element (::in / ::out) — %q is not one", strings.Join([]string{prev.class, prev.refDir}, "."))
+		}
+		if p.peek() == '.' || p.peek() == '[' || p.peek() == '#' {
+			return fmt.Errorf("::rows takes no kind, id or attr — it IS the edge-row opt-out")
+		}
+		if p.peekIsPseudoElement() {
+			return fmt.Errorf("::rows closes its element — nothing follows it (write the far-node form without it)")
+		}
+		prev.rows = true
+		return errRowsCloses
 	}
 	el := selElem{comb: selChild, comp: &comp, min: 1, max: 1}
 	if p.peek() == '{' {
@@ -1683,6 +1723,12 @@ func (p *modSelParser) parsePseudoElement() (selCompound, error) {
 		return p.parseConflictElement(name)
 	case "ref":
 		return comp, fmt.Errorf("the reference elements are named by DIRECTION: ::in (who points here) and ::out (what this points at) — e.g. ::out.call, ::in.type")
+	case "rows":
+		// The ::rows marker is not an element of its own: appendRefElem
+		// attaches it to the ref element it follows. The class is never
+		// read, so it carries none.
+		comp.rows = true
+		return comp, nil
 	default:
 		return comp, fmt.Errorf("unknown pseudo-element ::%s — ::in / ::out (edges), ::grep('pattern') (matched lines), ::comment (doc block), ::signature / ::body (a callable's decl head / body) exist", name)
 	}
@@ -3232,7 +3278,8 @@ TASK → QUERY
   what is in a file           path=store.go func   (bare attr: no quotes, even with / in it)
   who calls X, only in a file #'X'::in.call > *[path=main.go]  (bracket to FILTER an element)
                               #'store.go' func     (the id form; pins the file node itself)
-  who calls X                 #'store.go#Save'::in.call          rows carry from: + a file@line site
+  who calls X                 #'store.go#Save'::in.call          lands on the callers (far nodes)
+  the call-sites of X         #'store.go#Save'::in.call::rows    edge rows: site, from:, to:
   what does X call            #'store.go#Save'::out.call > *
   everything that reaches X   #'X'::in.call{1,} > *
   is X used at all            #'X'::in             (0 matches = unused)
@@ -3293,6 +3340,10 @@ SPEC
          symbol — #'S'::in.return.type > * :parents(func). Attached to the INNERMOST enclosing
          symbol: X::out = X's own, X ::out = nested symbols' too. {m,n} = edges crossed, {1,} =
          transitive. * NEVER matches an edge. Address = site ("file@line").
+         LANDING: a selector whose LAST step is a bare ref (no > * after it) lands on the
+         FAR NODES by default — the answer is the symbols the edge points at. ::rows on that
+         ref element is the opt-out: #'S'::in.type::rows returns the EDGE rows (site, from:,
+         to:) and the text output says so in one line. ::rows takes nothing after it.
   ::grep('flags pattern')  matched lines as nodes. -i -w -E -F -v -A<n> -B<n> -C<n>; literal
          unless -E. :contains('…') is the boolean form over the node's BODY.
   ::comment  the doc block above a decl, contiguous lines joined, a GENERATED node (invisible
@@ -3493,7 +3544,9 @@ func (e *engine) evaluate(list selectorList) []*treeNode {
 // group. This is the shape that lands on far nodes by default — the
 // answer is the nodes the edge points AT, not the edge rows. An explicit
 // `> *` after the edge makes the non-ref compound the last element, so
-// this is false and the far-node rows are already in the result.
+// this is false and the far-node rows are already in the result. `::rows`
+// on the element is the opt-out: the edge rows themselves (site, from:,
+// to:) are the answer, so landing is suppressed.
 func lastIsBareEdge(list selectorList) bool {
 	if len(list) == 0 {
 		return false
@@ -3507,7 +3560,7 @@ func lastIsBareEdge(list selectorList) bool {
 		return false
 	}
 	c := el.comp
-	return c.isRef && len(c.attrs) == 0 && c.ordSel == 0 &&
+	return c.isRef && !c.rows && len(c.attrs) == 0 && c.ordSel == 0 &&
 		len(c.pseudos) == 0 && len(c.positionClaims) == 0
 }
 

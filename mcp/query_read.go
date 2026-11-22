@@ -540,6 +540,32 @@ func fullClause(c *selCompound) string {
 // information are not worth a reader's attention: a bare `func` explains
 // itself, so a single-row reading collapses to one line and a selector with
 // real structure gets the full table.
+// edgeRowsHint is the one-line note for a text answer whose last step is a
+// ref element marked `::rows`: the rows shown are the EDGES (site, from:,
+// to:), and the default form — the same selector without `::rows`, or the
+// explicit `> *` — lands on the far nodes. The hint names that form so a
+// reader of the edge rows learns the far-node idiom from the output itself.
+// A selector that ends in the ref WITHOUT `::rows` already lands on far
+// nodes, so there is nothing to name.
+func edgeRowsHint(list selectorList) string {
+	if len(list) == 0 {
+		return ""
+	}
+	cx := &list[len(list)-1]
+	if len(cx.elems) == 0 {
+		return ""
+	}
+	el := &cx.elems[len(cx.elems)-1]
+	if el.group != nil || el.comp == nil {
+		return ""
+	}
+	c := el.comp
+	if !c.isRef || !c.rows {
+		return ""
+	}
+	return "these rows are the EDGES (site, from:/to:); drop ::rows (or use > *) to land on the far nodes"
+}
+
 func renderReading(w io.Writer, list selectorList) error {
 	rows := describeSelector(list)
 	if len(rows) == 0 {

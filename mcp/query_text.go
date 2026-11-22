@@ -133,6 +133,15 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 	if err := renderQueryTree(w, paged, total, offset, end, e.workExceeded, e.timedOut, trace, showConf); err != nil {
 		return err
 	}
+	// A ref element marked with ::rows answered with the EDGE rows (the
+	// caller chose the opt-out), so name the default far-node form in one
+	// line: the reader learns the idiom from the output itself, and a model
+	// reading these rows as "the nodes matching" knows how to get the nodes.
+	if h := edgeRowsHint(list); h != "" {
+		if _, err := fmt.Fprintf(w, "\n%s\n", h); err != nil {
+			return err
+		}
+	}
 	// The same hint the MCP path attaches as `hint`, rendered for a human.
 	//
 	// It was JSON-only, so `poly-lsp-mcp query` answered a zero-result selector

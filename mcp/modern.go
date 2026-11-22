@@ -76,7 +76,7 @@ const modernNodeQueryDescription = `EXAMPLE: mcp/tools.go -> #'mcp/tools.go#Fn' 
 CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements. Files are nodes; no separate filesystem API.
 TAGS are a FIXED set: project dir file func method type struct interface class const var field enum ctor module import argument, *. Workspace NAMES are NEVER tags, always #ids: #cache, #'store.go#Save' (quote with '). Language as class: file.go. space=descendant >=child ,=union — space is ALWAYS a node boundary. FILTER by bracketing ONTO an element: func[path=a.go] ≠ func path=a.go (things inside a func). In [] | is OR and & AND over whole TESTS — but ONLY before another test: [name=a|name=b] is boolean, [name~=a|b] is one regex.
 GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive.
-::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E); no ctx by default (hit=the line), -A/-B/-C adds it; result carries a per-file rollup.
+::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E); no ctx by default (hit=the line), -A/-B/-C adds it; per-file rollup; -c = counts.
 FOOTGUNS: * NEVER matches ::edges or ::grep lines — name them or they're invisible. {m,n} elsewhere is regex REPETITION child-joined, NOT depth: func{2} = func>func; within-3-levels = "> *{0,2} > x". :not/:is(sel) test the node ITSELF; :where/:any/:all/:empty(sel) test AROUND it (leading tag = a descendant, leading ::/pseudo = the node; bare :any/:all/:empty judge their position). :parents(sel) = ALL upstream (ancestors + incoming refs) — broader than callers. Edge/::grep addresses are file@line: node_read/node_edit hit that exact line.
 RECIPES: START at a name/string: ::grep('needle'), method[name=x] — NOT :root > * (dir listing). #'main'::out.call > * callees | func:not([name^=Test]):empty(::in) dead code | import#huma::in.call::grep('-E (Get|Post)\(') endpoints.`
 
@@ -397,7 +397,18 @@ func handleModernNodeQuery(s *Server, sess sessionID, args json.RawMessage) ([]C
 	// ::grep recon: a per-file count over ALL matches (not just the page),
 	// so a truncated result still shows WHERE the term concentrates —
 	// which files to narrow into next. Cheap: one int per file, no text.
-	if rollup := fragmentRollup(rows); len(rollup) > 0 {
+	// -c carries the count on the engine, not on rows: there are no
+	// fragment rows to count, so the rollup IS the answer.
+	rollup := fragmentRollup(rows)
+	if len(e.countRollup) > 0 {
+		if rollup == nil {
+			rollup = map[string]int{}
+		}
+		for f, n := range e.countRollup {
+			rollup[f] += n
+		}
+	}
+	if len(rollup) > 0 {
 		payload["rollup"] = rollup
 	}
 	// Dead ends, rolled up: what this query did not search and why, so a

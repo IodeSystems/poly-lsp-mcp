@@ -416,6 +416,15 @@ type engine struct {
 	// semantics need identity).
 	fragCache map[*treeNode]map[string][]*treeNode
 
+	// countRollup: a ::grep('-c …') mints no line rows; the per-file
+	// match counts ARE the answer, accumulated here as hosts are walked.
+	countRollup map[string]int
+	// countedFrag: the (file, line) sites already counted for one -c
+	// compound — the bare ::grep('x') hosts NEST (file ⊃ type ⊃ method all
+	// contain the same lines), and without this the same line would be
+	// counted once per host.
+	countedFrag map[string]map[string]bool
+
 	// commentCache: the generated ::comment node per host (see commentOf).
 	commentCache map[*treeNode]*treeNode
 
@@ -1893,6 +1902,9 @@ func parseFragmentSpec(text string) (*grepSpec, error) {
 				continue
 			}
 			switch c {
+			case 'c':
+				// Counts only: the rollup IS the answer, so no line rows.
+				g.countOnly = true
 			case 'A', 'B', 'C':
 				num := bs[bi+1:]
 				bi = len(bs)
@@ -3345,7 +3357,8 @@ SPEC
          ref element is the opt-out: #'S'::in.type::rows returns the EDGE rows (site, from:,
          to:) and the text output says so in one line. ::rows takes nothing after it.
   ::grep('flags pattern')  matched lines as nodes. -i -w -E -F -v -A<n> -B<n> -C<n>; literal
-         unless -E. :contains('…') is the boolean form over the node's BODY.
+         unless -E. -c = counts only: no line rows, the per-file rollup IS the answer.
+         :contains('…') is the boolean form over the node's BODY (no -c, no context).
   ::comment  the doc block above a decl, contiguous lines joined, a GENERATED node (invisible
          to *). func:any(::comment) = documented; func:not(:any(::comment)) = undocumented;
          ::comment:contains('TODO'). Address = file@line.
@@ -4746,6 +4759,9 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 	if relaxed {
 		key = "\x00every-line"
 	}
+	if comp.fragSpec.countOnly {
+		key = "\x00c" + key // counts-only mints nothing: don't share the row cache
+	}
 	if e.fragCache == nil {
 		e.fragCache = map[*treeNode]map[string][]*treeNode{}
 	}
@@ -4764,6 +4780,39 @@ func (e *engine) fragmentsOf(h *treeNode, comp *selCompound, relaxed bool) []*tr
 		return frags // project/dir (and other sourceless) hosts have no lines
 	}
 	g := comp.fragSpec
+	if g.countOnly {
+		// -c: the per-file count is the answer, so mint NO line rows —
+		// just count what would have matched and hand it to the rollup.
+		// Each (file, line) is counted ONCE: the bare ::grep('x') hosts nest
+		// (file ⊃ type ⊃ method all contain the same lines), and dedup
+		// cannot collapse what was never minted.
+		if e.countedFrag == nil {
+			e.countedFrag = map[string]map[string]bool{}
+		}
+		seen := e.countedFrag[comp.fragRaw]
+		if seen == nil {
+			seen = map[string]bool{}
+			e.countedFrag[comp.fragRaw] = seen
+		}
+		for i := range lines {
+			if !e.spend(1) {
+				break
+			}
+			if relaxed || !g.matchLine(lines[i]) {
+				continue
+			}
+			site := fmt.Sprintf("%s@%d", h.file, startLine+i)
+			if seen[site] {
+				continue
+			}
+			seen[site] = true
+			if e.countRollup == nil {
+				e.countRollup = map[string]int{}
+			}
+			e.countRollup[h.file]++
+		}
+		return frags
+	}
 	for i, l := range lines {
 		if !e.spend(1) {
 			break
@@ -6288,6 +6337,7 @@ type grepSpec struct {
 	word          bool // -w
 	invert        bool // -v
 	before, after int  // -B / -A / -C (0 = no context, the default)
+	countOnly         bool // -c: per-file match counts, no line rows
 
 	re *regexp.Regexp
 }
@@ -6352,9 +6402,9 @@ func unsupportedFlagErr(c byte) error {
 	// reading first rather than listing flags at someone who wanted none.
 	if c == '-' {
 		return fmt.Errorf("%s", "a pattern beginning with `-` is read as flags — end the flags with `--` first, "+
-			"as in ::grep('-E -- --docker'). Supported flags: -i -w -E -F -v -n -r, and -A<n>/-B<n>/-C<n> in ::grep")
+			"as in ::grep('-E -- --docker'). Supported flags: -i -w -E -F -v -n -r -c, and -A<n>/-B<n>/-C<n> in ::grep")
 	}
-	return fmt.Errorf("unsupported flag %q — supported: -i -w -E -F -v -n -r, and -A<n>/-B<n>/-C<n> in ::grep. "+
+	return fmt.Errorf("unsupported flag %q — supported: -i -w -E -F -v -n -r -c, and -A<n>/-B<n>/-C<n> in ::grep. "+
 		"The selector scopes the search, so file arguments are never accepted. "+
 		"To search for a pattern that BEGINS with a dash, end the flags with `--` first", "-"+string(c))
 }
@@ -6445,6 +6495,8 @@ func parseContainsSpec(text string) (*grepSpec, error) {
 				continue
 			}
 			switch c {
+			case 'c':
+				return nil, fmt.Errorf(":contains: -c doesn't apply — :contains is a yes/no predicate; use ::grep('-c …') for per-file match counts")
 			case 'A', 'B', 'C':
 				return nil, fmt.Errorf(":contains: -%c doesn't apply — :contains is a yes/no predicate. Use node_query's grep field for context lines", c)
 			default:

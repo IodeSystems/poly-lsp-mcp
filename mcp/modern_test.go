@@ -456,6 +456,46 @@ func TestModernQueryGrepDefaultNoContextHasRollup(t *testing.T) {
 	}
 }
 
+// ::grep('-c …') — the per-file ROLLUP is the answer: one query, no
+// fragment rows, and the counts summed across the whole set (the nested
+// hosts that would double-mint a line are counted once per line).
+func TestModernQueryGrepCountOnlyIsPerFileRollupNoRows(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		abs := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module x\ngo 1.26\n")
+	write("a.go", "package x\n\nfunc A() {\n\tNEEDLE one\n\tNEEDLE two\n}\n\nfunc B() {\n\tNEEDLE three\n}\n")
+	write("b.go", "package x\n\nfunc C() {\n\tNEEDLE four\n}\n")
+
+	s := startSessionFull(t, dir, nil, nil)
+	s.request("initialize", map[string]any{})
+	s.notify("notifications/initialized", map[string]any{})
+	defer s.close()
+
+	q := query(t, s, map[string]any{"selector": `::grep('-c NEEDLE')`})
+	if q.TotalMatches != 0 {
+		t.Fatalf("-c must return NO per-line rows; got %d (%v)", q.TotalMatches, nodes(q))
+	}
+	for _, m := range q.Matches {
+		if m.Class == "::grep" {
+			t.Errorf("a fragment row leaked through -c: %+v", m)
+		}
+	}
+	if q.Rollup["a.go"] != 3 {
+		t.Errorf("rollup[a.go] should be 3 (each line counted once, hosts nest); got %v", q.Rollup)
+	}
+	if q.Rollup["b.go"] != 1 {
+		t.Errorf("rollup[b.go] should be 1; got %v", q.Rollup)
+	}
+}
+
 // A ::grep hit on a pathologically long line (a generated bundle a file
 // node can still point at) must come back ELIDED around the match, not as
 // a multi-KB fragment that blows the token budget.

@@ -341,6 +341,9 @@ func grepMeaning(g *grepSpec) string {
 	if g.invert {
 		s = "does NOT " + strings.TrimPrefix(s, "")
 	}
+	if g.countOnly {
+		s += " — -c: per-file match counts only, no line rows"
+	}
 	if len(mods) > 0 {
 		s += " (" + strings.Join(mods, ", ") + ")"
 	}

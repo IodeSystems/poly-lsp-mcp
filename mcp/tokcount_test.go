@@ -116,7 +116,12 @@ import (
 // Shape B (folded: reuse `node` as anchor + one enum field) measured 32
 // tokens; the old "newText alone … never inserts one" line shrank to make
 // room. Fifth raise; same standing candidate (params/return, i_1m5r2tw1g34cjn13c7neek).
-const modernTokenBudget = 1270
+// 1270 → 1320: the `&` intersection operator — the CANONICAL "A AND B" form,
+// named in the card (measured 41 tokens after compacting the example) and in
+// the `?` reference. It is the one form the reference was missing that a model
+// reaching for "A AND B" has to spell out by hand; naming it in the card is
+// what makes it discoverable at all. Sixth raise; same standing candidate.
+const modernTokenBudget = 1320
 
 // TestModernToolSurfaceTokenBudget reports the per-tool cost and guards
 // the total.

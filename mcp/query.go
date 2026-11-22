@@ -1293,6 +1293,13 @@ type selComplex struct {
 	// --json); a match missing a field leaves it empty.
 	fields    []string
 	hasFields bool
+
+	// and is the right operand of a top-level `&` intersection:
+	// `#'Store'::in.type & #run::out.call` evaluates each side to its
+	// far-node set and returns the nodes in BOTH. Only one `&` is
+	// allowed per top-level complex (chain: A & B & C is A & (B & C));
+	// a nil value means no intersection.
+	and *selComplex
 }
 
 // subjectComp returns the complex's subject compound (a group's subject
@@ -1490,6 +1497,29 @@ func (p *modSelParser) parseList() (selectorList, error) {
 		if err := validateGlobalComplex(&cx); err != nil {
 			return nil, err
 		}
+		// & intersection: A & B [& C ...] chains right (A & B & C = A & (B & C)).
+		// Only legal at top level — the right operand is a complete complex,
+		// so a leading `&` (self-ref) is unambiguously NOT an intersection.
+		for {
+			p.skipWS()
+			if p.peek() != '&' {
+				break
+			}
+			p.i++
+			p.skipWS()
+			right, err := p.parseComplex()
+			if err != nil {
+				return nil, fmt.Errorf("after '&': %v", err)
+			}
+			if err := validateGlobalComplex(&right); err != nil {
+				return nil, err
+			}
+			target := &cx
+			for target.and != nil {
+				target = target.and
+			}
+			target.and = &right
+		}
 		list = append(list, cx)
 		p.skipWS()
 		if p.peek() == ',' {
@@ -1536,7 +1566,7 @@ func (p *modSelParser) parseComplex() (selComplex, error) {
 		} else {
 			sawWS := p.skipWS()
 			c := p.peek()
-			if p.eof() || c == ',' || c == ')' {
+			if p.eof() || c == ',' || c == ')' || c == '&' {
 				return cx, nil
 			}
 			if c == '>' {
@@ -3356,6 +3386,13 @@ SPEC
          FAR NODES by default — the answer is the symbols the edge points at. ::rows on that
          ref element is the opt-out: #'S'::in.type::rows returns the EDGE rows (site, from:,
          to:) and the text output says so in one line. ::rows takes nothing after it.
+  INTERSECT  A & B — the CANONICAL form for "A AND B": two edge steps from the same node.
+         Each side lands on its far nodes independently; the answer is the nodes in BOTH.
+         #'Store'::in.type & #run::out.call = nodes the type-edges point at (use Store) AND
+         the call-edges point at (called by run): a node that uses Store AND is called by
+         run, once. A node with only one of the two edges is absent. Top level only, one
+         & (A & B & C chains right = A & (B & C)); a leading & inside a clause is a
+         self-ref, not an intersection.
   ::grep('flags pattern')  matched lines as nodes. -i -w -E -F -v -A<n> -B<n> -C<n>; literal
          unless -E. -c = counts only: no line rows, the per-file rollup IS the answer.
          :contains('…') is the boolean form over the node's BODY (no -c, no context).
@@ -3564,7 +3601,28 @@ func lastIsBareEdge(list selectorList) bool {
 	if len(list) == 0 {
 		return false
 	}
-	cx := &list[len(list)-1]
+	return lastIsBareEdgeComplex(&list[len(list)-1])
+}
+
+// lastIsBareEdgeComplex is lastIsBareEdge for one complex: it ends with a
+// bare ref element (`::in` / `::out` with no id/attr/pseudo, min=max=1,
+// no group) — the shape that lands on far nodes by default. An
+// intersection complex (`&`) lands inside evalComplex, so it is not
+// bare-edge at this level.
+func lastIsBareEdgeComplex(cx *selComplex) bool {
+	if cx.and != nil {
+		return false
+	}
+	return bareEdgeLastElement(cx)
+}
+
+// bareEdgeLastElement is the element-shape half of lastIsBareEdgeComplex:
+// the complex's LAST element is a bare ref (`::in`/`::out`, no id/attr/
+// pseudo, min=max=1, no group). It deliberately ignores cx.and, so an
+// intersection side can be tested for landing on its own — the left
+// operand of `&` IS bare-edge when its last element is, even though the
+// whole complex is not bare-edge at the top level.
+func bareEdgeLastElement(cx *selComplex) bool {
 	if len(cx.elems) == 0 {
 		return false
 	}
@@ -3700,6 +3758,9 @@ func cappableList(list selectorList) bool {
 	cx := list[0]
 	if cx.rel != relTop || len(cx.elems) != 1 {
 		return false
+	}
+	if cx.and != nil {
+		return false // an intersection composes two sets; no single walk
 	}
 	el := cx.elems[0]
 	if el.group != nil || el.comp == nil {
@@ -4223,8 +4284,9 @@ func (e *engine) evalComplex(cx selComplex, anchor *treeNode, relaxSubject bool)
 	// Cardinality-order a pure-descendant chain: seed from the rarer end
 	// when the est says it clearly wins. Never in the relaxed (∀-domain)
 	// pass — that one is compared against the strict pass and must walk
-	// the same shape.
-	if !relaxSubject {
+	// the same shape. Not for an intersection: planReorder returns only
+	// the left side, which would drop the `&` operand.
+	if !relaxSubject && cx.and == nil {
 		if out, ok := e.planReorder(cx); ok {
 			return out
 		}
@@ -4257,6 +4319,34 @@ func (e *engine) evalComplex(cx selComplex, anchor *treeNode, relaxSubject bool)
 			}
 		}
 		return map[*treeNode]bool{anchor: true}
+	}
+	// & intersection: evaluate the left side (this complex's elems, already
+	// in `tips`), land bare edges, evaluate the right side (cx.and), land
+	// its bare edges, and return the set intersection. Each side lands on
+	// far nodes independently — `#'Store'::in.type & #run::out.call` means
+	// "nodes the type-edges point at" ∩ "nodes the call-edges point at".
+	if cx.and != nil {
+		left := tips
+		// The left side lands on its far nodes on its own: the complex
+		// carries `&` so lastIsBareEdgeComplex is false for it, but its
+		// last ELEMENT is the bare edge.
+		if bareEdgeLastElement(&cx) {
+			left = e.landBareEdge(left)
+		}
+		right := e.evalComplex(*cx.and, anchor, relaxSubject)
+		if right == nil {
+			return nil
+		}
+		if lastIsBareEdgeComplex(cx.and) {
+			right = e.landBareEdge(right)
+		}
+		out := map[*treeNode]bool{}
+		for n := range left {
+			if right[n] {
+				out[n] = true
+			}
+		}
+		return out
 	}
 	return tips
 }

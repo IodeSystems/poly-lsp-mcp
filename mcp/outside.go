@@ -333,7 +333,7 @@ func (s *Server) resolveModernNodeAs(sess sessionID, node string) (*modernNode, 
 	if file, ok := s.outsideFilePart(node); ok {
 		return s.resolveOutsideNode(sess, node, file)
 	}
-	return s.resolveModernNode(node)
+	return s.resolveModernNode(sess, node)
 }
 
 // resolveOutsideNode resolves <abs>, <abs>#<sym> or <abs>@<line>[-<end>]

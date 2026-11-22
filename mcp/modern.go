@@ -695,7 +695,10 @@ func looksLikeSelector(s string) bool {
 	return false
 }
 
-// resolveModernNode resolves node_read / node_edit's `node` field.
+// resolveModernNode resolves node_read / node_edit's `node` field for a
+// tool call of session sess: a selector settles with the client's LSP
+// switch (the engine is forSession'd after the tree build, exactly as
+// node_query does), not the daemon's defaults.
 //
 // Two accepted forms, and NEVER a silent guess between them:
 //
@@ -713,7 +716,7 @@ func looksLikeSelector(s string) bool {
 // address at a DIFFERENT symbol after an unrelated edit. Ordinals stay
 // a last-resort disambiguator on the OUTPUT side; the INPUT side never
 // guesses.
-func (s *Server) resolveModernNode(node string) (*modernNode, error) {
+func (s *Server) resolveModernNode(sess sessionID, node string) (*modernNode, error) {
 	node = strings.TrimSpace(node)
 	if node == "" {
 		return nil, errors.New("node is required")
@@ -764,6 +767,7 @@ func (s *Server) resolveModernNode(node string) (*modernNode, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.forSession(sess)
 	matches := e.evaluate(list)
 	switch len(matches) {
 	case 0:
@@ -1410,7 +1414,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 		b.count++
 	}
 
-	rn, err := s.resolveModernNode(p.Node)
+	rn, err := s.resolveModernNode(sess, p.Node)
 	if err != nil {
 		return nil, true, err
 	}

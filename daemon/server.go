@@ -209,7 +209,13 @@ func fileSymbolFrom(s symbols.Symbol) FileSymbol {
 }
 
 type queryIn struct {
-	Body struct {
+	// Session is the client's X-Poly-Session header. When non-empty, the
+	// answer is settled with that session's child-LSP switch (lsp_off /
+	// lsp_on, stored under the session id by SetSessionLSP from /open);
+	// empty answers with the daemon's defaults — the pre-session-thread
+	// behaviour, and what a client that sent no header gets.
+	Session string `header:"X-Poly-Session"`
+	Body    struct {
 		Root     string   `json:"root"`
 		Selector string   `json:"selector"`
 		Limit    int      `json:"limit"`
@@ -527,10 +533,14 @@ func (h *host) handler() (http.Handler, error) {
 			}
 			var buf bytes.Buffer
 			var qerr error
+			// A session that sent X-Poly-Session answers with its own
+			// child-LSP switch; one that did not (and the no-switch
+			// default) answers exactly as before, with the daemon's
+			// defaults.
 			if in.Body.JSON {
-				qerr = srv.QueryJSON(in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf, in.Body.Include...)
+				qerr = srv.QueryJSONAs(in.Session, in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf, in.Body.Include...)
 			} else {
-				qerr = srv.QueryText(in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf, in.Body.Include...)
+				qerr = srv.QueryTextAs(in.Session, in.Body.Selector, in.Body.Limit, in.Body.Offset, in.Body.Budget, &buf, in.Body.Include...)
 			}
 			if qerr != nil {
 				// A selector error is the answer to what was asked: a

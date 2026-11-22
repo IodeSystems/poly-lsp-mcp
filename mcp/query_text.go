@@ -48,7 +48,23 @@ type SelectorError struct{ Err error }
 func (e *SelectorError) Error() string { return e.Err.Error() }
 func (e *SelectorError) Unwrap() error { return e.Err }
 
+// QueryText is the local (stdio / CLI) view: it answers for the implicit
+// local session. For a daemon session — where the client's LSP switch
+// lives under its X-Poly-Session id, not localSession — use QueryTextAs.
 func (s *Server) QueryText(selector string, limit, offset int, budget string, w io.Writer, include ...string) error {
+	return s.queryText(localSession, selector, limit, offset, budget, w, include...)
+}
+
+// QueryTextAs is QueryText for a daemon session: the answer is settled with
+// the client's own child-LSP switch (lsp_off / lsp_on stored under the
+// session id by SetSessionLSP), not the daemon's defaults. sess is the
+// wire X-Poly-Session header; empty answers for localSession, exactly as
+// QueryText does.
+func (s *Server) QueryTextAs(sess, selector string, limit, offset int, budget string, w io.Writer, include ...string) error {
+	return s.queryText(normSession(sess), selector, limit, offset, budget, w, include...)
+}
+
+func (s *Server) queryText(sess sessionID, selector string, limit, offset int, budget string, w io.Writer, include ...string) error {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		return &SelectorError{errors.New("selector is required (e.g. \":root > *\" for the top-level tour)")}
@@ -80,6 +96,7 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 	if err != nil {
 		return err
 	}
+	e.forSession(sess)
 	if v, unit, ok := parseBudget(budget); ok {
 		e.setBudget(v, unit)
 	}
@@ -160,14 +177,15 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 	// where they were ambiguous and each row states its conf, so the three
 	// no-LSP caveats below would be false. Say what the edges are made of
 	// instead, the line node_query returns under edges.
-	if s.childLSPServes() {
+	if s.childLSPServesFor(sess) {
 		if note := e.precisionNote(); note != "" {
 			_, err := fmt.Fprintf(w, "\nedges: %s\n", note)
 			return err
 		}
 		return nil
 	}
-	// No child LSP served (no --resolve, or none could start), so every
+	// No child LSP served for this session (no --resolve, none could
+	// start, or the client turned every hosted language off), so every
 	// edge it crossed is name-keyed (lexical) — a far end may be a
 	// same-named symbol, not the resolved one. Without this line a
 	// lexical guess reads as a settled fact. Say so whenever an edge was
@@ -194,7 +212,20 @@ func (s *Server) QueryText(selector string, limit, offset int, budget string, w 
 // plus the file it lives in. The document carries total, offset and the
 // stop-early flags as fields; no reading, hint or caveat text is written
 // outside it, so stdout always parses.
+// QueryJSON is the local (stdio / CLI) view of QueryTextAs: it answers for
+// the implicit local session.
 func (s *Server) QueryJSON(selector string, limit, offset int, budget string, w io.Writer, include ...string) error {
+	return s.queryJSON(localSession, selector, limit, offset, budget, w, include...)
+}
+
+// QueryJSONAs is QueryJSON for a daemon session: the JSON document is
+// settled with the client's own child-LSP switch (see QueryTextAs). sess is
+// the wire X-Poly-Session header; empty answers for localSession.
+func (s *Server) QueryJSONAs(sess, selector string, limit, offset int, budget string, w io.Writer, include ...string) error {
+	return s.queryJSON(normSession(sess), selector, limit, offset, budget, w, include...)
+}
+
+func (s *Server) queryJSON(sess sessionID, selector string, limit, offset int, budget string, w io.Writer, include ...string) error {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		return &SelectorError{errors.New("selector is required (e.g. \":root > *\" for the top-level tour)")}
@@ -221,6 +252,7 @@ func (s *Server) QueryJSON(selector string, limit, offset int, budget string, w 
 	if err != nil {
 		return err
 	}
+	e.forSession(sess)
 	if v, unit, ok := parseBudget(budget); ok {
 		e.setBudget(v, unit)
 	}
@@ -328,6 +360,24 @@ func (s *Server) InitResolve(mgr *multiplex.Manager) error {
 // name-keyed.
 func (s *Server) childLSPServes() bool {
 	return s.manager != nil && len(s.manager.Languages()) > 0
+}
+
+// childLSPServesFor is childLSPServes for a specific session: every
+// language the manager holds is off for the session when the session's
+// switch turns them all off (e.g. --lsp-off <name> for the only hosted
+// language). The lexical caveat lines must then apply: an lsp-off
+// client's edges are name-keyed, and precisionNote is not the story.
+func (s *Server) childLSPServesFor(sess sessionID) bool {
+	if !s.childLSPServes() {
+		return false
+	}
+	off := s.lspOff(sess)
+	for _, l := range s.manager.Languages() {
+		if !off[l] {
+			return true
+		}
+	}
+	return false
 }
 
 // maxFarEnds caps how many far ends one ref row spells out before it

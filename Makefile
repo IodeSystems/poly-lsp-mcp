@@ -145,10 +145,14 @@ clean:
 	rm -f $(BINARY)
 	$(GO) clean -testcache
 
-# Quick sanity for a PR: short tests + race + vet. Fast enough to
-# run on every commit.
+# Quick sanity for a PR: short tests + race + vet + the temp-dir leak guard.
+# Fast enough to run on every commit.
 .PHONY: check
-check: vet test test-race
+check: vet test test-race no-leaked-temp-dirs
+
+.PHONY: no-leaked-temp-dirs
+no-leaked-temp-dirs:
+	@bash scripts/check/no-leaked-temp-dirs.sh
 
 .PHONY: help
 help:
@@ -161,7 +165,8 @@ help:
 	@echo "  test-all        - full test suite, no -short"
 	@echo "  test-race       - short suite + race detector (standing gate)"
 	@echo "  test-race-all   - full suite + race detector (pre-release)"
-	@echo "  check           - vet + test + test-race (PR gate)"
+	@echo "  check           - vet + test + test-race + no-leaked-temp-dirs (PR gate)"
+	@echo "  no-leaked-temp-dirs - refuse a run that left a poly-lsp-mcp-* dir in the OS temp dir"
 	@echo "  vet             - go vet"
 	@echo "  fmt             - go fmt"
 	@echo "  smoke-editor    - real-binary LSP conformance smoke"

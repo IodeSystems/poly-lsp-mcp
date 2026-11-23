@@ -116,12 +116,12 @@ func TestContainsSharesMatcherAndFlagVocabulary(t *testing.T) {
 	// Same flag vocabulary: the boolean flags ::grep accepts are accepted
 	// here too — none of them refuse.
 	for _, sel := range []string{
-		`method:contains('-i PRINTLN')`, // -i
-		`method:contains('-w Start')`,   // -w
+		`method:contains('-i PRINTLN')`,     // -i
+		`method:contains('-w Start')`,       // -w
 		`method:contains('-F fmt.Println')`, // -F
-		`method:contains('-v init')`,    // -v
-		`method:contains('-n fmt')`,     // -n
-		`method:contains('-r fmt')`,     // -r
+		`method:contains('-v init')`,        // -v
+		`method:contains('-n fmt')`,         // -n
+		`method:contains('-r fmt')`,         // -r
 	} {
 		if r := s.callTool("node_query", map[string]any{"selector": sel, "limit": 5}); r.IsError {
 			t.Errorf(":contains must accept the grep boolean flags; %s refused: %s", sel, r.Content[0].Text)

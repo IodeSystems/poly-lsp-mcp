@@ -57,12 +57,13 @@ func registerModernTools() map[string]Tool {
 			Description: modernNodeEditDescription,
 			InputSchema: modernNodeEditSchema,
 			Handler:     withEditUsage(handleModernNodeEdit),
-			// commit/rollback are HIDDEN, not missing: the rejection help
-			// reveals them exactly when a multi-stage edit is needed, so they
-			// cost no schema budget on every other turn. includeComments is hidden
-			// too: a rename rewrites comment mentions by default, and the reply
-			// names the override.
-			Undeclared: []string{"commit", "rollback", "includeComments", "diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
+			// rollback is HIDDEN, not missing: the staged-edit help reveals it
+			// exactly when a batch is open. commit is declared: a rejection
+			// that says "retry with commit:false" is unusable for a field the
+			// model has never seen (22 rejections, 19 failed retries, then sed).
+			// includeComments is hidden too: a rename rewrites comment mentions
+			// by default, and the reply names the override.
+			Undeclared: []string{"rollback", "includeComments", "diagnosticLimit", "referenceLimit", "contextLines", "validate", "siblingDiagnostics"},
 		},
 	}
 }
@@ -73,7 +74,7 @@ func registerModernTools() map[string]Tool {
 // information. Keep them dense.
 
 const modernNodeQueryDescription = `EXAMPLE: mcp/tools.go -> #'mcp/tools.go#Fn' (or mcp/tools.go:Fn) -> #'mcp/tools.go#Fn'::in.call
-CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements. Files are nodes; no separate filesystem API.
+CSS-inspired selector language over ONE tree — DAG: project > dir > file > symbols (dotted) > argument — plus the reference GRAPH as pseudo-elements.
 TAGS are a FIXED set: project dir file func method type struct interface class const var field enum ctor module import argument, *. Workspace NAMES are NEVER tags, always #ids: #cache, #'store.go#Save' (quote with '). Language as class: file.go. space=descendant >=child ,=union — space is ALWAYS a node boundary. FILTER by bracketing ONTO an element: func[path=a.go] ≠ func path=a.go (things inside a func). In [] | is OR and & AND over whole TESTS — but ONLY before another test: [name=a|name=b] is boolean, [name~=a|b] is one regex.
 GRAPH: X::in who points at X / X::out what X's body points at; kind class .call/.type/.import. The far end is the edge's CHILD — cross with >. X::out = X's own edges, X ::out = nested symbols' too. {m,n} on an edge = edges crossed, {1,} = transitive. A & B = the CANONICAL "A AND B": two edge steps from the same node, each landing on its far nodes — answer = the nodes in BOTH (e.g. #'Store'::in.type & #run::out.call).
 ::grep('flags pattern') = matched LINES as nodes (-i -w -E -F -v -A/-B/-C<n>; literal unless -E); no ctx by default (hit=the line), -A/-B/-C adds it; per-file rollup; -c = counts.
@@ -88,8 +89,8 @@ var modernNodeQuerySchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"include":{"type":"array","items":{"type":"string"},"description":"override excluded path patterns"}},` +
 	`"required":["selector"]}`)
 
-const modernNodeReadDescription = `Read a node whole. node = an address from node_query's matches[].node ("<file>#<sym>" or "<file>"), or a selector matching exactly one node (2+ errors and lists candidates).
-An addressed symbol is NEVER truncated: you get the complete declaration, byte-for-byte the span node_edit's newText replaces.
+const modernNodeReadDescription = `Read a node whole. node = an address from node_query's matches[].node ("<file>#<sym>" or "<file>"), or a selector matching exactly one node.
+An addressed symbol is NEVER truncated: byte-for-byte the span node_edit's newText replaces.
 startLine/lineLimit on ANY address read a file WINDOW anchored there — not the text oldText matches; it says so.`
 
 var modernNodeReadSchema = json.RawMessage(`{"type":"object","properties":{` +
@@ -118,6 +119,7 @@ var modernNodeEditSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"properties":{"name":{"type":"string"},"type":{"type":"string"}},"required":["name","type"]}},` +
 	`"return":{"type":"string"},` +
 	`"delete":{"type":"boolean"},` +
+	`"commit":{"type":"boolean","description":"false stages the edit unvalidated; the next edit without it validates+commits the batch"},` +
 	`"accept":{"type":"string","enum":["mine","theirs"]},` +
 	`"insert":{"type":"string","enum":["after","before"]}},` +
 	`"required":["node"]}`)
@@ -1190,9 +1192,8 @@ type modernEditArgs struct {
 	// Pairs with newText (which carries the new declaration only).
 	Insert *string `json:"insert,omitempty"`
 
-	// commit / rollback drive the staged-edit transaction. HIDDEN — kept
-	// out of the schema on purpose; the rejection help reveals them when a
-	// multi-stage edit is actually needed. commit:false stages (unvalidated);
+	// commit / rollback drive the staged-edit transaction. commit is in the
+	// schema; rollback is HIDDEN, revealed by the staged-edit help. commit:false stages (unvalidated);
 	// the first edit without it commits the batch atomically; rollback:true
 	// discards the batch. commit defaults to true.
 	Commit   *bool `json:"commit,omitempty"`

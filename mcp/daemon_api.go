@@ -167,6 +167,7 @@ func (s *Server) CallTool(sess, name string, args json.RawMessage, opts CallOpti
 	}
 	s.setSessionWait(normSession(sess), opts.ValidateWait)
 	s.setSessionPathPolicy(normSession(sess), opts.AllowPaths, opts.ExcludePaths)
+	s.noteToolCall(normSession(sess))
 	return tool.Handler(s, normSession(sess), args)
 }
 

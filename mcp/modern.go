@@ -1319,6 +1319,7 @@ func handleModernNodeEdit(s *Server, sess sessionID, args json.RawMessage) ([]Co
 	s.activeSession = sess
 	defer func() { s.activeSession = localSession }()
 	commit := p.Commit == nil || *p.Commit
+	p.landIncomplete = true // the modern surface lands half-finished edits; see landIncompleteEdit
 
 	if p.Rollback {
 		b := s.currentBatch()

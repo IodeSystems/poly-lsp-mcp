@@ -175,6 +175,12 @@ type diagnosticOptions struct {
 	// edit that closes an open commit:false batch — stage it, then validate
 	// and commit the union. See editBatch.
 	commitBatch bool
+
+	// landIncomplete is set INTERNALLY by the modern node_edit handler (not
+	// JSON): an edit whose new errors are ALL the incomplete class (see
+	// incompleteEditErrorCodes) lands with those errors listed instead of
+	// being rejected. The legacy surface leaves it false and still rejects.
+	landIncomplete bool
 }
 
 const (

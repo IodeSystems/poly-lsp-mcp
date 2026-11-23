@@ -260,6 +260,10 @@ type Server struct {
 	// lsp_off.go.
 	sessionLSP map[sessionID]LSPPrefs
 
+	// sessionHints: per-session tool-call count and when the staging hint
+	// was last shown, under sessionWaitsMu. See stagingHintDue.
+	sessionHints map[sessionID]*hintState
+
 	// proactiveOpen controls whether handleInitialize, after spawning
 	// the manager, walks the workspace and sends didOpen for every
 	// file with a child LSP. This is how the poly-lsp-mcp://diagnostics
@@ -1097,6 +1101,7 @@ func (s *Server) handleToolsCall(req *jsonrpc.Message) {
 		})
 		return
 	}
+	s.noteToolCall(localSession)
 	content, isError, err := tool.Handler(s, localSession, p.Arguments)
 	if err != nil {
 		content = []Content{{Type: "text", Text: err.Error()}}

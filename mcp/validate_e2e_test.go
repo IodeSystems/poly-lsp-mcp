@@ -149,7 +149,11 @@ func goplsValidateSession(t *testing.T, orig string) (*mcpSession, string) {
 func TestNodeEditValidateRepeatBrokenEdit(t *testing.T) {
 	orig := "package main\n\nfunc main() {\n\tx := 1\n\t_ = x\n}\n"
 	sess, mainPath := goplsValidateSession(t, orig)
-	broken := "package main\n\nfunc main() {\n\tdoesNotExist()\n}\n"
+	// A TYPE error, not an undefined name: undefined names are the incomplete
+	// class, which the modern node_edit now lands instead of reverting (see
+	// TestIncompleteEditLandsWithErrorsAndOnceHint). This test is about the
+	// revert baseline, so it needs an error that still reverts.
+	broken := "package main\n\nfunc main() {\n\tvar s string = 1\n\t_ = s\n}\n"
 	for i := 0; i < 5; i++ {
 		m := editMain(t, sess, mainPath, broken)
 		if m["rejected"] != true || m["reverted"] != true {

@@ -821,6 +821,38 @@ ships no `tsserver.js`, so typescript-language-server cannot run it.
   it returns from that handler early (skipping the rest of its setup), so
   the registration is accepted and nothing is ever sent for it.
 
+## node_edit lands incomplete edits
+
+The validation gate used to reject any edit that added an error, including
+the "incomplete" class (`incompleteEditErrorCodes`: UndeclaredName,
+UnusedVar, UnusedImport, MissingFieldOrMethod): a declaration with no use
+yet, or a use whose declaration comes in the next edit. Real logs: 22
+rejections of this class; the rejection said "retry with commit:false",
+but `commit` was not in the schema, so 19 retries later the model fell
+back to sed.
+
+Decision (modern `node_edit` only; the legacy surface still rejects):
+
+- `commit` is now declared in the schema, so the recovery is usable.
+- When every new error is the incomplete class, the edit LANDS (applied,
+  kept) instead of being reverted. The result is `validated:false`,
+  `incomplete:true`, with `newErrors` as `file:line: code: message` and an
+  `action` saying to fix the counterpart next. Any other new error still
+  rejects and reverts.
+- The result carries a one-line staging tip (`commit:false` stages edits,
+  the final call without it validates them together). It shows once per MCP
+  session, and again only after 50 further tool calls in that session, so a
+  context compacted away in a long session sees it again. The call counter
+  is per session and counts every tool call (stdio and daemon dispatch);
+  state lives in `Server.sessionHints` (session.go) and is dropped on
+  disconnect.
+- A staged batch (`commit:false`, then a final call) is unchanged: the
+  union is validated at commit and rejected as before.
+
+Trade-off: a landed edit leaves the tree in an error state between calls.
+That is the same state a staged batch leaves, and the errors are listed in
+the reply instead of hidden behind a rejection.
+
 ## Dev-rung attestation (main@bf17c8b28)
 
 Measured against the declarations on current main. "HOLDS" means the

@@ -88,6 +88,7 @@ func (s *Server) RollbackSession(sess string) (discarded int, ok bool) {
 	delete(s.sessionWaits, sid)
 	delete(s.sessionPaths, sid)
 	delete(s.sessionLSP, sid)
+	delete(s.sessionHints, sid)
 	s.sessionWaitsMu.Unlock()
 	b := s.batches[sid]
 	if b == nil {
@@ -108,4 +109,51 @@ func (s *Server) OpenBatches() int {
 	s.editMu.Lock()
 	defer s.editMu.Unlock()
 	return len(s.batches)
+}
+
+// stagingHintRepeat is how many tool calls must pass before a session sees the
+// staging hint again: a long session's context may have been compacted away.
+const stagingHintRepeat = 50
+
+// hintState is one session's tool-call count and the count at which the
+// staging hint was last shown (shown=false: never).
+type hintState struct {
+	calls   int
+	shown   bool
+	shownAt int
+}
+
+// hintFor returns sess's hintState, creating it. Assumes sessionWaitsMu held.
+func (s *Server) hintFor(sess sessionID) *hintState {
+	if s.sessionHints == nil {
+		s.sessionHints = map[sessionID]*hintState{}
+	}
+	h := s.sessionHints[sess]
+	if h == nil {
+		h = &hintState{}
+		s.sessionHints[sess] = h
+	}
+	return h
+}
+
+// noteToolCall counts one tool call (any tool) for sess. Called at both
+// dispatch points (stdio and daemon), before the handler runs.
+func (s *Server) noteToolCall(sess sessionID) {
+	s.sessionWaitsMu.Lock()
+	defer s.sessionWaitsMu.Unlock()
+	s.hintFor(sess).calls++
+}
+
+// stagingHintDue reports whether sess should see the staging hint now, and
+// records that it did: true the first time, then only after
+// stagingHintRepeat further tool calls.
+func (s *Server) stagingHintDue(sess sessionID) bool {
+	s.sessionWaitsMu.Lock()
+	defer s.sessionWaitsMu.Unlock()
+	h := s.hintFor(sess)
+	if h.shown && h.calls-h.shownAt < stagingHintRepeat {
+		return false
+	}
+	h.shown, h.shownAt = true, h.calls
+	return true
 }

@@ -38,6 +38,8 @@ type editOutcome struct {
 	RevertErr    string   // revert failure detail
 	NewErrors    []string // the error diagnostics THIS edit added (code∷message)
 	Validated    bool     // proven clean: LSP answered, no new errors
+	Landed       bool     // edit KEPT though it added NewErrors: all incomplete-class (landIncomplete)
+	Hint         string   // staging tip on a Landed edit, set once per session window
 	Skipped      string   // "" | "no-lsp" | "lsp-timeout" | "lsp-unconfirmed" — safety not provable
 	SkipNote     string   // why, in words, when Skipped is lsp-timeout or lsp-unconfirmed
 
@@ -522,6 +524,11 @@ func (s *Server) applyBytesValidated(abs string, orig, out []byte, mode os.FileM
 		return oc, nil
 	}
 
+	// A half-finished edit lands: its errors are the expected state mid-change.
+	if s.landIncompleteEdit(&oc, introduced, opts) {
+		return oc, nil
+	}
+
 	// Introduced errors → roll back.
 	oc.Rejected, oc.NewErrors = true, introduced
 	var rerr error
@@ -677,6 +684,9 @@ func (t *validationTxn) check(diags editDiagnostics) editOutcome {
 			return oc
 		}
 		oc.Validated = true
+		return oc
+	}
+	if t.s.landIncompleteEdit(&oc, introduced, t.opts) {
 		return oc
 	}
 	oc.Rejected, oc.NewErrors = true, introduced
@@ -899,6 +909,7 @@ func (oc editOutcome) attach(p map[string]any) {
 			p["validationNote"] = oc.SkipNote
 		}
 	}
+	oc.attachLanded(p)
 	oc.Format.attach(p, oc.formatOrig, oc.formatCur, oc.Final)
 	if len(oc.LostWrites) > 0 {
 		// `alert` sorts before `diagnostics`, for the reason the rejection's
@@ -935,6 +946,7 @@ func (oc editOutcome) annotate(p map[string]any) {
 			p["validationNote"] = oc.SkipNote
 		}
 	}
+	oc.attachLanded(p)
 	attachFormatFiles(p, oc.FormatFiles)
 }
 
@@ -1006,6 +1018,72 @@ func incompleteEditAction(newErrors []string) string {
 		"not wrong — a declaration with no use yet, or a use whose declaration is still coming. " +
 		"commit:false applies without validating; make the counterpart edits the same way; then one " +
 		"final node_edit WITHOUT commit:false validates and commits the batch atomically."
+}
+
+// landIncompleteEdit keeps an edit instead of rejecting it when the caller
+// opted in (opts.landIncomplete) and every new error is the incomplete class.
+// Rejecting those cost 22 rejected calls and 19 failed retries in real logs:
+// the model had to stage a counterpart it could not yet write. The errors
+// travel in the result (attachLanded) so the next edit can fix the
+// counterpart. Anything else still rejects. Assumes editMu held.
+func (s *Server) landIncompleteEdit(oc *editOutcome, introduced []string, opts diagnosticOptions) bool {
+	if !opts.landIncomplete || incompleteEditAction(introduced) == "" {
+		return false
+	}
+	oc.Landed, oc.NewErrors = true, introduced
+	if s.stagingHintDue(s.activeSession) {
+		oc.Hint = stagingHint
+	}
+	return true
+}
+
+// stagingHint is shown on a landed edit once per session window; see
+// stagingHintDue.
+const stagingHint = "Tip: commit:false stages several edits and validates them together on the final call without it."
+
+// attachLanded writes a landed edit's fields. `action` sorts before
+// `diagnostics`, as on a rejection, so the instruction is read first.
+func (oc editOutcome) attachLanded(p map[string]any) {
+	if !oc.Landed {
+		return
+	}
+	p["validated"] = false
+	p["incomplete"] = true
+	p["newErrors"] = oc.landedErrors()
+	p["action"] = "LANDED, NOT clean: the edit is on disk and added the errors in newErrors, all of the " +
+		"incomplete kind (a declaration with no use yet, or a use whose declaration is missing). " +
+		"Fix the counterpart in your next edit."
+	if oc.Hint != "" {
+		p["tip"] = oc.Hint
+	}
+}
+
+// landedErrors lists the new errors as "file:line: code: message", taking the
+// line from the edit's diagnostics (the fingerprint keys carry none). An
+// error whose diagnostic was dropped by the limit keeps just the file.
+func (oc editOutcome) landedErrors() []string {
+	out := make([]string, 0, len(oc.NewErrors))
+	for _, k := range oc.NewErrors {
+		parts := strings.Split(k, "\x00")
+		if len(parts) != 3 {
+			out = append(out, k)
+			continue
+		}
+		file := strings.TrimPrefix(parts[0], "file://")
+		loc := file
+		for _, d := range oc.Diags.Items {
+			if d.Message == parts[2] && (d.File == file || d.File == parts[0] || strings.HasSuffix(file, "/"+d.File)) {
+				loc = fmt.Sprintf("%s:%d", d.File, d.StartLine)
+				break
+			}
+		}
+		if parts[1] == "" || parts[1] == "<nil>" {
+			out = append(out, fmt.Sprintf("%s: %s", loc, parts[2]))
+		} else {
+			out = append(out, fmt.Sprintf("%s: %s: %s", loc, parts[1], parts[2]))
+		}
+	}
+	return out
 }
 
 // readableNewErrors turns the internal error fingerprints into something a

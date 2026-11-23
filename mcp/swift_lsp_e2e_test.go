@@ -214,22 +214,23 @@ func TestSwiftPrecisionWithSourceKitLSP(t *testing.T) {
 	openOnChild(t, s, runPath)
 	waitPublished(t, srv, runPath)
 	q := query(t, s, map[string]any{"selector": `#'Sources/Demo/Run.swift#run'::out.call`, "limit": 20})
+	// A bare-edge selector lands on the far nodes (ecb3a9f): one row per
+	// callee, its address in m.Node, the reaching edge's conf in m.Conf.
 	var saw bool
 	for _, m := range q.Matches {
-		joined := strings.Join(m.To, ",")
-		if !strings.Contains(joined, "Store.swift#Store.save") {
+		if strings.Contains(m.Node, "Cache.swift#Cache.save") {
+			t.Errorf("sourcekit-lsp resolves Store().save; Cache.save still lands as a far node: %q (conf=%q)", m.Node, m.Conf)
+		}
+		if !strings.Contains(m.Node, "Store.swift#Store.save") {
 			continue
 		}
 		saw = true
-		if strings.Contains(joined, "Cache.swift#Cache.save") {
-			t.Errorf("sourcekit-lsp resolves Store().save; the edge still lists Cache.save: %v (conf=%q)", m.To, m.Conf)
-		}
 		if m.Conf != refLSP {
 			t.Errorf("conf=%q, want %q", m.Conf, refLSP)
 		}
 	}
 	if !saw {
-		t.Fatalf("no outgoing call edge to Store.save; got %+v", q.Matches)
+		t.Fatalf("no outgoing call lands on Store.save; got %+v", q.Matches)
 	}
 }
 

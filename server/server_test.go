@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -84,12 +86,40 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+
+	// A signal-killed run (SIGINT from the user, SIGTERM from a CI timeout)
+	// dies before the removal below; the handler closes that path. It removes
+	// the dir and exits so a signal leaves no poly-lsp-mcp-srv-test-* behind.
+	stop := cleanupOnSignal(dir)
+	defer stop()
+
+	// TestTempDirRemovedOnSignal sets this so it can tell when the handler is
+	// installed, and signal only once the run is past the slow go build.
+	if ready := os.Getenv("POLY_LSP_MCP_SRV_READY_FILE"); ready != "" {
+		_ = os.WriteFile(ready, []byte("ready"), 0o600)
+	}
+
 	// os.Exit skips deferred calls, so the directory is removed before it.
 	// m.Run returns a non-zero code when any test fails, and the removal
 	// runs on that path too: a failed run leaves no poly-lsp-mcp-srv-test-*.
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// cleanupOnSignal installs a SIGINT/SIGTERM handler that removes dir and
+// exits, so a signal-killed test run leaves no temp dir behind. It returns
+// a function that stops the handler; the normal exit path calls it before
+// removing the dir itself. SIGKILL is not catchable, so it is not handled.
+func cleanupOnSignal(dir string) func() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-ch
+		_ = os.RemoveAll(dir)
+		os.Exit(1)
+	}()
+	return func() { signal.Stop(ch) }
 }
 
 // lspSession drives a live Server through in-process io.Pipe pairs. It
@@ -1121,6 +1151,85 @@ func TestTempDirRemovedOnFailedRun(t *testing.T) {
 			t.Fatalf("failing run left a temp dir behind: %s", d)
 		}
 	}
+}
+
+// TestTempDirCleanupOnSignalSentinel blocks forever: TestTempDirRemovedOnSignal
+// sends the child run SIGINT while it is stuck here, so the run is killed by a
+// signal rather than exiting on its own.
+func TestTempDirCleanupOnSignalSentinel(t *testing.T) {
+	if os.Getenv("POLY_LSP_MCP_SRV_SENTINEL_SIGNAL") != "1" {
+		t.Skip("sentinel: only runs when POLY_LSP_MCP_SRV_SENTINEL_SIGNAL=1")
+	}
+	<-make(chan struct{}) // block until the test sends SIGINT
+}
+
+// TestTempDirRemovedOnSignal runs this package's test binary with only the
+// blocking sentinel test, sends it SIGINT, and asserts it leaves no
+// poly-lsp-mcp-srv-test-* dir in os.TempDir. This is the signal-proof for the
+// cleanup in TestMain: a regression that removes the dir only on a normal
+// exit re-creates the leak a SIGINT/SIGTERM-killed run would otherwise leave.
+func TestTempDirRemovedOnSignal(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("no caller path")
+	}
+	abs, err := filepath.Abs(filepath.Dir(thisFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := tempTestDirs("poly-lsp-mcp-srv-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(t.TempDir(), "handler-ready")
+	cmd := exec.Command(exe, "-test.run", "TestTempDirCleanupOnSignalSentinel", "-test.count", "1")
+	cmd.Dir = abs
+	cmd.Stdin = nil
+	cmd.Env = append(os.Environ(), "POLY_LSP_MCP_SRV_SENTINEL_SIGNAL=1", "POLY_LSP_MCP_SRV_READY_FILE="+ready)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The ready file is written after TestMain installs the signal handler,
+	// which is past the slow go build. Wait for it so the signal reaches the
+	// handler, not the default disposition.
+	deadline := time.Now().Add(120 * time.Second)
+	for fileExists(ready) == false && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !fileExists(ready) {
+		cmd.Process.Kill()
+		t.Fatal("child test run never installed its signal handler")
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatalf("send SIGINT: %v", err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("child test run should have exited non-zero on SIGINT")
+	}
+
+	after, err := tempTestDirs("poly-lsp-mcp-srv-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for d := range after {
+		if _, seen := before[d]; !seen {
+			t.Fatalf("signal-killed run left a temp dir behind: %s", d)
+		}
+	}
+}
+
+// fileExists reports whether path exists.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // tempTestDirs returns the set of directories in os.TempDir with the given

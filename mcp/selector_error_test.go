@@ -53,7 +53,7 @@ func TestSelectorQuestionMarkReturnsGrammar(t *testing.T) {
 		t.Fatalf(`selector "?" should return the grammar, got error: %s`, r.Content[0].Text)
 	}
 	for _, want := range []string{"TASK → QUERY", "COMPOSING", "SPEC", ":parents",
-		"PROJECTION & AGGREGATES", "PATH CAPTURE", "max(length)"} {
+		"PROJECTION & AGGREGATES", "PATH CAPTURE", "max(length)", "INTERSECT"} {
 		if !strings.Contains(r.Content[0].Text, want) {
 			t.Errorf("grammar missing %q", want)
 		}

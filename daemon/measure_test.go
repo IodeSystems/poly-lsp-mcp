@@ -122,6 +122,123 @@ func TestMeasureWorktreeOpen(t *testing.T) {
 	t.Logf("gopls workspace warmth (to 1st workspace/symbol): %v   <- the dominant, UNSHAREABLE cost", goplsWarm)
 }
 
+// TestMeasureWorktreeSharingFleet is TestMeasureWorktreeSharing under the
+// child-LSP fleet at the daemon's defaults (multiplex.Fleet: MaxChildren 4,
+// RSSBudgetPct 25, IdleStop 10m), which the issue's measurements predate:
+// does the fleet change what two worktrees of one repo cost — does it evict
+// the first gopls when the second opens, and at what cost to restart it?
+// Run with:
+//
+//	go test ./daemon/ -tags measure -run TestMeasureWorktreeSharingFleet -v -count=1
+func TestMeasureWorktreeSharingFleet(t *testing.T) {
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not on PATH")
+	}
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.LoadOrDefault("nonexistent.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := cfg.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(t.TempDir(), "wt")
+	if out, err := exec.Command("git", "-C", repoRoot, "worktree", "add", "--detach", wt, "HEAD").CombinedOutput(); err != nil {
+		t.Fatalf("worktree: %v\n%s", err, out)
+	}
+	defer func() { _ = exec.Command("git", "-C", repoRoot, "worktree", "remove", "--force", wt).Run() }()
+
+	r := NewRegistry(cfg, reg, false, false)
+	r.cachePath = "" // cold: no ~/.poly-lsp/cache.gob
+	r.SetRootLifetime(time.Hour, -1)
+	// The daemon's lifecycle defaults (cmd_mcp.go lifecycleFlags): the
+	// fleet's process-wide rules, applied to every root's Manager.
+	r.SetLifecycle(multiplex.Lifecycle{
+		IdleStop:     10 * time.Minute,
+		MaxRSS:       multiplex.DefaultMaxRSS(multiplex.TotalRAM()),
+		PSIThreshold: 20,
+		MaxChildren:  4,
+		RSSBudgetPct: 25,
+	})
+	defer r.Close()
+
+	query := func(srv *mcp.Server) {
+		// A resolved query: the root's gopls loads its workspace.
+		if _, _, err := srv.CallTool("", "node_query", json.RawMessage(`{"selector":"#RollbackSession::in"}`), mcp.CallOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// children reads the root's OWN child-LSP manager: the authoritative
+	// per-child state, RSS and stop counters (a ps listing cannot tell
+	// which gopls serves which root).
+	children := func(srv *mcp.Server) {
+		mgr := srv.Manager()
+		if mgr == nil {
+			t.Log("  (no child-LSP manager)")
+			return
+		}
+		for _, cs := range mgr.Status() {
+			if cs.Language != "go" {
+				continue
+			}
+			t.Logf("  go child at %s: state=%s rss=%d MiB starts=%d capStops=%d budgetStops=%d lastStop=%s",
+				cs.Root, cs.State, cs.RSS>>20, cs.Starts, cs.CapStops, cs.BudgetStops, cs.LastStop)
+		}
+	}
+	fleet := func(label string) {
+		fs := r.fleet.Status()
+		t.Logf("%s: fleet running=%d cap=%d rss=%d MiB budget=%d MiB", label, fs.Running, fs.MaxChildren, fs.RSS>>20, fs.RSSBudget>>20)
+	}
+	goChild := func(srv *mcp.Server) (state string, rss int64, starts, capStops, budgetStops int) {
+		for _, cs := range srv.Manager().Status() {
+			if cs.Language == "go" {
+				return cs.State, cs.RSS, cs.Starts, cs.CapStops, cs.BudgetStops
+			}
+		}
+		return "none", 0, 0, 0, 0
+	}
+
+	t0 := time.Now()
+	srvA, err := r.Get(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("root A (repo) open: %v", time.Since(t0))
+	query(srvA)
+	fleet("after A's query")
+	children(srvA)
+
+	t0 = time.Now()
+	srvB, err := r.Get(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("root B (worktree) open: %v", time.Since(t0))
+	query(srvB)
+	fleet("after B's query")
+	children(srvA)
+	children(srvB)
+	stA, rssA, startsA, capA, budA := goChild(srvA)
+	stB, rssB, _, capB, budB := goChild(srvB)
+	t.Logf("gopls A: %s rss=%d MiB (starts=%d capStops=%d budgetStops=%d)", stA, rssA>>20, startsA, capA, budA)
+	t.Logf("gopls B: %s rss=%d MiB (capStops=%d budgetStops=%d)", stB, rssB>>20, capB, budB)
+	evicted := capA+capB+budA+budB > 0 || stA != "running"
+	t.Logf("fleet evicted a gopls to make room: %v", evicted)
+
+	// Does the fleet restart what it stopped? Re-query A and time it:
+	// spawn+initialize+workspace load if A's child was stopped, near-instant
+	// if it is still running.
+	t0 = time.Now()
+	query(srvA)
+	t.Logf("re-query A: %v (includes gopls wake if the fleet stopped it)", time.Since(t0))
+	fleet("after A re-query")
+	children(srvA)
+}
+
 // TestMeasureWorktreeSharing: what one daemon shares between two roots that
 // are worktrees of the same repository, and what it holds twice. Two roots
 // in one Registry, as the daemon hosts them: time to open, parse-cache

@@ -59,3 +59,35 @@ of the sweeper's own output, so check the display filter first.
   `TestMeasureWorktreeSharing`, `daemon/measure_test.go`) produce the
   numbers quoted in `docs/design.md`; rerun them rather than trusting a
   quoted figure on a different repo.
+- Attribute which child serves which root from the root's own
+  `Manager.Status()` (state, RSS, stop counters), not a `ps` listing: a
+  `ps` line names the binary but not its workspace, so it cannot say which
+  gopls is the parent repo's and which is the worktree's. (The first pass
+  of the fleet re-measurement below read eviction off a `ps` listing and
+  got it wrong; the manager status is authoritative.)
+
+## Finding: two worktrees of one repo under the child-LSP fleet (2026-11-24)
+
+Re-measured the issue's scenario (i_1m5r2t7k3dczk49mtwctmv) on current main
+with the child-LSP fleet at the daemon's defaults (`--lsp-max-children 4`,
+`--lsp-rss-budget-pct 25`, `--lsp-idle-stop 10m`), which the issue's
+pre-fleet numbers do not cover: `TestMeasureWorktreeSharingFleet`
+(`-tags measure`), this repo + one detached worktree in one Registry.
+
+- **No eviction at two worktrees.** Both gopls stay running after each root's
+  resolved query: gopls A (repo) 500 MiB, gopls B (worktree) 466 MiB, summed
+  ~990 MiB — far under the 31 GiB budget (25% of 124 GiB RAM). `capStops` and
+  `budgetStops` are 0 on both; re-querying A is 278 ms with no gopls wake.
+  The fleet's LRU/eviction path never fires for two worktrees.
+- **The default cap is consumed by two worktrees.** `running=4 cap=4` with two
+  roots: each spawns a gopls *and* a typescript server, so 2 roots × 2
+  languages = 4, exactly the daemon-wide cap. A third worktree (a 5th child)
+  is where the LRU stop begins — and, being daemon-wide, it would evict
+  across repos, not within one. That cross-repo eviction is the only delta a
+  per-repo budget (proposal 1) would change, and it is only reachable with
+  ≥3 worktrees under the default cap.
+- **Per-gopls RSS is lower here than the issue's 0.8–2.15 GB** (466–500 MiB):
+  this repo is small and a single resolved query loads the workspace without
+  heavy analysis. The *shape* (one gopls per root, the dominant cost) is
+  unchanged; the absolute figure is repo-dependent, so treat 0.8–2 GB as the
+  large-repo bound, not the default.

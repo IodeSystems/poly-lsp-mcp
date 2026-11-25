@@ -574,6 +574,11 @@ func (s *Server) SetManager(mgr *multiplex.Manager) {
 	}
 }
 
+// Manager returns the child-LSP manager the server routes to, or nil when
+// the server is index-only. Read by callers that need the manager's own
+// state (child statuses, fleet) without the server's routing.
+func (s *Server) Manager() *multiplex.Manager { return s.manager }
+
 // SetDiagnosticWait sets how long an edit waits for the child LSP's
 // diagnostics of the edited text (--validate-wait; default 2s).
 func (s *Server) SetDiagnosticWait(d time.Duration) {

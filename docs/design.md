@@ -159,6 +159,12 @@ ground; the most verbose variant did worse (more grep scaffolding).
   `.storyboard` / `.xib` have no registered extension and are not indexed;
   linking a storyboard's `customClass` / outlets to Swift is an aw4 issue
   (the XML extractor would read every `key=` attribute as a name).
+- Python tool trees: `.venv`, `venv`, `.tox`, `site-packages` and `.eggs`
+  are skip dirs (a virtualenv is vendored third-party, often 15x the
+  first-party lines; `site-packages` and `.eggs` are listed because
+  `pip install --target` and tox put them outside any `.venv` parent). A
+  first-party dir literally named `venv` is the accepted risk: naming it or
+  an `include` pattern opens it, like every skip dir.
 - Shadowing: a lesser-typed file beside a stronger one (foo.js/foo.ts,
   foo.py/foo.pyi) is out of the index and broad queries, reachable by path.
 - Markdown is structural: `section` nodes own their body; only headings,

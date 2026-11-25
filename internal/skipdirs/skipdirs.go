@@ -32,6 +32,17 @@ var skipDirs = map[string]bool{
 	".swiftpm":    true,
 	"DerivedData": true,
 	"xcuserdata":  true,
+	// Python tool dirs. A virtualenv is vendored third-party code, often 15x
+	// the first-party lines (1.19M venv vs 77k in the 2026-10-22 dogfood).
+	// site-packages and .eggs sit directly under .venv but are listed too:
+	// pip install --target and tox put them outside any .venv parent. A
+	// first-party dir named venv is the accepted risk; naming it or an
+	// include pattern opens it, like every skip dir.
+	".venv":          true,
+	"venv":           true,
+	".tox":           true,
+	"site-packages":  true,
+	".eggs":          true,
 }
 
 // skipDirSuffixes are directory-name suffixes skipped like skipDirs. An

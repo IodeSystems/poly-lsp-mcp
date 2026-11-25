@@ -132,6 +132,22 @@ entry here.
   evaluation). Overshoot is bounded by one tree-sitter parse, which is not
   interruptible.
 
+## Test temp hygiene and concurrency
+
+- The proof test `TestTwoConcurrentTempDirScanRuns`
+  (`internal/isolation/isolation_test.go`) attests D4 isolation by running
+  only the two collision-sensitive tests — `TestTempDirRemovedOnFailedRun`
+  in `./server` and `./multiplex` — concurrently in distinct `TMPDIR`s,
+  with a negative control on a shared `TMPDIR`. It does not run the whole
+  suite. "Two worktrees can run the suite at once and both pass" (the
+  claim in docs/environments.md §2b) is inferred from that measured
+  collision surface, not measured directly: the inference rests on those
+  two tests being the only full-temp-dir scanners in the suite (the
+  mechanism in §2b), so no other test in either package can see the other
+  run's prefixed directory. A new full-temp-dir scanner added to any
+  package not covered by the proof test would make the inference stale
+  without breaking it.
+
 ## Indexing and daemon
 
 - The home check uses `$HOME`, so a dotfiles repository at `~` is refused

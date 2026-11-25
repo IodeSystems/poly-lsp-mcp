@@ -60,6 +60,60 @@ func TestQueryRollsUpPrunedByReason(t *testing.T) {
 	}
 }
 
+// A gitignored .venv is a skip dir on the query path: a broad query skips it
+// and counts it in leftOut.pruned, naming the file or an include pattern
+// reaches it, and the .gitignore is irrelevant to the query tree (the
+// 2026-10-24 decision: node_query does not apply .gitignore).
+func TestQuerySkipsGitignoredVenv(t *testing.T) {
+	// Every venv-style dir the shared skip list now holds, each with its own
+	// symbol, plus a first-party one. The .gitignore is part of the fixture to
+	// document that the query path is independent of it (the 2026-10-24
+	// decision: node_query does not apply .gitignore).
+	dir := writeTree(t, map[string]string{
+		".gitignore":       ".venv/\n",
+		"pkg/a.py":         "def first_fn():\n    return 1\n",
+		".venv/lib/x.py":   "def venv_hidden():\n    return 2\n",
+		"venv/lib/y.py":    "def plain_venv():\n    return 3\n",
+		".tox/venv0/z.py":  "def tox_hidden():\n    return 4\n",
+		"site-packages/w.py": "def sp_hidden():\n    return 5\n",
+		".eggs/e.py":       "def eggs_hidden():\n    return 6\n",
+	})
+	s := startSession(t, dir)
+	defer s.close()
+	s.request("initialize", map[string]any{})
+
+	lo, text := leftOutWith(t, s, "func")
+	for _, name := range []string{"venv_hidden", "plain_venv", "tox_hidden", "sp_hidden", "eggs_hidden"} {
+		if strings.Contains(text, name) {
+			t.Errorf("a broad query should not list a venv-style symbol %s:\n%s", name, text)
+		}
+	}
+	if !strings.Contains(text, "first_fn") {
+		t.Errorf("the first-party symbol should be listed:\n%s", text)
+	}
+	for _, d := range []string{".venv/", "venv/", ".tox/", "site-packages/", ".eggs/"} {
+		if prunedOf(lo)[d] != float64(1) {
+			t.Errorf("leftOut.pruned should count %s:\n%s", d, text)
+		}
+	}
+
+	lo, text = leftOutWith(t, s, "file[path=.venv/lib/x.py] > *")
+	if !strings.Contains(text, "venv_hidden") {
+		t.Errorf("naming the venv path should reach it:\n%s", text)
+	}
+	if prunedOf(lo)[".venv/"] != nil {
+		t.Errorf("a reached .venv is not pruned: %v", lo)
+	}
+
+	lo, text = leftOutWith(t, s, "func", ".venv")
+	if !strings.Contains(text, "venv_hidden") {
+		t.Errorf("include .venv should walk it fully:\n%s", text)
+	}
+	if prunedOf(lo)[".venv/"] != nil {
+		t.Errorf("an included .venv is not pruned: %v", lo)
+	}
+}
+
 func TestQueryOmitsLeftOutWhenNothingPruned(t *testing.T) {
 	dir := writeTree(t, map[string]string{"app.ts": "export function app() {}\n"})
 	s := startSession(t, dir)

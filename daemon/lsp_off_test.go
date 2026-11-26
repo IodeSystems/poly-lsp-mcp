@@ -48,6 +48,22 @@ func runFakeLSP() {
 				if os.Getenv("FAKE_FMT") == "file" {
 					resp.Result = json.RawMessage(`{"capabilities":{"textDocumentSync":1,"documentFormattingProvider":true}}`)
 				}
+				if os.Getenv("FAKE_DEF_URI") != "" {
+					resp.Result = json.RawMessage(`{"capabilities":{"textDocumentSync":1,"definitionProvider":true}}`)
+				}
+			case "textDocument/definition":
+				line := os.Getenv("FAKE_DEF_LINE")
+				if line == "" {
+					line = "0"
+				}
+				uri := os.Getenv("FAKE_DEF_URI")
+				if uri != "" {
+					uriQ, _ := json.Marshal(uri)
+					resp.Result = json.RawMessage(`{"uri":` + string(uriQ) +
+						`,"range":{"start":{"line":` + line + `,"character":0},"end":{"line":` + line + `,"character":0}}}`)
+				} else {
+					resp.Error = &jsonrpc.Error{Code: -32601, Message: "no FAKE_DEF_URI"}
+				}
 			case "textDocument/formatting":
 				var fp struct {
 					TextDocument struct {

@@ -139,7 +139,11 @@ func queryRaw(t *testing.T, socket, session, root, selector string, jsonMode boo
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		var e struct{ Kind, Title, Detail string `json:"detail"` }
+		var e struct {
+			Kind   string `json:"kind"`
+			Title  string `json:"title"`
+			Detail string `json:"detail"`
+		}
 		_ = json.NewDecoder(resp.Body).Decode(&e)
 		return "", fmt.Errorf("query: %d: %s", resp.StatusCode, e.Detail)
 	}
